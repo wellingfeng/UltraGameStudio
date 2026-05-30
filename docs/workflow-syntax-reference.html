@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Workflow 脚本语法参考</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg2:#161b22; --bg3:#1c2330;
+    --fg:#e6edf3; --muted:#9da7b3; --line:#2d3543;
+    --accent:#58a6ff; --green:#3fb950; --amber:#d29922;
+    --purple:#bc8cff; --pink:#f778ba; --code:#79c0ff; --red:#ff7b72;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    line-height:1.7;font-size:16px}
+  .wrap{max-width:1000px;margin:0 auto;padding:0 24px 80px}
+  header{padding:60px 24px 44px;text-align:center;
+    background:radial-gradient(ellipse at top,#1b2430 0%,var(--bg) 70%);
+    border-bottom:1px solid var(--line)}
+  header h1{font-size:38px;margin:0 0 12px;letter-spacing:-.5px}
+  header .sub{color:var(--muted);font-size:17px;max-width:680px;margin:0 auto}
+  .badge{display:inline-block;margin-top:18px;padding:6px 14px;border-radius:999px;
+    background:var(--bg3);border:1px solid var(--line);color:var(--accent);
+    font-size:13px;font-family:ui-monospace,Consolas,monospace}
+  nav{position:sticky;top:0;z-index:10;background:rgba(13,17,23,.88);
+    backdrop-filter:blur(8px);border-bottom:1px solid var(--line);padding:12px 0;margin-bottom:36px}
+  nav .wrap{display:flex;gap:6px;flex-wrap:wrap;padding-bottom:0;padding-top:0}
+  nav a{color:var(--muted);text-decoration:none;font-size:13.5px;padding:6px 11px;border-radius:8px;transition:.15s}
+  nav a:hover{background:var(--bg3);color:var(--fg)}
+  section{margin:46px 0;scroll-margin-top:72px}
+  h2{font-size:26px;border-left:4px solid var(--accent);padding-left:14px;margin:0 0 18px}
+  h3{font-size:19px;margin:26px 0 10px;color:var(--fg)}
+  h4{font-size:16px;margin:18px 0 8px;color:var(--code);font-family:ui-monospace,monospace}
+  p{color:#cdd6e0}
+  .lead{font-size:17px}
+  code{font-family:ui-monospace,"SFMono-Regular",Consolas,monospace;
+    background:var(--bg3);padding:2px 7px;border-radius:5px;font-size:.87em;color:var(--code)}
+  pre{background:var(--bg2);border:1px solid var(--line);border-radius:12px;
+    padding:18px 20px;overflow-x:auto;font-size:13.5px;line-height:1.6}
+  pre code{background:none;padding:0;color:#c9d1d9}
+  .k{color:var(--pink)} .f{color:var(--purple)} .s{color:#a5d6ff}
+  .c{color:#6e7781;font-style:italic} .n{color:#79c0ff} .t{color:var(--amber)}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:14px}
+  th,td{text-align:left;padding:10px 13px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{color:var(--accent);font-weight:600}
+  td code{font-size:.85em}
+  .callout{border-radius:12px;padding:15px 19px;margin:18px 0;border-left:4px solid var(--amber);background:rgba(210,153,34,.08)}
+  .callout.tip{border-left-color:var(--green);background:rgba(63,185,80,.08)}
+  .callout.warn{border-left-color:var(--red);background:rgba(255,123,114,.08)}
+  .callout.info{border-left-color:var(--accent);background:rgba(88,166,255,.08)}
+  .callout strong{color:var(--fg)}
+  .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+  .card{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:18px}
+  .card h4{margin:0 0 8px;color:var(--fg);font-family:inherit;font-size:16px}
+  .card code{font-size:.82em}
+  .yes{color:var(--green);font-weight:600} .no{color:var(--red);font-weight:600}
+  .sig{background:var(--bg3);border:1px solid var(--line);border-radius:8px;padding:10px 14px;
+    font-family:ui-monospace,monospace;font-size:13.5px;color:var(--code);margin:8px 0;overflow-x:auto}
+  footer{text-align:center;color:var(--muted);font-size:13px;margin-top:60px;padding-top:24px;border-top:1px solid var(--line)}
+  .tag{display:inline-block;padding:1px 8px;border-radius:6px;font-size:11px;margin-left:6px;
+    font-family:ui-monospace,monospace;vertical-align:middle}
+  .tag.req{background:rgba(255,123,114,.15);color:var(--red);border:1px solid rgba(255,123,114,.3)}
+  .tag.opt{background:rgba(157,167,179,.12);color:var(--muted);border:1px solid var(--line)}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📐 Workflow 脚本语法参考</h1>
+  <p class="sub">它不是一门新语言——它就是 <b>JavaScript</b> + 几个注入的全局 API + 几条限制。本页是完整的语法 / API / 约束速查。</p>
+  <div class="badge">Plain JavaScript · Injected Globals · No external official URL</div>
+</header>
+
+<nav>
+  <div class="wrap">
+    <a href="#essence">本质</a>
+    <a href="#skeleton">骨架</a>
+    <a href="#meta">meta 块</a>
+    <a href="#globals">全局 API</a>
+    <a href="#constraints">语言约束</a>
+    <a href="#limits">并发上限</a>
+    <a href="#resume">缓存/恢复</a>
+    <a href="#full">完整示例</a>
+    <a href="#cheat">速查卡</a>
+  </div>
+</nav>
+
+<div class="wrap">
+
+<!-- 本质 -->
+<section id="essence">
+  <h2>一、先搞清本质</h2>
+  <p class="lead">你理解得对：Workflow 多出来的就是<strong>一层中间脚本</strong>，让执行更确定（循环/分支/扇出由代码说了算，而不是模型即兴）。但这层脚本：</p>
+  <div class="grid">
+    <div class="card">
+      <h4>✅ 是标准 JavaScript</h4>
+      <p><code>const/let</code>、<code>await</code>、<code>if/while/for</code>、<code>Array.map/filter/flat</code>、<code>JSON</code>、<code>Math</code>、模板字符串、箭头函数……全都能用。</p>
+    </div>
+    <div class="card">
+      <h4>➕ 注入了 8 个全局</h4>
+      <p>函数 <code>agent</code> <code>parallel</code> <code>pipeline</code> <code>phase</code> <code>log</code> <code>workflow</code>；对象 <code>args</code> <code>budget</code>。这是唯一"新"的部分。</p>
+    </div>
+    <div class="card">
+      <h4>➖ 加了几条限制</h4>
+      <p>不能写 TypeScript 类型；禁用 <code>Date.now()</code>/<code>Math.random()</code>/无参 <code>new Date()</code>；没有文件系统/Node API。</p>
+    </div>
+  </div>
+  <div class="callout info">
+    <strong>为什么没给你外部 URL？</strong> 因为这套 DSL 是 Workflow 工具<strong>内部定义</strong>的（在工具说明里），不是某个公开框架，没有 MDN 那样的官网。本页就是把它的完整定义整理出来供你学习。JS 本身的语法可参考 <code>developer.mozilla.org</code> 的 JavaScript 文档。
+  </div>
+</section>
+
+<!-- 骨架 -->
+<section id="skeleton">
+  <h2>二、脚本骨架（必须长这样）</h2>
+<pre><code><span class="k">export const</span> meta = { <span class="c">/* 见第三节，必须是第一句、纯字面量 */</span> }
+<span class="c">// ↓ 主体从这里开始，运行在 async 上下文里，可直接 await</span>
+<span class="f">phase</span>(<span class="s">'Stage A'</span>)
+<span class="k">const</span> x = <span class="k">await</span> <span class="f">agent</span>(<span class="s">'做某事'</span>, { schema: SCHEMA })
+<span class="f">log</span>(<span class="s">`拿到 ${x.count} 条`</span>)
+<span class="k">return</span> { result: x }   <span class="c">// 顶层 return 的值会作为整个 workflow 的返回结果</span></code></pre>
+  <div class="callout warn">
+    <strong>两条硬规则：</strong> ① 文件第一句必须是 <code>export const meta = {...}</code>。② <code>meta</code> 必须是<strong>纯字面量</strong>——里面不能有变量、函数调用、展开运算符 <code>...</code> 或模板插值。
+  </div>
+</section>
+
+<!-- meta -->
+<section id="meta">
+  <h2>三、<code>meta</code> 块字段</h2>
+  <table>
+    <tr><th>字段</th><th>必填</th><th>说明</th></tr>
+    <tr><td><code>name</code></td><td><span class="tag req">必填</span></td><td>工作流名</td></tr>
+    <tr><td><code>description</code></td><td><span class="tag req">必填</span></td><td>一行说明，显示在权限弹窗</td></tr>
+    <tr><td><code>phases</code></td><td><span class="tag opt">可选</span></td><td>数组，每个 <code>phase()</code> 调用对应一条 <code>{title, detail}</code>；title 必须和脚本里 <code>phase('...')</code> 完全一致</td></tr>
+    <tr><td><code>whenToUse</code></td><td><span class="tag opt">可选</span></td><td>显示在工作流列表里的使用场景说明</td></tr>
+    <tr><td><code>model</code></td><td><span class="tag opt">可选</span></td><td>某阶段用特定模型时标注</td></tr>
+  </table>
+<pre><code><span class="k">export const</span> meta = {
+  name: <span class="s">'review-changes'</span>,
+  description: <span class="s">'分维度审查改动并逐项验证'</span>,
+  phases: [
+    { title: <span class="s">'Review'</span>, detail: <span class="s">'按维度并行审查'</span> },
+    { title: <span class="s">'Verify'</span>, detail: <span class="s">'对每个发现对抗式验证'</span> },
+  ],
+}</code></pre>
+</section>
+
+<!-- globals -->
+<section id="globals">
+  <h2>四、注入的全局 API（核心）</h2>
+
+  <h3>4.1 <code>agent()</code> — 启动一个子代理</h3>
+  <div class="sig">agent(prompt: string, opts?: object) → Promise&lt;string | object | null&gt;</div>
+  <p><b>返回值规则：</b></p>
+  <table>
+    <tr><th>情况</th><th>返回</th></tr>
+    <tr><td>不传 <code>schema</code></td><td>子代理的最终文本（<code>string</code>）</td></tr>
+    <tr><td>传了 <code>schema</code></td><td>校验通过的对象（<code>object</code>），无需手动解析</td></tr>
+    <tr><td>用户中途跳过该代理</td><td><code>null</code>（用 <code>.filter(Boolean)</code> 过滤）</td></tr>
+  </table>
+  <p><b>opts 字段：</b></p>
+  <table>
+    <tr><th>字段</th><th>类型</th><th>说明</th></tr>
+    <tr><td><code>label</code></td><td>string</td><td>进度显示用的标签</td></tr>
+    <tr><td><code>phase</code></td><td>string</td><td>显式归入某进度分组（在 pipeline/parallel 内部用，避免和全局 phase() 抢状态）</td></tr>
+    <tr><td><code>schema</code></td><td>JSON Schema</td><td>强制子代理返回符合该 schema 的结构化对象</td></tr>
+    <tr><td><code>model</code></td><td>string</td><td>覆盖模型档位。<b>默认不传</b>，继承主循环模型（通常正确）</td></tr>
+    <tr><td><code>isolation</code></td><td><code>'worktree'</code></td><td>在独立 git worktree 里跑。<b>很贵</b>，仅当多代理并行写会冲突时用</td></tr>
+    <tr><td><code>agentType</code></td><td>string</td><td>用自定义子代理类型（如 <code>'Explore'</code>、<code>'oh-my-claudecode:build-fixer'</code>）</td></tr>
+  </table>
+<pre><code><span class="k">const</span> txt  = <span class="k">await</span> <span class="f">agent</span>(<span class="s">'总结这个模块'</span>)                          <span class="c">// 返回 string</span>
+<span class="k">const</span> data = <span class="k">await</span> <span class="f">agent</span>(<span class="s">'找出所有 bug'</span>, { schema: BUGS })          <span class="c">// 返回 object</span>
+<span class="k">const</span> r    = <span class="k">await</span> <span class="f">agent</span>(<span class="s">'迁移这个文件'</span>, { isolation: <span class="s">'worktree'</span>,
+                                            label: <span class="s">'migrate:foo'</span> })</code></pre>
+
+  <h3>4.2 <code>pipeline()</code> — 流水线（默认首选）</h3>
+  <div class="sig">pipeline(items: any[], stage1, stage2, …) → Promise&lt;any[]&gt;</div>
+  <p>每个 item <strong>独立</strong>穿过所有阶段，<strong>阶段间无屏障</strong>——item A 可在阶段3，item B 还在阶段1。墙钟 = 最慢的单条链路。</p>
+  <p><b>每个 stage 回调签名：</b><code>(prevResult, originalItem, index) => …</code> —— 后面的 stage 也能拿到最初的 item 和下标。某 stage 抛错 → 该 item 掉成 <code>null</code> 并跳过其余阶段。</p>
+<pre><code><span class="k">const</span> out = <span class="k">await</span> <span class="f">pipeline</span>(files,
+  file               => <span class="f">agent</span>(<span class="s">`审查 ${file}`</span>, { schema: REVIEW }),
+  (review, file, i)  => <span class="f">agent</span>(<span class="s">`验证 ${file} 的发现`</span>, { schema: VERDICT })
+)</code></pre>
+
+  <h3>4.3 <code>parallel()</code> — 并发屏障</h3>
+  <div class="sig">parallel(thunks: Array&lt;() =&gt; Promise&lt;any&gt;&gt;) → Promise&lt;any[]&gt;</div>
+  <p><strong>是屏障</strong>：等全部完成才返回。注意参数是<strong>函数数组（thunk）</strong>，不是 Promise 数组。某个 thunk 抛错 → 该位置变 <code>null</code>，调用本身永不 reject，所以用前先 <code>.filter(Boolean)</code>。</p>
+<pre><code><span class="k">const</span> res = <span class="k">await</span> <span class="f">parallel</span>(items.<span class="f">map</span>(it => () =>   <span class="c">// ← 注意 () => 包一层</span>
+  <span class="f">agent</span>(<span class="s">`处理 ${it}`</span>, { schema: S })))
+<span class="k">const</span> ok = res.<span class="f">filter</span>(<span class="n">Boolean</span>)                       <span class="c">// 滤掉失败的 null</span></code></pre>
+  <div class="callout tip">
+    <strong>选哪个？</strong> 默认用 <code>pipeline()</code>。只有当"阶段 N 需要阶段 N-1 的<em>全部</em>结果"（先去重再验证、统计总数后提前退出、需要互相对比）才用 <code>parallel()</code> 屏障。
+  </div>
+
+  <h3>4.4 <code>phase()</code> / <code>log()</code></h3>
+  <div class="sig">phase(title: string): void &nbsp;·&nbsp; log(message: string): void</div>
+  <p><code>phase</code> 开启新阶段，之后的 <code>agent()</code> 归到该分组；<code>log</code> 向用户输出一行进度叙述。</p>
+
+  <h3>4.5 <code>workflow()</code> — 内联调用另一个工作流</h3>
+  <div class="sig">workflow(nameOrRef: string | {scriptPath}, args?: any) → Promise&lt;any&gt;</div>
+  <p>把已保存的工作流当子步骤跑，<strong>只能嵌套一层</strong>（子工作流里再调 <code>workflow()</code> 会抛错）。</p>
+
+  <h3>4.6 <code>args</code> — 入参对象</h3>
+  <p>调用 Workflow 工具时传入的 <code>args</code> 原样出现在这里。<b>传数组/对象要传真正的 JSON 值</b>，别传 JSON 字符串（否则 <code>args.map</code> 会报错）。</p>
+<pre><code><span class="c">// 调用方： Workflow({ script, args: ['a.cpp','b.cpp'] })</span>
+<span class="k">await</span> <span class="f">pipeline</span>(args, f => <span class="f">agent</span>(<span class="s">`处理 ${f}`</span>))</code></pre>
+
+  <h3>4.7 <code>budget</code> — token 预算</h3>
+  <div class="sig">budget.total: number|null &nbsp;·&nbsp; budget.spent(): number &nbsp;·&nbsp; budget.remaining(): number</div>
+  <p>用户用 "+500k" 之类设的本轮目标。<code>total</code> 为 <code>null</code> 表示没设（此时 <code>remaining()</code> 是 <code>Infinity</code>）。可做动态深度循环：</p>
+<pre><code><span class="k">while</span> (budget.total && budget.<span class="f">remaining</span>() > <span class="n">50_000</span>) {
+  <span class="k">const</span> r = <span class="k">await</span> <span class="f">agent</span>(<span class="s">'继续找问题'</span>, { schema: BUGS })
+  bugs.<span class="f">push</span>(...r.bugs)
+}</code></pre>
+</section>
+
+<!-- constraints -->
+<section id="constraints">
+  <h2>五、语言约束（容易踩坑）</h2>
+  <table>
+    <tr><th></th><th>规则</th><th>原因 / 替代</th></tr>
+    <tr><td class="no">✗</td><td>不能写 TypeScript：类型标注 <code>: string[]</code>、<code>interface</code>、泛型 <code>&lt;T&gt;</code></td><td>解析会失败。就写纯 JS</td></tr>
+    <tr><td class="no">✗</td><td><code>Date.now()</code> / <code>Math.random()</code> / 无参 <code>new Date()</code></td><td>会抛错（破坏 resume）。时间戳通过 <code>args</code> 传入；要随机就靠 item 下标变 prompt</td></tr>
+    <tr><td class="no">✗</td><td>文件系统 / Node.js API（<code>fs</code>、<code>require</code> 等）</td><td>不可用。读写文件让 <code>agent()</code> 去做</td></tr>
+    <tr><td class="yes">✓</td><td>标准内置：<code>JSON</code> <code>Math</code> <code>Array</code> <code>Object</code> <code>Set</code> <code>Map</code> 等</td><td>正常用</td></tr>
+    <tr><td class="yes">✓</td><td>顶层直接 <code>await</code>（脚本跑在 async 上下文）</td><td>不用包 <code>async function</code></td></tr>
+    <tr><td class="yes">✓</td><td>自定义辅助函数（如 <code>chunk()</code>）</td><td>可以在脚本里 <code>function chunk(){}</code></td></tr>
+  </table>
+</section>
+
+<!-- limits -->
+<section id="limits">
+  <h2>六、并发与上限</h2>
+  <table>
+    <tr><th>限制</th><th>值</th></tr>
+    <tr><td>同时运行的代理数</td><td><code>min(16, CPU核数 - 2)</code>，超出的排队</td></tr>
+    <tr><td>单个 workflow 生命周期代理总数</td><td><code>1000</code>（防失控的后备上限）</td></tr>
+    <tr><td>嵌套 <code>workflow()</code> 层数</td><td>仅 1 层</td></tr>
+  </table>
+  <p>所以你尽管给 <code>parallel()</code>/<code>pipeline()</code> 传 100 个 item，它们都会完成，只是任意时刻只有约 10 个在跑。</p>
+</section>
+
+<!-- resume -->
+<section id="resume">
+  <h2>七、缓存与恢复（Resume）</h2>
+  <p>每次调用 Workflow 都会把脚本落盘，返回一个 <code>scriptPath</code> 和 <code>runId</code>。这正是"用户可以改脚本来更确定执行"的关键机制：</p>
+  <table>
+    <tr><th>操作</th><th>做法</th></tr>
+    <tr><td>迭代脚本</td><td>编辑那个 <code>scriptPath</code> 文件，再用 <code>Workflow({ scriptPath })</code> 重跑</td></tr>
+    <tr><td>断点续跑</td><td><code>Workflow({ scriptPath, resumeFromRunId })</code>：未改动的 <code>agent()</code> 调用秒回缓存，只重跑第一个改动点及之后</td></tr>
+    <tr><td>完全命中</td><td>同脚本 + 同 args → 100% 缓存命中</td></tr>
+  </table>
+  <div class="callout">
+    <strong>这也是为什么禁用 <code>Date.now()</code>/<code>Math.random()</code>：</strong>它们会让"同脚本同输入"产生不同结果，破坏缓存命中和可复现性。
+  </div>
+</section>
+
+<!-- full example -->
+<section id="full">
+  <h2>八、覆盖几乎所有语法点的完整示例</h2>
+  <p>把上面的语法点串起来——这是一个"找 bug → 去重 → 多镜头对抗验证 → 循环到枯竭"的真实结构：</p>
+<pre><code><span class="k">export const</span> meta = {
+  name: <span class="s">'exhaustive-bug-hunt'</span>,
+  description: <span class="s">'穷尽式找 bug 并多镜头验证'</span>,
+  phases: [{ title: <span class="s">'Find'</span> }, { title: <span class="s">'Verify'</span> }],
+}
+
+<span class="c">// 自定义辅助函数 —— 纯 JS，允许</span>
+<span class="k">function</span> <span class="f">key</span>(b) { <span class="k">return</span> b.file + <span class="s">':'</span> + b.line }
+
+<span class="k">const</span> FINDERS = [
+  { prompt: <span class="s">'按数据流找空指针/越界'</span> },
+  { prompt: <span class="s">'按并发找数据竞争'</span> },
+  { prompt: <span class="s">'按资源生命周期找泄漏'</span> },
+]
+<span class="k">const</span> seen = <span class="k">new</span> <span class="n">Set</span>(), confirmed = []
+<span class="k">let</span> dry = <span class="n">0</span>
+
+<span class="k">while</span> (dry &lt; <span class="n">2</span>) {                                   <span class="c">// 循环到枯竭</span>
+  <span class="f">phase</span>(<span class="s">'Find'</span>)
+  <span class="k">const</span> found = (<span class="k">await</span> <span class="f">parallel</span>(FINDERS.<span class="f">map</span>(f => () =>   <span class="c">// parallel 屏障 + thunk</span>
+    <span class="f">agent</span>(f.prompt, { phase: <span class="s">'Find'</span>, schema: BUGS }))))
+    .<span class="f">filter</span>(<span class="n">Boolean</span>).<span class="f">flatMap</span>(r => r.bugs)        <span class="c">// 滤 null + 摊平</span>
+
+  <span class="k">const</span> fresh = found.<span class="f">filter</span>(b => !seen.<span class="f">has</span>(<span class="f">key</span>(b)))  <span class="c">// 对 seen 去重</span>
+  <span class="k">if</span> (!fresh.length) { dry++; <span class="k">continue</span> }
+  dry = <span class="n">0</span>; fresh.<span class="f">forEach</span>(b => seen.<span class="f">add</span>(<span class="f">key</span>(b)))
+  <span class="f">log</span>(<span class="s">`本轮新发现 ${fresh.length} 个`</span>)               <span class="c">// 进度叙述</span>
+
+  <span class="f">phase</span>(<span class="s">'Verify'</span>)
+  <span class="k">const</span> judged = <span class="k">await</span> <span class="f">parallel</span>(fresh.<span class="f">map</span>(b => () =>
+    <span class="f">parallel</span>([<span class="s">'correctness'</span>, <span class="s">'security'</span>, <span class="s">'repro'</span>].<span class="f">map</span>(lens => () =>  <span class="c">// 多镜头</span>
+      <span class="f">agent</span>(<span class="s">`用 ${lens} 视角判断 "${b.desc}" 是否真实`</span>,
+            { phase: <span class="s">'Verify'</span>, schema: VERDICT })))
+      .<span class="f">then</span>(vs => ({ b, real: vs.<span class="f">filter</span>(<span class="n">Boolean</span>)
+                                .<span class="f">filter</span>(v => v.real).length >= <span class="n">2</span> }))))  <span class="c">// 多数票</span>
+
+  confirmed.<span class="f">push</span>(...judged.<span class="f">filter</span>(v => v.real).<span class="f">map</span>(v => v.b))
+}
+
+<span class="k">return</span> { confirmed, total: confirmed.length }      <span class="c">// 顶层返回</span></code></pre>
+</section>
+
+<!-- cheat sheet -->
+<section id="cheat">
+  <h2>九、一页速查卡</h2>
+<pre><code><span class="c">// ── 结构 ──────────────────────────────</span>
+<span class="k">export const</span> meta = { name, description, phases:[{title,detail}] }  <span class="c">// 第一句·纯字面量</span>
+
+<span class="c">// ── 注入全局（唯一"新"语法）─────────────</span>
+<span class="k">await</span> <span class="f">agent</span>(prompt, { label, phase, schema, model, isolation, agentType })
+<span class="k">await</span> <span class="f">pipeline</span>(items, stageA, stageB, ...)   <span class="c">// 无屏障；stage(prev, item, i)</span>
+<span class="k">await</span> <span class="f">parallel</span>(items.<span class="f">map</span>(x => () => ...))    <span class="c">// 屏障；thunk 数组；失败→null</span>
+<span class="f">phase</span>(title)   <span class="f">log</span>(msg)   <span class="k">await</span> <span class="f">workflow</span>(name, args)   <span class="c">// 嵌套限 1 层</span>
+args                                       <span class="c">// 入参（真 JSON，非字符串）</span>
+budget.total / budget.<span class="f">spent</span>() / budget.<span class="f">remaining</span>()
+
+<span class="c">// ── 禁用 ─────────────────────────────</span>
+<span class="no">✗</span> TypeScript 类型 / interface / 泛型
+<span class="no">✗</span> Date.now() / Math.random() / new Date()
+<span class="no">✗</span> fs / require / Node API
+
+<span class="c">// ── 可用 ─────────────────────────────</span>
+<span class="yes">✓</span> const/let · await · if/while/for · 箭头函数 · 模板串
+<span class="yes">✓</span> JSON / Math / Array / Object / Set / Map · 自定义函数
+<span class="yes">✓</span> 顶层 await · 顶层 return（= 工作流结果）</code></pre>
+</section>
+
+<footer>
+  Workflow 脚本语法参考 · 生成于 2026-05-29 · 路径 temps/workflow-syntax-reference.html<br>
+  本 DSL 由 Workflow 工具内部定义，无外部官网；JS 基础语法见 developer.mozilla.org
+</footer>
+
+</div>
+</body>
+</html>

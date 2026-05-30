@@ -1,0 +1,35 @@
+# Dependencies
+app/node_modules/
+
+# Frontend and Tauri build output
+app/dist/
+app/src-tauri/target/
+app/.vite/
+app/*.tsbuildinfo
+
+# Local agent/browser/debug state
+.omc/
+.gstack/
+app/.gstack/
+app/src-tauri/.gstack/
+
+# Environment and local secrets
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Native debug artifacts
+*.pdb

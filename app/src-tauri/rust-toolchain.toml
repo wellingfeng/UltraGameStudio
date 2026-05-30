@@ -1,0 +1,5 @@
+# Pin OpenWorkflow's Rust build to the MSVC toolchain.
+# The GNU toolchain needs MinGW (dlltool.exe), which is not installed on this
+# machine; MSVC uses the already-installed Visual Studio 2022 Build Tools.
+[toolchain]
+channel = "stable-x86_64-pc-windows-msvc"

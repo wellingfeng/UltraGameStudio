@@ -1,0 +1,453 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenWorkflow · 设计文档</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg-alt:#161b22; --panel:#1c2128; --panel-2:#21262d;
+    --border:#30363d; --border-soft:#21262d;
+    --fg:#e6edf3; --fg-dim:#9da7b3; --fg-faint:#6e7681;
+    --accent:#7c8cff; --accent-2:#37c2a8; --accent-3:#e3a008; --accent-4:#f778ba;
+    --pin-exec:#e6edf3; --pin-data:#37c2a8; --pin-flow:#7c8cff;
+    --radius:10px; --radius-sm:6px;
+    --mono:'JetBrains Mono','SFMono-Regular',Consolas,monospace;
+    --sans:'Inter','Segoe UI',system-ui,-apple-system,sans-serif;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--fg);font-family:var(--sans);
+       line-height:1.65;font-size:15px;-webkit-font-smoothing:antialiased}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);background:var(--panel-2);padding:1px 6px;
+       border-radius:4px;font-size:.88em;color:#a5d6ff}
+  pre{background:#010409;border:1px solid var(--border);border-radius:var(--radius);
+      padding:18px 20px;overflow:auto;font-family:var(--mono);font-size:13px;
+      line-height:1.6;color:#c9d1d9}
+  pre .k{color:#ff7b72}.s{color:#a5d6ff}.c{color:#8b949e;font-style:italic}.f{color:#d2a8ff}.n{color:#79c0ff}
+
+  /* layout */
+  header.hero{padding:64px 40px 48px;background:
+     radial-gradient(1200px 400px at 20% -10%, rgba(124,140,255,.18), transparent 60%),
+     radial-gradient(900px 360px at 90% 0%, rgba(55,194,168,.14), transparent 55%),
+     var(--bg);border-bottom:1px solid var(--border)}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 40px}
+  .badge{display:inline-flex;gap:8px;align-items:center;font-family:var(--mono);
+     font-size:12px;color:var(--accent-2);border:1px solid var(--border);
+     background:var(--panel);padding:5px 12px;border-radius:999px;margin-bottom:22px}
+  h1{font-size:46px;line-height:1.1;margin:0 0 14px;letter-spacing:-1px;
+     background:linear-gradient(120deg,#fff,#9da7b3);-webkit-background-clip:text;
+     -webkit-text-fill-color:transparent}
+  .lede{font-size:19px;color:var(--fg-dim);max-width:760px;margin:0}
+
+  nav.toc{position:sticky;top:0;z-index:10;background:rgba(13,17,23,.85);
+     backdrop-filter:blur(10px);border-bottom:1px solid var(--border)}
+  nav.toc .wrap{display:flex;gap:6px;flex-wrap:wrap;padding:12px 40px}
+  nav.toc a{font-size:13px;color:var(--fg-dim);padding:6px 12px;border-radius:6px}
+  nav.toc a:hover{background:var(--panel);color:var(--fg);text-decoration:none}
+
+  section{padding:54px 0;border-bottom:1px solid var(--border-soft)}
+  h2{font-size:30px;margin:0 0 6px;letter-spacing:-.5px;display:flex;align-items:center;gap:12px}
+  h2 .num{font-family:var(--mono);font-size:15px;color:var(--accent);
+     border:1px solid var(--border);border-radius:8px;padding:3px 9px}
+  h3{font-size:19px;margin:34px 0 10px;color:var(--fg)}
+  h4{font-size:15px;margin:22px 0 6px;color:var(--accent-2);font-family:var(--mono)}
+  p{color:var(--fg-dim)}
+  .sub{color:var(--fg-faint);margin-top:0}
+  ul{color:var(--fg-dim);padding-left:22px}li{margin:5px 0}
+
+  .grid{display:grid;gap:18px}
+  .g2{grid-template-columns:1fr 1fr}.g3{grid-template-columns:repeat(3,1fr)}
+  @media(max-width:820px){.g2,.g3{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);
+     padding:20px 22px}
+  .card h3{margin-top:0;font-size:16px;display:flex;align-items:center;gap:10px}
+  .card .ic{width:30px;height:30px;border-radius:8px;display:grid;place-items:center;
+     font-size:15px;background:var(--panel-2);border:1px solid var(--border)}
+  .card p{margin:.4em 0 0;font-size:14px}
+
+  /* ascii / diagram blocks */
+  .diagram{background:#010409;border:1px solid var(--border);border-radius:var(--radius);
+     padding:22px;font-family:var(--mono);font-size:12.5px;color:#8b949e;
+     line-height:1.5;white-space:pre;overflow:auto}
+  .diagram b{color:var(--accent)}.diagram em{color:var(--accent-2);font-style:normal}
+
+  table{width:100%;border-collapse:collapse;font-size:14px;margin-top:8px}
+  th,td{text-align:left;padding:10px 14px;border-bottom:1px solid var(--border)}
+  th{color:var(--fg);font-weight:600;background:var(--panel);font-size:13px}
+  td{color:var(--fg-dim)}
+  td code{white-space:nowrap}
+  .pill{display:inline-block;font-family:var(--mono);font-size:11px;padding:2px 8px;
+     border-radius:6px;border:1px solid var(--border)}
+  .pill.exec{color:var(--pin-flow)}.pill.data{color:var(--pin-data)}.pill.io{color:var(--accent-3)}
+
+  /* layout sketch for the 3-zone UI */
+  .uisketch{display:grid;grid-template-columns:200px 1fr 220px;gap:10px;height:380px;
+     background:var(--bg-alt);border:1px solid var(--border);border-radius:12px;padding:10px}
+  .uisketch .z{border:1px dashed var(--border);border-radius:8px;padding:10px;
+     font-size:12px;color:var(--fg-faint);display:flex;flex-direction:column;gap:8px}
+  .uisketch .zlabel{font-family:var(--mono);font-size:10px;color:var(--accent);text-transform:uppercase;letter-spacing:1px}
+  .uisketch .mid{display:flex;flex-direction:column;gap:10px;border:none;padding:0}
+  .uisketch .blueprint{flex:2;background:
+     linear-gradient(rgba(48,54,61,.5) 1px,transparent 1px) 0 0/22px 22px,
+     linear-gradient(90deg,rgba(48,54,61,.5) 1px,transparent 1px) 0 0/22px 22px,
+     #0d1117;border:1px dashed var(--border);border-radius:8px;position:relative;
+     display:grid;place-items:center;color:var(--fg-faint)}
+  .uisketch .bottom{flex:1;display:grid;grid-template-columns:2fr 1fr;gap:10px}
+  .uisketch .bottom .z{border-style:dashed}
+  .mock-btn{background:var(--panel-2);border:1px solid var(--border);border-radius:6px;
+     padding:6px 8px;color:var(--fg-dim);font-size:11px}
+  .mock-row{background:var(--panel);border-radius:6px;padding:6px 8px;color:var(--fg-faint);font-size:11px}
+  .node-chip{position:absolute;background:var(--panel);border:1px solid var(--accent);
+     border-radius:6px;padding:4px 8px;font-size:10px;color:var(--fg)}
+
+  .kbd{font-family:var(--mono);font-size:12px;background:var(--panel-2);
+     border:1px solid var(--border);border-bottom-width:2px;border-radius:5px;padding:1px 6px}
+  .note{border-left:3px solid var(--accent);background:var(--panel);padding:12px 16px;
+     border-radius:0 8px 8px 0;font-size:14px;color:var(--fg-dim);margin:16px 0}
+  footer{padding:40px;text-align:center;color:var(--fg-faint);font-size:13px}
+  .tag{font-family:var(--mono);font-size:11px;color:var(--fg-faint)}
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <div class="badge">◆ OpenWorkflow · Design Spec v0.1</div>
+    <h1>OpenWorkflow</h1>
+    <p class="lede">一个受 Unreal Engine 蓝图编辑器启发的<strong style="color:var(--fg)">可视化工作流编辑器</strong>。
+    用拖拽节点的方式生成与编辑 AI Workflow，并通过一套通用 IR + 多解析器，让同一份工作流可以运行在 Claude Code、Codex、Gemini 等不同大模型之上。</p>
+  </div>
+</header>
+
+<nav class="toc"><div class="wrap">
+  <a href="#overview">1 · 概述</a>
+  <a href="#goals">2 · 目标</a>
+  <a href="#arch">3 · 架构</a>
+  <a href="#ir">4 · 通用 IR</a>
+  <a href="#nodes">5 · 节点类型</a>
+  <a href="#ui">6 · 界面设计</a>
+  <a href="#prompts">7 · 提示词面板</a>
+  <a href="#parser">8 · 解析器</a>
+  <a href="#data">9 · 数据模型</a>
+  <a href="#stack">10 · 技术选型</a>
+  <a href="#roadmap">11 · 路线图</a>
+</div></nav>
+
+<main class="wrap">
+
+<section id="overview">
+  <h2><span class="num">01</span> 概述</h2>
+  <p>Claude Code 最新版本支持以脚本方式编写 Workflow（多智能体编排），表达力强但<strong style="color:var(--fg)">对非工程用户不友好</strong>：需要手写 JS、记忆 <code>agent()</code>/<code>parallel()</code>/<code>pipeline()</code> 等 API，难以一眼看清编排拓扑。</p>
+  <p>OpenWorkflow 的核心主张：<strong style="color:var(--fg)">工作流本质是一张有向图</strong>。既然是图，就应该像 UE 蓝图那样被<em style="color:var(--accent-2);font-style:normal">看见、拖拽、连线、调试</em>，而脚本只是这张图的一种序列化表示。OpenWorkflow 让图与脚本双向同步，并让脚本能被翻译到不同大模型的运行时。</p>
+  <div class="grid g3" style="margin-top:24px">
+    <div class="card"><h3><span class="ic">🎛️</span> 可视化编辑</h3><p>蓝图式画布：节点 = 步骤，引脚 = 输入/输出，连线 = 执行流与数据流。</p></div>
+    <div class="card"><h3><span class="ic">🔁</span> 图↔脚本双向</h3><p>画布改动实时编译为脚本；导入脚本即可反解析为图。</p></div>
+    <div class="card"><h3><span class="ic">🧩</span> 多模型通用</h3><p>统一 IR + 可插拔解析器，一份工作流跑在 Claude / Codex / Gemini。</p></div>
+  </div>
+</section>
+
+<section id="goals">
+  <h2><span class="num">02</span> 设计目标</h2>
+  <div class="grid g2">
+    <div class="card"><h3>✅ 必须达成</h3>
+      <ul>
+        <li>蓝图画布：节点增删、连线、拖拽、缩放、对齐网格</li>
+        <li>图 → 脚本编译（Claude Code workflow 脚本为首发目标）</li>
+        <li>脚本 → 图解析（导入既有 workflow）</li>
+        <li>通用 IR：与具体模型/运行时解耦的中间表示</li>
+        <li>会话管理：新建 Workflow、新建会话、历史记录</li>
+        <li>AI 协作区：与模型对话、由对话驱动图的生成与修改</li>
+        <li>常用提示词面板：一键追问边界 / 澄清需求</li>
+      </ul>
+    </div>
+    <div class="card"><h3>🌟 期望达成</h3>
+      <ul>
+        <li>多运行时适配器（Claude Code / Codex CLI / Gemini CLI）</li>
+        <li>节点级实时执行状态回显（运行中 / 成功 / 失败 / token 消耗）</li>
+        <li>子工作流（subgraph）与可复用节点库</li>
+        <li>断点 / 单步 / 重放（参考 UE 蓝图调试）</li>
+        <li>版本对比与协作</li>
+      </ul>
+    </div>
+  </div>
+  <div class="note">设计原则：<strong style="color:var(--fg)">图是真相源（Source of Truth）</strong>，脚本是一种导出格式；但允许工程师在脚本侧编辑后回灌，保持双向一致。</div>
+</section>
+
+<section id="arch">
+  <h2><span class="num">03</span> 系统架构</h2>
+  <p>分层架构，自上而下为：编辑器层、核心模型层（IR）、解析/编译层、运行时适配层。</p>
+  <div class="diagram">
+┌──────────────────────────────────────────────────────────────────────┐
+│                        <b>Editor (Pencil → Web UI)</b>                       │
+│   会话栏      │   蓝图画布 Blueprint Canvas   │   提示词面板             │
+│   History     │   + AI 对话 / 输入区          │   Prompt Library         │
+└───────┬───────────────────┬──────────────────────────┬────────────────┘
+        │  edit graph        │  chat / commands          │  inject prompt
+        ▼                    ▼                           ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│                  <b>Workflow IR  ·  通用中间表示 (JSON)</b>                  │
+│      nodes[] · edges[] · ports · params · meta · subgraphs              │
+└───────┬───────────────────────────────────────────────┬──────────────┘
+        │  emit()                                         │  parse()
+        ▼                                                 ▲
+┌─────────────────────────┐   ┌─────────────────────────┐
+│  <em>Emitters 编译器</em>          │   │  <em>Parsers 解析器</em>           │
+│  IR → ClaudeCode.js     │   │  ClaudeCode.js → IR     │
+│  IR → Codex prompt-flow │   │  YAML / JSON → IR       │
+│  IR → Gemini chain      │   │  LangGraph → IR (实验)  │
+└───────────┬─────────────┘   └─────────────────────────┘
+            ▼
+┌──────────────────────────────────────────────────────────────────────┐
+│              <b>Runtime Adapters 运行时适配层</b>                            │
+│   Claude Code Workflow  │  Codex CLI  │  Gemini CLI  │  自定义 HTTP     │
+│   ← 执行状态 / 日志 / token 回流到画布节点 (live overlay)                  │
+└──────────────────────────────────────────────────────────────────────┘
+  </div>
+  <h3>关键解耦点</h3>
+  <ul>
+    <li><strong style="color:var(--fg)">IR 不绑定任何模型</strong>：节点描述「做什么」，适配器决定「在哪跑、怎么跑」。</li>
+    <li><strong style="color:var(--fg)">Emitter 与 Parser 成对但独立</strong>：可只实现 Emitter（导出）而暂不实现 Parser（导入）。</li>
+    <li><strong style="color:var(--fg)">运行时回流</strong>：执行事件（开始/结束/错误/token）以节点 id 为键回写画布。</li>
+  </ul>
+</section>
+
+<section id="ir">
+  <h2><span class="num">04</span> 通用 Workflow IR</h2>
+  <p>IR 是 OpenWorkflow 的心脏，一份与模型无关的 JSON 图。下面是一个「评审流水线」工作流的 IR 示例：</p>
+  <pre><span class="c">// workflow.owf.json — OpenWorkflow IR</span>
+{
+  <span class="s">"version"</span>: <span class="s">"0.1"</span>,
+  <span class="s">"meta"</span>: { <span class="s">"name"</span>: <span class="s">"review-changes"</span>, <span class="s">"description"</span>: <span class="s">"多维度评审并验证"</span> },
+  <span class="s">"nodes"</span>: [
+    { <span class="s">"id"</span>:<span class="s">"start"</span>,  <span class="s">"type"</span>:<span class="s">"start"</span> },
+    { <span class="s">"id"</span>:<span class="s">"scan"</span>,   <span class="s">"type"</span>:<span class="s">"agent"</span>,
+      <span class="s">"params"</span>:{ <span class="s">"prompt"</span>:<span class="s">"列出变更文件"</span>, <span class="s">"model"</span>:<span class="s">"haiku"</span>, <span class="s">"schema"</span>:<span class="s">"FILES"</span> } },
+    { <span class="s">"id"</span>:<span class="s">"review"</span>, <span class="s">"type"</span>:<span class="s">"parallel"</span>,
+      <span class="s">"params"</span>:{ <span class="s">"over"</span>:<span class="s">"$scan.files"</span>, <span class="s">"prompt"</span>:<span class="s">"审查该文件"</span> } },
+    { <span class="s">"id"</span>:<span class="s">"verify"</span>, <span class="s">"type"</span>:<span class="s">"agent"</span>,
+      <span class="s">"params"</span>:{ <span class="s">"prompt"</span>:<span class="s">"对抗式验证每条发现"</span> } },
+    { <span class="s">"id"</span>:<span class="s">"end"</span>,    <span class="s">"type"</span>:<span class="s">"end"</span> }
+  ],
+  <span class="s">"edges"</span>: [
+    { <span class="s">"from"</span>:<span class="s">"start"</span>,  <span class="s">"to"</span>:<span class="s">"scan"</span>,   <span class="s">"kind"</span>:<span class="s">"exec"</span> },
+    { <span class="s">"from"</span>:<span class="s">"scan"</span>,   <span class="s">"to"</span>:<span class="s">"review"</span>, <span class="s">"kind"</span>:<span class="s">"exec"</span> },
+    { <span class="s">"from"</span>:<span class="s">"review"</span>, <span class="s">"to"</span>:<span class="s">"verify"</span>, <span class="s">"kind"</span>:<span class="s">"exec"</span> },
+    { <span class="s">"from"</span>:<span class="s">"verify"</span>, <span class="s">"to"</span>:<span class="s">"end"</span>,    <span class="s">"kind"</span>:<span class="s">"exec"</span> }
+  ]
+}</pre>
+
+  <h3>对应导出的 Claude Code 脚本</h3>
+  <pre><span class="k">export const</span> meta = { name:<span class="s">'review-changes'</span>, description:<span class="s">'多维度评审并验证'</span>,
+  phases:[{title:<span class="s">'Scan'</span>},{title:<span class="s">'Review'</span>},{title:<span class="s">'Verify'</span>}] }
+
+phase(<span class="s">'Scan'</span>)
+<span class="k">const</span> scan = <span class="k">await</span> <span class="f">agent</span>(<span class="s">'列出变更文件'</span>, { model:<span class="s">'haiku'</span>, schema: FILES })
+phase(<span class="s">'Review'</span>)
+<span class="k">const</span> reviews = <span class="k">await</span> <span class="f">parallel</span>(scan.files.map(f => () =>
+  <span class="f">agent</span>(<span class="s">`审查 ${f}`</span>)))
+phase(<span class="s">'Verify'</span>)
+<span class="k">const</span> verdicts = <span class="k">await</span> <span class="f">parallel</span>(reviews.map(r => () =>
+  <span class="f">agent</span>(<span class="s">`对抗式验证: ${r}`</span>)))
+<span class="k">return</span> { verdicts }</pre>
+  <p class="sub">同一份 IR，换一个 Emitter 即可产出 Codex prompt-flow 或 Gemini chain，无需改图。</p>
+</section>
+
+<section id="nodes">
+  <h2><span class="num">05</span> 节点类型</h2>
+  <p>引脚约定：<span class="pill exec">▶ exec 执行流</span> 控制顺序； <span class="pill data">● data 数据流</span> 传递结果； <span class="pill io">◆ io 配置</span> 静态参数。</p>
+  <table>
+    <thead><tr><th>节点</th><th>类别</th><th>引脚</th><th>映射到脚本</th></tr></thead>
+    <tbody>
+      <tr><td><code>Start / End</code></td><td>控制</td><td>exec out / exec in</td><td>脚本入口与 <code>return</code></td></tr>
+      <tr><td><code>Agent</code></td><td>执行</td><td>exec ▶▶ · data(prompt,model,schema) → result ●</td><td><code>agent(prompt, opts)</code></td></tr>
+      <tr><td><code>Parallel</code></td><td>编排</td><td>exec ▶▶ · over[] ● → results[] ●</td><td><code>parallel(items.map(...))</code></td></tr>
+      <tr><td><code>Pipeline</code></td><td>编排</td><td>exec ▶▶ · stages ◆ → out[] ●</td><td><code>pipeline(items, s1, s2…)</code></td></tr>
+      <tr><td><code>Phase</code></td><td>分组</td><td>exec ▶▶ · title ◆</td><td><code>phase('…')</code> 进度分组</td></tr>
+      <tr><td><code>Branch / If</code></td><td>控制</td><td>exec ▶ · cond ● → true▶ / false▶</td><td><code>if (...) {}</code></td></tr>
+      <tr><td><code>Loop</code></td><td>控制</td><td>exec ▶ · until ● → body▶ / done▶</td><td><code>while (...) {}</code></td></tr>
+      <tr><td><code>Workflow (子图)</code></td><td>复用</td><td>exec ▶▶ · args ● → result ●</td><td><code>workflow(name, args)</code></td></tr>
+      <tr><td><code>Log / Note</code></td><td>旁路</td><td>exec ▶▶ · msg ◆</td><td><code>log('…')</code></td></tr>
+      <tr><td><code>Variable / Get-Set</code></td><td>数据</td><td>data ● ↔ ●</td><td>局部 <code>const</code> / 引用 <code>$node.field</code></td></tr>
+    </tbody>
+  </table>
+  <div class="note">节点参数面板支持 <code>schema</code> 选择，对应脚本中的结构化输出（强制 agent 调用 StructuredOutput 工具），保证下游连线拿到的是已校验对象。</div>
+</section>
+
+<section id="ui">
+  <h2><span class="num">06</span> 界面设计 · 三区布局</h2>
+  <p>整体采用深色开发者工具风格。左（导航/会话）— 中（编辑+对话）— 右（提示词），中部再分上（蓝图）下（AI 交互）。</p>
+
+  <div class="uisketch">
+    <div class="z">
+      <span class="zlabel">Left · 会话栏</span>
+      <div class="mock-btn">＋ 新建 Workflow</div>
+      <div class="mock-btn">＋ 新建会话</div>
+      <div class="tag" style="margin-top:6px">历史记录</div>
+      <div class="mock-row">review-changes</div>
+      <div class="mock-row">build-fixer</div>
+      <div class="mock-row">deep-research</div>
+    </div>
+    <div class="mid">
+      <div class="blueprint">
+        <span class="zlabel" style="position:absolute;top:8px;left:10px">Blueprint Canvas</span>
+        <div class="node-chip" style="top:60px;left:40px">▶ Agent · Scan</div>
+        <div class="node-chip" style="top:130px;left:180px;border-color:var(--accent-2)">⇶ Parallel · Review</div>
+        <div class="node-chip" style="top:60px;left:330px;border-color:var(--accent-3)">▶ Agent · Verify</div>
+        <span>节点 · 引脚 · 连线（拖拽 / 缩放 / 网格吸附）</span>
+      </div>
+      <div class="bottom">
+        <div class="z"><span class="zlabel">AI 返回</span>
+          <div class="mock-row">⟳ 正在生成 review 节点…</div>
+          <div class="mock-row">✓ 已连接 Scan → Review</div>
+        </div>
+        <div class="z"><span class="zlabel">AI 输入</span>
+          <div class="mock-row" style="flex:1">在 Verify 后加一个汇总节点…</div>
+          <div class="mock-btn" style="align-self:flex-end">发送 ⏎</div>
+        </div>
+      </div>
+    </div>
+    <div class="z">
+      <span class="zlabel">Right · 提示词</span>
+      <div class="mock-row">▷ 当前工作流清晰了吗</div>
+      <div class="mock-row">▷ 当前边界清晰了吗</div>
+      <div class="mock-row">▷ 是否有遗漏的分支</div>
+      <div class="mock-row">▷ 每个节点的输入输出明确吗</div>
+      <div class="mock-row">▷ 失败如何回退</div>
+    </div>
+  </div>
+
+  <div class="grid g3" style="margin-top:24px">
+    <div class="card"><h3><span class="ic">◧</span> 左 · 会话栏</h3>
+      <p>顶部为主行动区（新建 Workflow / 新建会话），参考 CodeX Desktop。底部为会话历史列表，点击切换上下文。</p></div>
+    <div class="card"><h3><span class="ic">▣</span> 中 · 主工作区</h3>
+      <p>上半部为蓝图编辑器（核心）；下半部左侧是 AI 返回流（Claude Code 式主区），右侧是 AI 输入框。</p></div>
+    <div class="card"><h3><span class="ic">◨</span> 右 · 提示词面板</h3>
+      <p>常用追问清单，每条带三角形箭头 <code>▷</code>，点击即把该提示词发给 AI，加速澄清需求与边界。</p></div>
+  </div>
+
+  <h3>交互要点</h3>
+  <ul>
+    <li>蓝图画布：拖拽创建连线、右键菜单加节点、<span class="kbd">Space</span> 拖拽平移、滚轮缩放、网格吸附。</li>
+    <li>AI 双向：在输入框描述意图 → AI 直接<strong style="color:var(--fg)">操作画布</strong>（增删节点/连线），改动以高亮回显在返回区。</li>
+    <li>选中节点 → 右侧面板可切换为「节点属性」编辑（prompt / model / schema / isolation）。</li>
+    <li>底部 AI 返回区与画布共享选区：点节点定位日志，点日志高亮节点。</li>
+  </ul>
+</section>
+
+<section id="prompts">
+  <h2><span class="num">07</span> 常用提示词面板</h2>
+  <p>面板是「工作流方法论」的固化——把 OpenWorkflow 倡导的澄清式设计变成一键操作。分组可折叠，支持自定义。</p>
+  <div class="grid g2">
+    <div class="card"><h4>清晰度 / Clarity</h4><ul>
+      <li>▷ 当前工作流清晰了吗？</li>
+      <li>▷ 当前边界清晰了吗？</li>
+      <li>▷ 每个节点的职责单一吗？</li>
+    </ul></div>
+    <div class="card"><h4>完整性 / Completeness</h4><ul>
+      <li>▷ 是否覆盖了失败 / 超时分支？</li>
+      <li>▷ 有没有遗漏的并行机会？</li>
+      <li>▷ 数据从哪来、到哪去明确吗？</li>
+    </ul></div>
+    <div class="card"><h4>正确性 / Correctness</h4><ul>
+      <li>▷ 连线的数据类型匹配吗？</li>
+      <li>▷ 是否存在环 / 死锁？</li>
+      <li>▷ 结构化输出 schema 定义了吗？</li>
+    </ul></div>
+    <div class="card"><h4>成本 / Cost</h4><ul>
+      <li>▷ 模型档位（haiku/sonnet/opus）合理吗？</li>
+      <li>▷ 并发上限与预算控制了吗？</li>
+      <li>▷ 哪些节点可降级？</li>
+    </ul></div>
+  </div>
+  <p class="sub">点击三角形 ▷ → 该提示词作为一条消息发给 AI，AI 据此审视当前画布并给出修改建议或直接落地。</p>
+</section>
+
+<section id="parser">
+  <h2><span class="num">08</span> 通用解析器</h2>
+  <p>解析器把不同来源/目标的工作流表示与 IR 互转。采用<strong style="color:var(--fg)">注册表 + 适配器</strong>模式，新增模型只需实现一对 <code>parse/emit</code>。</p>
+  <pre><span class="k">interface</span> <span class="n">WorkflowAdapter</span> {
+  id: <span class="n">string</span>;              <span class="c">// 'claude-code' | 'codex' | 'gemini'</span>
+  <span class="f">parse</span>(src: <span class="n">string</span>): <span class="n">IRGraph</span>;   <span class="c">// 外部表示 → IR</span>
+  <span class="f">emit</span>(ir: <span class="n">IRGraph</span>): <span class="n">string</span>;    <span class="c">// IR → 外部表示</span>
+  <span class="f">capabilities</span>(): <span class="n">CapSet</span>;     <span class="c">// 支持哪些节点/特性</span>
+}
+
+registry.<span class="f">register</span>(<span class="n">ClaudeCodeAdapter</span>);  <span class="c">// 首发</span>
+registry.<span class="f">register</span>(<span class="n">CodexAdapter</span>);
+registry.<span class="f">register</span>(<span class="n">GeminiAdapter</span>);</pre>
+  <h3>解析策略</h3>
+  <ul>
+    <li><strong style="color:var(--fg)">Claude Code 脚本</strong>：用 AST（acorn/babel）解析，识别 <code>agent/parallel/pipeline/phase/workflow</code> 调用与数据依赖，重建节点与边。</li>
+    <li><strong style="color:var(--fg)">声明式 (YAML/JSON)</strong>：直接 schema 映射，最稳妥，作为跨模型的「无损」交换格式。</li>
+    <li><strong style="color:var(--fg)">能力协商</strong>：emit 前用 <code>capabilities()</code> 检查目标运行时是否支持某节点（如 worktree 隔离），不支持则降级或告警。</li>
+  </ul>
+  <div class="note">脚本是图灵完备的，存在无法静态还原为图的写法。策略：可还原的子集映射为节点；无法还原的片段封装为 <code>CodeBlock</code> 节点（黑盒），保证「往返不丢」。</div>
+</section>
+
+<section id="data">
+  <h2><span class="num">09</span> 数据模型</h2>
+  <div class="grid g2">
+    <div class="card"><h4>Session 会话</h4><pre style="margin:0;font-size:12px">{
+  id, title, createdAt,
+  workflowId,
+  messages: Message[],   <span class="c">// AI 对话</span>
+  cursor: NodeId          <span class="c">// 当前焦点节点</span>
+}</pre></div>
+    <div class="card"><h4>Workflow 工作流</h4><pre style="margin:0;font-size:12px">{
+  id, name, version,
+  ir: IRGraph,            <span class="c">// 真相源</span>
+  target: 'claude-code',  <span class="c">// 默认运行时</span>
+  layout: {nodeId:{x,y}}  <span class="c">// 画布坐标</span>
+}</pre></div>
+    <div class="card"><h4>Node 节点</h4><pre style="margin:0;font-size:12px">{
+  id, type, label,
+  params: {...},
+  ports: { in:[], out:[] },
+  runtime?: {status, tokens, log}
+}</pre></div>
+    <div class="card"><h4>Edge 连线</h4><pre style="margin:0;font-size:12px">{
+  id, from:{node,port},
+  to:{node,port},
+  kind: 'exec' | 'data'
+}</pre></div>
+  </div>
+  <p class="sub">持久化：会话与历史落地为 <code>~/.openworkflow/sessions/*.json</code>；工作流为 <code>*.owf.json</code>，可导出为目标脚本文件。</p>
+</section>
+
+<section id="stack">
+  <h2><span class="num">10</span> 技术选型</h2>
+  <table>
+    <thead><tr><th>层</th><th>选型</th><th>理由</th></tr></thead>
+    <tbody>
+      <tr><td>桌面壳</td><td><code>Tauri</code>（或 Electron）</td><td>跨平台、本地文件与 CLI 进程访问；Tauri 体积更小</td></tr>
+      <tr><td>UI 框架</td><td><code>React</code> + <code>TypeScript</code></td><td>生态成熟，配合节点编辑器库</td></tr>
+      <tr><td>蓝图画布</td><td><code>React Flow (xyflow)</code></td><td>成熟的节点/连线/缩放/小地图能力，可深度自定义节点</td></tr>
+      <tr><td>脚本解析</td><td><code>acorn / @babel/parser</code></td><td>把 Claude Code workflow JS 解析为 AST 重建图</td></tr>
+      <tr><td>状态管理</td><td><code>Zustand</code></td><td>轻量，适合画布 + 会话双状态</td></tr>
+      <tr><td>样式</td><td><code>Tailwind</code> + CSS 变量</td><td>深色主题与设计 token 一致</td></tr>
+      <tr><td>界面设计</td><td><code>Pencil (.pen)</code></td><td>本项目用于产出高保真界面稿</td></tr>
+      <tr><td>运行时</td><td>Claude Code / Codex / Gemini CLI</td><td>通过适配器以子进程或 API 调用</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="roadmap">
+  <h2><span class="num">11</span> 路线图</h2>
+  <div class="grid g3">
+    <div class="card"><h3>M1 · 编辑器骨架</h3><p>三区布局、画布增删节点/连线、会话历史、节点属性面板。</p></div>
+    <div class="card"><h3>M2 · 图↔脚本</h3><p>Claude Code Emitter + Parser，IR 落地，提示词面板，AI 驱动画布。</p></div>
+    <div class="card"><h3>M3 · 多模型 & 运行</h3><p>Codex/Gemini 适配器、运行时回流、节点级执行状态、子图复用。</p></div>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  OpenWorkflow · 可视化 AI 工作流编辑器 · 设计文档 v0.1 — 配套界面稿见 <span class="tag">pencil/Openflow.pen</span>
+</footer>
+
+</body>
+</html>
