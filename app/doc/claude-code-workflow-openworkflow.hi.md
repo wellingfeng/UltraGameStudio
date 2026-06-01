@@ -1,229 +1,185 @@
-# Claude Code में Workflows हैं। अन्य मॉडलों के बारे में क्या? मैंने OpenWorkflows आज़माया
+# Claude Code में Dynamic Workflows आ गए हैं। बाकी मॉडलों का क्या? OpenWorkflows एक ओपन-सोर्स विकल्प है
 
-हाल ही में मैं Claude Code workflows को बारीकी से देख रहा हूँ।
+## हाल में मैं Claude Code के नए dynamic workflows को देख रहा हूं। MCP, Skill और Hooks की तुलना में इस नए फीचर पर बहुत कम चर्चा हुई है। आगे इन्हें मैं workflows कहूंगा।
 
-मुझे इसमें सिर्फ "एक और फीचर" नहीं दिखता। यह जटिल काम को एक के बाद एक चैट टर्न से बाहर निकालता है। कार्यों को सबएजेंट, समानांतर शाखाओं और पाइपलाइन में विभाजित किया जा सकता है, और फिर स्क्रिप्ट द्वारा समन्वित किया जा सकता है।
+जटिल कार्यों के लिए कई लोग पहले शोध वाला HTML बनाते थे, फिर उसे तकनीकी योजना वाले HTML में बदलते थे, और अंत में AI को विकास के लिए दे देते थे। लेकिन कई बार परिणाम अच्छे नहीं आते। मुख्य कारण यह है कि HTML इंसानों के पढ़ने के लिए टेक्स्ट है। यह Script नहीं है, और इसमें संरचित जानकारी कम होती है। क्रम की स्थिरता, कितना काम समानांतर चल सकता है, सीमाएं साफ हैं या नहीं, कार्य कैसे बांटे जाएं, और कार्य आपस में जानकारी कैसे बदलें, ये सब अस्पष्ट रहते हैं। इसलिए AI को बहुत कुछ अनुमान लगाना पड़ता है।
 
-यह इसलिए मायने रखता है क्योंकि वर्कफ़्लो अब एक बातचीत के अंदर अस्थायी व्यवस्था नहीं है। यह कुछ ऐसा बन जाता है जिसे आप सहेज सकते हैं, संपादित कर सकते हैं और पुन: उपयोग कर सकते हैं।
+workflows खुद Script होते हैं, इसलिए वे इस समस्या को सीधे हल कर सकते हैं।
 
-इससे मेरे मन में एक सवाल भी उठा: अगर वर्कफ़्लो AI कोडिंग में एक आम परत बन रहे हैं, तो उन्हें एक मॉडल या एक CLI से क्यों बांधा जाए?
+इसके अलावा workflows में कई कोणों से खोज, adversarial validation और योजना पर voting जैसी व्यवस्था भी होती है। इसी वजह से उनकी सटीकता अधिक हो सकती है। यह पैमाने से जीतने का तरीका है: एक ही समस्या पर पांच agents को एक साथ चलाएं, फिर एक और agent परिणामों का सारांश तैयार करता है। यह सच में अधिक सटीक होता है, लेकिन token भी तेजी से खर्च होते हैं।
 
-तो मैंने OpenWorkflows आज़माया। यह Claude Code-शैली वर्कफ़्लो को एक विज़ुअल कैनवस में बदलता है, और एक ही वर्कफ़्लो को Claude Code, Codex, Gemini और अधिक लोकल या क्लाउड रनटाइम के लिए लक्षित करने का प्रयास करता है।
+जब यह इतना सामान्य उपयोगी है, तो इसे किसी एक मॉडल या एक CLI से क्यों बांधा जाए?
 
-यह ट्यूटोरियल अमूर्त अवधारणाओं से शुरू नहीं होता। यह स्क्रीनशॉट के क्रम में चलता है। उदाहरण ठोस है: OpenWorkflows को कई उपस्थिति थीम का समर्थन करने दें, Pencil को डिफ़ॉल्ट करें, और सेटिंग्स / उपस्थिति में स्विच करने की अनुमति दें।
+इसी सोच के आधार पर मैंने OpenWorkflows बनाया, या अधिक सही कहें तो AI ने बनाया। यह Claude Code जैसे workflows को visual canvas में बदलता है और कोशिश करता है कि वही flow Claude Code, Codex, Gemini और दूसरे local या cloud runtimes पर भी चल सके।
 
-> यह स्क्रीनशॉट-आधारित उपयोग ट्यूटोरियल है।
->
-> अंग्रेजी संस्करण: [Claude Code Has Workflows. What About Other Models? I Tried OpenWorkflows](claude-code-workflow-openworkflow.en.md)
+इस बार मैं अमूर्त अवधारणाओं की बात नहीं करूंगा। सीधे screenshots के हिसाब से चलूंगा। उदाहरण भी ठोस है: OpenWorkflows को कई interface styles का समर्थन देना, Pencil को default बनाना, और Settings / Appearance में style बदलने देना।
 
-## 0. अंतिम इंटरफ़ेस से शुरू करें
+विकास के दौरान मैंने अधिक से अधिक काम OpenWorkflows के अंदर ही करने की कोशिश की, ताकि यह खुद को bootstrap कर सके।
 
-<p align="center">
-  <img src="images/0-标题使用.png" alt="OpenWorkflows कैनवस, इतिहास रेल, नोड गुण और AI इनपुट क्षेत्र" width="960">
-</p>
-<p align="center"><em>चित्र 0: मुख्य OpenWorkflows कार्यक्षेत्र, केंद्र में ब्लूप्रिंट, दाईं ओर नोड गुण और नीचे AI इनपुट व आउटपुट।</em></p>
+नीचे की प्रक्रिया development के लिए CodeX को default large model के रूप में इस्तेमाल करती है।
 
-मुख्य UI के चार भाग हैं: बाईं ओर वर्कफ़्लो इतिहास, केंद्र में विज़ुअल कैनवस, दाईं ओर नोड गुण और सामान्य प्रॉम्प्ट, और नीचे AI इनपुट और प्रतिक्रिया पैनल।
-
-स्क्रीनशॉट में वर्कफ़्लो का शीर्षक "Pencil मल्टी-थीम उपस्थिति योजना" है। यह एक स्थिर आरेख नहीं है। यह एक वर्कफ़्लो है जिसे आप संपादित करते रह सकते हैं, स्क्रिप्ट में बदल सकते हैं, चला सकते हैं और बाद में फिर से देख सकते हैं।
-
-## 1. OpenWorkflows डाउनलोड करें
+### 0. पहले अंतिम interface देखें
 
 <p align="center">
-  <img src="images/1-下载.png" alt="OpenWorkflows GitHub पृष्ठ और Releases प्रवेश" width="840">
+  <img src="images/0-标题使用.png" alt="OpenWorkflows main interface" width="960">
 </p>
-<p align="center"><em>चित्र 1: GitHub प्रोजेक्ट पृष्ठ पर Releases अनुभाग से नवीनतम बिल्ड खोजें।</em></p>
 
-इसे आज़माने का सबसे तेज़ तरीका GitHub प्रोजेक्ट पृष्ठ खोलना और Releases से नवीनतम रिलीज़ डाउनलोड करना है।
+OpenWorkflows के main interface में बीच में workflows blueprint है, दाईं ओर node properties हैं, और नीचे AI input और output है।
 
-दाईं ओर का About पैनल स्थिति स्पष्ट करता है। यह एक विज़ुअल एडिटर है जो Claude Code Workflows को Codex, Gemini और अधिक LLM रनटाइम तक विस्तारित करता है।
+मुख्य interface लगभग चार हिस्सों में बंटा है: बाईं ओर workflows history, बीच में visual canvas, दाईं ओर node properties और common prompts, और नीचे AI input तथा responses।
 
-यदि आप कोड पर काम करना चाहते हैं, तो रेपो क्लोन करें और `app/` डायरेक्टरी से शुरू करें:
-
-```bash
-npm install
-npm run dev
-```
-
-डेस्कटॉप ऐप के लिए:
-
-```bash
-npm run desktop
-```
-
-## 2. सामान्य सेटिंग्स और रन एंट्री पॉइंट की पुष्टि करें
+### 1. OpenWorkflows डाउनलोड करें
 
 <p align="center">
-  <img src="images/2-通用设置.png" alt="OpenWorkflows सामान्य सेटिंग्स पृष्ठ" width="640">
+  <img src="images/1-下载.png" alt="OpenWorkflows GitHub Releases" width="840">
 </p>
-<p align="center"><em>चित्र 2: सेटिंग्स / सामान्य में भाषा, लोकल CLI और लॉन्च Shell कॉन्फ़िगर करें; सक्रिय रन मॉडल / चैनल AI इनपुट के नीचे चुनें।</em></p>
 
-कुछ भी बनाने से पहले, **सेटिंग्स / सामान्य** खोलें। यहाँ आप UI भाषा, प्रॉम्प्ट ऑटो-ट्रांसलेशन, लोकल CLI और लॉन्च Shell कॉन्फ़िगर कर सकते हैं।
+GitHub project page के दाईं ओर Releases से latest version खोजें।
 
-पुराना **मॉडल** टैब हटा दिया गया है। सक्रिय मॉडल या चैनल अब Settings में कॉन्फ़िगर नहीं होता; मौजूदा अनुरोध के लिए इसे AI इनपुट के नीचे वाले runtime dropdown से चुनें।
+### 2. पहले large model configure करें
 
-यदि किसी खास नोड को अलग मॉडल चाहिए, तो उस नोड को चुनें और Node Properties में मॉडल override करें। खाली छोड़ने पर नोड workflow या global selection को inherit करता है।
+Default रूप से यह system में configured CLI का उपयोग करके शुरू होगा। आप CC-Switch जैसी tools से इसे configure कर सकते हैं।
 
-## 3. नया वर्कफ़्लो बनाएं और अनुरोध दर्ज करें
+### 3. नया workflows बनाएं और request लिखें
 
 <p align="center">
-  <img src="images/3-新建workflow.png" alt="नया वर्कफ़्लो बनाना और AI इनपुट में अनुरोध दर्ज करना" width="840">
+  <img src="images/3-新建workflow.png" alt="नया workflows बनाएं और request लिखें" width="840">
 </p>
-<p align="center"><em>चित्र 3: नया वर्कफ़्लो क्लिक करें, फिर नीचे-दाएं AI इनपुट में वर्कफ़्लो का वर्णन करें।</em></p>
 
-सामान्य सेटिंग्स और रन एंट्री पॉइंट की पुष्टि के बाद, बाईं ओर **नया वर्कफ़्लो** क्लिक करें। कैनवस एक न्यूनतम संरचना के साथ शुरू होता है: Start, एक Agent, और End।
+Model configure करने के बाद बाईं ओर "New workflows" पर click करें। Canvas पर एक minimal structure दिखेगा: Start, एक Agent, और End।
 
-वास्तविक शुरुआती बिंदु मैन्युअल नोड ड्राइंग नहीं है। यह नीचे-दाएं कोने में AI इनपुट है। इस उदाहरण में, मैंने टाइप किया:
+यहां सच में हाथ से nodes draw करने की जरूरत नहीं है। असली शुरुआत नीचे दाईं ओर AI input box से होती है। इस example में मैंने लिखा:
 
 ```text
-मैं चाहता हूं कि OpenWorkflows कई उपस्थिति थीम का समर्थन करे,
-Pencil को डिफ़ॉल्ट करे,
-और सेटिंग्स / उपस्थिति में उन्हें स्विच करने की अनुमति दे।
+मैं चाहता हूं कि OpenWorkflows कई interface styles support करे,
+default में Pencil design इस्तेमाल करे,
+और Settings / Appearance में इन्हें switch किया जा सके।
 ```
 
-`Ctrl+Enter` से भेजने या भेजें बटन क्लिक करने के बाद, OpenWorkflows अनुरोध को एक संपादन योग्य वर्कफ़्लो ब्लूप्रिंट में बदल देता है।
+लिखने के बाद Ctrl+Enter दबा सकते हैं, या नीचे दाईं ओर send button दबा सकते हैं। OpenWorkflows इस natural language को editable workflows blueprint में बदल देता है।
 
-## 4-1. वर्कफ़्लो ब्लूप्रिंट जनरेट करें
+### 4-1. workflows blueprint generate करें
 
 <p align="center">
-  <img src="images/4-1生成workflow蓝图.png" alt="अनुरोध से जनरेट किया गया वर्कफ़्लो ब्लूप्रिंट" width="960">
+  <img src="images/4-1生成workflow蓝图.png" alt="Generated workflows blueprint" width="960">
 </p>
-<p align="center"><em>चित्र 4-1: AI लक्ष्य को समानांतर शाखाओं, सारांश नोड, कार्यान्वयन नोड, सत्यापन और वितरण में विभाजित करता है।</em></p>
 
-अनुरोध भेजे जाने के बाद, OpenWorkflows वर्तमान चरण को एक पूर्ण वर्कफ़्लो में पुनर्लेखित करता है।
+Request भेजने के बाद OpenWorkflows पहले current step को एक complete workflow में reorganize करता है।
 
-स्क्रीनशॉट में ब्लूप्रिंट मोटे तौर पर इस प्रकार बनता है:
+Screenshot में blueprint लगभग ऐसा है:
 
 ```text
 Start
-  -> समानांतर में उपस्थिति समर्थन का अन्वेषण करें
-      -> वर्तमान प्रवेश बिंदुओं पर शोध करें
-      -> थीम सिस्टम डिज़ाइन करें
-      -> Pencil डिफ़ॉल्ट थीम डिज़ाइन करें
-  -> कार्यान्वयन योजना का सारांश करें
-  -> मल्टी-थीम उपस्थिति लागू करें
-  -> सेटिंग्स / उपस्थिति स्विचिंग कनेक्ट करें
-  -> सत्यापित करें और समीक्षा करें
-  -> वितरण परिणाम रिकॉर्ड करें
+  -> Appearance support plan को parallel में व्यवस्थित करें
+      -> Existing appearance entry points research करें
+      -> Multi-style system design करें
+      -> Pencil default style design करें
+  -> Implementation plan summarize करें
+  -> Multiple interface styles implement करें
+  -> Settings / Appearance switching जोड़ें
+  -> Validation और regression checks करें
+  -> Delivery result record करें
   -> End
 ```
 
-यहाँ महत्वपूर्ण यह नहीं है कि ग्राफ कितना सुंदर दिखता है। महत्वपूर्ण यह है कि एक अस्पष्ट लक्ष्य एक निष्पादन योग्य योजना बन जाता है।
+दाईं ओर node properties में selected node की properties को आगे भी modify किया जा सकता है। लेकिन ज्यादातर समय नीचे के input box से AI को blueprint nodes modify करने को कहना अधिक स्वाभाविक है, ताकि लगातार iteration हो सके।
 
-दाईं ओर का नोड गुण पैनल आपको लेबल, प्रकार, शाखाएं, एजेंट प्रकार और स्कीमा का निरीक्षण करने देता है। जनरेशन आपको संरचना को संपादित करने से नहीं रोकता।
-
-## 4-2. जनरेट की गई स्क्रिप्ट देखें
+### 4-2. Generated script देखें
 
 <p align="center">
-  <img src="images/4-2蓝图脚本.png" alt="जनरेट किया गया वर्कफ़्लो स्क्रिप्ट डायलॉग" width="960">
+  <img src="images/4-2蓝图脚本.png" alt="Generated workflows script" width="960">
 </p>
-<p align="center"><em>चित्र 4-2: कैनवस से जनरेट की गई वर्कफ़्लो स्क्रिप्ट का निरीक्षण करने के लिए स्क्रिप्ट बटन का उपयोग करें।</em></p>
 
-शीर्ष बार में एक **स्क्रिप्ट** बटन है। इसे खोलें और आप वर्तमान ब्लूप्रिंट से जनरेट की गई स्क्रिप्ट देखेंगे।
+ऊपर "Script" का entry point है। उसे खोलने पर current blueprint से generated script दिखता है।
 
-स्क्रीनशॉट में, आप `parallel(...)` और `agent(...)` संरचनाएं देख सकते हैं। समानांतर नोड समवर्ती शाखाएं बन जाते हैं, और सामान्य नोड अलग-अलग एजेंट कॉल बन जाते हैं।
+Screenshot में parallel(...) और agent(...) जैसी structures दिखती हैं। Parallel nodes concurrent branches बनते हैं, और normal nodes अलग-अलग agent calls बनते हैं।
 
-यह दिखाता है कि OpenWorkflows केवल बक्से बनाने के बारे में नहीं है। कैनवस एक साझा वर्कफ़्लो संरचना द्वारा समर्थित है जो बाद में विभिन्न रनटाइम को लक्षित कर सकता है।
+यह भी बताता है कि OpenWorkflows सिर्फ boxes draw नहीं कर रहा। Canvas के पीछे unified workflows structure है, इसलिए आगे अलग-अलग runtimes जोड़े जा सकते हैं।
 
-## 5. सामान्य प्रॉम्प्ट के साथ परिष्कृत करते रहें
+### 5. दाईं ओर common prompts से आगे modify करें
 
 <p align="center">
-  <img src="images/5-使用常用提示词.png" alt="सामान्य प्रॉम्प्ट पैनल और AI इनपुट क्षेत्र" width="960">
+  <img src="images/5-使用常用提示词.png" alt="Common prompts से workflows modify करें" width="960">
 </p>
-<p align="center"><em>चित्र 5: सामान्य प्रॉम्प्ट विशिष्ट वर्कफ़्लो संपादन को AI इनपुट क्षेत्र में डालते हैं।</em></p>
 
-ब्लूप्रिंट जनरेट होने के बाद, आपको इसे तुरंत चलाने की आवश्यकता नहीं है। प्रवाह को परिष्कृत करने के लिए दाईं ओर का **सामान्य प्रॉम्प्ट** पैनल बेहतर है।
+Blueprint generate होने के बाद तुरंत run करना जरूरी नहीं है। दाईं ओर "Common Prompts" process को polish करने के लिए ज्यादा उपयुक्त हैं, हालांकि आप खुद भी लिख सकते हैं।
 
-प्रॉम्प्ट परिदृश्य के अनुसार समूहीकृत हैं: स्पष्टीकरण, स्पष्टता, पूर्णता, लागत, संरचना, विश्वसनीयता, प्रदर्शन और समानांतरता, और सत्यापन।
+Prompts scenario के हिसाब से grouped हैं, जैसे interactive clarification, clarity, completeness, cost, structure, reliability, performance and parallelism, verification and testing।
 
-स्क्रीनशॉट **अनुरोध स्पष्ट करें** प्रॉम्प्ट दिखाता है। यह ग्राफ बदलने से पहले प्रमुख अस्पष्टताओं की पुष्टि करने के लिए AI इनपुट भरता है।
+Screenshot में "Clarify Requirements" चुना गया है। यह AI input box में एक prompt भरता है, जो AI से कहता है कि blueprint modify करने से पहले key ambiguities को interactive तरीके से confirm करे।
 
-यह उपयोगी है क्योंकि कई वर्कफ़्लो विफलताएं मॉडल विफलताएं नहीं हैं। वे इसलिए होती हैं क्योंकि लक्ष्य, सीमाएं, विफलता पथ या लागत रणनीति कभी स्पष्ट रूप से नहीं बताई गई थीं।
+यह design बहुत practical है। कई workflows इसलिए fail नहीं होते कि model काम नहीं कर सकता, बल्कि इसलिए कि goal, boundaries, failure paths और cost strategy शुरुआत में साफ नहीं होती।
 
-## 6. इंटरैक्टिव विकल्पों के साथ सीमाओं की पुष्टि करें
+इसके अलावा grill-me, boundary conditions complete करना, parallel optimization, single principle जैसे common prompts भी हैं। आप खुद prompts जोड़ या modify कर सकते हैं।
+
+### 6. Interactive choices से boundary confirm करें
 
 <p align="center">
-  <img src="images/6-交互选择.png" alt="AI प्रतिक्रिया में इंटरैक्टिव विकल्प बटन" width="640">
+  <img src="images/6-交互选择.png" alt="Interactive choices से boundary confirm करें" width="640">
 </p>
-<p align="center"><em>चित्र 6: जब अनुरोध अस्पष्ट हो, तो AI विकल्प प्रदान करता है ताकि आप पहले दायरे की पुष्टि कर सकें।</em></p>
 
-**अनुरोध स्पष्ट करें** चुनने के बाद, AI तुरंत ग्राफ नहीं बदलता। इसके बजाय, यह एक अनुवर्ती प्रश्न पूछता है: थीम स्विचिंग कितनी दूर तक जानी चाहिए?
+"Clarify Requirements" दबाने के बाद AI सीधे graph modify नहीं करता। वह पहले पूछता है: "Interface style switching feature किस scope तक implement होना चाहिए?"
 
-स्क्रीनशॉट दो विकल्प प्रदान करता है: केवल Pencil डिफ़ॉल्ट थीम शिप करें और विस्तार संरचना को जगह पर छोड़ दें, या Pencil और कई स्विच करने योग्य थीम शिप करें।
+Screenshot में दो options हैं: सिर्फ Pencil default style implement करके extension structure छोड़ना, या Pencil सहित कई switchable styles implement करना।
 
-एक बार जब आप चुन लेते हैं, AI उस निर्णय को वर्कफ़्लो ब्लूप्रिंट में वापस लिखता है और अपडेटेड IRGraph आउटपुट करता है। यह AI द्वारा अपने आप वर्कफ़्लो को गलत दिशा में ले जाने के जोखिम को कम करता है।
+आपके चुनने के बाद AI इस decision को workflows blueprint में वापस लिखता है और updated IRGraph output करता है। यह step AI के अपने-आप गलत direction में जाने की समस्या को कम करता है।
 
-## 7. चलाएं क्लिक करें
+### 7. Run पर click करें
 
 <p align="center">
-  <img src="images/7-运行.png" alt="OpenWorkflows में शीर्ष चलाएं बटन" width="960">
+  <img src="images/7-运行.png" alt="workflows run करें" width="960">
 </p>
-<p align="center"><em>चित्र 7: ब्लूप्रिंट तैयार होने के बाद, शीर्ष बार में चलाएं क्लिक करें।</em></p>
 
-संरचना, runtime selection और प्रमुख सीमाओं की पुष्टि होने के बाद, **चलाएं** क्लिक करें।
+Blueprint structure, model configuration और key boundaries confirm होने के बाद ऊपर "Run" दबाएं।
 
-ब्लूप्रिंट जनरेट होते ही वर्कफ़्लो न चलाना बेहतर है। पहले जांचें कि क्या समानांतर शाखाएं समझ में आती हैं, क्या सारांश नोड शाखाओं के बाद आता है, और क्या सत्यापन अंतिम परिणाम को कवर करता है।
+Blueprint generate होते ही run करना अच्छा नहीं है। पहले देखें कि parallel branches सही हैं या नहीं, summary node parallel branches के बाद है या नहीं, और validation final result को cover करती है या नहीं।
 
-यदि कोई नोड केवल जिम्मेदारी में अस्पष्ट है, तो आप चलाने से पहले उसका लेबल, प्रॉम्प्ट, एजेंट प्रकार या स्कीमा संपादित कर सकते हैं।
+अगर किसी node की responsibility बस unclear है, तो पहले node properties में modify करके फिर run करें।
 
-## 8. चलने की स्थिति देखें
+### 8. Running state देखें
 
 <p align="center">
-  <img src="images/8-运行中.png" alt="स्टॉप बटन के साथ चलने की स्थिति" width="960">
+  <img src="images/8-运行中.png" alt="workflows running state देखें" width="960">
 </p>
-<p align="center"><em>चित्र 8: चलते समय, बटन "चल रहा है... रोकें" में बदल जाता है, और प्रत्येक नोड अपनी स्थिति दिखाता है।</em></p>
 
-जब वर्कफ़्लो शुरू होता है, शीर्ष बटन **चल रहा है... रोकें** में बदल जाता है। नीचे का AI इनपुट लॉक हो जाता है ताकि चलने के दौरान ब्लूप्रिंट न बदले।
+Run करने के बाद top button "Running... Stop" में बदल जाता है। नीचे AI input lock हो जाता है, ताकि execution के दौरान blueprint गड़बड़ न हो।
 
-कैनवस सीधे नोड स्थिति दिखाता है। स्क्रीनशॉट में, Start पूरा हो गया है, समानांतर नोड अभी भी चल रहा है, और शीर्ष-दायां काउंटर निष्पादन प्रगति दिखाता है।
+Canvas पर node status दिखता है। Screenshot में Start complete है, बाद वाला parallel node running है, और top-right में run count भी है। बीच में failure हो जाए तो previous task से आगे continue किया जा सकता है।
 
-यह एक लंबे लॉग से अधिक पठनीय है। यदि कुछ विफल होता है, तो आपको पूरा प्रॉम्प्ट फेंकने की आवश्यकता नहीं है। आप विफल नोड ढूंढ सकते हैं और केवल उस नोड का प्रॉम्प्ट, मॉडल या इनपुट समायोजित कर सकते हैं।
-
-## 9. उपस्थिति थीम स्विच करें
+### 9. Interface style switch करें
 
 <p align="center">
-  <img src="images/9-切换风格.png" alt="कई थीम के साथ उपस्थिति सेटिंग्स" width="840">
+  <img src="images/9-切换风格.png" alt="Interface style switch करें" width="840">
 </p>
-<p align="center"><em>चित्र 9: अंतिम सुविधा सेटिंग्स / उपस्थिति में आती है, जहां आप Pencil, Deep Night, Aurora, Daylight, Ember और अधिक चुन सकते हैं।</em></p>
 
-इस उदाहरण का लक्ष्य OpenWorkflows को कई उपस्थिति थीम का समर्थन करने देना है। अंतिम प्रवेश बिंदु **सेटिंग्स / उपस्थिति** है।
+OpenWorkflows development complete होने के बाद program restart करें, और Settings / Appearance में अलग-अलग appearance styles switch करें।
 
-स्क्रीनशॉट Pencil, Deep Night, Aurora, Daylight और Ember जैसे थीम कार्ड दिखाता है। जब आप एक चुनते हैं, तो यह वैश्विक पृष्ठभूमि, पैनल, सीमाएं और चलने की स्थिति के रंग बदलता है।
+Screenshot में Pencil, Deep Night, Aurora, Daylight, Ember जैसे style cards दिखते हैं। किसी style को चुनने पर global background, panels, borders और run-state colors बदलते हैं।
 
-यह वास्तविक उपयोग मामला भी दिखाता है। OpenWorkflows केवल डेमो आरेखों के लिए नहीं है। यह एक उत्पाद अनुरोध को अनुसंधान, डिज़ाइन, कार्यान्वयन, सत्यापन और वितरण ट्रैकिंग में तोड़ सकता है, फिर प्रत्येक भाग को सही नोड के माध्यम से आगे बढ़ा सकता है।
+### मुझे जो सच में उपयोगी लगता है
 
-## मुझे जो वास्तव में उपयोगी लगता है
+OpenWorkflows की सबसे बड़ी value prompt के ऊपर UI लगाने में नहीं है।
 
-OpenWorkflows एक प्रॉम्प्ट को UI में लपेटने से अधिक मूल्यवान है।
+यह "request -> blueprint -> script -> run -> history review" को जोड़ता है। आप पहले natural language से process generate कर सकते हैं, फिर canvas पर structure check कर सकते हैं, जरूरत हो तो common prompts से boundaries भर सकते हैं, और अंत में run कर सकते हैं।
 
-यह अनुरोध, ब्लूप्रिंट, स्क्रिप्ट, निष्पादन और इतिहास समीक्षा को जोड़ता है। आप प्राकृतिक भाषा में एक प्रवाह जनरेट कर सकते हैं, कैनवस पर संरचना का निरीक्षण कर सकते हैं, सीमाओं को कसने के लिए सामान्य प्रॉम्प्ट का उपयोग कर सकते हैं, और उसके बाद ही इसे चला सकते हैं।
+एक ही workflows को naturally एक model से बंधा होने की जरूरत नहीं है। Simple nodes सस्ते models इस्तेमाल कर सकते हैं, key nodes मजबूत models इस्तेमाल कर सकते हैं, और execution target आगे Claude Code, Codex, Gemini या दूसरे runtimes तक expand हो सकता है।
 
-एक वर्कफ़्लो को एक मॉडल से बांधने की भी आवश्यकता नहीं है। सरल नोड सस्ते मॉडल का उपयोग कर सकते हैं, महत्वपूर्ण नोड मजबूत मॉडल का उपयोग कर सकते हैं, और निष्पादन लक्ष्य अभी भी Claude Code, Codex, Gemini या अन्य रनटाइम तक विस्तारित हो सकता है।
+Complex AI coding tasks के लिए यह तरीका एक बहुत लंबे prompt से ज्यादा maintainable है। कोई node fail हो तो वही node सुधारें। कोई branch जरूरी न हो तो branch delete करें। Reuse करना हो तो history से continue करें।
 
-जटिल AI कोडिंग कार्यों के लिए, वह संरचना एक विशाल प्रॉम्प्ट की तुलना में बनाए रखना बहुत आसान है। यदि एक नोड विफल होता है, तो उस नोड को ठीक करें। यदि एक शाखा अनावश्यक है, तो उसे हटा दें। यदि आप पुन: उपयोग चाहते हैं, तो इतिहास से जारी रखें।
+### अभी शुरुआती है, लेकिन दिशा देखने लायक है
 
-## यह Claude Code से कैसे संबंधित है
+workflows का पूरा concept अभी काफी शुरुआती है, और OpenWorkflows भी अभी शुरू ही हुआ है। Runtime adapters, node capabilities और script ecosystem बदलते रहेंगे।
 
-OpenWorkflows Claude Code का प्रतिस्थापन नहीं लगता।
+लेकिन overall direction साफ है: AI coding लंबे समय तक "chat box खोलो और हर step manually आगे बढ़ाओ" तक सीमित नहीं रहेगी।
 
-Claude Code ने पहले ही वर्कफ़्लो दिशा स्पष्ट कर दी है: जटिल काम को गतिशील स्क्रिप्ट के रूप में लिखा जा सकता है, कई सबएजेंट में समन्वित किया जा सकता है, और पृष्ठभूमि में चलाया जा सकता है।
+Complex tasks आखिरकार workflows बनेंगे, क्योंकि वे देखे, edit किए, migrate किए और reuse किए जा सकते हैं।
 
-OpenWorkflows उस दिशा में एक विज़ुअल परत जोड़ता है: वर्कफ़्लो बनाएं, संपादित करें, सहेजें, और फिर उसी संरचना को अधिक मॉडल और रनटाइम के विरुद्ध आज़माएं।
+QQ group: 149523963
 
-तो यह Claude Code के खिलाफ नहीं जा रहा है। यह वर्कफ़्लो विचार को बाहर की ओर विस्तारित कर रहा है।
-
-## अभी शुरुआती है, लेकिन देखने लायक है
-
-OpenWorkflows अभी परिपक्व नहीं है। रनटाइम एडेप्टर, नोड क्षमताएं और स्क्रिप्ट इकोसिस्टम बदलते रहेंगे।
-
-लेकिन दिशा स्पष्ट है। AI कोडिंग हमेशा "चैट बॉक्स खोलें और हर चरण को मैन्युअल रूप से आगे बढ़ाएं" पर नहीं रुकेगी।
-
-अंततः, जटिल कार्य वर्कफ़्लो बन जाएंगे। एकमात्र वास्तविक प्रश्न यह है कि क्या वह वर्कफ़्लो एक उपकरण के अंदर बंद रहता है, या क्या इसे देखा, संपादित, स्थानांतरित और पुन: उपयोग किया जा सकता है।
-
-प्रोजेक्ट:
+Project:
 
 https://github.com/wellingfeng/OpenWorkflows
 
-संदर्भ:
+Reference:
 
 https://code.claude.com/docs/en/workflows

@@ -280,6 +280,7 @@ export interface StoreState {
   newWorkflow: () => void;
   newSession: () => void;
   selectSession: (sessionId: string, workspaceId?: string) => void;
+  deleteSession: (sessionId: string, workspaceId?: string) => void;
   sendPrompt: (text: string) => void;
   /**
    * Submit the user's answer to an interactive node message (the AI-return dock
@@ -1538,6 +1539,77 @@ async function activateHistorySession(
   });
 }
 
+async function deleteHistorySession(
+  sessionId: string,
+  workspaceId?: string,
+): Promise<void> {
+  const state = useStore.getState();
+  const targetWorkspaceId = workspaceId ?? state.activeWorkspaceId ?? undefined;
+  if (!targetWorkspaceId) return;
+
+  await historyStore.deleteSession(targetWorkspaceId, sessionId);
+
+  const workspaces = await historyStore.listWorkspaces();
+  const wasActive =
+    state.activeSessionId === sessionId &&
+    state.activeWorkspaceId === targetWorkspaceId;
+
+  if (!wasActive) {
+    useStore.setState((s) => {
+      const nextSessions = (s.sessionTree[targetWorkspaceId] ?? s.sessions).filter(
+        (session) => session.id !== sessionId,
+      );
+      return {
+        workspaces,
+        sessionTree: {
+          ...s.sessionTree,
+          [targetWorkspaceId]: nextSessions,
+        },
+      };
+    });
+    return;
+  }
+
+  // Deleting the active session: switch to the next available session and
+  // load its full data (messages, workflow, run state), or clear the editor
+  // when the workspace becomes empty.
+  const freshState = useStore.getState();
+  const nextSessions = (
+    freshState.sessionTree[targetWorkspaceId] ?? freshState.sessions
+  ).filter((session) => session.id !== sessionId);
+  const nextActive = nextSessions[0] ?? null;
+
+  if (nextActive) {
+    await activateHistorySession(nextActive.id, targetWorkspaceId);
+  } else {
+    useStore.setState((s) => ({
+      workspaces,
+      activeSessionId: null,
+      sessions: nextSessions,
+      sessionTree: {
+        ...s.sessionTree,
+        [targetWorkspaceId]: nextSessions,
+      },
+      messages: [],
+      workflow: defaultBlueprint(undefined, s.locale),
+      selectedNodeId: null,
+      dirty: false,
+      runState: {},
+      runOutputs: {},
+      lastRunFailedNodeId: null,
+      canvasViewport: null,
+      mode: 'design' as const,
+      ...composerDraftPatchForSession(s, {
+        workspaceId: targetWorkspaceId,
+        sessionId: null,
+      }),
+    }));
+    await historyStore.patchConfig({
+      lastActiveSessionId: undefined,
+    });
+  }
+}
+
 async function activateWorkspacePath(path: string): Promise<void> {
   const trimmed = path.trim();
   if (!trimmed) return;
@@ -1941,6 +2013,10 @@ export const useStore = create<StoreState>((set) => ({
 
   selectSession: (sessionId, workspaceId) => {
     void activateHistorySession(sessionId, workspaceId);
+  },
+
+  deleteSession: (sessionId, workspaceId) => {
+    void deleteHistorySession(sessionId, workspaceId);
   },
 
   // AI-driven graph edit (design mode only).

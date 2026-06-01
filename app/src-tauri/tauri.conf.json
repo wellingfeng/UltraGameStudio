@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "OpenWorkflows",
-  "version": "0.1.9",
+  "version": "0.1.10",
   "identifier": "com.openworkflows.app",
   "build": {
     "frontendDist": "../dist",

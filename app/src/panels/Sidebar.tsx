@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import StatusIndicator, { type StatusTone } from '@/components/StatusIndicator';
 import {
   sessionLiveStatus,
@@ -34,6 +34,8 @@ function formatTime(ts: number): string {
   if (sameDay) return hhmm;
   return `${d.getMonth() + 1}/${d.getDate()} ${hhmm}`;
 }
+
+const PAGE_SIZE = 20;
 
 function clampPercent(percent: number | null | undefined): number | null {
   if (percent == null || !Number.isFinite(percent)) return null;
@@ -96,7 +98,77 @@ export default function Sidebar() {
   const aiEditingSessions = useStore((s) => s.aiEditingSessions);
   const newWorkflow = useStore((s) => s.newWorkflow);
   const selectSession = useStore((s) => s.selectSession);
+  const deleteSession = useStore((s) => s.deleteSession);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [workspaceLimits, setWorkspaceLimits] = useState<Record<string, number>>({});
+  const [flatLimit, setFlatLimit] = useState(PAGE_SIZE);
+
+  // ── Context menu for session deletion ────────────────────────────────────
+  type MenuState =
+    | null
+    | {
+        x: number;
+        y: number;
+        sessionId: string;
+        workspaceId: string | null;
+        title: string;
+      };
+
+  const [menu, setMenu] = useState<MenuState>(null);
+
+  const onSessionContextMenu = useCallback(
+    (
+      event: React.MouseEvent,
+      sessionId: string,
+      workspaceId: string | null,
+      title: string,
+    ) => {
+      event.preventDefault();
+      const aside = event.currentTarget.closest('aside');
+      if (!aside) return;
+      const rect = aside.getBoundingClientRect();
+      setMenu({
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top,
+        sessionId,
+        workspaceId,
+        title,
+      });
+    },
+    [],
+  );
+
+  const handleDelete = useCallback(() => {
+    if (!menu) return;
+    const confirmed = window.confirm(
+      t(locale, 'sidebar.deleteConfirm').replace('{title}', menu.title),
+    );
+    if (confirmed) {
+      deleteSession(menu.sessionId, menu.workspaceId ?? undefined);
+    }
+    setMenu(null);
+  }, [menu, locale, deleteSession]);
+
+  /** Close the context menu on Escape. */
+  useEffect(() => {
+    if (!menu) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMenu(null);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [menu]);
+
+  const loadMoreWorkspace = useCallback((workspaceId: string) => {
+    setWorkspaceLimits((prev) => ({
+      ...prev,
+      [workspaceId]: (prev[workspaceId] ?? PAGE_SIZE) + PAGE_SIZE,
+    }));
+  }, []);
+
+  const loadMoreFlat = useCallback(() => {
+    setFlatLimit((prev) => prev + PAGE_SIZE);
+  }, []);
 
   const { width, onResizeStart } = useResizableWidth({
     storageKey: 'openworkflow.sidebarWidth.v1',
@@ -174,7 +246,7 @@ export default function Sidebar() {
                       </div>
                     ) : (
                       <ul className="flex flex-col gap-0.5">
-                        {list.map((session) => {
+                        {list.slice(0, workspaceLimits[workspace.id] ?? PAGE_SIZE).map((session) => {
                           const active =
                             session.id === activeSessionId &&
                             workspace.id === activeWorkspaceId;
@@ -199,6 +271,14 @@ export default function Sidebar() {
                               <button
                                 type="button"
                                 onClick={() => selectSession(session.id, workspace.id)}
+                                onContextMenu={(e) =>
+                                  onSessionContextMenu(
+                                    e,
+                                    session.id,
+                                    workspace.id,
+                                    session.title,
+                                  )
+                                }
                                 className={
                                   'group flex w-full flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-left transition-colors ' +
                                   (active
@@ -238,6 +318,17 @@ export default function Sidebar() {
                             </li>
                           );
                         })}
+                        {list.length > (workspaceLimits[workspace.id] ?? PAGE_SIZE) && (
+                          <li className="px-2 py-1">
+                            <button
+                              type="button"
+                              onClick={() => loadMoreWorkspace(workspace.id)}
+                              className="w-full rounded-md px-2 py-1.5 text-left text-sm text-fg-dim transition-colors hover:bg-border-soft hover:text-fg"
+                            >
+                              {t(locale, 'sidebar.loadMore')}
+                            </button>
+                          </li>
+                        )}
                       </ul>
                     )}
                   </li>
@@ -250,7 +341,7 @@ export default function Sidebar() {
             </div>
           ) : (
             <ul className="flex flex-col gap-0.5">
-              {sessions.map((session) => {
+              {sessions.slice(0, flatLimit).map((session) => {
                 const active = session.id === activeSessionId;
                 const sessionKey = { workspaceId: null, sessionId: session.id };
                 const liveStatus = sessionLiveStatus(
@@ -270,6 +361,14 @@ export default function Sidebar() {
                     <button
                       type="button"
                       onClick={() => selectSession(session.id)}
+                      onContextMenu={(e) =>
+                        onSessionContextMenu(
+                          e,
+                          session.id,
+                          null,
+                          session.title,
+                        )
+                      }
                       className={
                         'group flex w-full flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-left transition-colors ' +
                         (active
@@ -299,6 +398,17 @@ export default function Sidebar() {
                   </li>
                 );
               })}
+              {sessions.length > flatLimit && (
+                <li className="px-2 py-1">
+                  <button
+                    type="button"
+                    onClick={loadMoreFlat}
+                    className="w-full rounded-md px-2 py-1.5 text-left text-sm text-fg-dim transition-colors hover:bg-border-soft hover:text-fg"
+                  >
+                    {t(locale, 'sidebar.loadMore')}
+                  </button>
+                </li>
+              )}
             </ul>
           )}
         </div>
@@ -319,6 +429,61 @@ export default function Sidebar() {
       {settingsOpen && (
         <SettingsModal onClose={() => setSettingsOpen(false)} />
       )}
+
+      {menu && (
+        <SessionContextMenu
+          x={menu.x}
+          y={menu.y}
+          locale={locale}
+          onDelete={handleDelete}
+          onClose={() => setMenu(null)}
+        />
+      )}
     </aside>
+  );
+}
+
+/**
+ * Right-click context menu for a session entry.
+ * Positioned relative to the Sidebar so it stays inside the rail.
+ */
+function SessionContextMenu({
+  x,
+  y,
+  locale,
+  onDelete,
+  onClose,
+}: {
+  x: number;
+  y: number;
+  locale: Locale;
+  onDelete: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <>
+      {/* Backdrop catches the next click anywhere and dismisses the menu. */}
+      <div
+        className="fixed inset-0 z-30"
+        onClick={onClose}
+        onContextMenu={(e) => {
+          e.preventDefault();
+          onClose();
+        }}
+      />
+      <div
+        className="absolute z-40 min-w-[140px] overflow-hidden rounded-md border border-border bg-panel shadow-2xl"
+        style={{ left: x, top: y }}
+      >
+        <button
+          type="button"
+          onClick={onDelete}
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-fg-dim transition-colors hover:bg-panel-2 hover:text-fg"
+        >
+          <span className="text-fg-faint">🗑</span>
+          <span>{t(locale, 'sidebar.deleteSession')}</span>
+        </button>
+      </div>
+    </>
   );
 }

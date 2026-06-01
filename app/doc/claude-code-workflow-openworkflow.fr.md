@@ -1,228 +1,180 @@
-<div align="center">
-  <a href="claude-code-workflow-openworkflow.en.md">English</a> | <a href="claude-code-workflow-openworkflow.md">中文</a> | Français | <a href="claude-code-workflow-openworkflow.de.md">Deutsch</a> | <a href="claude-code-workflow-openworkflow.es.md">Español</a> | <a href="claude-code-workflow-openworkflow.pt-BR.md">Português</a> | <a href="claude-code-workflow-openworkflow.ru.md">Русский</a> | <a href="claude-code-workflow-openworkflow.ja.md">日本語</a> | <a href="claude-code-workflow-openworkflow.ko.md">한국어</a> | <a href="claude-code-workflow-openworkflow.hi.md">हिन्दी</a> | <a href="claude-code-workflow-openworkflow.ar.md">العربية</a>
-</div>
+# Claude Code a des Dynamic Workflows. Et les autres modèles ? Une alternative open source : OpenWorkflows
 
-# Claude Code propose des Workflows. Et les autres modèles ? J'ai essayé OpenWorkflows
+## Ces derniers temps, j'observe les nouveaux dynamic workflows de Claude Code. Par rapport à MCP, Skill et Hooks, peu de gens parlent de cette nouvelle fonction. Dans la suite, je les appellerai simplement workflows.
 
-Récemment, j'ai examiné de près les workflows Claude Code.
+Pour les tâches complexes, beaucoup de personnes aimaient auparavant écrire d'abord un HTML de recherche, puis le transformer en HTML de plan technique, avant de le donner à l'IA pour le développement. Mais le résultat est souvent décevant. La raison principale est que le HTML est un texte destiné aux humains. Ce n'est pas un script et il manque d'informations structurées. La cohérence de l'ordre, le degré de parallélisme, la clarté des limites, la division des tâches et l'échange d'informations entre tâches restent flous. L'IA doit donc trop deviner.
 
-Ce qui m'intéresse, ce n'est pas juste « une fonctionnalité de plus ». Cela extrait le travail complexe d'un tour de chat après l'autre. Les tâches peuvent être divisées en sous-agents, des branches parallèles et des pipelines, puis coordonnées par des scripts.
+Les workflows sont eux-mêmes des scripts, ce qui leur permet de résoudre ce problème directement.
 
-C'est important car un workflow n'est plus un arrangement temporaire au sein d'une seule conversation. Il devient quelque chose que vous pouvez sauvegarder, modifier et réutiliser.
+Les workflows apportent aussi l'exploration sous plusieurs angles, la validation adversariale et le vote sur les plans. C'est pourquoi ils peuvent être plus précis. Ils gagnent par l'échelle : cinq agents travaillent en même temps sur le même problème, puis un autre agent synthétise les résultats. C'est effectivement plus précis, mais les tokens partent très vite.
 
-Cela m'a aussi posé une question : si les workflows deviennent une couche commune dans le codage IA, pourquoi devraient-ils être liés à un seul modèle ou à une seule CLI ?
+Puisque c'est aussi général, pourquoi faudrait-il l'attacher à un seul modèle ou à une seule CLI ?
 
-J'ai donc essayé OpenWorkflows. Il transforme les workflows de style Claude Code en un canevas visuel, et il tente de faire en sorte que le même workflow cible Claude Code, Codex, Gemini et d'autres runtimes locaux ou cloud.
+En suivant cette idée, j'ai développé OpenWorkflows, ou plus exactement, l'IA l'a développé. Il transforme les workflows de type Claude Code en canevas visuel et tente de faire en sorte qu'un même flux puisse cibler Claude Code, Codex, Gemini et d'autres runtimes locaux ou cloud.
 
-Ce tutoriel ne commence pas par des concepts abstraits. Il parcourt les captures d'écran dans l'ordre. L'exemple est concret : faire en sorte qu'OpenWorkflows prenne en charge plusieurs thèmes d'apparence, que le thème Pencil soit appliqué par défaut, et qu'il soit possible de les changer dans Paramètres / Apparence.
+Cette fois, je ne parle pas de concepts abstraits. Je parcours directement les captures d'écran. L'exemple est concret : faire en sorte qu'OpenWorkflows prenne en charge plusieurs styles d'interface, utilise Pencil par défaut et permette de basculer dans Paramètres / Apparence.
 
-> Il s'agit de la version française du tutoriel d'utilisation basé sur les captures d'écran.
->
-> Version anglaise : [OpenWorkflows usage tutorial](claude-code-workflow-openworkflow.en.md)
+Pendant le développement, j'ai essayé de faire autant que possible dans OpenWorkflows pour qu'il puisse s'auto-amorcer.
 
-## 0. Commencer par l'interface finale
+Le processus ci-dessous utilise CodeX comme grand modèle par défaut pour le développement.
+
+### 0. D'abord, l'interface finale
 
 <p align="center">
-  <img src="images/0-标题使用.png" alt="Canevas OpenWorkflows, rail d'historique, propriétés des nœuds et zone de saisie IA" width="960">
+  <img src="images/0-标题使用.png" alt="Interface principale d'OpenWorkflows" width="960">
 </p>
-<p align="center"><em>Figure 0 : L'espace de travail principal d'OpenWorkflows, avec le blueprint au centre, les propriétés des nœuds à droite, et la saisie et la réponse IA en bas.</em></p>
 
-L'interface principale comporte quatre parties : l'historique des workflows à gauche, le canevas visuel au centre, les propriétés des nœuds et les prompts courants à droite, ainsi que la saisie IA et les panneaux de réponse en bas.
+Dans l'interface principale d'OpenWorkflows, le blueprint des workflows est au centre, les propriétés des nœuds sont à droite, et l'entrée ainsi que la sortie IA sont en bas.
 
-Le workflow dans la capture d'écran est intitulé « Plan d'apparence multi-thèmes Pencil ». Ce n'est pas un diagramme statique. C'est un workflow que vous pouvez continuer à modifier, transformer en script, exécuter et consulter ultérieurement.
+L'interface principale se divise grosso modo en quatre parties : l'historique des workflows à gauche, le canevas visuel au centre, les propriétés des nœuds et les prompts courants à droite, puis l'entrée IA et les réponses en bas.
 
-## 1. Télécharger OpenWorkflows
+### 1. Télécharger OpenWorkflows
 
 <p align="center">
-  <img src="images/1-下载.png" alt="Page GitHub d'OpenWorkflows avec l'entrée Releases" width="840">
+  <img src="images/1-下载.png" alt="OpenWorkflows GitHub Releases" width="840">
 </p>
-<p align="center"><em>Figure 1 : Retrouvez la dernière version dans la section Releases de la page GitHub.</em></p>
 
-Le moyen le plus rapide de l'essayer est d'ouvrir la page du projet sur GitHub et de télécharger la dernière version depuis Releases.
+Trouvez la dernière version dans Releases, à droite de la page du projet GitHub.
 
-Le panneau À propos à droite clarifie le positionnement. Il s'agit d'un éditeur visuel qui étend les Workflows Claude Code à Codex, Gemini et d'autres runtimes LLM.
+### 2. Configurer d'abord le grand modèle
 
-Si vous souhaitez travailler sur le code, clonez le dépôt et démarrez depuis le répertoire `app/` :
+Par défaut, OpenWorkflows utilise la CLI déjà configurée sur le système pour démarrer. Vous pouvez utiliser des outils comme CC-Switch pour la configurer.
 
-```bash
-npm install
-npm run dev
-```
-
-Pour l'application de bureau, utilisez :
-
-```bash
-npm run desktop
-```
-
-## 2. Vérifier les réglages généraux et le point d'exécution
+### 3. Créer de nouveaux workflows, puis saisir la demande
 
 <p align="center">
-  <img src="images/2-通用设置.png" alt="Page des paramètres généraux d'OpenWorkflows" width="640">
+  <img src="images/3-新建workflow.png" alt="Créer de nouveaux workflows et saisir la demande" width="840">
 </p>
-<p align="center"><em>Figure 2 : Configurez la langue, la CLI locale et le shell de lancement dans Paramètres / Général ; choisissez le modèle / canal d'exécution actif en bas de la zone de saisie IA.</em></p>
 
-Avant de dessiner quoi que ce soit, ouvrez **Paramètres / Général**. C'est ici que vous configurez la langue de l'interface, la traduction automatique des prompts, la CLI locale et le shell de lancement.
+Après avoir configuré le modèle, cliquez sur "Nouveau workflows" à gauche. Le canevas affiche une structure minimale : Start, un Agent et End.
 
-L'ancien onglet **Modèles** a été supprimé. Le modèle ou canal actif ne se configure plus dans les paramètres ; pour la requête en cours, choisissez-le dans le menu runtime en bas de la zone de saisie IA.
-
-Si un nœud précis doit utiliser un autre modèle, sélectionnez-le et remplacez le modèle dans les propriétés du nœud. Si le champ reste vide, le nœud hérite du choix du workflow ou du choix global.
-
-## 3. Créer un nouveau workflow et saisir une requête
-
-<p align="center">
-  <img src="images/3-新建workflow.png" alt="Création d'un nouveau workflow et saisie d'une requête dans la zone IA" width="840">
-</p>
-<p align="center"><em>Figure 3 : Cliquez sur Nouveau Workflow, puis décrivez le workflow dans la zone de saisie IA en bas à droite.</em></p>
-
-Après avoir vérifié les réglages généraux et le point d'exécution, cliquez sur **Nouveau Workflow** à gauche. Le canevas démarre avec une structure minimale : Démarrer, un Agent et Fin.
-
-Le véritable point de départ n'est pas le dessin manuel des nœuds. C'est la zone de saisie IA dans le coin inférieur droit. Dans cet exemple, j'ai tapé :
+Il n'est pas nécessaire de dessiner les nœuds à la main. Le vrai point de départ est la zone de saisie IA en bas à droite. Dans cet exemple, j'ai saisi :
 
 ```text
-Je souhaite qu'OpenWorkflows prenne en charge plusieurs thèmes d'apparence,
-que le thème Pencil soit appliqué par défaut,
-et qu'il soit possible de les changer dans Paramètres / Apparence.
+Je veux qu'OpenWorkflows prenne en charge plusieurs styles d'interface,
+utilise Pencil comme design par défaut
+et permette de changer dans Paramètres / Apparence.
 ```
 
-Après l'avoir envoyé avec `Ctrl+Entrée`, ou en cliquant sur le bouton d'envoi, OpenWorkflows transforme la requête en un blueprint de workflow modifiable.
+Une fois le texte écrit, vous pouvez appuyer sur Ctrl+Enter ou cliquer sur le bouton d'envoi en bas à droite. OpenWorkflows transforme ce langage naturel en blueprint de workflows éditable.
 
-## 4-1. Générer le blueprint du workflow
+### 4-1. Générer le blueprint de workflows
 
 <p align="center">
-  <img src="images/4-1生成workflow蓝图.png" alt="Blueprint de workflow généré à partir de la requête" width="960">
+  <img src="images/4-1生成workflow蓝图.png" alt="Blueprint de workflows généré" width="960">
 </p>
-<p align="center"><em>Figure 4-1 : L'IA divise l'objectif en branches parallèles, un nœud de synthèse, des nœuds d'implémentation, une validation et une livraison.</em></p>
 
-Une fois la requête envoyée, OpenWorkflows réécrit l'étape actuelle en un workflow complet.
+Après l'envoi de la demande, OpenWorkflows réorganise d'abord l'étape actuelle en un workflow complet.
 
-Le blueprint dans la capture d'écran devient approximativement :
+Le blueprint de la capture ressemble à ceci :
 
 ```text
-Démarrer
-  -> Explorer la prise en charge de l'apparence en parallèle
-      -> Rechercher les points d'entrée actuels
-      -> Concevoir le système de thèmes
-      -> Concevoir le thème par défaut Pencil
-  -> Synthétiser le plan d'implémentation
-  -> Implémenter l'apparence multi-thèmes
-  -> Connecter le changement dans Paramètres / Apparence
-  -> Valider et réviser
-  -> Enregistrer les résultats de livraison
-  -> Fin
+Start
+  -> Examiner en parallèle le support des apparences
+      -> Étudier les points d'entrée d'apparence existants
+      -> Concevoir le système multi-style
+      -> Concevoir le style Pencil par défaut
+  -> Résumer le plan d'implémentation
+  -> Implémenter plusieurs styles d'interface
+  -> Brancher le changement dans Paramètres / Apparence
+  -> Valider et vérifier les régressions
+  -> Documenter le résultat livré
+  -> End
 ```
 
-Ce qui compte ici, ce n'est pas l'esthétique du graphe. C'est qu'un objectif flou devient un plan exécutable.
+Dans le panneau des propriétés à droite, les propriétés du nœud sélectionné peuvent encore être modifiées. Mais le plus souvent, on utilise plutôt la zone de saisie en bas pour demander à l'IA de modifier les nœuds du blueprint et continuer l'itération.
 
-Le panneau des propriétés des nœuds à droite vous permet toujours d'inspecter les libellés, les types, les branches, les types d'agents et les schemas. La génération ne vous empêche pas de modifier la structure.
-
-## 4-2. Consulter le script généré
+### 4-2. Voir le script généré
 
 <p align="center">
-  <img src="images/4-2蓝图脚本.png" alt="Boîte de dialogue du script de workflow généré" width="960">
+  <img src="images/4-2蓝图脚本.png" alt="Script de workflows généré" width="960">
 </p>
-<p align="center"><em>Figure 4-2 : Utilisez le bouton Script pour inspecter le script de workflow généré à partir du canevas.</em></p>
 
-Il y a un bouton **Script** dans la barre supérieure. Ouvrez-le et vous verrez le script généré à partir du blueprint actuel.
+En haut se trouve une entrée "Script". En l'ouvrant, vous voyez le script généré à partir du blueprint actuel.
 
-Dans la capture d'écran, vous pouvez voir les structures `parallel(...)` et `agent(...)`. Les nœuds parallèles deviennent des branches simultanées, et les nœuds ordinaires deviennent des appels d'agent individuels.
+Dans la capture, on voit des structures comme parallel(...) et agent(...). Les nœuds parallèles deviennent des branches exécutées en concurrence, et les nœuds ordinaires deviennent des appels agent individuels.
 
-Cela montre qu'OpenWorkflows ne se contente pas de dessiner des boîtes. Le canevas repose sur une structure de workflow partagée qui peut ensuite cibler différents runtimes.
+Cela montre aussi qu'OpenWorkflows ne se contente pas de dessiner des boîtes. Derrière le canevas se trouve une structure de workflows unifiée, ce qui permet ensuite de se connecter à différents runtimes.
 
-## 5. Continuer à affiner avec les prompts courants
+### 5. Continuer avec les prompts courants à droite
 
 <p align="center">
-  <img src="images/5-使用常用提示词.png" alt="Panneau des prompts courants et zone de saisie IA" width="960">
+  <img src="images/5-使用常用提示词.png" alt="Utiliser les prompts courants pour continuer à modifier les workflows" width="960">
 </p>
-<p align="center"><em>Figure 5 : Les prompts courants poussent les modifications typiques du workflow dans la zone de saisie IA.</em></p>
 
-Après la génération du blueprint, vous n'êtes pas obligé de l'exécuter immédiatement. Le panneau **Prompts courants** à droite est plus adapté pour affiner le flux.
+Après la génération du blueprint, il n'est pas nécessaire de l'exécuter tout de suite. Le panneau "Prompts courants" à droite est plus adapté pour affiner le processus, même si vous pouvez aussi écrire vous-même.
 
-Les prompts sont regroupés par scénario : clarification, clarté, exhaustivité, coût, structure, fiabilité et parallélisme, et vérification.
+Les prompts sont regroupés par scénario : clarification interactive, clarté, complétude, coût, structure, fiabilité, performance et parallélisme, validation et tests.
 
-La capture d'écran montre le prompt **Clarifier la requête**. Il remplit la zone de saisie IA avec une demande de confirmation des ambiguïtés clés avant de modifier le graphe.
+Dans la capture, le prompt choisi est "Clarifier les exigences". Il remplit la zone de saisie IA avec une demande de confirmation interactive des points ambigus avant toute modification du blueprint.
 
-C'est utile car de nombreux échecs de workflow ne sont pas des échecs de modèle. Ils surviennent parce que l'objectif, les limites, les chemins d'échec ou la stratégie de coût n'ont pas été assez clairement définis.
+Cette conception est très utile. Beaucoup de workflows échouent non parce que le modèle ne sait pas faire, mais parce que l'objectif, les limites, les chemins d'échec et la stratégie de coût n'étaient pas assez clairs au départ.
 
-## 6. Confirmer les limites avec des choix interactifs
+Il existe aussi des prompts courants comme grill-me, compléter les conditions limites, optimiser le parallélisme et principe unique. Vous pouvez en ajouter ou les modifier vous-même.
+
+### 6. Confirmer les limites avec des choix interactifs
 
 <p align="center">
-  <img src="images/6-交互选择.png" alt="Boutons de choix interactifs dans la réponse IA" width="640">
+  <img src="images/6-交互选择.png" alt="Choix interactifs pour confirmer les limites" width="640">
 </p>
-<p align="center"><em>Figure 6 : Lorsque la requête est ambiguë, l'IA propose des choix pour que vous puissiez d'abord confirmer la portée.</em></p>
 
-Après avoir choisi **Clarifier la requête**, l'IA ne modifie pas le graphe immédiatement. Au lieu de cela, elle pose une question de suivi : jusqu'où doit aller le changement de thème ?
+Après avoir cliqué sur "Clarifier les exigences", l'IA ne modifie pas directement le graphe. Elle demande d'abord : "Quel périmètre doit couvrir la fonction de changement de style d'interface ?"
 
-La capture d'écran propose deux choix : livrer uniquement le thème par défaut Pencil et laisser la structure d'extension en place, ou livrer Pencil plus plusieurs thèmes interchangeables.
+La capture propose deux choix : livrer seulement le style Pencil par défaut avec une structure extensible, ou livrer Pencil plus plusieurs styles commutables.
 
-Une fois votre choix fait, l'IA réécrit cette décision dans le blueprint de workflow et produit l'IRGraph mis à jour. Cela réduit le risque que l'IA emmène le workflow dans la mauvaise direction de son propre chef.
+Après votre choix, l'IA écrit cette décision dans le blueprint de workflows et sort l'IRGraph mis à jour. Cette étape réduit le risque que l'IA parte seule dans la mauvaise direction.
 
-## 7. Cliquer sur Exécuter
+### 7. Cliquer sur Exécuter
 
 <p align="center">
-  <img src="images/7-运行.png" alt="Bouton Exécuter en haut dans OpenWorkflows" width="960">
+  <img src="images/7-运行.png" alt="Exécuter les workflows" width="960">
 </p>
-<p align="center"><em>Figure 7 : Une fois le blueprint prêt, cliquez sur Exécuter dans la barre supérieure.</em></p>
 
-Après avoir confirmé la structure, le choix du runtime et les limites clés, cliquez sur **Exécuter**.
+Quand la structure du blueprint, la configuration du modèle et les limites clés sont confirmées, cliquez sur "Exécuter" en haut.
 
-Il vaut mieux ne pas exécuter le workflow dès qu'il est généré. Vérifiez d'abord si les branches parallèles ont du sens, si le nœud de synthèse vient après les branches, et si la validation couvre le résultat final.
+Je recommande de ne pas lancer juste après la génération. Vérifiez d'abord si les branches parallèles sont raisonnables, si le nœud de synthèse vient après les branches parallèles, et si la validation couvre le résultat final.
 
-Si un nœud n'est clair que sur sa responsabilité, vous pouvez modifier son libellé, son prompt, son type d'agent ou son schema avant de réexécuter.
+Si un nœud a seulement une responsabilité peu claire, vous pouvez d'abord le modifier dans ses propriétés, puis relancer.
 
-## 8. Observer l'état d'exécution
+### 8. Observer l'état d'exécution
 
 <p align="center">
-  <img src="images/8-运行中.png" alt="État d'exécution avec bouton d'arrêt" width="960">
+  <img src="images/8-运行中.png" alt="Observer l'état d'exécution des workflows" width="960">
 </p>
-<p align="center"><em>Figure 8 : Pendant l'exécution, le bouton passe à « Exécution en cours... Arrêter », et chaque nœud affiche son état.</em></p>
 
-Lorsque le workflow démarre, le bouton supérieur passe à **Exécution en cours... Arrêter**. La zone de saisie IA en bas est verrouillée pour que le blueprint ne change pas en cours d'exécution.
+Après le lancement, le bouton supérieur devient "En cours... Stop". L'entrée IA en bas est verrouillée pour éviter que le blueprint soit modifié pendant l'exécution.
 
-Le canevas affiche directement le statut des nœuds. Dans la capture d'écran, Démarrer est terminé, le nœud parallèle est encore en cours d'exécution, et le compteur en haut à droite indique la progression de l'exécution.
+Le canevas affiche l'état des nœuds. Dans la capture, Start est terminé, le nœud parallèle suivant est en cours, et un compteur d'exécution apparaît en haut à droite. Si une étape échoue au milieu, on peut continuer depuis la tâche précédente.
 
-C'est plus lisible qu'un long journal. Si quelque chose échoue, vous n'avez pas besoin de jeter tout le prompt. Vous pouvez trouver le nœud défaillant et ajuster uniquement le prompt, le modèle ou l'entrée de ce nœud.
-
-## 9. Changer le thème d'apparence
+### 9. Changer le style d'interface
 
 <p align="center">
-  <img src="images/9-切换风格.png" alt="Paramètres d'apparence avec plusieurs thèmes" width="840">
+  <img src="images/9-切换风格.png" alt="Changer le style d'interface" width="840">
 </p>
-<p align="center"><em>Figure 9 : La fonctionnalité finale atterrit dans Paramètres / Apparence, où vous pouvez choisir Pencil, Deep Night, Aurora, Daylight, Ember, et plus encore.</em></p>
 
-L'objectif de cet exemple est de permettre à OpenWorkflows de prendre en charge plusieurs thèmes d'apparence. Le point d'entrée final est **Paramètres / Apparence**.
+Une fois le développement terminé par OpenWorkflows, redémarrez le programme et changez de style dans Paramètres / Apparence.
 
-La capture d'écran montre des cartes de thèmes telles que Pencil, Deep Night, Aurora, Daylight et Ember. Lorsque vous en choisissez un, il modifie l'arrière-plan global, les panneaux, les bordures et les couleurs d'état d'exécution.
+La capture montre des cartes de style comme Pencil, Deep Night, Aurora, Daylight et Ember. Une fois sélectionné, le style modifie l'arrière-plan global, les panneaux, les bordures et les couleurs d'état d'exécution.
 
-Cela montre également le véritable cas d'usage ici. OpenWorkflows ne sert pas uniquement à faire des diagrammes de démonstration. Il peut décomposer une demande de produit en recherche, conception, implémentation, validation et suivi de livraison, puis faire passer chaque partie par le bon nœud.
+### Ce que je trouve vraiment utile
 
-## Ce que je trouse réellement utile
+La vraie valeur d'OpenWorkflows n'est pas d'enrober un prompt dans une UI.
 
-OpenWorkflows a de la valeur au-delà de l'enveloppe d'un prompt dans une interface.
+Il relie "demande -> blueprint -> script -> exécution -> historique". Vous pouvez d'abord générer un processus en langage naturel, vérifier la structure sur le canevas, compléter les limites avec des prompts courants si nécessaire, puis seulement exécuter.
 
-Il relie la requête, le blueprint, le script, l'exécution et la révision de l'historique. Vous pouvez générer un flux en langage naturel, inspecter la structure sur le canevas, utiliser les prompts courants pour resserrer les limites, et ne l'exécuter qu'ensuite.
+Un même ensemble de workflows n'a pas non plus besoin d'être lié naturellement à un seul modèle. Les nœuds simples peuvent utiliser des modèles moins chers, les nœuds clés des modèles plus puissants, et la cible d'exécution peut continuer à s'étendre à Claude Code, Codex, Gemini ou d'autres runtimes.
 
-Un workflow n'a pas non plus besoin d'être lié à un seul modèle. Les nœuds simples peuvent utiliser des modèles moins chers, les nœuds importants peuvent utiliser des modèles plus puissants, et la cible d'exécution peut toujours s'étendre à Claude Code, Codex, Gemini ou d'autres runtimes.
+Pour des tâches complexes de programmation IA, cette décomposition est plus facile à maintenir qu'un très long prompt. Si un nœud échoue, on corrige ce nœud. Si une branche est inutile, on la supprime. Si l'on veut réutiliser, on repart de l'historique.
 
-Pour les tâches de codage IA complexes, cette structure est bien plus facile à maintenir qu'un énorme prompt unique. Si un nœud échoue, corrigez ce nœud. Si une branche est inutile, supprimez-la. Si vous souhaitez réutiliser, reprenez depuis l'historique.
+### C'est encore tôt, mais la direction mérite d'être suivie
 
-## Comment cela se rapporte à Claude Code
+Le concept global de workflows est encore jeune, et OpenWorkflows lui-même vient de commencer. Les adaptateurs de runtime, les capacités des nœuds et l'écosystème de scripts continueront d'évoluer.
 
-OpenWorkflows ne ressemble pas à un remplacement de Claude Code.
+Mais la direction générale est claire : la programmation IA ne restera pas longtemps à "ouvrir une fenêtre de chat puis pousser chaque étape à la main".
 
-Claude Code a déjà clarifié la direction du workflow : le travail complexe peut être écrit sous forme de scripts dynamiques, coordonnés entre plusieurs sous-agents, et exécuté en arrière-plan.
+Les tâches complexes finiront par devenir des workflows, parce qu'elles peuvent être vues, éditées, migrées et réutilisées.
 
-OpenWorkflows ajoute une couche visuelle à cette direction : dessinez le workflow, modifiez-le, sauvegardez-le, puis essayez la même structure sur davantage de modèles et de runtimes.
-
-Il ne s'agit donc pas de s'opposer à Claude Code. Il s'agit d'étendre l'idée de workflow vers l'extérieur.
-
-## Encore jeune, mais à suivre
-
-OpenWorkflows n'est pas encore mature. Les adaptateurs de runtime, les capacités des nœuds et l'écosystème de scripts continueront d'évoluer.
-
-Mais la direction est claire. Le codage IA ne restera pas éternellement à « ouvrir une boîte de chat et pousser manuellement chaque étape ».
-
-Finalement, les tâches complexes deviendront des workflows. La seule vraie question est de savoir si ce workflow restera verrouillé à l'intérieur d'un seul outil, ou s'il pourra être vu, modifié, migré et réutilisé.
+Groupe QQ : 149523963
 
 Projet :
 
