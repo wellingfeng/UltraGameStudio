@@ -152,6 +152,27 @@ export function extractJsonObject(text: string): string {
 }
 
 /**
+ * Captain-loop structural guidance, injected into UNIFIED_SYSTEM. The single
+ * biggest accuracy lever for COMPLEX, decomposable, high-stakes long tasks: the
+ * research (docs/workflow-captain-research.html) found the gap isn't "more
+ * agents" but a visible "队长(manager) + 任务账本 + 验收门 + 已验收锚点 + 汇总"
+ * structure. This teaches the model when to reach for that shape and gives it a
+ * concrete few-shot skeleton to copy — without it the model free-forms complex
+ * graphs and routinely omits acceptance/rework. Exported separately so it can be
+ * asserted in tests and reused by the headless CLI.
+ *
+ * Deliberately scoped: simple / single-step / low-risk requests must NOT use it.
+ */
+export const CAPTAIN_LOOP_GUIDANCE = `**队长闭环（复杂、可拆、高风险的长任务才用）**：当任务复杂、能拆成 ≥3 个相互独立的子任务、风险较高、或"做完还要验收/返工"时，用「队长闭环」结构，而不是堆更多平铺 agent。它的价值是把"拆、派、验"做成可见结构：队长只拆解/调度/汇总/验收、不亲自产出核心产物；worker 各自只做被分配的子任务；验收门看证据而非"已完成"声明；汇总只基于已验收内容。判断"该用"的免费信号：用户描述里出现"先…再…然后"、多个交付物、提到验收/质量/烂尾/返工/端到端/全面。判断"不该用"：简单、单步、低风险需求——仍用最小充分结构，绝不为了显得周全而硬套队长（那会徒增成本与认知负担）。
+- 结构（5–7 节点）：目标冻结 agent → 队长拆单 agent(\`agentType:'workflow-manager'\`, \`schema:'TASK_LEDGER'\`) → \`parallel\`(N 个 worker，各执行账本中一个独立子任务) → \`consensus\`(\`strategy:'adversarial'\`, \`schema:'VERDICT'\`，voters = 正向验收者 + 反面复核者) → 汇总 agent(只读已验收产物与未解决 gaps，不拼接全部 worker 输出)。
+- 约束：worker 的输出只是候选，唯有验收门通过才算 accepted；汇总不得把所有 worker 输出直接拼起来；\`meta.schemaDefs\` 必须包含 TASK_LEDGER 与 VERDICT 两个 schema 定义。
+- 数据流：队长账本用 data 边喂给 \`parallel\`；worker 输出用 data 边喂给 \`consensus\` 验收门；验收门结论(+账本)用 data 边喂给汇总 agent。
+- 精简骨架（节点与边的最小形态，可据此扩展）：
+  meta.schemaDefs: { TASK_LEDGER: "{ tasks: [{ id:'', title:'', owner:'', acceptance:'', evidenceRequired:'', status:'pending', gaps:[] }] }", VERDICT: "{ pass:false, acceptedArtifact:'', evidence:[], gaps:[{ taskId:'', severity:'P0', reason:'', nextAction:'' }] }" }
+  nodes: [ {id:'n_start',type:'start'}, {id:'n_goal',type:'agent',params:{prompt:'冻结目标/非目标/成功标准'}}, {id:'n_captain',type:'agent',params:{prompt:'拆成可验收任务账本',agentType:'workflow-manager',schema:'TASK_LEDGER'}}, {id:'n_workers',type:'parallel',params:{branches:[{prompt:'Worker A…'},{prompt:'Worker B…'}]}}, {id:'n_gate',type:'consensus',params:{voters:[{prompt:'验收：核验证据',schema:'VERDICT'},{prompt:'反面复核：找遗漏',schema:'VERDICT'}],strategy:'adversarial',schema:'VERDICT'}}, {id:'n_summary',type:'agent',params:{prompt:'只读已验收产物与未解决 gaps 汇总'}}, {id:'n_end',type:'end'} ]
+  edges: [ exec: n_start→n_goal→n_captain→n_workers→n_gate→n_summary→n_end；data: n_captain→n_workers、n_workers→n_gate、n_gate→n_summary ]`;
+
+/**
  * Unified system prompt: the assistant both explains (Chinese prose) AND emits
  * the full updated IRGraph in a fenced ```json block for normal AI-input turns.
  * The caller streams the explanation to the user, hides the JSON, parses it,
@@ -199,6 +220,8 @@ IRGraph 结构（编译为真实可运行的 workflow，请严格遵守）：
 - 别为了"看起来整齐"把本可并行的步骤强行串成一条线——那会让运行明显变慢。
 
 **共识/投票（复杂任务才用）**：对**复杂或高风险**的关键步骤（安全审计、架构决策、需要交叉验证、不容出错的结论、需要从多源/多角度核验），用 consensus 节点而非单个 agent——它"多角度探索→对抗式交叉验证→投票"，质量来自对抗而非堆量。判断"复杂"的免费信号：prompt 很长、含多个子目标、汇聚多路上游、命中 审计/安全/架构/重构/验证 等关键词。简单步骤仍用普通 agent，避免无谓的 N 倍成本。策略选择：默认 multi-lens（多视角投票）；安全/强对抗场景用 adversarial（先出结论再专门反驳）；多方案择优用 tournament（打分选胜并嫁接亮点）；同质自检用 self-consistency（同提示跑 N 次取多数）。voters 写成差异化的角度提示，并尽量配 schema（如 VERDICT）让投票可靠。
+
+${CAPTAIN_LOOP_GUIDANCE}
 
 **复合/嵌套（任务非常复杂才用）**：当某一步**本身就是一整个子工作流**——多目标、多阶段、可独立验收、需要自己的内部并行/分支、或单个 agent 的 prompt 已经塞不下——用 composite 节点把它**嵌套成子图**，而不是在主图里继续平铺一长串节点。判断"非常复杂"的免费信号：用户描述里反复出现"先…再…然后…"、可拆出的子任务 ≥ 4、该步需要自己的内部并行/分支结构、与主流程语义上属于不同抽象层。简单或中等复杂度仍用 agent / parallel / pipeline，**不要为了显得有层次而无谓嵌套**（嵌套有认知开销）。composite 的子节点必须 parent=该 composite 节点 id；输入/输出**只能**通过上面的端口约定与外部连接（边的 port 必须精确等于声明的 inputs[].id / outputs[].id），不要让子节点直接拉一条裸 data 边跨出 composite 边界。最小示例（composite c1：1 输入 in_x、1 输出 out_y，内含 a1→a2）：
   nodes: [..., {id:'c1',type:'composite',params:{inputs:[{id:'in_x',kind:'data',label:'输入'}],outputs:[{id:'out_y',kind:'data',label:'结果'}]}}, {id:'a1',type:'agent',parent:'c1',params:{prompt:'…'}}, {id:'a2',type:'agent',parent:'c1',params:{prompt:'…'}}, ...]

@@ -58,6 +58,19 @@ export interface ProviderRuntimeInfo {
   canUseCliFallback: boolean;
 }
 
+export interface DefaultChannelsExport {
+  type: 'openworkflow.defaultChannels';
+  version: 1;
+  providers: Provider[];
+  activeProviderIds: Partial<Record<ProviderKind, string>>;
+}
+
+export interface DefaultChannelsImportResult {
+  imported: number;
+  updated: number;
+  skipped: number;
+}
+
 /** localStorage key holding the JSON array of providers. */
 export const PROVIDERS_STORAGE = 'fuc_providers';
 /**
@@ -277,6 +290,63 @@ function saveProviders(list: Provider[]): void {
   notifyProviderConfigChanged();
 }
 
+function normalizeImportProvider(value: unknown): Provider | null {
+  const stored = normalizeStoredProvider(value);
+  if (stored) return stored;
+  if (typeof value !== 'object' || value === null) return null;
+  const v = value as Record<string, unknown>;
+  if (typeof v.name !== 'string') return null;
+  return {
+    id: genId(),
+    kind: normalizeProviderKind(v.kind ?? v.adapter),
+    name: v.name,
+    apiKey: typeof v.apiKey === 'string' ? v.apiKey : '',
+    baseUrl: typeof v.baseUrl === 'string' ? v.baseUrl : '',
+    transport: normalizeProviderTransport(
+      normalizeProviderKind(v.kind ?? v.adapter),
+      v.transport,
+    ),
+    model: typeof v.model === 'string' ? v.model : undefined,
+  };
+}
+
+function normalizeActiveProviderIds(value: unknown): ActiveByKind {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return {};
+  }
+  const raw = value as Record<string, unknown>;
+  const out: ActiveByKind = {};
+  for (const kind of PROVIDER_KINDS) {
+    const id = raw[kind];
+    if (typeof id === 'string' && id.trim()) out[kind] = id.trim();
+  }
+  return out;
+}
+
+function readDefaultChannelsPayload(value: unknown): {
+  providers: Provider[];
+  activeProviderIds: ActiveByKind;
+} | null {
+  const source =
+    typeof value === 'object' && value !== null && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : null;
+  const rawProviders = Array.isArray(value)
+    ? value
+    : Array.isArray(source?.providers)
+      ? source.providers
+      : null;
+  if (!rawProviders) return null;
+  const providers = rawProviders
+    .map(normalizeImportProvider)
+    .filter((p): p is Provider => p !== null);
+  if (providers.length === 0 && rawProviders.length > 0) return null;
+  return {
+    providers,
+    activeProviderIds: normalizeActiveProviderIds(source?.activeProviderIds),
+  };
+}
+
 export function isProviderBaseUrlValid(baseUrl: string): boolean {
   const raw = baseUrl.trim();
   if (!raw) return true;
@@ -371,6 +441,89 @@ export function getActiveProviderIds(): Record<ProviderKind, string> {
     codex: resolveActiveForKind(list, map, 'codex'),
     gemini: resolveActiveForKind(list, map, 'gemini'),
   };
+}
+
+export function exportDefaultChannelsConfig(): DefaultChannelsExport {
+  return {
+    type: 'openworkflow.defaultChannels',
+    version: 1,
+    providers: loadProviders(),
+    activeProviderIds: getActiveProviderIds(),
+  };
+}
+
+export function importDefaultChannelsConfig(
+  value: unknown,
+): DefaultChannelsImportResult {
+  const payload = readDefaultChannelsPayload(value);
+  if (!payload) {
+    throw new Error('Unsupported default channels JSON');
+  }
+
+  const list = loadProviders();
+  const activeMap = loadActiveByKind();
+  const byId = new Map(list.map((provider) => [provider.id, provider]));
+  const bySignature = new Map(
+    list.map((provider) => [providerMetadataSignature(provider), provider]),
+  );
+  const idRemap = new Map<string, string>();
+  const incomingIds = new Set<string>();
+  let imported = 0;
+  let updated = 0;
+  let skipped = 0;
+
+  for (const provider of payload.providers) {
+    if (incomingIds.has(provider.id)) {
+      skipped += 1;
+      continue;
+    }
+    incomingIds.add(provider.id);
+
+    const signature = providerMetadataSignature(provider);
+    const target = byId.get(provider.id) ?? bySignature.get(signature);
+    if (target) {
+      const index = list.findIndex((candidate) => candidate.id === target.id);
+      if (index === -1) {
+        skipped += 1;
+        continue;
+      }
+      const next = { ...provider, id: target.id };
+      list[index] = next;
+      byId.set(next.id, next);
+      bySignature.set(providerMetadataSignature(next), next);
+      idRemap.set(provider.id, next.id);
+      updated += 1;
+      continue;
+    }
+
+    list.push(provider);
+    byId.set(provider.id, provider);
+    bySignature.set(signature, provider);
+    idRemap.set(provider.id, provider.id);
+    imported += 1;
+  }
+
+  for (const kind of PROVIDER_KINDS) {
+    const exportedActive = payload.activeProviderIds[kind];
+    const remapped = exportedActive ? idRemap.get(exportedActive) : undefined;
+    if (remapped && list.some((provider) => provider.id === remapped)) {
+      activeMap[kind] = remapped;
+    }
+    const valid =
+      !!activeMap[kind] &&
+      list.some((provider) => provider.kind === kind && provider.id === activeMap[kind]);
+    if (!valid) {
+      const first = list.find((provider) => provider.kind === kind);
+      if (first) activeMap[kind] = first.id;
+      else delete activeMap[kind];
+    }
+  }
+
+  saveProviders(list);
+  saveActiveByKind(activeMap);
+  notifyProviderConfigChanged();
+
+  return { imported, updated, skipped };
 }
 
 /** Set the default provider for its own category. Unknown ids are ignored. */

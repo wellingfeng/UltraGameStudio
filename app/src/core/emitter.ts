@@ -168,7 +168,7 @@ function emitScope(
       case 'parallel': {
         const v = assign(ctx, node.id);
         const spec = nodeToSpec(node);
-        const call = emitParallel(node, indent);
+        const call = emitParallel(node, indent, ctxVars(ctx, node.id));
         out.push(
           `${pad}${decl(ctx, node.id, v)}await ${call} // @node ${node.id}${routeAnnotation(spec)}`,
         );
@@ -186,7 +186,7 @@ function emitScope(
       case 'consensus': {
         const v = assign(ctx, node.id);
         const spec = nodeToSpec(node);
-        const call = emitConsensus(node, indent);
+        const call = emitConsensus(node, indent, ctxVars(ctx, node.id));
         out.push(
           `${pad}${decl(ctx, node.id, v)}await ${call} // @node ${node.id}${routeAnnotation(spec)}`,
         );
@@ -307,16 +307,40 @@ function emitPromptLiteral(prompt: string, ctxVars: string[]): string {
   return template(tpl);
 }
 
-/** Emit a `parallel([ () => agent(...), … ])` thunk array. */
-function emitParallel(node: IRNode, indent: number): string {
-  const branches = readSpecs(node.params.branches);
-  if (branches.length === 0) return 'parallel([])';
-  const pad = '  '.repeat(indent + 1);
-  const items = branches.map((b) => `${pad}() => ${emitAgentCall(b, [])},`);
-  return `parallel([\n${items.join('\n')}\n${'  '.repeat(indent)}])`;
+/**
+ * The trailing `, { from: [a, b] }` data-input argument for a container call
+ * (parallel / consensus). Unlike an `agent` (which weaves upstream outputs into
+ * its prompt template) or a `pipeline` (whose data input is its `items` arg),
+ * these two nodes carry no natural reference to their upstream producers, so
+ * their data edges would otherwise vanish on emit→parse. Emitting upstream var
+ * names as bare identifiers in an options object lets the parser's `wireDataRefs`
+ * (which resolves identifier references against earlier bindings) reconstruct the
+ * exact data edges — keeping round-trip lossless. The injected runtime helpers
+ * read only their leading argument(s), so the extra `from` is inert at run time.
+ * Empty ⇒ '' (no behavior change for nodes without data inputs, preserving
+ * byte-stability of existing scripts).
+ */
+function dataInputArg(ctxVars: string[]): string {
+  if (ctxVars.length === 0) return '';
+  return `, { from: [${ctxVars.join(', ')}] }`;
 }
 
-/** Emit a `pipeline(items, (item) => agent(...), (prev, item, i) => agent(...))`. */
+/** Emit a `parallel([ () => agent(...), … ])` thunk array. */
+function emitParallel(node: IRNode, indent: number, ctxVars: string[] = []): string {
+  const branches = readSpecs(node.params.branches);
+  const from = dataInputArg(ctxVars);
+  if (branches.length === 0) return `parallel([]${from})`;
+  const pad = '  '.repeat(indent + 1);
+  const items = branches.map((b) => `${pad}() => ${emitAgentCall(b, [])},`);
+  return `parallel([\n${items.join('\n')}\n${'  '.repeat(indent)}]${from})`;
+}
+
+/**
+ * Emit a `pipeline(items, (item) => agent(...), (prev, item, i) => agent(...))`.
+ * A pipeline's data input is its `items` argument (the parser recovers the
+ * upstream edge from the `items` identifier), so — unlike parallel/consensus — it
+ * needs no `from:` annotation.
+ */
 function emitPipeline(node: IRNode, indent: number): string {
   const items = String(node.params.items ?? 'args');
   const stages = readSpecs(node.params.stages);
@@ -333,11 +357,14 @@ function emitPipeline(node: IRNode, indent: number): string {
  * Emit a `consensus([ () => agent(...), … ], { strategy, … })` call. Voters mirror
  * `parallel` branches (thunk array, no nested ctx block). The trailing options use
  * a fixed key order (strategy, samples, quorum, schema) so re-emit is byte-stable;
- * `schema` is a bare identifier defined in the schema preamble.
+ * `schema` is a bare identifier defined in the schema preamble. Upstream data
+ * inputs (`ctxVars`) are folded into the same options object as a `from: […]`
+ * array so they survive round-trip (the gate consumes worker outputs by edge,
+ * not by prompt interpolation).
  */
-function emitConsensus(node: IRNode, indent: number): string {
+function emitConsensus(node: IRNode, indent: number, ctxVars: string[] = []): string {
   const voters = readSpecs(node.params.voters);
-  const opts = emitConsensusOpts(node);
+  const opts = emitConsensusOpts(node, ctxVars);
   if (voters.length === 0) return `consensus([]${opts})`;
   const pad = '  '.repeat(indent + 1);
   const items = voters.map((b) => `${pad}() => ${emitAgentCall(b, [])},`);
@@ -345,7 +372,7 @@ function emitConsensus(node: IRNode, indent: number): string {
 }
 
 /** Build the `consensus` options object (fixed key order, present keys only). */
-function emitConsensusOpts(node: IRNode): string {
+function emitConsensusOpts(node: IRNode, ctxVars: string[] = []): string {
   const p = node.params ?? {};
   const opts: string[] = [];
   const strategy = typeof p.strategy === 'string' ? p.strategy : 'multi-lens';
@@ -354,6 +381,7 @@ function emitConsensusOpts(node: IRNode): string {
   if (typeof p.quorum === 'number') opts.push(`quorum: ${p.quorum}`);
   const schema = optStr(p.schema);
   if (schema) opts.push(`schema: ${ident(schema)}`); // bare identifier
+  if (ctxVars.length > 0) opts.push(`from: [${ctxVars.join(', ')}]`);
   return `, { ${opts.join(', ')} }`;
 }
 

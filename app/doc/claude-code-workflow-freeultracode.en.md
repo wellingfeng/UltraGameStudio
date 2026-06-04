@@ -1,24 +1,24 @@
-# Claude Code Has Dynamic Workflows. What About Other Models? An Open-Source Alternative: FreeUltraCode
+# Claude Code workflows are useful. Premium quota runs out fast.
 
-## I have been looking at Claude Code's new dynamic workflows. Compared with MCP, Skill, and Hooks, very few people are talking about this new feature. I will call them workflows below.
+## Claude Code's new dynamic workflows are much quieter than MCP, Skills, or Hooks. This walkthrough calls them workflows.
 
-For complex tasks, many people used to first write a research HTML file, then turn it into a technical-plan HTML file, and finally hand it to AI for development. In practice, the result is often not good. The main reason is that HTML is text for humans to read. It is not a script, and it lacks structured information. Order consistency, how much work can run in parallel, whether boundaries are clear, how tasks are divided, and how tasks exchange information are all unclear, so the AI has to guess too much.
+For complex tasks, many people write a research HTML file, turn it into a technical-plan HTML file, and then hand it to AI for development. In practice, the result is often unstable. HTML is text for humans to read. It is not a script. Order consistency, parallelism, task boundaries, task splitting, and data exchange are all vague, so the model has to guess too much.
 
-Workflows themselves are scripts, so they can solve this problem directly.
+Workflows are scripts, so those structural choices can live in the process itself.
 
-Workflows also support multi-angle exploration, adversarial validation, and plan voting. That is why they can be more accurate. They win by scale: let five agents run on the same problem at the same time, then have another agent summarize the results. It is indeed more accurate, and it burns tokens fast.
+Workflows also support multi-angle exploration, adversarial validation, and plan voting. Let five agents run on the same problem, then have another agent merge the useful parts. The result is usually steadier, and the token bill grows fast.
 
 Since this is so general, why should it be tied to one model or one CLI?
 
-Following that idea, I built FreeUltraCode, or more precisely, AI built it. It turns Claude Code-style workflows into a visual canvas, and tries to make the same workflow target Claude Code, Codex, Gemini, and more local or cloud runtimes.
+FreeUltraCode turns Claude Code-style workflows into a visual canvas, then lets the same workflow target Claude Code, Codex, Gemini, and more local or cloud runtimes.
 
-This time I will not talk about abstract concepts. I will walk through the screenshots directly. The example is concrete: make FreeUltraCode support multiple interface styles, use Pencil by default, and allow switching in Settings / Appearance.
+This walkthrough uses a real change: make FreeUltraCode support multiple interface styles, use Pencil by default, and allow switching in Settings / Appearance.
 
-During development, I tried to do as much as possible inside FreeUltraCode so it could bootstrap itself.
+Most of the work happens inside FreeUltraCode itself, so the tool gets tested while it is being built.
 
-The following process uses CodeX as the default large model for development.
+The walkthrough uses Codex as the default model.
 
-### 0. Start with the final interface
+### 0. Main interface
 
 <p align="center">
   <img src="images/0-标题使用.png" alt="FreeUltraCode main interface" width="960">

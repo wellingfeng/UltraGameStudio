@@ -339,6 +339,39 @@ pre,
   border-color: var(--accent);
 }
 
+.fuc-stream-nav {
+  background: color-mix(in oklab, var(--panel) 28%, transparent);
+  opacity: 0.28;
+  transform: translateY(-50%) translateX(4px);
+  transition: opacity 160ms ease, transform 160ms ease, background 160ms ease;
+}
+.fuc-stream-nav:hover,
+.fuc-stream-nav:focus-within {
+  background: color-mix(in oklab, var(--panel) 72%, transparent);
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+.fuc-stream-nav-button {
+  border: 1px solid color-mix(in oklab, var(--fg-faint) 18%, transparent);
+  background: color-mix(in oklab, var(--panel-2) 56%, transparent);
+  box-shadow: 0 8px 24px -18px rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(8px);
+}
+.fuc-stream-nav-button:hover,
+.fuc-stream-nav-button:focus-visible {
+  border-color: color-mix(in oklab, var(--accent) 50%, var(--border));
+  background: color-mix(in oklab, var(--panel-2) 88%, var(--accent) 8%);
+}
+.fuc-stream-nav-button:disabled {
+  background: color-mix(in oklab, var(--panel-2) 36%, transparent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .fuc-stream-nav {
+    transition: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .omc-pulse-dot {
     animation: none !important;
@@ -724,6 +757,73 @@ pre,
 }
 .ai-markdown .katex { font-size: 1.02em; }
 
-/* Tool card: subtle hover lift. */
-.ai-tool-card { transition: border-color 0.12s, background 0.12s; }
-.ai-tool-card:hover { border-color: color-mix(in oklab, var(--accent) 30%, var(--border-soft)); }
+/* Tool events are low-priority stream telemetry, not content cards. */
+.ai-tools-group {
+  gap: 1px;
+  margin: 0.2rem 0;
+}
+.ai-tool-card {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid transparent;
+  background: color-mix(in oklab, var(--panel-2) 18%, transparent);
+  transition: border-color 0.12s, background 0.12s;
+}
+.ai-tool-card::before {
+  content: '';
+  position: absolute;
+  left: 4px;
+  top: 0.35rem;
+  bottom: 0.35rem;
+  width: 1px;
+  border-radius: 999px;
+  background: color-mix(in oklab, var(--fg-faint) 38%, transparent);
+  opacity: 0.55;
+}
+.ai-tool-card:hover,
+.ai-tool-card[data-open='true'] {
+  border-color: color-mix(in oklab, var(--fg-faint) 14%, transparent);
+  background: color-mix(in oklab, var(--panel-2) 28%, transparent);
+}
+.ai-tool-card[data-status='running'] {
+  background: color-mix(in oklab, var(--status-running) 5%, transparent);
+}
+.ai-tool-card[data-status='running']::before {
+  width: 2px;
+  background: linear-gradient(
+    180deg,
+    transparent 0%,
+    color-mix(in oklab, var(--status-running) 76%, var(--accent)) 46%,
+    transparent 100%
+  );
+  background-size: 100% 220%;
+  opacity: 0.85;
+  animation: ai-tool-flow 1.15s linear infinite;
+}
+.ai-tool-card[data-status='done']::before {
+  background: color-mix(in oklab, var(--fg-faint) 32%, transparent);
+}
+.ai-tool-card[data-status='error'] {
+  background: color-mix(in oklab, var(--status-error) 6%, transparent);
+}
+.ai-tool-card[data-status='error']::before {
+  width: 2px;
+  background: color-mix(in oklab, var(--status-error) 70%, transparent);
+  opacity: 0.85;
+}
+.ai-tool-body {
+  border-top: 1px solid color-mix(in oklab, var(--fg-faint) 14%, transparent);
+}
+.ai-tool-panel {
+  border-color: color-mix(in oklab, var(--fg-faint) 18%, transparent);
+  background: color-mix(in oklab, var(--code-bg) 90%, transparent);
+}
+@keyframes ai-tool-flow {
+  from { background-position: 0 120%; }
+  to { background-position: 0 -120%; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-tool-card[data-status='running']::before {
+    animation: none;
+  }
+}

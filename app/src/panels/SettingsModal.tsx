@@ -1,37 +1,48 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ChangeEvent,
+  type ReactNode,
+} from 'react';
 import {
   Check,
   ChevronDown,
+  Cpu,
   DownloadCloud,
   Eye,
   EyeOff,
   ExternalLink,
   FileText,
-  FolderOpen,
   Globe,
   Info,
   Keyboard,
   Palette,
-  Pencil,
   Plus,
   RefreshCw,
   Settings as SettingsIcon,
   SlidersHorizontal,
   Sparkles,
-  SquareTerminal,
   Trash2,
+  UploadCloud,
   X,
-  Zap,
   type LucideIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import {
   FREE_CHANNELS,
   ensureFreeProxy,
+  exportFreeChannelsConfig,
+  freeChannelById,
   freeChannelReady,
+  freeChannelSelection,
   getFreeChannelKey,
+  getFreeChannelModel,
   getFreeChannelModelOverride,
+  importFreeChannelsConfig,
   importFreeChannelKeysFromAutoConfig,
+  isFreeChannelSelection,
   setFreeChannelKey,
   setFreeChannelModel,
   type FreeChannel,
@@ -45,12 +56,12 @@ import { DEFAULT_MODEL } from '@/lib/anthropic';
 import {
   addProvider,
   deleteProvider,
-  getActiveProviderIds,
+  exportDefaultChannelsConfig,
   getProviderRuntimeInfo,
+  importDefaultChannelsConfig,
   isProviderBaseUrlValid,
   listProviders,
   providerMetadataSignature,
-  setActiveProviderId,
   updateProvider,
   type Provider,
   type ProviderRuntimeStatus,
@@ -61,7 +72,6 @@ import {
   localModelStatus,
   openExternal,
   type LocalModelRuntimeStatus,
-  validateCliPath,
   validateShellPath,
 } from '@/lib/tauri';
 import LocalModelSetupDialog from '@/components/LocalModelSetupDialog';
@@ -83,14 +93,10 @@ import {
   getCliRuntimeSnapshot,
   isCliAdapterAvailable,
   primeCliRuntime,
-  saveCliCandidateSelection,
-  saveCustomCliPathSelection,
-  selectedCliCandidateId,
   subscribeCliRuntime,
-  type CliCandidate,
   type CliRuntimeSnapshot,
 } from '@/lib/cliConfig';
-import { basename, pickFile } from '@/lib/folderPicker';
+import { pickFile } from '@/lib/folderPicker';
 import {
   LANGUAGE_SELECT_OPTIONS,
   t,
@@ -111,11 +117,22 @@ import {
   setConsensusSetting,
   type ConsensusSettings as ConsensusSettingsValues,
 } from '@/lib/consensusSettings';
+import {
+  canRefreshFreeChannelModels,
+  freeChannelModelOptions,
+  providerModelOptions,
+  refreshFreeChannelModels,
+  refreshProviderModels,
+} from '@/lib/modelLists';
+import {
+  systemDefaultGatewaySelection,
+  workflowDefaultGatewaySelection,
+} from '@/lib/modelGateway/resolver';
+import { shallow } from 'zustand/shallow';
 
 type SettingsTab =
   | 'general'
   | 'models'
-  | 'freeChannels'
   | 'consensus'
   | 'shortcuts'
   | 'appearance'
@@ -124,12 +141,98 @@ type LanguageOption = (typeof LANGUAGE_SELECT_OPTIONS)[number];
 
 const tabs: { id: SettingsTab; labelKey: TranslationKey; Icon: LucideIcon }[] = [
   { id: 'general', labelKey: 'settings.tabs.general', Icon: SlidersHorizontal },
-  { id: 'freeChannels', labelKey: 'settings.tabs.freeChannels', Icon: Zap },
-  { id: 'consensus', labelKey: 'settings.tabs.consensus', Icon: Sparkles },
+  { id: 'models', labelKey: 'settings.tabs.models', Icon: Cpu },
   { id: 'shortcuts', labelKey: 'settings.tabs.shortcuts', Icon: Keyboard },
   { id: 'appearance', labelKey: 'settings.tabs.appearance', Icon: Palette },
   { id: 'about', labelKey: 'settings.tabs.about', Icon: Info },
 ];
+
+interface BrowserFileWritable {
+  write(data: string): Promise<void>;
+  close(): Promise<void>;
+}
+
+interface BrowserFileHandle {
+  createWritable(): Promise<BrowserFileWritable>;
+}
+
+interface BrowserSavePickerWindow extends Window {
+  showSaveFilePicker?: (options: {
+    suggestedName: string;
+    types: Array<{
+      description: string;
+      accept: Record<string, string[]>;
+    }>;
+  }) => Promise<BrowserFileHandle>;
+}
+
+async function exportJsonFile(
+  data: unknown,
+  filename: string,
+  title: string,
+): Promise<boolean> {
+  const json = JSON.stringify(data, null, 2);
+
+  if (isTauri()) {
+    const { save } = await import('@tauri-apps/plugin-dialog');
+    const picked = await save({
+      title,
+      defaultPath: filename,
+      filters: [{ name: 'JSON', extensions: ['json'] }],
+    });
+    if (!picked) return false;
+    const target = typeof picked === 'string' ? picked : String(picked);
+    const { writeTextFile } = await import('@tauri-apps/plugin-fs');
+    await writeTextFile(target, json);
+    return true;
+  }
+
+  const picker = (window as BrowserSavePickerWindow).showSaveFilePicker;
+  if (!picker) throw new Error('SAVE_PICKER_UNAVAILABLE');
+  try {
+    const handle = await picker({
+      suggestedName: filename,
+      types: [
+        {
+          description: 'JSON',
+          accept: { 'application/json': ['.json'] },
+        },
+      ],
+    });
+    const writable = await handle.createWritable();
+    await writable.write(json);
+    await writable.close();
+    return true;
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') return false;
+    throw err;
+  }
+}
+
+async function readJsonFile(file: File): Promise<unknown> {
+  return JSON.parse(await file.text()) as unknown;
+}
+
+function formatStatusMessage(
+  template: string,
+  values: Record<string, string | number>,
+): string {
+  return Object.entries(values).reduce(
+    (msg, [key, value]) => msg.replace(`{${key}}`, String(value)),
+    template,
+  );
+}
+
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function describeExportError(err: unknown, locale: Locale): string {
+  if (err instanceof Error && err.message === 'SAVE_PICKER_UNAVAILABLE') {
+    return t(locale, 'settings.channels.exportPickerUnavailable');
+  }
+  return describeError(err);
+}
 
 export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<SettingsTab>('general');
@@ -245,7 +348,6 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
               {tab === 'general' ? (
                 <GeneralSettings
                   locale={locale}
-                  cliRuntime={cliRuntime}
                   languageOptions={languageOptions}
                   targetLanguages={targetLanguages}
                   promptAutoTranslate={promptAutoTranslate}
@@ -253,9 +355,7 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                   setPromptAutoTranslate={setPromptAutoTranslate}
                 />
               ) : tab === 'models' ? (
-                <ModelsSettings locale={locale} cliRuntime={cliRuntime} />
-              ) : tab === 'freeChannels' ? (
-                <FreeChannelsSettings locale={locale} />
+                <ChannelsSettings locale={locale} cliRuntime={cliRuntime} />
               ) : tab === 'consensus' ? (
                 <ConsensusSettings locale={locale} />
               ) : tab === 'shortcuts' ? (
@@ -290,7 +390,6 @@ function useCliRuntimeState(): CliRuntimeSnapshot {
 
 function GeneralSettings({
   locale,
-  cliRuntime,
   languageOptions,
   targetLanguages,
   promptAutoTranslate,
@@ -298,68 +397,12 @@ function GeneralSettings({
   setPromptAutoTranslate,
 }: {
   locale: Locale;
-  cliRuntime: CliRuntimeSnapshot;
   languageOptions: LanguageOption[];
   targetLanguages: LanguageOption[];
   promptAutoTranslate: boolean;
   setLocale: (locale: Locale) => void;
   setPromptAutoTranslate: (enabled: boolean) => void;
 }) {
-  const selectedAdapter = useStore((s) =>
-    normalizeRuntimeAdapter(s.workflow.meta.adapter),
-  );
-  const [cliError, setCliError] = useState<string | null>(null);
-  const [pickingCli, setPickingCli] = useState(false);
-  const cliOptions = useMemo(
-    () =>
-      cliRuntime.candidates.filter(
-        (candidate) =>
-          candidate.status === 'available' || candidate.source === 'custom',
-      ),
-    [cliRuntime.candidates],
-  );
-  const activeCliId = selectedCliCandidateId(cliRuntime);
-  const activeCli =
-    cliOptions.find((candidate) => candidate.id === activeCliId) ??
-    cliRuntime.candidates.find((candidate) => candidate.id === activeCliId);
-  const trigger = cliTriggerLabel(cliRuntime, activeCli, selectedAdapter, locale);
-  const cliHelp = cliHelpText(cliRuntime, cliOptions, locale);
-  const cliMigrationNotice = cliMigrationNoticeText(
-    cliRuntime.config.migrationNotice,
-    locale,
-  );
-  const cliBusy = cliRuntime.status === 'loading' || pickingCli;
-
-  const selectCliCandidate = async (candidateId: string) => {
-    const candidate = cliOptions.find((item) => item.id === candidateId);
-    if (!candidate || candidate.status !== 'available') return;
-    try {
-      await saveCliCandidateSelection(candidate);
-      setCliError(null);
-    } catch (err) {
-      setCliError(cliErrorText(err, locale, 'save'));
-    }
-  };
-
-  const selectCustomCli = async () => {
-    if (!isTauri()) {
-      setCliError(t(locale, 'settings.cliDesktopOnly'));
-      return;
-    }
-    setPickingCli(true);
-    try {
-      const path = await pickFile(t(locale, 'settings.cliPickTitle'));
-      if (!path) return;
-      const validation = await validateCliPath(path);
-      await saveCustomCliPathSelection(selectedAdapter, validation);
-      setCliError(null);
-    } catch (err) {
-      setCliError(cliErrorText(err, locale, 'path'));
-    } finally {
-      setPickingCli(false);
-    }
-  };
-
   // Launch shell that wraps AI CLI invocations (independent of the model CLI).
   const [runShell, setRunShellState] = useState<RunShellConfig>(() =>
     getRunShell(),
@@ -444,42 +487,6 @@ function GeneralSettings({
       </SettingRow>
 
       <SettingRow
-        title={t(locale, 'settings.cliLabel')}
-        description={t(locale, 'settings.cliDescription')}
-      >
-        <div className="w-full max-w-[24rem] space-y-2">
-          <CliSelectControl
-            activeId={activeCliId}
-            customLabel={t(locale, 'settings.cliCustom')}
-            disabled={false}
-            emptyLabel={t(locale, 'settings.cliEmpty')}
-            loading={cliBusy}
-            loadingLabel={t(locale, 'settings.cliLoading')}
-            options={cliOptions.map((candidate) =>
-              cliCandidateOption(candidate, locale),
-            )}
-            triggerHint={trigger.hint}
-            triggerLabel={trigger.label}
-            onCustom={selectCustomCli}
-            onSelect={selectCliCandidate}
-          />
-          {cliHelp && (
-            <p className="text-xs leading-relaxed text-fg-faint">{cliHelp}</p>
-          )}
-          {cliMigrationNotice && (
-            <p className="text-xs leading-relaxed text-amber-300">
-              {cliMigrationNotice}
-            </p>
-          )}
-          {cliError && (
-            <p className="text-xs leading-relaxed text-[#f78b8b]">
-              {cliError}
-            </p>
-          )}
-        </div>
-      </SettingRow>
-
-      <SettingRow
         title={t(locale, 'settings.shellLabel')}
         description={t(locale, 'settings.shellDescription')}
       >
@@ -552,14 +559,6 @@ function GeneralSettings({
       </SettingRow>
     </div>
   );
-}
-
-interface CliSelectOption {
-  id: string;
-  label: string;
-  hint?: string;
-  note?: string;
-  disabled?: boolean;
 }
 
 function SelectControl<T extends string>({
@@ -652,296 +651,8 @@ function SelectControl<T extends string>({
   );
 }
 
-function CliSelectControl({
-  activeId,
-  customLabel,
-  disabled,
-  emptyLabel,
-  loading,
-  loadingLabel,
-  options,
-  triggerHint,
-  triggerLabel,
-  onCustom,
-  onSelect,
-}: {
-  activeId: string | null;
-  customLabel: string;
-  disabled?: boolean;
-  emptyLabel: string;
-  loading: boolean;
-  loadingLabel: string;
-  options: CliSelectOption[];
-  triggerHint?: string;
-  triggerLabel: string;
-  onCustom: () => void;
-  onSelect: (id: string) => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const onDown = (event: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(event.target as Node)) {
-        setOpen(false);
-      }
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [open]);
-
-  return (
-    <div ref={rootRef} className="relative w-full">
-      <button
-        type="button"
-        disabled={disabled}
-        onClick={() => setOpen((value) => !value)}
-        className={cn(
-          'flex min-h-9 w-full items-center gap-2 rounded-md border px-3 py-2 text-left text-sm transition-colors',
-          open
-            ? 'border-accent bg-border-soft text-fg'
-            : 'border-border bg-panel text-fg-dim hover:border-accent hover:text-fg',
-          disabled && 'cursor-not-allowed opacity-60',
-        )}
-      >
-        <SquareTerminal size={15} strokeWidth={2.1} className="shrink-0 text-fg-faint" />
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-fg">{triggerLabel}</span>
-          {triggerHint && (
-            <span className="mt-0.5 block truncate font-mono text-[10px] text-fg-faint">
-              {triggerHint}
-            </span>
-          )}
-        </span>
-        <ChevronDown
-          size={15}
-          strokeWidth={2.1}
-          className={cn('shrink-0 text-fg-faint transition-transform', open && 'rotate-180')}
-        />
-      </button>
-
-      {open && (
-        <div className="absolute right-0 top-full z-20 mt-1 w-full min-w-[18rem] max-w-[24rem] overflow-hidden rounded-md border border-border bg-panel py-1 shadow-xl">
-          {loading ? (
-            <div className="px-3 py-2 text-xs text-fg-faint">{loadingLabel}</div>
-          ) : options.length === 0 ? (
-            <div className="px-3 py-2 text-xs text-fg-faint">{emptyLabel}</div>
-          ) : (
-            <ul role="listbox">
-              {options.map((option) => {
-                const active = option.id === activeId;
-                return (
-                  <li key={option.id}>
-                    <button
-                      type="button"
-                      role="option"
-                      aria-selected={active}
-                      disabled={option.disabled}
-                      onClick={() => {
-                        if (option.disabled) return;
-                        onSelect(option.id);
-                        setOpen(false);
-                      }}
-                      className={cn(
-                        'flex w-full items-start gap-2 px-3 py-2 text-left text-xs transition-colors',
-                        option.disabled
-                          ? 'cursor-not-allowed text-fg-faint opacity-70'
-                          : active
-                            ? 'bg-border-soft text-fg'
-                            : 'text-fg-dim hover:bg-border-soft hover:text-fg',
-                      )}
-                    >
-                      <span className="mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center">
-                        {active && <Check size={12} strokeWidth={2.4} className="text-accent" />}
-                      </span>
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate">{option.label}</span>
-                        {(option.hint || option.note) && (
-                          <span className="mt-0.5 block truncate text-[10px] text-fg-faint">
-                            {option.note ?? option.hint}
-                          </span>
-                        )}
-                      </span>
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-
-          <div className="my-1 border-t border-border-soft" />
-          <button
-            type="button"
-            disabled={loading}
-            onClick={() => {
-              setOpen(false);
-              onCustom();
-            }}
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-fg transition-colors hover:bg-border-soft disabled:cursor-wait disabled:text-fg-faint"
-          >
-            <FolderOpen size={13} strokeWidth={2.1} className="text-fg-faint" />
-            <span>{customLabel}</span>
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
-function cliCandidateOption(
-  candidate: CliCandidate,
-  locale: Locale,
-): CliSelectOption {
-  const path = candidate.path ?? candidate.command;
-  const name = candidate.source === 'custom' ? basename(path) : candidate.command;
-  const label =
-    candidate.source === 'custom'
-      ? `${runtimeAdapterLabel(candidate.adapter)} · ${name}`
-      : runtimeAdapterLabel(candidate.adapter);
-  const note =
-    candidate.status === 'available'
-      ? undefined
-      : cliCandidateStatusText(candidate, locale);
-  return {
-    id: candidate.id,
-    label,
-    hint: candidate.source === 'custom' ? path : candidate.path ?? candidate.command,
-    note,
-    disabled: candidate.status !== 'available',
-  };
-}
-
-function cliTriggerLabel(
-  runtime: CliRuntimeSnapshot,
-  active: CliCandidate | undefined,
-  selectedAdapter: RuntimeAdapterId,
-  locale: Locale,
-): { label: string; hint?: string } {
-  const selected = runtime.config.selected;
-  if (active) {
-    const option = cliCandidateOption(active, locale);
-    return { label: option.label, hint: option.hint };
-  }
-  if (selected.kind === 'known') {
-    return {
-      label: runtimeAdapterLabel(selected.adapter),
-      hint: selected.pathHint ?? selected.command,
-    };
-  }
-  if (selected.kind === 'path') {
-    return {
-      label: `${runtimeAdapterLabel(selected.adapter)} · ${basename(selected.path)}`,
-      hint: selected.path,
-    };
-  }
-  const adapterCandidate = runtime.candidates.find(
-    (candidate) =>
-      candidate.adapter === selectedAdapter && candidate.status === 'available',
-  );
-  if (adapterCandidate) {
-    return {
-      label: t(locale, 'settings.cliAuto'),
-      hint: `${runtimeAdapterLabel(selectedAdapter)} · ${
-        adapterCandidate.path ?? adapterCandidate.command
-      }`,
-    };
-  }
-  return { label: t(locale, 'settings.cliNone') };
-}
-
-function cliHelpText(
-  runtime: CliRuntimeSnapshot,
-  options: CliCandidate[],
-  locale: Locale,
-): string {
-  if (runtime.status === 'loading') return t(locale, 'settings.cliLoading');
-  if (runtime.status === 'error') return t(locale, 'settings.cliScanFailed');
-  const selected = runtime.config.selected;
-  const activeId = selectedCliCandidateId(runtime);
-  const active = runtime.candidates.find((candidate) => candidate.id === activeId);
-  if (active && active.status !== 'available') {
-    return cliCandidateStatusText(active, locale);
-  }
-  if (options.length === 0) return t(locale, 'settings.cliEmptyHint');
-  if (selected.kind === 'path') return t(locale, 'settings.cliCustomHint');
-  return t(locale, 'settings.cliAutoHint');
-}
-
-function cliMigrationNoticeText(
-  notice: CliRuntimeSnapshot['config']['migrationNotice'],
-  locale: Locale,
-): string {
-  if (!notice) return '';
-  const value = compactCliNoticeValue(notice.raw);
-  const suffix = value ? ` (${value})` : '';
-  if (notice.code === 'legacy-shell-wrapper') {
-    return t(locale, 'settings.cliLegacyShellWrapper').replace(
-      '{value}',
-      suffix,
-    );
-  }
-  if (notice.code === 'legacy-path-unavailable') {
-    return t(locale, 'settings.cliLegacyPathUnavailable').replace(
-      '{value}',
-      suffix,
-    );
-  }
-  return t(locale, 'settings.cliLegacyUnrecognized').replace('{value}', suffix);
-}
-
-function compactCliNoticeValue(value: string): string {
-  const compact = value.trim().replace(/\s+/g, ' ');
-  return compact.length > 72 ? `${compact.slice(0, 69)}...` : compact;
-}
-
-function cliCandidateStatusText(
-  candidate: CliCandidate,
-  locale: Locale,
-): string {
-  if (candidate.status === 'not-executable' && candidate.error) {
-    return stripCliErrorPrefix(candidate.error);
-  }
-  if (candidate.status === 'unsupported' && candidate.error) {
-    return stripCliErrorPrefix(candidate.error);
-  }
-  if (candidate.status === 'permission-denied') {
-    return candidate.error
-      ? stripCliErrorPrefix(candidate.error)
-      : t(locale, 'settings.cliPathUnavailable');
-  }
-  if (candidate.status === 'invalid') return t(locale, 'settings.cliInvalidFile');
-  return t(locale, 'settings.cliPathUnavailable');
-}
-
-function cliErrorText(
-  err: unknown,
-  locale: Locale,
-  kind: 'path' | 'save',
-): string {
-  const raw = err instanceof Error ? err.message : String(err);
-  if (raw === 'NO_BACKEND') return t(locale, 'settings.cliDesktopOnly');
-  if (raw.includes('INVALID_CLI_PATH') || raw.includes('NOT_FILE')) {
-    return t(locale, 'settings.cliInvalidFile');
-  }
-  if (
-    raw.includes('UNSUPPORTED_CLI_TYPE') ||
-    raw.includes('NOT_EXECUTABLE') ||
-    raw.includes('PERMISSION_DENIED')
-  ) {
-    return stripCliErrorPrefix(raw);
-  }
-  if (kind === 'save') return t(locale, 'settings.cliSaveFailed');
-  return raw ? stripCliErrorPrefix(raw) : t(locale, 'settings.cliPathUnavailable');
-}
-
 function stripCliErrorPrefix(raw: string): string {
   return raw.replace(/^[A-Z_]+:\s*/u, '').trim();
-}
-
-function normalizeRuntimeAdapter(adapter: string | undefined): RuntimeAdapterId {
-  if (adapter === 'codex' || adapter === 'gemini') return adapter;
-  return 'claude-code';
 }
 
 /** Map a stored provider kind to its runtime adapter id. */
@@ -968,29 +679,454 @@ const PROVIDER_ADAPTER_SECTIONS: ReadonlyArray<{
   { adapter: 'gemini', dotClassName: 'bg-sky-400' },
 ];
 
-type BadgeState = 'current' | 'direct' | 'cli' | 'unavailable';
+type BadgeState = 'direct' | 'cli' | 'unavailable';
 type ProviderDraft = Omit<Provider, 'id'>;
 type ProviderEditorMode = 'add' | 'edit';
 
-const CLI_RUNTIME_CARDS = [
-  {
-    adapterId: 'codex',
-    nameKey: 'settings.models.codex',
-    dotClassName: 'bg-fg-faint',
-    detailKey: 'settings.models.detailCodex',
-  },
-  {
-    adapterId: 'gemini',
-    nameKey: 'settings.models.gemini',
-    dotClassName: 'bg-sky-400',
-    detailKey: 'settings.models.detailGemini',
-  },
-] satisfies Array<{
-  adapterId: RuntimeAdapterId;
-  nameKey: TranslationKey;
-  dotClassName: string;
-  detailKey: TranslationKey;
-}>;
+type ChannelSettingsTab = 'default' | 'free';
+const DEFAULT_PROVIDER_OPTION_PREFIX = 'default-provider:';
+const SYSTEM_DEFAULT_OPTION_PREFIX = 'system-default:';
+const FREE_CHANNEL_OPTION_PREFIX = 'free:';
+const MODEL_DEFAULT_OPTION_ID = '__default_model__';
+const CLAUDE_MODEL_CLASS_OPTIONS = ['sonnet', 'opus', 'haiku'];
+
+function defaultProviderOptionId(providerId: string): string {
+  return `${DEFAULT_PROVIDER_OPTION_PREFIX}${providerId}`;
+}
+
+function systemDefaultOptionId(adapter: RuntimeAdapterId): string {
+  return `${SYSTEM_DEFAULT_OPTION_PREFIX}${adapter}`;
+}
+
+function freeChannelOptionId(channelId: string): string {
+  return `${FREE_CHANNEL_OPTION_PREFIX}${channelId}`;
+}
+
+function providerIdFromDefaultOption(optionId: string): string | null {
+  if (!optionId.startsWith(DEFAULT_PROVIDER_OPTION_PREFIX)) return null;
+  return optionId.slice(DEFAULT_PROVIDER_OPTION_PREFIX.length) || null;
+}
+
+function adapterFromSystemDefaultOption(
+  optionId: string,
+): RuntimeAdapterId | null {
+  if (!optionId.startsWith(SYSTEM_DEFAULT_OPTION_PREFIX)) return null;
+  const adapterId = optionId.slice(SYSTEM_DEFAULT_OPTION_PREFIX.length);
+  return RUNTIME_ADAPTERS.find((adapter) => adapter.id === adapterId)?.id ?? null;
+}
+
+function freeChannelFromOption(optionId: string): string | null {
+  if (!optionId.startsWith(FREE_CHANNEL_OPTION_PREFIX)) return null;
+  const channelId = optionId.slice(FREE_CHANNEL_OPTION_PREFIX.length);
+  return freeChannelById(channelId) ? channelId : null;
+}
+
+function modelFromOptionId(optionId: string): string {
+  return optionId === MODEL_DEFAULT_OPTION_ID ? '' : optionId;
+}
+
+function providerSelection(provider: Provider, modelOverride?: string) {
+  const adapter = providerKindToAdapter(provider.kind);
+  const model = (modelOverride ?? provider.model ?? '').trim();
+  return {
+    adapter,
+    modelClass: model || 'default',
+    providerId: provider.id,
+    channelId: 'default',
+  };
+}
+
+function uniqueModelOptions(
+  models: Array<string | undefined | null>,
+): Array<{ id: string; label: string; hint?: string }> {
+  const out: Array<{ id: string; label: string; hint?: string }> = [];
+  const seen = new Set<string>();
+  for (const raw of models) {
+    const model = raw?.trim();
+    if (!model) continue;
+    const key = model.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ id: model, label: model });
+  }
+  return out;
+}
+
+function ChannelsSettings({
+  locale,
+  cliRuntime,
+}: {
+  locale: Locale;
+  cliRuntime: CliRuntimeSnapshot;
+}) {
+  const [channelTab, setChannelTab] = useState<ChannelSettingsTab>('default');
+  const channelTabs: Array<{
+    id: ChannelSettingsTab;
+    label: string;
+  }> = [
+    { id: 'default', label: t(locale, 'settings.modelsTitle') },
+    { id: 'free', label: t(locale, 'settings.freeChannels.title') },
+  ];
+
+  return (
+    <div className="space-y-5">
+      <GlobalRunControls locale={locale} cliRuntime={cliRuntime} />
+
+      <div>
+        <div
+          role="tablist"
+          aria-orientation="horizontal"
+          className="inline-flex w-fit gap-1 rounded-lg border border-border-soft bg-bg p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+        >
+          {channelTabs.map((item) => {
+            const active = channelTab === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setChannelTab(item.id)}
+                className={cn(
+                  'min-h-11 min-w-[7rem] rounded-md border px-5 py-2.5 text-sm font-semibold outline-none transition-[background-color,border-color,color,box-shadow] focus-visible:ring-1 focus-visible:ring-accent',
+                  active
+                    ? 'border-accent bg-accent text-bg shadow-[0_8px_18px_-14px_rgba(124,140,255,0.9)]'
+                    : 'border-transparent text-fg-faint hover:border-border-soft hover:bg-panel hover:text-fg',
+                )}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <div role="tabpanel">
+        {channelTab === 'default' ? (
+          <ModelsSettings locale={locale} cliRuntime={cliRuntime} />
+        ) : (
+          <FreeChannelsSettings locale={locale} />
+        )}
+      </div>
+    </div>
+  );
+}
+
+function GlobalRunControls({
+  locale,
+  cliRuntime,
+}: {
+  locale: Locale;
+  cliRuntime: CliRuntimeSnapshot;
+}) {
+  const runSelection = useStore(
+    (s) => workflowDefaultGatewaySelection(s.workflow),
+    shallow,
+  );
+  const setGlobalRunSelection = useStore((s) => s.setGlobalRunSelection);
+  const composerModelOptions = useStore((s) => s.modelOptions);
+  const [revision, setRevision] = useState(0);
+  const [modelListRevision, setModelListRevision] = useState(0);
+  const [loadingModels, setLoadingModels] = useState(false);
+
+  useEffect(() => {
+    const refresh = () => setRevision((n) => n + 1);
+    window.addEventListener('fuc:gateway-config-changed', refresh);
+    return () => window.removeEventListener('fuc:gateway-config-changed', refresh);
+  }, []);
+
+  useEffect(() => {
+    const refresh = () => setModelListRevision((n) => n + 1);
+    window.addEventListener('fuc:model-list-changed', refresh);
+    return () => window.removeEventListener('fuc:model-list-changed', refresh);
+  }, []);
+
+  const defaultChannelProviders = useMemo(() => {
+    void revision;
+    const desktop = isTauri();
+    return listProviders()
+      .map((provider) => {
+        const adapter = providerKindToAdapter(provider.kind);
+        const runtime = getProviderRuntimeInfo(provider, {
+          canUseCliFallback:
+            desktop && isCliAdapterAvailable(adapter, cliRuntime),
+        });
+        return { provider, adapter, status: runtime.status };
+      })
+      .sort((a, b) => {
+        const adapterRank =
+          RUNTIME_ADAPTERS.findIndex((item) => item.id === a.adapter) -
+          RUNTIME_ADAPTERS.findIndex((item) => item.id === b.adapter);
+        if (adapterRank !== 0) return adapterRank;
+        const rankA = providerSortRank(a.status);
+        const rankB = providerSortRank(b.status);
+        if (rankA !== rankB) return rankA - rankB;
+        return a.provider.name.localeCompare(b.provider.name);
+      });
+  }, [cliRuntime, revision]);
+
+  const channelOptions = useMemo(
+    () => {
+      const defaultOptions = RUNTIME_ADAPTERS.flatMap((adapter) => {
+        const group = `${t(locale, 'dock.channelGroupDefault')} · ${adapter.label}`;
+        return [
+          {
+            id: systemDefaultOptionId(adapter.id),
+            label: `${adapter.label} · ${t(locale, 'dock.channelSystemDefault')}`,
+            hint: t(locale, 'settings.models.sourceSystemCli'),
+            group,
+          },
+          ...defaultChannelProviders
+            .filter((item) => item.adapter === adapter.id)
+            .map(({ provider }) => ({
+              id: defaultProviderOptionId(provider.id),
+              label: provider.name.trim() || adapter.label,
+              hint: t(locale, 'dock.channelKindDefault'),
+              group,
+            })),
+        ];
+      });
+
+      return [
+        ...defaultOptions,
+        ...FREE_CHANNELS.map((channel) => ({
+          id: freeChannelOptionId(channel.id),
+          label: `Free · ${channel.label}`,
+          hint: freeChannelReady(channel.id)
+            ? t(locale, 'settings.freeChannels.ready')
+            : t(locale, 'settings.freeChannels.needsKey'),
+          group: t(locale, 'dock.channelGroupFree'),
+        })),
+      ];
+    },
+    [defaultChannelProviders, locale],
+  );
+
+  const selectedFreeChannelId = isFreeChannelSelection(runSelection);
+  const selectedAdapter =
+    RUNTIME_ADAPTERS.find((adapter) => adapter.id === runSelection.adapter)?.id ??
+    RUNTIME_ADAPTERS[0].id;
+  const pinnedDefaultProvider = runSelection.providerId
+    ? defaultChannelProviders.find(
+        (item) =>
+          item.provider.id === runSelection.providerId &&
+          item.adapter === selectedAdapter,
+      )
+    : undefined;
+  const selectedFreeChannel = selectedFreeChannelId
+    ? freeChannelById(selectedFreeChannelId)
+    : undefined;
+  const selectedDefaultProvider = selectedFreeChannel
+    ? undefined
+    : pinnedDefaultProvider;
+  const channelValue = selectedFreeChannelId
+    ? freeChannelOptionId(selectedFreeChannelId)
+    : selectedDefaultProvider
+      ? defaultProviderOptionId(selectedDefaultProvider.provider.id)
+      : systemDefaultOptionId(selectedAdapter);
+
+  useEffect(() => {
+    if (!selectedFreeChannel) return;
+    if (!canRefreshFreeChannelModels(selectedFreeChannel)) return;
+    let disposed = false;
+    setLoadingModels(true);
+    void refreshFreeChannelModels(selectedFreeChannel)
+      .catch(() => undefined)
+      .finally(() => {
+        if (!disposed) setLoadingModels(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [selectedFreeChannel, revision]);
+
+  useEffect(() => {
+    if (selectedFreeChannel || !selectedDefaultProvider) return;
+    let disposed = false;
+    setLoadingModels(true);
+    void refreshProviderModels(selectedDefaultProvider.provider)
+      .catch(() => undefined)
+      .finally(() => {
+        if (!disposed) setLoadingModels(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [
+    selectedFreeChannel,
+    selectedDefaultProvider,
+    selectedDefaultProvider?.provider.id,
+    selectedDefaultProvider?.provider.apiKey,
+    selectedDefaultProvider?.provider.baseUrl,
+    selectedDefaultProvider?.provider.model,
+  ]);
+
+  const modelOptions = useMemo(() => {
+    void modelListRevision;
+    const defaultOption = {
+      id: MODEL_DEFAULT_OPTION_ID,
+      label: t(locale, 'settings.models.modelNone'),
+      hint: 'default',
+    };
+    if (selectedFreeChannel) {
+      return [
+        defaultOption,
+        ...uniqueModelOptions(freeChannelModelOptions(selectedFreeChannel)),
+      ];
+    }
+    if (selectedDefaultProvider) {
+      const provider = selectedDefaultProvider.provider;
+      const fallback =
+        selectedDefaultProvider.adapter === 'claude-code'
+          ? [
+              runSelection.modelClass,
+              ...composerModelOptions.map((option) => option.id),
+              ...CLAUDE_MODEL_CLASS_OPTIONS,
+            ]
+          : ['default', runSelection.modelClass];
+      return [
+        defaultOption,
+        ...uniqueModelOptions([
+          provider.model,
+          ...providerModelOptions(provider),
+          ...fallback,
+        ]),
+      ];
+    }
+    if (selectedAdapter === 'claude-code') {
+      return [
+        defaultOption,
+        ...uniqueModelOptions([
+          runSelection.modelClass,
+          ...composerModelOptions.map((option) => option.id),
+          ...CLAUDE_MODEL_CLASS_OPTIONS,
+        ]),
+      ];
+    }
+    return [
+      defaultOption,
+      ...uniqueModelOptions(['default', runSelection.modelClass]),
+    ];
+  }, [
+    composerModelOptions,
+    locale,
+    modelListRevision,
+    runSelection.modelClass,
+    selectedAdapter,
+    selectedDefaultProvider,
+    selectedFreeChannel,
+  ]);
+
+  const modelValue = selectedFreeChannel
+    ? getFreeChannelModel(selectedFreeChannel.id) || MODEL_DEFAULT_OPTION_ID
+    : selectedDefaultProvider
+      ? (selectedDefaultProvider.provider.model ?? '').trim() ||
+        MODEL_DEFAULT_OPTION_ID
+      : runSelection.systemDefault || runSelection.modelClass === 'default'
+        ? MODEL_DEFAULT_OPTION_ID
+        : runSelection.modelClass;
+
+  const onChannelChange = (id: string) => {
+    const providerId = providerIdFromDefaultOption(id);
+    if (providerId) {
+      const provider = defaultChannelProviders.find(
+        (item) => item.provider.id === providerId,
+      )?.provider;
+      if (!provider) return;
+      setGlobalRunSelection(providerSelection(provider));
+      return;
+    }
+
+    const defaultAdapter = adapterFromSystemDefaultOption(id);
+    if (defaultAdapter) {
+      setGlobalRunSelection(systemDefaultGatewaySelection(defaultAdapter));
+      return;
+    }
+
+    const freeChannelId = freeChannelFromOption(id);
+    if (!freeChannelId) return;
+    void ensureFreeProxy();
+    setGlobalRunSelection(
+      freeChannelSelection(freeChannelId, getFreeChannelModel(freeChannelId)),
+    );
+  };
+
+  const onModelChange = (id: string) => {
+    const selectedModel = modelFromOptionId(id);
+    if (selectedFreeChannel) {
+      setFreeChannelModel(selectedFreeChannel.id, selectedModel);
+      void ensureFreeProxy();
+      setGlobalRunSelection(
+        freeChannelSelection(
+          selectedFreeChannel.id,
+          selectedModel || getFreeChannelModel(selectedFreeChannel.id),
+        ),
+      );
+      return;
+    }
+    if (selectedDefaultProvider) {
+      const nextModel = selectedModel || undefined;
+      const provider = selectedDefaultProvider.provider;
+      updateProvider(provider.id, { model: nextModel });
+      setGlobalRunSelection(
+        providerSelection({ ...provider, model: nextModel }, selectedModel),
+      );
+      return;
+    }
+    setGlobalRunSelection(
+      {
+        ...systemDefaultGatewaySelection(selectedAdapter),
+        modelClass: selectedModel || 'default',
+      },
+    );
+  };
+
+  return (
+    <div className="rounded-lg border border-border bg-bg-alt p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Sparkles size={16} strokeWidth={2.1} className="text-accent-2" />
+        <div className="min-w-0">
+          <h4 className="text-sm font-semibold text-fg">
+            {t(locale, 'settings.models.active')}
+          </h4>
+          <p className="mt-0.5 text-[11px] leading-relaxed text-fg-faint">
+            {t(locale, 'settings.modelsDescription')}
+          </p>
+        </div>
+      </div>
+      <div className="grid w-full min-w-0 gap-3 md:grid-cols-2">
+        <label className="block min-w-0 space-y-1.5">
+          <span className="text-[11px] font-semibold text-fg-dim">
+            {t(locale, 'dock.channelTitle')}
+          </span>
+          <SelectControl
+            value={channelValue}
+            options={channelOptions}
+            onChange={onChannelChange}
+            icon={<Sparkles size={15} strokeWidth={2.1} />}
+          />
+        </label>
+        <label className="block min-w-0 space-y-1.5">
+          <span className="text-[11px] font-semibold text-fg-dim">
+            {t(locale, 'dock.modelVersionTitle')}
+          </span>
+          <SelectControl
+            value={modelValue}
+            options={modelOptions}
+            onChange={onModelChange}
+            icon={
+              <RefreshCw
+                size={15}
+                strokeWidth={2.1}
+                className={loadingModels ? 'animate-spin' : undefined}
+              />
+            }
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
 
 function ModelsSettings({
   locale,
@@ -1000,10 +1136,6 @@ function ModelsSettings({
   cliRuntime: CliRuntimeSnapshot;
 }) {
   const [providers, setProviders] = useState<Provider[]>(() => listProviders());
-  // Active/default provider id per category (Claude Code / CodeX / Gemini).
-  const [activeIds, setActiveIds] = useState<Record<Provider['kind'], string>>(
-    () => getActiveProviderIds(),
-  );
   const [editor, setEditor] = useState<{
     mode: ProviderEditorMode;
     providerId?: string;
@@ -1014,11 +1146,11 @@ function ModelsSettings({
   const [status, setStatus] = useState<{ tone: 'ok' | 'err'; msg: string } | null>(
     null,
   );
+  const jsonImportInputRef = useRef<HTMLInputElement | null>(null);
   const desktop = isTauri();
 
   const refresh = () => {
     setProviders(listProviders());
-    setActiveIds(getActiveProviderIds());
   };
 
   const handleAdd = (kind: Provider['kind'] = 'anthropic') => {
@@ -1032,17 +1164,6 @@ function ModelsSettings({
     setEditor({ mode: 'add', draft, initial: draft });
   };
 
-  const handleEdit = (provider: Provider) => {
-    const draft = providerDraft(provider);
-    setStatus(null);
-    setEditor({
-      mode: 'edit',
-      providerId: provider.id,
-      draft,
-      initial: draft,
-    });
-  };
-
   const handleDelete = (id: string) => {
     if (!window.confirm(t(locale, 'settings.models.confirmDelete'))) return;
     deleteProvider(id);
@@ -1053,11 +1174,6 @@ function ModelsSettings({
     if (!window.confirm(t(locale, 'settings.models.confirmDelete'))) return;
     deleteProvider(id);
     setEditor(null);
-    refresh();
-  };
-
-  const handleSelect = (id: string) => {
-    setActiveProviderId(id);
     refresh();
   };
 
@@ -1112,6 +1228,51 @@ function ModelsSettings({
     }
   };
 
+  const handleExportJson = async () => {
+    setStatus(null);
+    try {
+      const saved = await exportJsonFile(
+        exportDefaultChannelsConfig(),
+        'openworkflow-default-channels.json',
+        t(locale, 'settings.modelsTitle'),
+      );
+      if (!saved) return;
+      setStatus({
+        tone: 'ok',
+        msg: t(locale, 'settings.channels.exportSuccess'),
+      });
+    } catch (err) {
+      setStatus({
+        tone: 'err',
+        msg: `${t(locale, 'settings.channels.exportError')}: ${describeExportError(err, locale)}`,
+      });
+    }
+  };
+
+  const handleImportJson = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+    setStatus(null);
+    try {
+      const result = importDefaultChannelsConfig(await readJsonFile(file));
+      refresh();
+      setStatus({
+        tone: 'ok',
+        msg: formatStatusMessage(t(locale, 'settings.channels.importSuccess'), {
+          n: result.imported,
+          m: result.updated,
+          k: result.skipped,
+        }),
+      });
+    } catch (err) {
+      setStatus({
+        tone: 'err',
+        msg: `${t(locale, 'settings.channels.importError')}: ${describeError(err)}`,
+      });
+    }
+  };
+
   const providerCards = useMemo(
     () =>
       providers
@@ -1126,44 +1287,26 @@ function ModelsSettings({
           };
         })
         .sort((a, b) => {
-          const rankA = providerSortRank(
-            a.provider,
-            a.runtime.status,
-            activeIds[a.provider.kind] ?? '',
-          );
-          const rankB = providerSortRank(
-            b.provider,
-            b.runtime.status,
-            activeIds[b.provider.kind] ?? '',
-          );
+          const rankA = providerSortRank(a.runtime.status);
+          const rankB = providerSortRank(b.runtime.status);
           if (rankA !== rankB) return rankA - rankB;
           return a.provider.name.localeCompare(b.provider.name);
         }),
-    [activeIds, providers, desktop, cliRuntime],
+    [providers, desktop, cliRuntime],
   );
-  // One default per category → count the providers that are their category's default.
-  const currentCount = providerCards.filter(
-    ({ provider }) => activeIds[provider.kind] === provider.id,
-  ).length;
   const directCount = providerCards.filter(
     ({ runtime }) => runtime.status === 'direct',
   ).length;
   const providerCliCount = providerCards.filter(
     ({ runtime }) => runtime.status === 'cli',
   ).length;
-  const systemCliCount = CLI_RUNTIME_CARDS.filter(
-    (card) => desktop && isCliAdapterAvailable(card.adapterId, cliRuntime),
-  ).length;
-  const cliCount = providerCliCount + systemCliCount;
-  const unavailableCount =
-    providerCards.filter(({ runtime }) => runtime.status === 'unavailable')
-      .length +
-    CLI_RUNTIME_CARDS.filter(
-      (card) => !desktop || !isCliAdapterAvailable(card.adapterId, cliRuntime),
-    ).length;
-  const hasAvailableRuntime = directCount > 0 || cliCount > 0;
+  const systemCliAvailable = RUNTIME_ADAPTERS.some(
+    (adapter) => desktop && isCliAdapterAvailable(adapter.id, cliRuntime),
+  );
+  const hasAvailableRuntime =
+    directCount > 0 || providerCliCount > 0 || systemCliAvailable;
   const showNoRuntime = !hasAvailableRuntime;
-  const showEmptyProviders = providerCards.length === 0 && !showNoRuntime;
+  const showEmptyProviders = providerCards.length === 0 && hasAvailableRuntime;
 
   return (
     <div className="space-y-5">
@@ -1177,34 +1320,6 @@ function ModelsSettings({
           </p>
         </div>
         <div className="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:shrink-0">
-          <SummaryChip
-            tone="current"
-            label={t(locale, 'settings.models.summaryCurrent').replace(
-              '{n}',
-              String(currentCount),
-            )}
-          />
-          <SummaryChip
-            tone="direct"
-            label={t(locale, 'settings.models.summaryDirect').replace(
-              '{n}',
-              String(directCount),
-            )}
-          />
-          <SummaryChip
-            tone="cli"
-            label={t(locale, 'settings.models.summaryCli').replace(
-              '{n}',
-              String(cliCount),
-            )}
-          />
-          <SummaryChip
-            tone="unavailable"
-            label={t(locale, 'settings.models.summaryUnavailable').replace(
-              '{n}',
-              String(unavailableCount),
-            )}
-          />
           <button
             type="button"
             onClick={() => handleAdd()}
@@ -1213,6 +1328,29 @@ function ModelsSettings({
             <Plus size={13} strokeWidth={2.2} />
             {t(locale, 'settings.models.add')}
           </button>
+          <button
+            type="button"
+            onClick={() => void handleExportJson()}
+            className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+          >
+            <DownloadCloud size={13} strokeWidth={2.2} />
+            {t(locale, 'settings.channels.exportJson')}
+          </button>
+          <button
+            type="button"
+            onClick={() => jsonImportInputRef.current?.click()}
+            className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+          >
+            <UploadCloud size={13} strokeWidth={2.2} />
+            {t(locale, 'settings.channels.importJson')}
+          </button>
+          <input
+            ref={jsonImportInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(event) => void handleImportJson(event)}
+          />
           {desktop && (
             <button
               type="button"
@@ -1262,9 +1400,6 @@ function ModelsSettings({
         const sectionCards = providerCards.filter(
           (card) => card.adapter === adapter,
         );
-        const cliCard = CLI_RUNTIME_CARDS.find(
-          (card) => card.adapterId === adapter,
-        );
         return (
           <div key={adapter} className="space-y-3">
             <div className="flex items-center justify-between gap-2">
@@ -1283,68 +1418,20 @@ function ModelsSettings({
                 {t(locale, 'settings.models.add')}
               </button>
             </div>
-            <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-              {sectionCards.map(({ provider, runtime }) => {
-                const active = activeIds[provider.kind] === provider.id;
-                return (
-                  <ProviderCard
-                    key={provider.id}
-                    name={provider.name || runtimeAdapterLabel(adapter)}
-                    dotClassName={dotClassName}
-                    sourceSummary={providerSourceSummary(runtime, locale)}
-                    modelChips={providerModelChips(provider, locale)}
-                    modelLabel={t(locale, 'settings.models.modelSavedPreference')}
-                    badgeState={active ? 'current' : runtime.status}
-                    badgeLabel={
-                      active
-                        ? t(locale, 'settings.models.statusCurrent')
-                        : providerStatusLabel(runtime.status, locale)
-                    }
-                    detailState={runtime.status}
-                    detail={providerDetail(runtime.status, locale)}
-                    active={active}
-                    onSelect={
-                      active ? undefined : () => handleSelect(provider.id)
-                    }
-                    onEdit={() => handleEdit(provider)}
-                    onDelete={() => handleDelete(provider.id)}
-                    selectLabel={t(locale, 'settings.models.activate')}
-                    editLabel={t(locale, 'settings.models.edit')}
-                    deleteLabel={t(locale, 'settings.models.delete')}
-                  />
-                );
-              })}
-              {cliCard &&
-                (() => {
-                  const adapterCliAvailable =
-                    desktop && isCliAdapterAvailable(cliCard.adapterId, cliRuntime);
-                  const statusState: ProviderRuntimeStatus = adapterCliAvailable
-                    ? 'cli'
-                    : 'unavailable';
-                  return (
-                    <ProviderCard
-                      key={`${cliCard.adapterId}-system-cli`}
-                      name={t(locale, 'settings.models.sourceSystemCli')}
-                      dotClassName={dotClassName}
-                      sourceSummary={t(locale, 'settings.models.sourceSystemCli')}
-                      modelChips={[
-                        t(locale, 'settings.models.modelComposerSelected'),
-                      ]}
-                      modelLabel={t(locale, 'settings.models.modelRuntimeLabel')}
-                      badgeState={statusState}
-                      badgeLabel={providerStatusLabel(statusState, locale)}
-                      detailState={statusState}
-                      detail={
-                        adapterCliAvailable
-                          ? t(locale, cliCard.detailKey)
-                          : desktop
-                            ? t(locale, 'settings.models.detailCliMissing')
-                            : t(locale, 'settings.models.detailCliDesktopOnly')
-                      }
-                      active={false}
-                    />
-                  );
-                })()}
+            <div className="space-y-2.5">
+              {sectionCards.map(({ provider, runtime }) => (
+                <DefaultChannelRow
+                  key={provider.id}
+                  provider={provider}
+                  providers={providers}
+                  adapter={adapter}
+                  dotClassName={dotClassName}
+                  runtime={runtime}
+                  onDelete={() => handleDelete(provider.id)}
+                  onChange={refresh}
+                  locale={locale}
+                />
+              ))}
             </div>
           </div>
         );
@@ -1386,195 +1473,306 @@ function ModelsSettings({
   );
 }
 
-function ProviderCard({
-  name,
+function DefaultChannelRow({
+  provider,
+  providers,
+  adapter,
   dotClassName,
-  sourceSummary,
-  modelChips,
-  modelLabel,
-  badgeState,
-  badgeLabel,
-  detailState,
-  detail,
-  active,
-  onSelect,
-  onEdit,
+  runtime,
   onDelete,
-  selectLabel,
-  editLabel,
-  deleteLabel,
+  onChange,
+  locale,
 }: {
-  name: string;
+  provider: Provider;
+  providers: Provider[];
+  adapter: RuntimeAdapterId;
   dotClassName: string;
-  sourceSummary: string;
-  modelChips: string[];
-  modelLabel: string;
-  badgeState: BadgeState;
-  badgeLabel: string;
-  detailState: BadgeState;
-  detail: string;
-  active: boolean;
-  onSelect?: () => void;
-  onEdit?: () => void;
+  runtime: ReturnType<typeof getProviderRuntimeInfo>;
   onDelete?: () => void;
-  selectLabel?: string;
-  editLabel?: string;
-  deleteLabel?: string;
+  onChange: () => void;
+  locale: Locale;
 }) {
-  const detailColor =
-    detailState === 'direct'
-      ? 'text-emerald-300'
-      : detailState === 'unavailable'
-        ? 'text-rose-300'
-        : 'text-fg-faint';
+  const [baseUrlValue, setBaseUrlValue] = useState(provider.baseUrl);
+  const [keyValue, setKeyValue] = useState(provider.apiKey);
+  const [modelValue, setModelValue] = useState(provider.model ?? '');
+  const [showKey, setShowKey] = useState(false);
+  const [baseUrlError, setBaseUrlError] = useState<string | null>(null);
+  const [duplicateError, setDuplicateError] = useState<string | null>(null);
+  const [modelRefresh, setModelRefresh] = useState<{
+    loading: boolean;
+    error: string | null;
+  }>({ loading: false, error: null });
 
-  const visibleChips = modelChips.slice(0, 2);
-  const extraCount = Math.max(modelChips.length - visibleChips.length, 0);
+  useEffect(() => {
+    setBaseUrlValue(provider.baseUrl);
+    setKeyValue(provider.apiKey);
+    setModelValue(provider.model ?? '');
+    setBaseUrlError(null);
+    setDuplicateError(null);
+  }, [provider.id, provider.baseUrl, provider.apiKey, provider.model]);
+
+  const draftProvider: Provider = {
+    ...provider,
+    baseUrl: baseUrlValue,
+    apiKey: keyValue,
+    model: modelValue.trim() || undefined,
+  };
+  const draftRuntime = getProviderRuntimeInfo(draftProvider, {
+    canUseCliFallback: runtime.canUseCliFallback,
+  });
+  const modelOptions = providerModelOptions(draftProvider);
+  const modelSelectValue = modelOptions.includes(modelValue.trim())
+    ? modelValue.trim()
+    : '';
+  const KeyIcon = showKey ? EyeOff : Eye;
+
+  const commitProvider = (patch: Partial<ProviderDraft>): boolean => {
+    const nextProvider: Provider = {
+      ...draftProvider,
+      ...patch,
+    };
+    const next = trimProviderDraft(nextProvider);
+    if (!isProviderBaseUrlValid(next.baseUrl)) {
+      setBaseUrlError(t(locale, 'settings.models.validationBaseUrl'));
+      return false;
+    }
+    const duplicate = providers.some((candidate) => {
+      if (candidate.id === provider.id) return false;
+      return (
+        providerMetadataSignature(candidate) === providerMetadataSignature(next)
+      );
+    });
+    if (duplicate) {
+      setDuplicateError(t(locale, 'settings.models.validationDuplicate'));
+      return false;
+    }
+
+    setBaseUrlError(null);
+    setDuplicateError(null);
+    setBaseUrlValue(next.baseUrl);
+    setKeyValue(next.apiKey);
+    setModelValue(next.model ?? '');
+
+    if (!providerDraftChanged(next, providerDraft(provider))) return false;
+    updateProvider(provider.id, {
+      apiKey: next.apiKey,
+      baseUrl: next.baseUrl,
+      model: next.model,
+      transport: next.transport,
+    });
+    onChange();
+    return true;
+  };
+
+  const refreshModels = async () => {
+    setModelRefresh({ loading: true, error: null });
+    try {
+      const result = await refreshProviderModels(trimProviderDraft(draftProvider));
+      setModelRefresh({
+        loading: false,
+        error: result.error ?? null,
+      });
+    } catch (err) {
+      setModelRefresh({
+        loading: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
 
   return (
-    <article
-      className={cn(
-        'relative flex min-h-[146px] flex-col overflow-hidden rounded-lg border p-4 transition-colors',
-        active
-          ? 'border-accent/60 bg-accent/10 ring-1 ring-inset ring-accent/20'
-          : 'border-border bg-bg-alt',
-        onSelect && 'hover:border-accent/60 hover:bg-accent/5',
-      )}
+    <div
+      className="relative space-y-3 overflow-hidden rounded-lg border border-border bg-bg-alt p-4 transition-colors"
     >
-      {onSelect && (
-        <button
-          type="button"
-          aria-label={`${selectLabel ?? ''} ${name}`.trim()}
-          onClick={onSelect}
-          className="absolute inset-0 z-0 cursor-pointer rounded-lg focus:outline-none focus:ring-1 focus:ring-inset focus:ring-accent"
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
+          <GroupDot className={dotClassName} />
+          <span className="truncate text-sm font-medium text-fg">
+            {provider.name || runtimeAdapterLabel(adapter)}
+          </span>
+        </div>
+        <StatusBadge
+          state={draftRuntime.status}
+          label={providerStatusLabel(draftRuntime.status, locale)}
         />
-      )}
-      {active && (
-        <span className="absolute left-0 top-0 z-10 h-full w-[3px] bg-accent" />
-      )}
+        <span className="rounded border border-border px-1.5 py-0.5 text-[10px] text-fg-faint">
+          {providerRouteLabel(draftProvider, draftRuntime, locale)}
+        </span>
+        <span className="min-w-0 flex-1" />
+        <div className="flex items-center gap-1.5">
+          {onDelete && (
+            <button
+              type="button"
+              title={t(locale, 'settings.models.delete')}
+              aria-label={t(locale, 'settings.models.delete')}
+              onClick={onDelete}
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-panel text-fg-faint transition-colors hover:border-rose-500/50 hover:text-rose-400"
+            >
+              <Trash2 size={13} strokeWidth={2} />
+            </button>
+          )}
+        </div>
+      </div>
 
-      <div
-        className={cn(
-          'relative z-10 flex flex-1 flex-col',
-          onSelect && 'pointer-events-none',
-        )}
-      >
-        <div className="flex items-start justify-between gap-2">
-          <div className="flex min-w-0 items-center gap-2">
-            <GroupDot className={dotClassName} />
-            <span className="truncate text-sm font-medium text-fg">{name}</span>
-          </div>
-          <div className="flex shrink-0 items-center gap-2">
-            <StatusBadge state={badgeState} label={badgeLabel} />
-            <div className="pointer-events-auto flex items-center gap-1.5">
-              {onSelect && selectLabel && (
-                <button
-                  type="button"
-                  onClick={onSelect}
-                  className="rounded border border-border bg-panel px-2 py-1 text-[11px] text-fg-dim transition-colors hover:border-accent hover:text-fg"
-                >
-                  {selectLabel}
-                </button>
-              )}
-              {onEdit && editLabel && (
-                <button
-                  type="button"
-                  title={editLabel}
-                  aria-label={editLabel}
-                  onClick={onEdit}
-                  className="flex h-6 w-6 items-center justify-center rounded border border-border bg-panel text-fg-faint transition-colors hover:border-accent hover:text-fg"
-                >
-                  <Pencil size={13} strokeWidth={2} />
-                </button>
-              )}
-              {onDelete && (
+      <div className="grid gap-3 lg:grid-cols-2">
+        <label className="block space-y-1">
+          <span className="text-[11px] font-medium text-fg-dim">
+            {t(locale, 'settings.models.baseUrl')}
+          </span>
+          <input
+            type="text"
+            value={baseUrlValue}
+            onChange={(event) => {
+              setBaseUrlValue(event.target.value);
+              setBaseUrlError(null);
+              setDuplicateError(null);
+            }}
+            onBlur={() => commitProvider({ baseUrl: baseUrlValue })}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') event.currentTarget.blur();
+            }}
+            placeholder={providerBaseUrlPlaceholder(provider.kind)}
+            autoComplete="off"
+            spellCheck={false}
+            className={cn(
+              'w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent',
+              baseUrlError && 'border-rose-500/60',
+            )}
+          />
+          {baseUrlError && (
+            <p className="text-[11px] leading-relaxed text-rose-300">
+              {baseUrlError}
+            </p>
+          )}
+        </label>
+
+        <label className="block space-y-1">
+          <span className="text-[11px] font-medium text-fg-dim">
+            {t(locale, 'settings.models.apiKey')}
+          </span>
+          <div className="relative">
+            <input
+              type={showKey ? 'text' : 'password'}
+              value={keyValue}
+              onChange={(event) => setKeyValue(event.target.value)}
+              onBlur={() => commitProvider({ apiKey: keyValue })}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') event.currentTarget.blur();
+              }}
+              placeholder="sk-..."
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 pr-14 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+            />
+            <div className="absolute inset-y-0 right-1 flex items-center gap-0.5">
               <button
                 type="button"
-                title={deleteLabel}
-                aria-label={deleteLabel}
-                onClick={onDelete}
-                className="flex h-6 w-6 items-center justify-center rounded border border-border bg-panel text-fg-faint transition-colors hover:border-rose-500/50 hover:text-rose-400"
+                onClick={() => setShowKey((v) => !v)}
+                title={t(
+                  locale,
+                  showKey ? 'settings.models.hideKey' : 'settings.models.showKey',
+                )}
+                className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-fg"
               >
-                <Trash2 size={13} strokeWidth={2} />
+                <KeyIcon size={13} strokeWidth={2} />
               </button>
+              {keyValue && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setKeyValue('');
+                    commitProvider({ apiKey: '' });
+                  }}
+                  title={t(locale, 'settings.models.clear')}
+                  className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                >
+                  <Trash2 size={13} strokeWidth={2} />
+                </button>
               )}
             </div>
           </div>
-        </div>
+        </label>
 
-        <p className="mt-1.5 truncate text-[11px] text-fg-faint">
-          {sourceSummary}
-        </p>
-
-        <div className="mt-3 min-w-0">
-          <div className="mb-1 text-[10px] uppercase tracking-wide text-fg-faint">
-            {modelLabel}
+        <label className="block space-y-1 lg:col-span-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.freeChannels.modelLabel')}
+            </span>
+            <button
+              type="button"
+              onClick={() => void refreshModels()}
+              disabled={modelRefresh.loading}
+              className="inline-flex items-center gap-1 rounded border border-border bg-panel px-2 py-0.5 text-[11px] text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <RefreshCw
+                size={11}
+                strokeWidth={2}
+                className={modelRefresh.loading ? 'animate-spin' : undefined}
+              />
+              {t(locale, 'settings.models.fetchModels')}
+            </button>
           </div>
-          <div className="flex min-w-0 flex-wrap gap-1.5">
-            {visibleChips.map((model) => (
-              <span
-                key={model}
-                className="max-w-full truncate rounded border border-border bg-panel px-2 py-0.5 font-mono text-[11px] text-fg-dim"
-              >
-                {model}
-              </span>
-            ))}
-            {extraCount > 0 && (
-              <span className="rounded border border-border bg-panel px-2 py-0.5 font-mono text-[11px] text-fg-faint">
-                +{extraCount}
-              </span>
-            )}
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,14rem)]">
+            <input
+              type="text"
+              value={modelValue}
+              onChange={(event) => {
+                setModelValue(event.target.value);
+                setDuplicateError(null);
+              }}
+              onBlur={() => commitProvider({ model: modelValue })}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') event.currentTarget.blur();
+              }}
+              placeholder={providerModelPlaceholder(provider.kind, locale)}
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+            />
+            <select
+              value={modelSelectValue}
+              onChange={(event) => {
+                if (!event.target.value) return;
+                setModelValue(event.target.value);
+                commitProvider({ model: event.target.value });
+              }}
+              className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+            >
+              <option value="">{t(locale, 'settings.models.selectModel')}</option>
+              {modelOptions.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
           </div>
-        </div>
-
-        <div className="mt-auto pt-3">
-          <div className="border-t border-border-soft pt-2">
-            <p className={cn('text-[11px]', detailColor)}>{detail}</p>
-          </div>
-        </div>
+          {modelRefresh.error && (
+            <p className="text-[11px] leading-relaxed text-amber-300">
+              {modelRefresh.error}
+            </p>
+          )}
+          {duplicateError && (
+            <p className="text-[11px] leading-relaxed text-rose-300">
+              {duplicateError}
+            </p>
+          )}
+        </label>
       </div>
-    </article>
+    </div>
   );
 }
 
-function SummaryChip({
-  tone,
-  label,
-}: {
-  tone: BadgeState;
-  label: string;
-}) {
-  const toneClass =
-    tone === 'current'
-      ? {
-          pill: 'border-accent/50 bg-accent/15 text-accent',
-          dot: 'bg-accent',
-        }
-      : tone === 'direct'
-        ? {
-            pill: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
-            dot: 'bg-emerald-400',
-          }
-        : tone === 'unavailable'
-          ? {
-              pill: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
-              dot: 'bg-rose-400',
-            }
-          : {
-              pill: 'border-border bg-panel text-fg-faint',
-              dot: 'bg-fg-faint',
-            };
-  return (
-    <span
-      className={cn(
-        'inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px]',
-        toneClass.pill,
-      )}
-    >
-      <span className={cn('h-1.5 w-1.5 rounded-full', toneClass.dot)} />
-      {label}
-    </span>
-  );
+function providerBaseUrlPlaceholder(kind: Provider['kind']): string {
+  if (kind === 'anthropic') return 'https://api.anthropic.com';
+  if (kind === 'gemini') {
+    return 'https://generativelanguage.googleapis.com/v1beta/openai';
+  }
+  return 'https://api.example.com/v1';
+}
+
+function providerModelPlaceholder(kind: Provider['kind'], locale: Locale): string {
+  if (kind === 'anthropic') return DEFAULT_MODEL;
+  return t(locale, 'settings.models.modelComposerSelected');
 }
 
 function ProviderGroupHeader({
@@ -1632,12 +1830,7 @@ function GroupDot({ className }: { className: string }) {
 
 function StatusBadge({ state, label }: { state: BadgeState; label: string }) {
   const styles =
-    state === 'current'
-      ? {
-          pill: 'border-accent/50 bg-accent/15 text-accent',
-          dot: 'bg-accent',
-        }
-      : state === 'direct'
+    state === 'direct'
       ? {
           pill: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
           dot: 'bg-emerald-400',
@@ -1690,6 +1883,10 @@ function ProviderEditor({
   onSaved: () => void;
 }) {
   const [keyVisible, setKeyVisible] = useState(false);
+  const [modelRefresh, setModelRefresh] = useState<{
+    loading: boolean;
+    error: string | null;
+  }>({ loading: false, error: null });
   const [errors, setErrors] = useState<{
     name?: string;
     baseUrl?: string;
@@ -1717,6 +1914,22 @@ function ProviderEditor({
     setSaveError(null);
     setErrors((prev) => ({ ...prev, ...clearErrorsForPatch(patch) }));
     onChange({ ...editor.draft, ...patch });
+  };
+
+  const refreshModels = async () => {
+    setModelRefresh({ loading: true, error: null });
+    try {
+      const result = await refreshProviderModels(editor.draft);
+      setModelRefresh({
+        loading: false,
+        error: result.error ?? null,
+      });
+    } catch (err) {
+      setModelRefresh({
+        loading: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   };
 
   const handleSave = () => {
@@ -1864,14 +2077,18 @@ function ProviderEditor({
               mono
               fullWidth
             />
-            <TextField
+            <ModelTextField
               label={t(locale, 'settings.models.defaultModel')}
               value={editor.draft.model ?? ''}
               onChange={(value) => patchDraft({ model: value })}
               placeholder={DEFAULT_MODEL}
               description={t(locale, 'settings.models.modelMetadataHelp')}
-              mono
-              fullWidth
+              options={providerModelOptions(editor.draft)}
+              loading={modelRefresh.loading}
+              error={modelRefresh.error}
+              refreshLabel={t(locale, 'settings.models.fetchModels')}
+              selectLabel={t(locale, 'settings.models.selectModel')}
+              onRefresh={refreshModels}
             />
             <div className="block space-y-1 sm:col-span-2">
               <div className="flex items-center justify-between gap-3">
@@ -1997,12 +2214,7 @@ function providerDraftChanged(a: ProviderDraft, b: ProviderDraft): boolean {
   );
 }
 
-function providerSortRank(
-  provider: Provider,
-  status: ProviderRuntimeStatus,
-  activeId: string,
-): number {
-  if (provider.id === activeId) return 0;
+function providerSortRank(status: ProviderRuntimeStatus): number {
   if (status === 'direct') return 1;
   if (status === 'cli') return 2;
   return 3;
@@ -2017,25 +2229,19 @@ function providerStatusLabel(
   return t(locale, 'settings.models.statusUnavailable');
 }
 
-function providerDetail(status: ProviderRuntimeStatus, locale: Locale): string {
-  if (status === 'direct') return t(locale, 'settings.models.detailDirect');
-  if (status === 'cli') return t(locale, 'settings.models.detailCli');
-  return t(locale, 'settings.models.detailUnavailable');
-}
-
-function providerSourceSummary(
+function providerRouteLabel(
+  provider: Provider,
   runtime: ReturnType<typeof getProviderRuntimeInfo>,
   locale: Locale,
 ): string {
-  if (runtime.status === 'cli') {
+  if (
+    runtime.status === 'cli' ||
+    provider.transport === 'cli' ||
+    provider.kind !== 'anthropic'
+  ) {
     return t(locale, 'settings.models.sourceSystemCli');
   }
-  return runtime.baseUrlHost;
-}
-
-function providerModelChips(provider: Provider, locale: Locale): string[] {
-  const saved = provider.model?.trim();
-  return saved ? [saved] : [t(locale, 'settings.models.modelComposerSelected')];
+  return t(locale, 'settings.models.sourceDirect');
 }
 
 function clearErrorsForPatch(
@@ -2094,6 +2300,100 @@ function TextField({
       )}
     </label>
   );
+}
+
+function ModelTextField({
+  label,
+  value,
+  onChange,
+  placeholder,
+  description,
+  options,
+  loading,
+  error,
+  refreshLabel,
+  selectLabel,
+  onRefresh,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  placeholder?: string;
+  description?: string;
+  options: string[];
+  loading: boolean;
+  error: string | null;
+  refreshLabel: string;
+  selectLabel: string;
+  onRefresh: () => void;
+}) {
+  const modelOptions = uniqueStringOptions([value, ...options]);
+  const selectValue = modelOptions.includes(value.trim()) ? value.trim() : '';
+  return (
+    <label className="block space-y-1 sm:col-span-2">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-[11px] font-medium text-fg-dim">{label}</span>
+        <button
+          type="button"
+          onClick={() => void onRefresh()}
+          disabled={loading}
+          className="inline-flex items-center gap-1 rounded border border-border bg-bg px-2 py-1 text-[11px] text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <RefreshCw
+            size={12}
+            strokeWidth={2}
+            className={loading ? 'animate-spin' : undefined}
+          />
+          {refreshLabel}
+        </button>
+      </div>
+      <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,14rem)]">
+        <input
+          type="text"
+          value={value}
+          onChange={(event) => onChange(event.target.value)}
+          placeholder={placeholder}
+          autoComplete="off"
+          spellCheck={false}
+          className="w-full rounded border border-border bg-bg px-2 py-1.5 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+        />
+        <select
+          value={selectValue}
+          onChange={(event) => {
+            if (event.target.value) onChange(event.target.value);
+          }}
+          className="h-[31px] w-full rounded border border-border bg-bg px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+        >
+          <option value="">{selectLabel}</option>
+          {modelOptions.map((model) => (
+            <option key={model} value={model}>
+              {model}
+            </option>
+          ))}
+        </select>
+      </div>
+      {description && (
+        <p className="text-[11px] leading-relaxed text-fg-faint">{description}</p>
+      )}
+      {error && (
+        <p className="text-[11px] leading-relaxed text-amber-300">{error}</p>
+      )}
+    </label>
+  );
+}
+
+function uniqueStringOptions(values: string[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const value = raw.trim();
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
 }
 
 function ReadonlyField({
@@ -2290,6 +2590,10 @@ function FreeChannelsSettings({ locale }: { locale: Locale }) {
   // Bumped after each row edit so status badges (ready / needs-key) re-read.
   const [revision, setRevision] = useState(0);
   const [localSetupOpen, setLocalSetupOpen] = useState(false);
+  const [status, setStatus] = useState<{ tone: 'ok' | 'err'; msg: string } | null>(
+    null,
+  );
+  const jsonImportInputRef = useRef<HTMLInputElement | null>(null);
   const refresh = () => setRevision((n) => n + 1);
   useEffect(() => {
     let disposed = false;
@@ -2301,16 +2605,99 @@ function FreeChannelsSettings({ locale }: { locale: Locale }) {
     };
   }, []);
 
+  const handleExportJson = async () => {
+    setStatus(null);
+    try {
+      const saved = await exportJsonFile(
+        exportFreeChannelsConfig(),
+        'openworkflow-free-channels.json',
+        t(locale, 'settings.freeChannels.title'),
+      );
+      if (!saved) return;
+      setStatus({
+        tone: 'ok',
+        msg: t(locale, 'settings.channels.exportSuccess'),
+      });
+    } catch (err) {
+      setStatus({
+        tone: 'err',
+        msg: `${t(locale, 'settings.channels.exportError')}: ${describeExportError(err, locale)}`,
+      });
+    }
+  };
+
+  const handleImportJson = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = '';
+    if (!file) return;
+    setStatus(null);
+    try {
+      const result = importFreeChannelsConfig(await readJsonFile(file));
+      refresh();
+      void ensureFreeProxy();
+      setStatus({
+        tone: 'ok',
+        msg: formatStatusMessage(t(locale, 'settings.channels.importFreeSuccess'), {
+          n: result.keys,
+          m: result.models,
+          k: result.skipped,
+        }),
+      });
+    } catch (err) {
+      setStatus({
+        tone: 'err',
+        msg: `${t(locale, 'settings.channels.importError')}: ${describeError(err)}`,
+      });
+    }
+  };
+
   return (
     <div className="space-y-5">
-      <div>
-        <h3 className="text-lg font-semibold text-fg">
-          {t(locale, 'settings.freeChannels.title')}
-        </h3>
-        <p className="mt-1 text-xs leading-relaxed text-fg-faint">
-          {t(locale, 'settings.freeChannels.description')}
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <h3 className="text-lg font-semibold text-fg">
+            {t(locale, 'settings.freeChannels.title')}
+          </h3>
+          <p className="mt-1 text-xs leading-relaxed text-fg-faint">
+            {t(locale, 'settings.freeChannels.description')}
+          </p>
+        </div>
+        <div className="flex w-full min-w-0 flex-wrap items-center gap-2 sm:w-auto sm:shrink-0">
+          <button
+            type="button"
+            onClick={() => void handleExportJson()}
+            className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+          >
+            <DownloadCloud size={13} strokeWidth={2.2} />
+            {t(locale, 'settings.channels.exportJson')}
+          </button>
+          <button
+            type="button"
+            onClick={() => jsonImportInputRef.current?.click()}
+            className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+          >
+            <UploadCloud size={13} strokeWidth={2.2} />
+            {t(locale, 'settings.channels.importJson')}
+          </button>
+          <input
+            ref={jsonImportInputRef}
+            type="file"
+            accept="application/json,.json"
+            className="hidden"
+            onChange={(event) => void handleImportJson(event)}
+          />
+        </div>
       </div>
+      {status && (
+        <p
+          className={cn(
+            'text-[11px] leading-relaxed',
+            status.tone === 'ok' ? 'text-emerald-300' : 'text-rose-300',
+          )}
+        >
+          {status.msg}
+        </p>
+      )}
       <div className="space-y-2.5">
         {FREE_CHANNELS.map((channel) => (
           <FreeChannelRow
@@ -2427,6 +2814,10 @@ function FreeChannelRow({
   const [localStatus, setLocalStatus] =
     useState<LocalModelRuntimeStatus | null>(null);
   const [checkingLocalStatus, setCheckingLocalStatus] = useState(false);
+  const [modelRefresh, setModelRefresh] = useState<{
+    loading: boolean;
+    error: string | null;
+  }>({ loading: false, error: null });
   useEffect(() => {
     setKeyValue(getFreeChannelKey(channel.id));
     setModelValue(getFreeChannelModelOverride(channel.id));
@@ -2478,22 +2869,44 @@ function FreeChannelRow({
   const transportLabel =
     channel.transport === 'anthropic'
       ? t(locale, 'settings.freeChannels.transportAnthropic')
-      : t(locale, 'settings.freeChannels.transportOpenai');
+      : channel.transport === 'openai'
+        ? t(locale, 'settings.freeChannels.transportOpenai')
+        : t(locale, 'settings.freeChannels.transportAuto');
 
   // Re-register the proxy with the latest keys/models. Cheap + idempotent;
   // fired on blur rather than per keystroke.
   const reproxy = () => {
     void ensureFreeProxy();
   };
-  const commitKey = (value: string) => {
-    setKeyValue(value);
-    setFreeChannelKey(channel.id, value);
-    onChange();
+  const commitKey = (value: string): boolean => {
+    const trimmed = value.trim();
+    setKeyValue(trimmed);
+    const changed = setFreeChannelKey(channel.id, trimmed);
+    if (changed) onChange();
+    return changed;
   };
-  const commitModel = (value: string) => {
-    setModelValue(value);
-    setFreeChannelModel(channel.id, value);
-    onChange();
+  const commitModel = (value: string): boolean => {
+    const trimmed = value.trim();
+    setModelValue(trimmed);
+    const changed = setFreeChannelModel(channel.id, trimmed);
+    if (changed) onChange();
+    return changed;
+  };
+  const refreshModels = async () => {
+    setModelRefresh({ loading: true, error: null });
+    try {
+      const result = await refreshFreeChannelModels(channel);
+      setModelRefresh({
+        loading: false,
+        error: result.error ?? null,
+      });
+      onChange();
+    } catch (err) {
+      setModelRefresh({
+        loading: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   };
 
   const status: { label: string; cls: string; title?: string } = channel.local
@@ -2509,6 +2922,11 @@ function FreeChannelRow({
         };
 
   const KeyIcon = showKey ? EyeOff : Eye;
+  const modelOptions = freeChannelModelOptions(channel);
+  const modelSelectValue = modelOptions.includes(modelValue.trim())
+    ? modelValue.trim()
+    : '';
+  const canRefreshModels = canRefreshFreeChannelModels(channel);
 
   return (
     <div className="space-y-3 rounded-lg border border-border bg-bg-alt p-4">
@@ -2584,8 +3002,13 @@ function FreeChannelRow({
               <input
                 type={showKey ? 'text' : 'password'}
                 value={keyValue}
-                onChange={(event) => commitKey(event.target.value)}
-                onBlur={reproxy}
+                onChange={(event) => setKeyValue(event.target.value)}
+                onBlur={() => {
+                  if (commitKey(keyValue)) reproxy();
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter') event.currentTarget.blur();
+                }}
                 placeholder={t(locale, 'settings.freeChannels.apiKeyPlaceholder')}
                 autoComplete="off"
                 spellCheck={false}
@@ -2609,8 +3032,7 @@ function FreeChannelRow({
                   <button
                     type="button"
                     onClick={() => {
-                      commitKey('');
-                      reproxy();
+                      if (commitKey('')) reproxy();
                     }}
                     title={t(locale, 'settings.freeChannels.clear')}
                     className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
@@ -2623,14 +3045,39 @@ function FreeChannelRow({
           </label>
         )}
         <label className="block space-y-1">
-          <span className="text-[11px] font-medium text-fg-dim">
-            {t(locale, 'settings.freeChannels.modelLabel')}
-          </span>
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.freeChannels.modelLabel')}
+            </span>
+            <button
+              type="button"
+              onClick={() => void refreshModels()}
+              disabled={!canRefreshModels || modelRefresh.loading}
+              title={
+                canRefreshModels
+                  ? t(locale, 'settings.models.fetchModels')
+                  : t(locale, 'settings.models.fetchModelsUnavailable')
+              }
+              className="inline-flex items-center gap-1 rounded border border-border bg-panel px-2 py-0.5 text-[11px] text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <RefreshCw
+                size={11}
+                strokeWidth={2}
+                className={modelRefresh.loading ? 'animate-spin' : undefined}
+              />
+              {t(locale, 'settings.models.fetchModels')}
+            </button>
+          </div>
           <input
             type="text"
             value={modelValue}
-            onChange={(event) => commitModel(event.target.value)}
-            onBlur={reproxy}
+            onChange={(event) => setModelValue(event.target.value)}
+            onBlur={() => {
+              if (commitModel(modelValue)) reproxy();
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') event.currentTarget.blur();
+            }}
             placeholder={
               channel.defaultModel ||
               t(locale, 'settings.freeChannels.modelPlaceholderLocal')
@@ -2639,6 +3086,28 @@ function FreeChannelRow({
             spellCheck={false}
             className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 text-sm text-fg outline-none transition-colors focus:border-accent"
           />
+          {modelOptions.length > 0 && (
+            <select
+              value={modelSelectValue}
+              onChange={(event) => {
+                if (!event.target.value) return;
+                if (commitModel(event.target.value)) reproxy();
+              }}
+              className="h-8 w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+            >
+              <option value="">{t(locale, 'settings.models.selectModel')}</option>
+              {modelOptions.map((model) => (
+                <option key={model} value={model}>
+                  {model}
+                </option>
+              ))}
+            </select>
+          )}
+          {modelRefresh.error && (
+            <p className="text-[11px] leading-relaxed text-amber-300">
+              {modelRefresh.error}
+            </p>
+          )}
         </label>
       </div>
 

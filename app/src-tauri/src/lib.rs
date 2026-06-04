@@ -163,6 +163,9 @@ const FREE_CHANNEL_ENV_MAPPINGS: &[(&str, &[&str])] = &[
 ];
 
 const LOCAL_MODEL_SETUP_PS1: &str = include_str!("../../scripts/setup-local-model.ps1");
+const LOCAL_MODEL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+const REMOTE_MODEL_LIST_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
+const AI_EDIT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -182,6 +185,13 @@ struct LocalModelRuntimeStatus {
     state: String,
     models: Vec<String>,
     message: Option<String>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteModelListResult {
+    models: Vec<String>,
+    url: String,
 }
 
 #[derive(serde::Serialize)]
@@ -253,8 +263,7 @@ fn free_channel_key_file_candidates() -> Vec<PathBuf> {
     out
 }
 
-#[tauri::command]
-fn free_channel_auto_keys() -> HashMap<String, String> {
+fn free_channel_auto_keys_blocking() -> HashMap<String, String> {
     let mut out = HashMap::new();
     for path in free_channel_key_file_candidates() {
         for (channel_id, key) in read_free_channel_key_file(path) {
@@ -274,6 +283,13 @@ fn free_channel_auto_keys() -> HashMap<String, String> {
         }
     }
     out
+}
+
+#[tauri::command]
+async fn free_channel_auto_keys() -> HashMap<String, String> {
+    tauri::async_runtime::spawn_blocking(free_channel_auto_keys_blocking)
+        .await
+        .unwrap_or_default()
 }
 
 /// Map a frontend adapter id to the local CLI binary that runs it.
@@ -358,6 +374,26 @@ fn temp_output_path(prefix: &str, ext: &str) -> std::path::PathBuf {
         .unwrap_or(0);
     path.push(format!("{prefix}-{stamp}.{ext}"));
     path
+}
+
+struct TempFileGuard {
+    path: PathBuf,
+}
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 fn spawn_cli_command(binary: &str) -> Command {
@@ -493,15 +529,14 @@ fn powershell_command(exe: &str, binary: &str, args: &[String]) -> Command {
 
 /// Validate a user-selected *launch shell* path. Unlike `validate_cli_path`
 /// this intentionally allows shells. Returns the normalized absolute path.
-#[tauri::command]
-fn validate_shell_path(path: String) -> Result<String, String> {
+fn validate_shell_path_blocking(path: String) -> Result<String, String> {
     let trimmed = path.trim();
     if trimmed.is_empty() {
         return Err("请选择 Shell 可执行文件。".to_string());
     }
     let p = std::path::Path::new(trimmed);
-    let canonical = std::fs::canonicalize(p)
-        .map_err(|_| "找不到该文件，请重新选择。".to_string())?;
+    let canonical =
+        std::fs::canonicalize(p).map_err(|_| "找不到该文件，请重新选择。".to_string())?;
     if !canonical.is_file() {
         return Err("请选择一个可执行文件。".to_string());
     }
@@ -509,7 +544,13 @@ fn validate_shell_path(path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn open_external(url: String) -> Result<(), String> {
+async fn validate_shell_path(path: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || validate_shell_path_blocking(path))
+        .await
+        .map_err(|e| format!("Shell 路径校验任务失败: {e}"))?
+}
+
+fn open_external_blocking(url: String) -> Result<(), String> {
     let u = url.trim();
     if !(u.starts_with("http://") || u.starts_with("https://")) {
         return Err("invalid url".to_string());
@@ -535,6 +576,13 @@ fn open_external(url: String) -> Result<(), String> {
     hide_console(&mut cmd);
     cmd.spawn().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+async fn open_external(url: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || open_external_blocking(url))
+        .await
+        .map_err(|e| format!("打开外部链接任务失败: {e}"))?
 }
 
 const PREVIEW_TEXT_LIMIT: u64 = 1_500_000;
@@ -600,8 +648,10 @@ fn decode_preview_text(bytes: Vec<u8>) -> Option<String> {
         .map(|text| text.trim_start_matches('\u{feff}').to_string())
 }
 
-#[tauri::command]
-fn preview_local_file(path: String, cwd: Option<String>) -> Result<LocalFilePreview, String> {
+fn preview_local_file_blocking(
+    path: String,
+    cwd: Option<String>,
+) -> Result<LocalFilePreview, String> {
     let resolved = preview_path(&path, cwd.as_deref())?;
     let metadata = std::fs::metadata(&resolved).map_err(|e| format!("读取文件信息失败：{e}"))?;
     if !metadata.is_file() {
@@ -692,6 +742,13 @@ fn preview_local_file(path: String, cwd: Option<String>) -> Result<LocalFilePrev
     })
 }
 
+#[tauri::command]
+async fn preview_local_file(path: String, cwd: Option<String>) -> Result<LocalFilePreview, String> {
+    tauri::async_runtime::spawn_blocking(move || preview_local_file_blocking(path, cwd))
+        .await
+        .map_err(|e| format!("文件预览任务失败: {e}"))?
+}
+
 fn fallback_local_model_hardware() -> LocalModelHardware {
     LocalModelHardware {
         ram_gb: None,
@@ -702,8 +759,7 @@ fn fallback_local_model_hardware() -> LocalModelHardware {
     }
 }
 
-#[tauri::command]
-fn local_model_hardware() -> LocalModelHardware {
+fn local_model_hardware_blocking() -> LocalModelHardware {
     let fallback = fallback_local_model_hardware();
     #[cfg(target_os = "windows")]
     {
@@ -741,6 +797,13 @@ if ($gpu.Maximum) { $gpuVramGb = [math]::Round($gpu.Maximum / 1GB, 1) }
         }
     }
     fallback
+}
+
+#[tauri::command]
+async fn local_model_hardware() -> LocalModelHardware {
+    tauri::async_runtime::spawn_blocking(local_model_hardware_blocking)
+        .await
+        .unwrap_or_else(|_| fallback_local_model_hardware())
 }
 
 fn local_model_status_payload(
@@ -818,6 +881,25 @@ fn extract_local_model_ids(channel_id: &str, value: &serde_json::Value) -> Vec<S
     out
 }
 
+fn fetch_local_model_ids(channel_id: &str) -> Result<Vec<String>, String> {
+    let Some(url) = local_model_status_endpoint(channel_id) else {
+        return Err("不支持检测该本地渠道。".to_string());
+    };
+    let response = ureq::get(url)
+        .timeout(LOCAL_MODEL_REQUEST_TIMEOUT)
+        .call()
+        .map_err(|err| match err {
+            ureq::Error::Status(code, _) => format!("本地服务返回 HTTP {code}。"),
+            other => format!("无法连接本地服务: {other}"),
+        })?;
+    let body = response
+        .into_string()
+        .map_err(|err| format!("读取本地服务响应失败: {err}"))?;
+    let value: serde_json::Value =
+        serde_json::from_str(&body).map_err(|err| format!("本地服务响应不是有效 JSON: {err}"))?;
+    Ok(extract_local_model_ids(channel_id, &value))
+}
+
 fn local_model_id_matches(configured: &str, available: &str) -> bool {
     let configured = configured.trim().to_ascii_lowercase();
     let available = available.trim().to_ascii_lowercase();
@@ -829,8 +911,10 @@ fn local_model_id_matches(configured: &str, available: &str) -> bool {
         || configured == format!("{available}:latest")
 }
 
-#[tauri::command]
-fn local_model_status(channel_id: String, model: Option<String>) -> LocalModelRuntimeStatus {
+fn local_model_status_blocking(
+    channel_id: String,
+    model: Option<String>,
+) -> LocalModelRuntimeStatus {
     let channel_id = channel_id.trim().to_ascii_lowercase();
     let configured_model = model.unwrap_or_default().trim().to_string();
     if configured_model.is_empty() {
@@ -855,9 +939,7 @@ fn local_model_status(channel_id: String, model: Option<String>) -> LocalModelRu
             Some("不支持检测该本地渠道。".to_string()),
         );
     };
-    let result = ureq::get(url)
-        .timeout(std::time::Duration::from_secs(2))
-        .call();
+    let result = ureq::get(url).timeout(LOCAL_MODEL_REQUEST_TIMEOUT).call();
     match result {
         Ok(response) => {
             let body = response.into_string().unwrap_or_default();
@@ -922,6 +1004,159 @@ fn local_model_status(channel_id: String, model: Option<String>) -> LocalModelRu
     }
 }
 
+#[tauri::command]
+async fn local_model_status(channel_id: String, model: Option<String>) -> LocalModelRuntimeStatus {
+    tauri::async_runtime::spawn_blocking(move || local_model_status_blocking(channel_id, model))
+        .await
+        .unwrap_or_else(|err| {
+            local_model_status_payload(
+                "",
+                "",
+                false,
+                false,
+                "service_error",
+                Vec::new(),
+                Some(format!("本地模型检测任务失败: {err}")),
+            )
+        })
+}
+
+#[tauri::command]
+async fn local_model_list(channel_id: String) -> Result<Vec<String>, String> {
+    let channel_id = channel_id.trim().to_ascii_lowercase();
+    tauri::async_runtime::spawn_blocking(move || fetch_local_model_ids(&channel_id))
+        .await
+        .map_err(|err| format!("本地模型列表任务失败: {err}"))?
+}
+
+fn push_remote_model_id(out: &mut Vec<String>, value: Option<&str>) {
+    let Some(value) = value else {
+        return;
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if out
+        .iter()
+        .any(|existing| existing.eq_ignore_ascii_case(trimmed))
+    {
+        return;
+    }
+    out.push(trimmed.to_string());
+}
+
+fn extract_remote_model_ids(value: &serde_json::Value) -> Vec<String> {
+    fn visit_model(out: &mut Vec<String>, value: &serde_json::Value) {
+        if let Some(model) = value.as_str() {
+            push_remote_model_id(out, Some(model));
+            return;
+        }
+        push_remote_model_id(out, value.get("id").and_then(|v| v.as_str()));
+        push_remote_model_id(out, value.get("name").and_then(|v| v.as_str()));
+        push_remote_model_id(out, value.get("model").and_then(|v| v.as_str()));
+    }
+
+    let mut out = Vec::new();
+    if let Some(items) = value.as_array() {
+        for item in items {
+            visit_model(&mut out, item);
+        }
+        return out;
+    }
+    if let Some(data) = value.get("data").and_then(|v| v.as_array()) {
+        for item in data {
+            visit_model(&mut out, item);
+        }
+    }
+    if let Some(models) = value.get("models").and_then(|v| v.as_array()) {
+        for item in models {
+            visit_model(&mut out, item);
+        }
+    }
+    visit_model(&mut out, value);
+    out
+}
+
+fn list_remote_models_blocking(
+    urls: Vec<String>,
+    api_key: Option<String>,
+    transport: String,
+) -> Result<RemoteModelListResult, String> {
+    let key = api_key.unwrap_or_default().trim().to_string();
+    let mut errors = Vec::new();
+    for raw_url in urls {
+        let url = raw_url.trim();
+        if url.is_empty() {
+            continue;
+        }
+        let mut request = ureq::get(url)
+            .timeout(REMOTE_MODEL_LIST_REQUEST_TIMEOUT)
+            .set("accept", "application/json");
+        if !key.is_empty() {
+            request = request.set("authorization", &format!("Bearer {key}"));
+            if transport == "anthropic" {
+                request = request
+                    .set("x-api-key", &key)
+                    .set("anthropic-version", "2023-06-01");
+            }
+        }
+
+        let response = match request.call() {
+            Ok(response) => response,
+            Err(ureq::Error::Status(code, resp)) => {
+                let detail = resp.into_string().unwrap_or_default();
+                errors.push(format!("{url}: HTTP {code} {detail}"));
+                continue;
+            }
+            Err(err) => {
+                errors.push(format!("{url}: {err}"));
+                continue;
+            }
+        };
+        let body = match response.into_string() {
+            Ok(body) => body,
+            Err(err) => {
+                errors.push(format!("{url}: 读取响应失败: {err}"));
+                continue;
+            }
+        };
+        let parsed: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                errors.push(format!("{url}: 响应不是有效 JSON: {err}"));
+                continue;
+            }
+        };
+        let models = extract_remote_model_ids(&parsed);
+        if !models.is_empty() {
+            return Ok(RemoteModelListResult {
+                models,
+                url: url.to_string(),
+            });
+        }
+        errors.push(format!("{url}: 未找到模型列表"));
+    }
+    Err(if errors.is_empty() {
+        "没有可用的模型列表端点。".to_string()
+    } else {
+        errors.join("; ")
+    })
+}
+
+#[tauri::command]
+async fn list_remote_models(
+    urls: Vec<String>,
+    api_key: Option<String>,
+    transport: String,
+) -> Result<RemoteModelListResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        list_remote_models_blocking(urls, api_key, transport)
+    })
+    .await
+    .map_err(|err| format!("模型列表任务失败: {err}"))?
+}
+
 fn validate_ollama_model_id(model: &str) -> Result<String, String> {
     let trimmed = model.trim();
     if trimmed.is_empty() {
@@ -939,8 +1174,7 @@ fn validate_ollama_model_id(model: &str) -> Result<String, String> {
     Ok(trimmed.to_string())
 }
 
-#[tauri::command]
-fn setup_local_model(model: String) -> Result<(), String> {
+fn setup_local_model_blocking(model: String) -> Result<(), String> {
     if !cfg!(target_os = "windows") {
         return Err("本地模型一键配置目前只支持 Windows + Ollama。".to_string());
     }
@@ -965,13 +1199,29 @@ fn setup_local_model(model: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn scan_model_clis() -> cli_runtime::CliScanResult {
-    cli_runtime::scan_model_clis()
+async fn setup_local_model(model: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || setup_local_model_blocking(model))
+        .await
+        .map_err(|e| format!("本地模型安装任务启动失败: {e}"))?
 }
 
 #[tauri::command]
-fn validate_cli_path(path: String) -> Result<cli_runtime::CliPathValidation, String> {
-    cli_runtime::validate_cli_path(&path)
+async fn scan_model_clis() -> cli_runtime::CliScanResult {
+    tauri::async_runtime::spawn_blocking(cli_runtime::scan_model_clis)
+        .await
+        .unwrap_or_else(|e| cli_runtime::CliScanResult {
+            scanned_at_ms: 0,
+            platform: cli_runtime::platform(),
+            candidates: Vec::new(),
+            error: Some(format!("CLI 扫描任务失败: {e}")),
+        })
+}
+
+#[tauri::command]
+async fn validate_cli_path(path: String) -> Result<cli_runtime::CliPathValidation, String> {
+    tauri::async_runtime::spawn_blocking(move || cli_runtime::validate_cli_path(&path))
+        .await
+        .map_err(|e| format!("CLI 路径校验任务失败: {e}"))?
 }
 
 /// Run an emitted workflow script through the mapped local CLI.
@@ -1059,8 +1309,7 @@ Edges: {id, from:{node,port}, to:{node,port}, kind} where kind is 'exec' or 'dat
 /// Requires `api_key`. Returns the new IRGraph as a JSON string. When no key is
 /// supplied the command errors so the frontend can fall back to its local
 /// intent engine.
-#[tauri::command]
-fn ai_edit_graph(
+fn ai_edit_graph_blocking(
     current_ir_json: String,
     instruction: String,
     api_key: Option<String>,
@@ -1084,6 +1333,7 @@ fn ai_edit_graph(
     });
 
     let response = ureq::post("https://api.anthropic.com/v1/messages")
+        .timeout(AI_EDIT_REQUEST_TIMEOUT)
         .set("x-api-key", &key)
         .set("anthropic-version", "2023-06-01")
         .set("content-type", "application/json")
@@ -1125,6 +1375,19 @@ fn ai_edit_graph(
     Ok(trimmed)
 }
 
+#[tauri::command]
+async fn ai_edit_graph(
+    current_ir_json: String,
+    instruction: String,
+    api_key: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        ai_edit_graph_blocking(current_ir_json, instruction, api_key)
+    })
+    .await
+    .map_err(|e| format!("AI 编辑任务失败: {e}"))?
+}
+
 /// Strip a possible ```json fence and return the inner JSON payload.
 fn extract_json(text: &str) -> String {
     let t = text.trim();
@@ -1160,7 +1423,9 @@ fn configured_ai_cli_timeout_secs() -> u64 {
 
 fn ai_cli_timeout_secs(override_secs: Option<u64>) -> u64 {
     let configured = configured_ai_cli_timeout_secs();
-    let dynamic = override_secs.filter(|secs| *secs >= 60).unwrap_or(configured);
+    let dynamic = override_secs
+        .filter(|secs| *secs >= 60)
+        .unwrap_or(configured);
     configured.max(dynamic)
 }
 
@@ -1186,11 +1451,25 @@ fn claude_bare_mode_disabled() -> bool {
         .unwrap_or(false)
 }
 
-fn env_has_value(env_vars: &HashMap<String, String>, key: &str) -> bool {
+fn env_value<'a>(env_vars: &'a HashMap<String, String>, key: &str) -> Option<&'a str> {
     env_vars
         .get(key)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+}
+
+fn env_has_value(env_vars: &HashMap<String, String>, key: &str) -> bool {
+    env_value(env_vars, key).is_some()
+}
+
+fn anthropic_auth_value(env_vars: &HashMap<String, String>) -> Option<&str> {
+    env_value(env_vars, "ANTHROPIC_AUTH_TOKEN").or_else(|| env_value(env_vars, "ANTHROPIC_API_KEY"))
+}
+
+fn has_anthropic_gateway_env(env_vars: &HashMap<String, String>) -> bool {
+    anthropic_auth_value(env_vars).is_some()
+        && (env_has_value(env_vars, "ANTHROPIC_BASE_URL")
+            || env_has_value(env_vars, "ANTHROPIC_MODEL"))
 }
 
 fn known_provider_model_variant(base_url: Option<&str>, model: Option<&str>) -> Option<String> {
@@ -1249,10 +1528,9 @@ fn normalize_spawn_env(
         .get("ANTHROPIC_MODEL")
         .cloned()
         .or_else(|| std::env::var("ANTHROPIC_MODEL").ok());
-    if let Some(model) = known_provider_model_variant(
-        anthropic_base.as_deref(),
-        anthropic_model.as_deref(),
-    ) {
+    if let Some(model) =
+        known_provider_model_variant(anthropic_base.as_deref(), anthropic_model.as_deref())
+    {
         if anthropic_model.as_deref().map(str::trim) != Some(model.as_str()) {
             out.insert("ANTHROPIC_MODEL".to_string(), model);
             changed = true;
@@ -1287,6 +1565,18 @@ fn should_run_claude_bare(env_vars: Option<&HashMap<String, String>>) -> bool {
     should_run_claude_bare_with_disable(env_vars, claude_bare_mode_disabled())
 }
 
+fn gateway_progress_model_hint(env_vars: Option<&HashMap<String, String>>) -> Option<String> {
+    let env_vars = env_vars?;
+    if !has_anthropic_gateway_env(env_vars) {
+        return None;
+    }
+    env_vars
+        .get("ANTHROPIC_MODEL")
+        .map(|model| model.trim())
+        .filter(|model| !model.is_empty())
+        .map(ToString::to_string)
+}
+
 fn should_run_claude_bare_with_disable(
     env_vars: Option<&HashMap<String, String>>,
     disabled: bool,
@@ -1297,10 +1587,69 @@ fn should_run_claude_bare_with_disable(
     let Some(env_vars) = env_vars else {
         return false;
     };
-    let has_api_key = env_has_value(env_vars, "ANTHROPIC_API_KEY");
-    let has_gateway_route =
-        env_has_value(env_vars, "ANTHROPIC_BASE_URL") || env_has_value(env_vars, "ANTHROPIC_MODEL");
-    has_api_key && has_gateway_route
+    has_anthropic_gateway_env(env_vars)
+}
+
+fn claude_gateway_settings_json(env_vars: &HashMap<String, String>) -> Option<serde_json::Value> {
+    if !has_anthropic_gateway_env(env_vars) {
+        return None;
+    }
+
+    let api_key =
+        env_value(env_vars, "ANTHROPIC_API_KEY").or_else(|| anthropic_auth_value(env_vars))?;
+    let auth_token = env_value(env_vars, "ANTHROPIC_AUTH_TOKEN").unwrap_or(api_key);
+    let mut settings_env = serde_json::Map::new();
+
+    for (key, value) in env_vars {
+        let trimmed = value.trim();
+        if key.starts_with("ANTHROPIC_") && !trimmed.is_empty() {
+            settings_env.insert(key.clone(), serde_json::Value::String(trimmed.to_string()));
+        }
+    }
+
+    settings_env.insert(
+        "ANTHROPIC_API_KEY".to_string(),
+        serde_json::Value::String(api_key.to_string()),
+    );
+    settings_env.insert(
+        "ANTHROPIC_AUTH_TOKEN".to_string(),
+        serde_json::Value::String(auth_token.to_string()),
+    );
+
+    let mut root = serde_json::Map::new();
+    if let Some(model) = env_value(env_vars, "ANTHROPIC_MODEL") {
+        for key in [
+            "ANTHROPIC_DEFAULT_OPUS_MODEL",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL_NAME",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME",
+        ] {
+            settings_env
+                .entry(key.to_string())
+                .or_insert_with(|| serde_json::Value::String(model.to_string()));
+        }
+        root.insert(
+            "model".to_string(),
+            serde_json::Value::String(model.to_string()),
+        );
+    }
+    root.insert("env".to_string(), serde_json::Value::Object(settings_env));
+    Some(serde_json::Value::Object(root))
+}
+
+fn write_claude_gateway_settings(
+    env_vars: Option<&HashMap<String, String>>,
+) -> Result<Option<TempFileGuard>, String> {
+    let Some(settings) = env_vars.and_then(claude_gateway_settings_json) else {
+        return Ok(None);
+    };
+    let path = temp_output_path("freeultracode-claude-settings", "json");
+    let bytes =
+        serde_json::to_vec(&settings).map_err(|e| format!("生成 Claude 临时配置失败: {e}"))?;
+    std::fs::write(&path, bytes).map_err(|e| format!("写入 Claude 临时配置失败: {e}"))?;
+    Ok(Some(TempFileGuard::new(path)))
 }
 
 /// Whether to request token-level partial streaming from the claude CLI via
@@ -1441,7 +1790,13 @@ fn summarize_tool_use(name: &str, input: &serde_json::Value) -> String {
 /// Extract a one-line subject (command/path/pattern) from a tool input object.
 fn tool_subject(input: &serde_json::Value) -> String {
     let s = [
-        "command", "pattern", "file_path", "path", "query", "url", "description",
+        "command",
+        "pattern",
+        "file_path",
+        "path",
+        "query",
+        "url",
+        "description",
     ]
     .iter()
     .find_map(|k| {
@@ -1486,7 +1841,11 @@ fn summarize_tool_result(block: &serde_json::Value) -> String {
     if truncated.is_empty() {
         return String::new();
     }
-    if block.get("is_error").and_then(|b| b.as_bool()).unwrap_or(false) {
+    if block
+        .get("is_error")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false)
+    {
         format!("⚠ {truncated}")
     } else {
         truncated
@@ -1652,6 +2011,7 @@ async fn ai_cli(
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<String, String> {
         let env_vars = normalize_spawn_env(env_vars);
+        let progress_model_hint = gateway_progress_model_hint(env_vars.as_ref());
         let binary = match cli_command
             .as_deref()
             .map(cli_runtime::normalize_cli_command_override)
@@ -1680,6 +2040,7 @@ async fn ai_cli(
         let mut args: Vec<String> = Vec::new();
         let mut workdir: Option<std::path::PathBuf> = None;
         let mut disable_autoupdater = false;
+        let mut temp_files: Vec<TempFileGuard> = Vec::new();
 
         if is_codex {
             // Codex's non-interactive surface is `codex exec`, and its JSON
@@ -1748,6 +2109,11 @@ async fn ai_cli(
             // successful model call into exit=1.
             if should_run_claude_bare(env_vars.as_ref()) {
                 args.push("--bare".into());
+            }
+            if let Some(settings_file) = write_claude_gateway_settings(env_vars.as_ref())? {
+                args.push("--settings".into());
+                args.push(settings_file.path().to_string_lossy().to_string());
+                temp_files.push(settings_file);
             }
             // Token-level streaming so the run log fills in as text/thinking is
             // generated, instead of staying blank until a whole message lands.
@@ -1856,6 +2222,7 @@ async fn ai_cli(
         let app2 = app.clone();
         let run2 = run_id.clone();
         let parse_codex = is_codex;
+        let progress_model_hint2 = progress_model_hint.clone();
         let codex_turn_status = Arc::new(Mutex::new(None::<String>));
         let codex_turn_status_reader = Arc::clone(&codex_turn_status);
         let stdout_activity = Arc::clone(&last_activity);
@@ -1907,8 +2274,10 @@ async fn ai_cli(
                                 && v.get("subtype").and_then(|s| s.as_str()) == Some("init")
                             {
                                 init_done = true;
-                                let model =
-                                    v.get("model").and_then(|m| m.as_str()).unwrap_or("");
+                                let model = progress_model_hint2
+                                    .as_deref()
+                                    .or_else(|| v.get("model").and_then(|m| m.as_str()))
+                                    .unwrap_or("");
                                 let line = if model.is_empty() {
                                     "⚙ 会话已启动，开始处理…".to_string()
                                 } else {
@@ -2396,6 +2765,85 @@ mod tests {
     }
 
     #[test]
+    fn gateway_progress_model_uses_injected_model() {
+        let mut env = HashMap::new();
+        env.insert("ANTHROPIC_API_KEY".to_string(), "freecc".to_string());
+        env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "http://127.0.0.1:8765/ch/kilo".to_string(),
+        );
+        env.insert(
+            "ANTHROPIC_MODEL".to_string(),
+            "poolside/laguna-xs.2:free".to_string(),
+        );
+
+        assert_eq!(
+            gateway_progress_model_hint(Some(&env)).as_deref(),
+            Some("poolside/laguna-xs.2:free")
+        );
+    }
+
+    #[test]
+    fn gateway_progress_model_ignores_plain_cli_env() {
+        let mut env = HashMap::new();
+        env.insert(
+            "ANTHROPIC_MODEL".to_string(),
+            "poolside/laguna-xs.2:free".to_string(),
+        );
+
+        assert_eq!(gateway_progress_model_hint(Some(&env)), None);
+    }
+
+    #[test]
+    fn claude_gateway_settings_override_pins_env_and_model() {
+        let mut env = HashMap::new();
+        env.insert(
+            "ANTHROPIC_BASE_URL".to_string(),
+            "http://127.0.0.1:8765/ch/kilo".to_string(),
+        );
+        env.insert("ANTHROPIC_API_KEY".to_string(), "local-token".to_string());
+        env.insert(
+            "ANTHROPIC_MODEL".to_string(),
+            "poolside/laguna-xs.2:free".to_string(),
+        );
+
+        let settings = claude_gateway_settings_json(&env).unwrap();
+        assert_eq!(
+            settings
+                .pointer("/env/ANTHROPIC_BASE_URL")
+                .and_then(|v| v.as_str()),
+            Some("http://127.0.0.1:8765/ch/kilo")
+        );
+        assert_eq!(
+            settings
+                .pointer("/env/ANTHROPIC_AUTH_TOKEN")
+                .and_then(|v| v.as_str()),
+            Some("local-token")
+        );
+        assert_eq!(
+            settings
+                .pointer("/env/ANTHROPIC_DEFAULT_SONNET_MODEL")
+                .and_then(|v| v.as_str()),
+            Some("poolside/laguna-xs.2:free")
+        );
+        assert_eq!(
+            settings.pointer("/model").and_then(|v| v.as_str()),
+            Some("poolside/laguna-xs.2:free")
+        );
+    }
+
+    #[test]
+    fn claude_gateway_settings_override_skips_plain_model_env() {
+        let mut env = HashMap::new();
+        env.insert(
+            "ANTHROPIC_MODEL".to_string(),
+            "poolside/laguna-xs.2:free".to_string(),
+        );
+
+        assert!(claude_gateway_settings_json(&env).is_none());
+    }
+
+    #[test]
     fn normalizes_spawn_env_known_provider_models() {
         let mut env = HashMap::new();
         env.insert(
@@ -2498,6 +2946,8 @@ pub fn run() {
             free_channel_auto_keys,
             local_model_hardware,
             local_model_status,
+            local_model_list,
+            list_remote_models,
             setup_local_model,
             open_external,
             preview_local_file,

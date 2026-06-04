@@ -268,14 +268,6 @@ function statusIndicator(dot: HTMLElement | null): HTMLElement | null {
   return dot?.querySelector<HTMLElement>('.fuc-status-indicator') ?? null;
 }
 
-function newWorkflowButton(container: HTMLElement): HTMLButtonElement {
-  const button = Array.from(container.querySelectorAll('button')).find((item) =>
-    item.textContent?.includes('新建Workflow'),
-  );
-  expect(button).toBeInstanceOf(HTMLButtonElement);
-  return button as HTMLButtonElement;
-}
-
 function newSessionButton(container: HTMLElement): HTMLButtonElement {
   const button = Array.from(container.querySelectorAll('button')).find((item) =>
     item.textContent?.includes('新建会话'),
@@ -486,23 +478,41 @@ describe('Sidebar workflow rename', () => {
     }
   });
 
-  it('shows workflow export only for full workflow sessions', async () => {
+  it('does not show a session kind badge for chat sessions', async () => {
+    resetSidebarStore();
+    const chatSession = {
+      ...SESSION,
+      id: 's_chat',
+      title: 'Research chat',
+      isWorkflow: false,
+    };
+    mockState.sessionTree = {
+      [WORKSPACE.id]: [chatSession],
+    };
+    mockState.sessions = [chatSession];
+    mockState.activeSessionId = chatSession.id;
+
+    const view = await renderSidebar();
+
+    try {
+      const button = sessionButton(view.container, 'Research chat');
+
+      expect(button.textContent).not.toContain('CHAT');
+      expect(button.textContent).not.toContain('WF');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('does not show workflow export from session context menus', async () => {
     resetSidebarStore();
     const view = await renderSidebar();
 
     try {
       await openSessionContextMenu(sessionButton(view.container, SESSION.title));
 
-      const exportButton = queryContextMenuExportButton(view.container);
-      expect(exportButton).toBeInstanceOf(HTMLButtonElement);
-
-      await clickButton(exportButton as HTMLButtonElement);
-
-      expect(mockState.exportWorkflowSession).toHaveBeenCalledWith(
-        SESSION.id,
-        WORKSPACE.id,
-        '导出 Workflow 到文件',
-      );
+      expect(queryContextMenuExportButton(view.container)).toBeNull();
+      expect(mockState.exportWorkflowSession).not.toHaveBeenCalled();
     } finally {
       await view.cleanup();
     }
@@ -731,6 +741,21 @@ describe('Sidebar workflow rename', () => {
       expect(
         view.container.querySelector('input[aria-label="重命名"]'),
       ).toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('selects the current session name when rename starts', async () => {
+    resetSidebarStore();
+    const view = await renderSidebar();
+
+    try {
+      const input = await startRename(view.container);
+
+      expect(input.value).toBe(SESSION.title);
+      expect(input.selectionStart).toBe(0);
+      expect(input.selectionEnd).toBe(SESSION.title.length);
     } finally {
       await view.cleanup();
     }
@@ -1045,7 +1070,38 @@ describe('Sidebar running progress dot', () => {
     },
   );
 
-  it('keeps the new workflow action enabled while the active workflow is running', async () => {
+  it.each([
+    ['success', 'success', '已完成', 'var(--status-success)'],
+    ['error', 'failed', '已失败', 'var(--status-error)'],
+  ] as const)(
+    'renders a chat session with %s as the terminal status indicator',
+    async (status, tone, label, color) => {
+      resetSidebarStore();
+      const chatSession = { ...SESSION, isWorkflow: false, runStatus: status };
+      mockState.sessionTree = {
+        [WORKSPACE.id]: [chatSession],
+      };
+      mockState.sessions = [chatSession];
+
+      const view = await renderSidebar();
+
+      try {
+        const dot = statusDot(view.container, tone);
+        expect(dot).not.toBeNull();
+        expect(dot?.getAttribute('title')).toBe(label);
+        const indicator = statusIndicator(dot);
+        expect(indicator).not.toBeNull();
+        expect(indicator?.classList.contains('fuc-status-spinner')).toBe(false);
+        expect(indicator?.style.getPropertyValue('--fuc-status-color')).toBe(
+          color,
+        );
+      } finally {
+        await view.cleanup();
+      }
+    },
+  );
+
+  it('keeps the new session action enabled while the active session is running', async () => {
     resetSidebarStore();
     mockState.mode = 'running';
     mockState.runningSessions = [SESSION_KEY];
@@ -1053,34 +1109,34 @@ describe('Sidebar running progress dot', () => {
     const view = await renderSidebar();
 
     try {
-      const button = newWorkflowButton(view.container);
+      const button = newSessionButton(view.container);
       expect(button.disabled).toBe(false);
 
       await act(async () => {
         button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
 
-      expect(mockState.newWorkflow).toHaveBeenCalledTimes(1);
+      expect(mockState.newSession).toHaveBeenCalledTimes(1);
     } finally {
       await view.cleanup();
     }
   });
 
-  it('keeps the new workflow action enabled during an active AI blueprint edit', async () => {
+  it('keeps the new session action enabled during an active AI edit', async () => {
     resetSidebarStore();
     mockState.aiEditingSessions = [SESSION_KEY];
 
     const view = await renderSidebar();
 
     try {
-      const button = newWorkflowButton(view.container);
+      const button = newSessionButton(view.container);
       expect(button.disabled).toBe(false);
 
       await act(async () => {
         button.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
 
-      expect(mockState.newWorkflow).toHaveBeenCalledTimes(1);
+      expect(mockState.newSession).toHaveBeenCalledTimes(1);
     } finally {
       await view.cleanup();
     }
@@ -1383,7 +1439,7 @@ describe('Sidebar session search', () => {
         view.container.querySelector('input[aria-label="搜索会话"]'),
       ).toBeNull();
       expect(view.container.textContent).toContain('暂无会话');
-      expect(view.container.textContent).toContain('新建Workflow');
+      expect(view.container.textContent).toContain('新建会话');
     } finally {
       await view.cleanup();
     }

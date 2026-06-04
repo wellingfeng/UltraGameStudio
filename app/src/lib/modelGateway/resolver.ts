@@ -738,7 +738,7 @@ function cliFallbackRoute(
 ): ResolvedGatewayRoute {
   const adapter = normalizeAdapter(selection.adapter);
   const model =
-    selection.systemDefault || selection.modelClass === 'default'
+    selection.modelClass === 'default'
       ? undefined
       : adapter === 'claude-code'
       ? // Tier alias (sonnet/opus/haiku) -> let the CLI map it; any other

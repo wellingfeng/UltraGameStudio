@@ -7,12 +7,10 @@ import {
 } from 'react';
 import {
   AlarmClock,
-  Download,
   Pencil,
   Search,
   Star,
   Trash2,
-  Upload,
   X,
 } from 'lucide-react';
 import StatusIndicator, { type StatusTone } from '@/components/StatusIndicator';
@@ -35,7 +33,7 @@ import ScheduledTaskDialog from './ScheduledTaskDialog';
 /**
  * CONTRACT: default export, no props. Left session rail.
  *
- * Top  : primary actions — "+ New Session" and "+ New Workflow".
+ * Top  : primary action — "+ New Session".
  * Bottom: session history list, sourced from the store; clicking switches the
  *         active session context.
  *
@@ -174,7 +172,7 @@ function historyStatusLabel(
 }
 
 function historyStatusTone(
-  session: Pick<Session, 'isWorkflow' | 'runStatus'>,
+  session: Pick<Session, 'isWorkflow' | 'simple' | 'runStatus'>,
   liveStatus: ReturnType<typeof sessionLiveStatus>,
 ): StatusTone | null {
   if (liveStatus === 'running') return 'running';
@@ -186,23 +184,7 @@ function historyStatusTone(
   ) {
     return 'failed';
   }
-  return session.isWorkflow ? 'unrun' : null;
-}
-
-function SessionKindBadge({
-  isWorkflow,
-  simple,
-}: {
-  isWorkflow: boolean;
-  simple: boolean;
-}) {
-  const chat = !isWorkflow || simple;
-  const className =
-    'inline-flex h-5 min-w-8 shrink-0 items-center justify-center rounded bg-border-soft px-1 font-mono text-[9px] leading-4 ' +
-    (chat
-      ? 'text-accent-3 opacity-75'
-      : 'text-accent-2 opacity-75');
-  return <span className={className}>{chat ? 'CHAT' : 'WF'}</span>;
+  return session.isWorkflow && !session.simple ? 'unrun' : null;
 }
 
 function deleteProtectionLabel(
@@ -292,10 +274,7 @@ export default function Sidebar() {
   const runningSessionProgress = useStore((s) => s.runningSessionProgress);
   const aiEditingSessions = useStore((s) => s.aiEditingSessions);
   const chattingSessions = useStore((s) => s.chattingSessions);
-  const newWorkflow = useStore((s) => s.newWorkflow);
   const newSession = useStore((s) => s.newSession);
-  const exportWorkflowSession = useStore((s) => s.exportWorkflowSession);
-  const importWorkflowToWorkspace = useStore((s) => s.importWorkflowToWorkspace);
   const selectSession = useStore((s) => s.selectSession);
   const deleteSession = useStore((s) => s.deleteSession);
   const renameWorkflowSession = useStore((s) => s.renameWorkflowSession);
@@ -325,16 +304,7 @@ export default function Sidebar() {
         favorite: boolean;
         scheduledTask?: ScheduledTaskConfig;
       };
-  type WorkspaceMenuState =
-    | null
-    | {
-        x: number;
-        y: number;
-        workspaceId: string;
-      };
-
   const [menu, setMenu] = useState<MenuState>(null);
-  const [workspaceMenu, setWorkspaceMenu] = useState<WorkspaceMenuState>(null);
   const [scheduleDialog, setScheduleDialog] = useState<{
     sessionId: string;
     workspaceId: string | null;
@@ -402,23 +372,6 @@ export default function Sidebar() {
         favorite,
         scheduledTask,
       });
-      setWorkspaceMenu(null);
-    },
-    [],
-  );
-
-  const onWorkspaceContextMenu = useCallback(
-    (event: React.MouseEvent, workspaceId: string) => {
-      event.preventDefault();
-      const aside = event.currentTarget.closest('aside');
-      if (!aside) return;
-      const rect = aside.getBoundingClientRect();
-      setWorkspaceMenu({
-        x: event.clientX - rect.left,
-        y: event.clientY - rect.top,
-        workspaceId,
-      });
-      setMenu(null);
     },
     [],
   );
@@ -468,16 +421,6 @@ export default function Sidebar() {
     }
     setMenu(null);
   }, [menu, locale, deleteSession, renaming]);
-
-  const handleExport = useCallback(() => {
-    if (!menu?.isWorkflow || menu.simple) return;
-    exportWorkflowSession(
-      menu.sessionId,
-      menu.workspaceId,
-      t(locale, 'canvas.exportTitle'),
-    );
-    setMenu(null);
-  }, [exportWorkflowSession, locale, menu]);
 
   const handleToggleFavorite = useCallback(() => {
     if (!menu) return;
@@ -531,15 +474,6 @@ export default function Sidebar() {
       current ? { ...current, scheduledTask: undefined } : current,
     );
   }, [scheduleDialog, setWorkflowScheduledTaskSession]);
-
-  const handleImportToWorkspace = useCallback(() => {
-    if (!workspaceMenu) return;
-    importWorkflowToWorkspace(
-      workspaceMenu.workspaceId,
-      t(locale, 'sidebar.importWorkflowTitle'),
-    );
-    setWorkspaceMenu(null);
-  }, [importWorkflowToWorkspace, locale, workspaceMenu]);
 
   const handleStartRename = useCallback(() => {
     if (!menu) return;
@@ -730,7 +664,7 @@ export default function Sidebar() {
         .filter((group) => {
           if (normalizedQuery) return group.sessions.length > 0;
           if (activeTab === 'favorites') return group.tabSessions.length > 0;
-          return true;
+          return group.tabSessions.length > 0;
         })
         .sort((a, b) => {
           const liveDiff =
@@ -837,14 +771,6 @@ export default function Sidebar() {
         >
           <span className="text-base leading-none">＋</span>
           {t(locale, 'sidebar.newSession')}
-        </button>
-        <button
-          type="button"
-          onClick={newWorkflow}
-          className="flex items-center gap-2 rounded-md border border-border bg-panel-2 px-3 py-2 text-sm font-medium text-fg-dim transition-colors hover:border-accent hover:bg-border-soft hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
-        >
-          <span className="text-base leading-none">＋</span>
-          {t(locale, 'sidebar.newWorkflow')}
         </button>
       </div>
 
@@ -986,9 +912,6 @@ export default function Sidebar() {
                           : 'bg-[var(--fuc-workspace-bg)] hover:bg-[var(--fuc-workspace-bg-hover)]')
                       }
                       style={workspaceToneStyle(workspace.id)}
-                      onContextMenu={(e) =>
-                        onWorkspaceContextMenu(e, workspace.id)
-                      }
                     >
                       <div className="flex items-center gap-1.5 text-[11px] font-semibold text-fg">
                         <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-[var(--fuc-workspace-chip-bg)] text-[var(--fuc-workspace-mark)]">
@@ -998,9 +921,7 @@ export default function Sidebar() {
                           {workspace.name}
                         </span>
                         <span className="rounded bg-[var(--fuc-workspace-chip-bg)] px-1.5 py-0.5 font-mono text-[10px] leading-none text-fg-dim">
-                          {activeTab === 'favorites'
-                            ? fullList.length
-                            : workspace.sessionCount}
+                          {fullList.length}
                         </span>
                       </div>
                       {workspace.path && (
@@ -1061,16 +982,13 @@ export default function Sidebar() {
                                       : 'text-fg-dim hover:bg-border-soft hover:text-fg')
                                   }
                                 >
-                                  <span className="grid w-full grid-cols-[auto_minmax(0,1fr)_var(--fuc-status-slot-size)] items-center gap-1.5">
-                                    <SessionKindBadge
-                                      isWorkflow={session.isWorkflow}
-                                      simple={session.simple === true}
-                                    />
+                                  <span className="grid w-full grid-cols-[minmax(0,1fr)_var(--fuc-status-slot-size)] items-center gap-1.5">
                                     <input
                                       autoFocus
                                       aria-label={t(locale, 'sidebar.renameSession')}
                                       value={renameDraft}
                                       disabled={renameSaving}
+                                      onFocus={(e) => e.currentTarget.select()}
                                       onChange={(e) => {
                                         setRenameDraft(e.target.value);
                                         setRenameError(null);
@@ -1098,7 +1016,7 @@ export default function Sidebar() {
                                       tone={status}
                                     />
                                   </span>
-                                  <span className="flex w-full items-center gap-1 pl-10">
+                                  <span className="flex w-full items-center gap-1">
                                     <button
                                       type="button"
                                       disabled={renameSaving}
@@ -1127,7 +1045,7 @@ export default function Sidebar() {
                                     </button>
                                   </span>
                                   {renameError && (
-                                    <span className="pl-10 text-[11px] leading-snug text-rose-300">
+                                    <span className="text-[11px] leading-snug text-rose-300">
                                       {renameError}
                                     </span>
                                   )}
@@ -1156,11 +1074,7 @@ export default function Sidebar() {
                                     ' disabled:cursor-not-allowed disabled:opacity-50'
                                   }
                                 >
-                                  <span className="grid w-full grid-cols-[auto_minmax(0,1fr)_var(--fuc-status-slot-size)] items-center gap-1.5">
-                                    <SessionKindBadge
-                                      isWorkflow={session.isWorkflow}
-                                      simple={session.simple === true}
-                                    />
+                                  <span className="grid w-full grid-cols-[minmax(0,1fr)_var(--fuc-status-slot-size)] items-center gap-1.5">
                                     <span className="flex min-w-0 flex-1 items-center gap-1">
                                       <FavoriteMarker
                                         favorite={session.favorite === true}
@@ -1179,7 +1093,7 @@ export default function Sidebar() {
                                       tone={status}
                                     />
                                   </span>
-                                  <span className="flex w-full items-center gap-1 pl-10 font-mono text-[10px] text-fg-faint">
+                                  <span className="flex w-full items-center gap-1 font-mono text-[10px] text-fg-faint">
                                     <span>{formatTime(session.updatedAt ?? session.createdAt)}</span>
                                     {session.preview && (
                                       <span className="min-w-0 flex-1 truncate">
@@ -1257,16 +1171,13 @@ export default function Sidebar() {
                             : 'text-fg-dim hover:bg-border-soft hover:text-fg')
                         }
                       >
-                        <span className="grid w-full grid-cols-[auto_minmax(0,1fr)_var(--fuc-status-slot-size)] items-center gap-1.5">
-                          <SessionKindBadge
-                            isWorkflow={session.isWorkflow}
-                            simple={session.simple === true}
-                          />
+                        <span className="grid w-full grid-cols-[minmax(0,1fr)_var(--fuc-status-slot-size)] items-center gap-1.5">
                           <input
                             autoFocus
                             aria-label={t(locale, 'sidebar.renameSession')}
                             value={renameDraft}
                             disabled={renameSaving}
+                            onFocus={(e) => e.currentTarget.select()}
                             onChange={(e) => {
                               setRenameDraft(e.target.value);
                               setRenameError(null);
@@ -1287,7 +1198,7 @@ export default function Sidebar() {
                           />
                           <StatusIndicator label={statusLabel} tone={status} />
                         </span>
-                        <span className="flex w-full items-center gap-1 pl-10">
+                        <span className="flex w-full items-center gap-1">
                           <button
                             type="button"
                             disabled={renameSaving}
@@ -1312,7 +1223,7 @@ export default function Sidebar() {
                           </button>
                         </span>
                         {renameError && (
-                          <span className="pl-10 text-[11px] leading-snug text-rose-300">
+                          <span className="text-[11px] leading-snug text-rose-300">
                             {renameError}
                           </span>
                         )}
@@ -1341,11 +1252,7 @@ export default function Sidebar() {
                           ' disabled:cursor-not-allowed disabled:opacity-50'
                         }
                       >
-                        <span className="grid w-full grid-cols-[auto_minmax(0,1fr)_var(--fuc-status-slot-size)] items-center gap-1.5">
-                          <SessionKindBadge
-                            isWorkflow={session.isWorkflow}
-                            simple={session.simple === true}
-                          />
+                        <span className="grid w-full grid-cols-[minmax(0,1fr)_var(--fuc-status-slot-size)] items-center gap-1.5">
                           <span className="flex min-w-0 flex-1 items-center gap-1">
                             <FavoriteMarker
                               favorite={session.favorite === true}
@@ -1361,7 +1268,7 @@ export default function Sidebar() {
                           </span>
                           <StatusIndicator label={statusLabel} tone={status} />
                         </span>
-                        <span className="pl-10 font-mono text-[10px] text-fg-faint">
+                        <span className="font-mono text-[10px] text-fg-faint">
                           {formatTime(session.updatedAt ?? session.createdAt)}
                         </span>
                       </button>
@@ -1410,7 +1317,6 @@ export default function Sidebar() {
           isFavorite={menu.favorite}
           canSchedule={menu.favorite}
           canRename={true}
-          canExportWorkflow={menu.isWorkflow && !menu.simple}
           deleteDisabledReason={deleteProtectionLabel(
             locale,
             menuDeleteProtectionReason,
@@ -1418,7 +1324,6 @@ export default function Sidebar() {
           onToggleFavorite={handleToggleFavorite}
           onSchedule={handleOpenSchedule}
           onRename={handleStartRename}
-          onExport={handleExport}
           onDelete={handleDelete}
           onClose={() => setMenu(null)}
         />
@@ -1432,31 +1337,6 @@ export default function Sidebar() {
           onDelete={handleDeleteSchedule}
           onClose={() => setScheduleDialog(null)}
         />
-      )}
-      {workspaceMenu && (
-        <>
-          <div
-            className="fixed inset-0 z-30"
-            onClick={() => setWorkspaceMenu(null)}
-            onContextMenu={(e) => {
-              e.preventDefault();
-              setWorkspaceMenu(null);
-            }}
-          />
-          <div
-            className="absolute z-40 min-w-[160px] overflow-hidden rounded-md border border-border bg-panel shadow-2xl"
-            style={{ left: workspaceMenu.x, top: workspaceMenu.y }}
-          >
-            <button
-              type="button"
-              onClick={handleImportToWorkspace}
-              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-fg-dim transition-colors hover:bg-panel-2 hover:text-fg"
-            >
-              <Upload size={13} className="text-fg-faint" />
-              <span>{t(locale, 'sidebar.importWorkflow')}</span>
-            </button>
-          </div>
-        </>
       )}
     </aside>
   );
@@ -1474,12 +1354,10 @@ function SessionContextMenu({
   isFavorite,
   canSchedule,
   canRename,
-  canExportWorkflow,
   deleteDisabledReason,
   onToggleFavorite,
   onSchedule,
   onRename,
-  onExport,
   onDelete,
   onClose,
 }: {
@@ -1490,12 +1368,10 @@ function SessionContextMenu({
   isFavorite: boolean;
   canSchedule: boolean;
   canRename: boolean;
-  canExportWorkflow: boolean;
   deleteDisabledReason: string | null;
   onToggleFavorite: () => void;
   onSchedule: () => void;
   onRename: () => void;
-  onExport: () => void;
   onDelete: () => void;
   onClose: () => void;
 }) {
@@ -1559,16 +1435,6 @@ function SessionContextMenu({
           >
             <Pencil size={13} className="text-fg-faint" />
             <span>{t(locale, 'sidebar.renameSession')}</span>
-          </button>
-        )}
-        {canExportWorkflow && (
-          <button
-            type="button"
-            onClick={onExport}
-            className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-fg-dim transition-colors hover:bg-panel-2 hover:text-fg"
-          >
-            <Download size={13} className="text-fg-faint" />
-            <span>{t(locale, 'canvas.exportTitle')}</span>
           </button>
         )}
         <button

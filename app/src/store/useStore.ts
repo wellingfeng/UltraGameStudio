@@ -13,7 +13,7 @@ import {
   type PinKind,
 } from '@/core/ir';
 import { autoLayoutGraph } from '@/core/autoLayout';
-import { defaultBlueprint, simpleBlueprint } from '@/core/defaultBlueprint';
+import { defaultBlueprint, simpleBlueprint, captainBlueprint } from '@/core/defaultBlueprint';
 import { isEmptyWorkflow } from '@/core/isEmptyWorkflow';
 import { normalizeWorkflowNodeNumbers } from '@/core/nodeNumbers';
 import {
@@ -59,7 +59,12 @@ import {
 } from '@/core/startInputs';
 import { readApiKey, readBaseUrl } from '@/lib/apiConfig';
 import { appendComposerDraftState } from '@/lib/composerEntryPolicy';
-import { clearActiveGatewaySelection } from '@/lib/gatewayConfig';
+import {
+  clearActiveGatewaySelection,
+  getExplicitActiveGatewaySelection,
+  setActiveGatewaySelection,
+} from '@/lib/gatewayConfig';
+import { getCliRuntimeSnapshot } from '@/lib/cliConfig';
 import { maybeRunCcSwitchAutoImportOnFirstRun } from '@/lib/ccSwitchAutoImport';
 import { ensureFreeProxy, isFreeChannelSelection } from '@/lib/freeChannels';
 import {
@@ -104,6 +109,7 @@ import {
   parseRunFailure as describeRunFailure,
   runFailureMeta,
   runWithConcurrency,
+  newSessionId,
   type RunCallbacks,
   type RunContext as RuntimeRunContext,
   type RunFailure,
@@ -142,6 +148,7 @@ import {
   savePromptGroups,
   savePromptGroupsVersion,
 } from '@/lib/composerStorage';
+import type { PersistedComposer } from '@/lib/composerStorage';
 import {
   normalizeWorkspacePath,
   uniqueWorkspaceHistory,
@@ -157,7 +164,6 @@ import {
   autosave,
   exportWorkflowToFile,
   importWorkflowFromFile,
-  loadLocalWorkflow,
 } from '@/lib/persist';
 import {
   historyStore,
@@ -376,6 +382,7 @@ export interface StoreState {
   stopChat: () => void;
   newWorkflow: () => void;
   newSimpleWorkflow: () => void;
+  newCaptainWorkflow: () => void;
   newSession: () => void;
   selectSession: (sessionId: string, workspaceId?: string) => void;
   deleteSession: (sessionId: string, workspaceId?: string) => void;
@@ -583,6 +590,17 @@ function withSessionGatewayDefaults(
   };
 }
 
+function configuredCliGatewaySelection(): GatewaySelection | null {
+  const selected = getCliRuntimeSnapshot().config.selected;
+  if (selected.kind !== 'known' && selected.kind !== 'path') return null;
+  return systemDefaultGatewaySelection(selected.adapter);
+}
+
+function withNewSessionGatewayDefaults(workflow: IRGraph): IRGraph {
+  const selection = getExplicitActiveGatewaySelection() ?? configuredCliGatewaySelection();
+  return selection ? withSessionGatewayDefaults(workflow, selection) : workflow;
+}
+
 function defaultSessionComposer(workspace?: string): ComposerSettings {
   const trimmed = workspace?.trim();
   return {
@@ -601,6 +619,20 @@ function composerSnapshotFromState(
       state.composer.model,
     ),
   };
+}
+
+let deferredComposerSave: PersistedComposer | null = null;
+let deferredComposerSaveTimer: ReturnType<typeof setTimeout> | null = null;
+
+function saveComposerSoon(state: PersistedComposer): void {
+  deferredComposerSave = state;
+  if (deferredComposerSaveTimer) return;
+  deferredComposerSaveTimer = setTimeout(() => {
+    deferredComposerSaveTimer = null;
+    const next = deferredComposerSave;
+    deferredComposerSave = null;
+    if (next) saveComposer(next);
+  }, 0);
 }
 
 function rememberSessionComposer(
@@ -810,11 +842,25 @@ function makeSession(locale: Locale = DEFAULT_LOCALE): Session {
 }
 
 function chatWorkflow(title: string | undefined, locale: Locale): IRGraph {
-  return simpleBlueprint(title, locale);
+  return withNewSessionGatewayDefaults(simpleBlueprint(title, locale));
 }
 
 function untitledSessionTitle(locale: Locale): string {
   return t(locale, 'defaultBlueprint.untitledSession');
+}
+
+function isVisibleChatSessionSummary(summary: SessionSummary): boolean {
+  return !summary.isWorkflow || summary.simple === true;
+}
+
+function isVisibleChatSessionRecord(record: SessionRecord): boolean {
+  return !record.isWorkflow || record.workflow?.meta?.simple === true;
+}
+
+function visibleChatSessionSummaries(
+  sessions: SessionSummary[],
+): SessionSummary[] {
+  return sessions.filter(isVisibleChatSessionSummary);
 }
 
 function historySessionRunStatus(
@@ -934,7 +980,12 @@ async function loadSessionTree(
   const pairs = await Promise.all(
     workspaces.map(async (workspace) => {
       const sessions = await historyStore.listSessions(workspace.id);
-      return [workspace.id, sessions.map((item) => sessionFromSummary(item))] as const;
+      return [
+        workspace.id,
+        visibleChatSessionSummaries(sessions).map((item) =>
+          sessionFromSummary(item),
+        ),
+      ] as const;
     }),
   );
   return Object.fromEntries(pairs);
@@ -1121,6 +1172,19 @@ function syncSessionRunStatus(
 ): void {
   const runStatus = historySessionRunStatus(status);
   useStore.setState((state) => updateSessionRunStatus(state, sessionKey, runStatus) ?? state);
+}
+
+function syncAndPersistSessionRunStatus(
+  sessionKey: WorkflowSessionKey,
+  status: IRRunStatus | undefined,
+): void {
+  syncSessionRunStatus(sessionKey, status);
+  if (!sessionKey.workspaceId || !sessionKey.sessionId) return;
+  void historyStore
+    .updateSession(sessionKey.workspaceId, sessionKey.sessionId, {
+      meta: { runStatus: status ?? 'idle' },
+    })
+    .catch(() => {});
 }
 
 function markLocalActiveSessionWorkflow(): void {
@@ -1623,7 +1687,7 @@ async function createNewWorkflowSession(
 ): Promise<void> {
   const state = useStore.getState();
   const workspaceId = state.activeWorkspaceId;
-  const workflow = build(undefined, state.locale);
+  const workflow = withNewSessionGatewayDefaults(build(undefined, state.locale));
   const title =
     workflow.meta.name ??
     (state.locale === 'en-US' ? 'New Workflow' : '新建工作流');
@@ -1791,7 +1855,7 @@ async function openWorkflowInSession(
       defaultSessionComposer(workspace?.path),
     );
     if (workspace?.path) {
-      saveComposer({
+      saveComposerSoon({
         composer: composerPatch.composer,
         composerBySession: composerPatch.composerBySession,
         workspaceHistory,
@@ -1898,10 +1962,10 @@ async function activateHistorySession(
             mode: 'running' as const,
           };
         }
-        const aiEdit = getAiEditChannel(s.activeWorkspaceId ?? null, sessionId);
-        const liveAiEdit = aiEditActive(aiEdit) ? aiEdit : null;
-        const aiEditSnapshot =
-          liveAiEdit ?? getAiEditSnapshot(s.activeWorkspaceId ?? null, sessionId);
+        const aiEditSnapshot = getAiEditViewSource(
+          s.activeWorkspaceId ?? null,
+          sessionId,
+        );
         if (aiEditSnapshot) {
           return {
             messages: aiEditSnapshot.messages,
@@ -1944,6 +2008,7 @@ async function activateHistorySession(
 
   const record = await historyStore.getSession(targetWorkspaceId, sessionId);
   if (!record) return;
+  if (!isVisibleChatSessionRecord(record)) return;
   const session = sessionFromRecord(record);
 
   // If we're switching BACK to the session whose run is still executing, rebuild
@@ -1953,14 +2018,18 @@ async function activateHistorySession(
   // crucially does NOT cancel its CLI processes.
   const ch = getRunChannel(targetWorkspaceId, session.id);
   const liveRun = runActive(ch) ? ch : null;
-  const aiCh = getAiEditChannel(targetWorkspaceId, session.id);
-  const liveAiEdit = aiEditActive(aiCh) ? aiCh : null;
+  // Pick the freshest AI-edit source for view restoration. getAiEditViewSource
+  // prefers the live channel (including chat-mode channels, which getAiEditChannel
+  // deliberately excludes for read-only-lock purposes) and falls back to the
+  // retained snapshot so a finished stream still restores its final messages.
+  const aiEditSnapshot = getAiEditViewSource(targetWorkspaceId, session.id);
 
+  const recordIsSimpleChat = record.workflow?.meta?.simple === true;
   const workflow = liveRun
     ? liveRun.workflow
-    : liveAiEdit
-      ? liveAiEdit.workflow
-    : record.isWorkflow && record.workflow
+    : aiEditSnapshot
+      ? aiEditSnapshot.workflow
+    : recordIsSimpleChat && record.workflow
       ? restoreWorkflowRunSnapshot(record.workflow, record.meta)
       : chatWorkflow(record.title, state.locale);
   const runProgress = liveRun
@@ -1969,9 +2038,9 @@ async function activateHistorySession(
         runOutputs: liveRun.runOutputs,
         lastRunFailedNodeId: liveRun.failedNodeId,
       }
-    : liveAiEdit
+    : aiEditSnapshot
       ? emptyRunProgress()
-    : record.isWorkflow
+    : recordIsSimpleChat
       ? runProgressFromSnapshot(workflow, workflow.meta.run ?? null)
       : emptyRunProgress();
   const canvasViewport = canvasViewportForSession(
@@ -2008,7 +2077,7 @@ async function activateHistorySession(
       fallbackComposer,
     );
     if (workspace) {
-      saveComposer({
+      saveComposerSoon({
         composer: composerPatch.composer,
         composerBySession: composerPatch.composerBySession,
         workspaceHistory,
@@ -2038,11 +2107,11 @@ async function activateHistorySession(
       })(),
       messages: liveRun
         ? liveRun.messages
-        : liveAiEdit
-          ? liveAiEdit.messages
+        : aiEditSnapshot
+          ? aiEditSnapshot.messages
           : record.messages,
       ...runProgress,
-      canvasViewport: record.isWorkflow ? canvasViewport : null,
+      canvasViewport: recordIsSimpleChat ? canvasViewport : null,
       selectedNodeId: null,
       mode: liveRun ? 'running' : 'design',
     };
@@ -2112,7 +2181,7 @@ async function deleteHistorySession(
       sessions: nextSessions,
       sessionTree,
       messages: [],
-      workflow: defaultBlueprint(undefined, s.locale),
+      workflow: chatWorkflow(undefined, s.locale),
       selectedNodeId: null,
       dirty: false,
       runState: {},
@@ -2464,7 +2533,9 @@ async function activateWorkspacePath(path: string): Promise<void> {
   if (!state.historyReady) return;
 
   const workspace = await historyStore.resolveWorkspaceByPath(trimmed);
-  const sessions = await historyStore.listSessions(workspace.id);
+  let sessions = visibleChatSessionSummaries(
+    await historyStore.listSessions(workspace.id),
+  );
   let active = sessions[0];
   if (!active) {
     const record = await historyStore.createSession({
@@ -2473,7 +2544,7 @@ async function activateWorkspacePath(path: string): Promise<void> {
       messages: [],
     });
     active = summaryFromRecord(record);
-    sessions.unshift(summaryFromRecord(record));
+    sessions = [summaryFromRecord(record), ...sessions];
   }
 
   const workspaces = await historyStore.listWorkspaces();
@@ -2481,11 +2552,13 @@ async function activateWorkspacePath(path: string): Promise<void> {
   const activeRecord = active
     ? await historyStore.getSession(workspace.id, active.id)
     : null;
+  const activeRecordIsSimpleChat =
+    activeRecord?.workflow?.meta?.simple === true;
   const workflow =
-    activeRecord?.isWorkflow && activeRecord.workflow
+    activeRecordIsSimpleChat && activeRecord?.workflow
       ? restoreWorkflowRunSnapshot(activeRecord.workflow, activeRecord.meta)
       : chatWorkflow(activeRecord?.title, state.locale);
-  const runProgress = activeRecord?.isWorkflow
+  const runProgress = activeRecordIsSimpleChat
     ? runProgressFromSnapshot(workflow, workflow.meta.run ?? null)
     : emptyRunProgress();
   const canvasViewport = canvasViewportForSession(
@@ -2509,7 +2582,7 @@ async function activateWorkspacePath(path: string): Promise<void> {
       s.workspaceHistory,
       WORKSPACE_HISTORY_LIMIT,
     );
-    saveComposer({
+    saveComposerSoon({
       composer: composerPatch.composer,
       composerBySession: composerPatch.composerBySession,
       workspaceHistory,
@@ -2526,7 +2599,7 @@ async function activateWorkspacePath(path: string): Promise<void> {
       composerBySession: composerPatch.composerBySession,
       workspaceHistory,
       ...runProgress,
-      canvasViewport: activeRecord?.isWorkflow ? canvasViewport : null,
+      canvasViewport: activeRecordIsSimpleChat ? canvasViewport : null,
       mode: 'design',
       ...composerDraftPatchForSession(s, sessionKey),
     };
@@ -2562,7 +2635,9 @@ async function initHistoryFromDisk(): Promise<void> {
     }
 
     workspaces = await historyStore.listWorkspaces();
-    const sessions = await historyStore.listSessions(workspace.id);
+    let sessions = visibleChatSessionSummaries(
+      await historyStore.listSessions(workspace.id),
+    );
     let active =
       sessions.find((s) => s.id === config.lastActiveSessionId) ??
       sessions.find((s) => s.id === workspace.lastActiveSessionId) ??
@@ -2574,7 +2649,7 @@ async function initHistoryFromDisk(): Promise<void> {
         messages: [],
       });
       active = summaryFromRecord(created);
-      sessions.unshift(summaryFromRecord(created));
+      sessions = [summaryFromRecord(created), ...sessions];
       workspaces = await historyStore.listWorkspaces();
     }
     const sessionTree = await loadSessionTree(workspaces);
@@ -2582,11 +2657,13 @@ async function initHistoryFromDisk(): Promise<void> {
       ? await historyStore.getSession(workspace.id, active.id)
       : null;
     const currentState = useStore.getState();
+    const activeRecordIsSimpleChat =
+      activeRecord?.workflow?.meta?.simple === true;
     const workflow =
-      activeRecord?.isWorkflow && activeRecord.workflow
+      activeRecordIsSimpleChat && activeRecord?.workflow
         ? restoreWorkflowRunSnapshot(activeRecord.workflow, activeRecord.meta)
         : chatWorkflow(activeRecord?.title, currentState.locale);
-    const runProgress = activeRecord?.isWorkflow
+    const runProgress = activeRecordIsSimpleChat
       ? runProgressFromSnapshot(workflow, workflow.meta.run ?? null)
       : emptyRunProgress();
     const canvasViewport = canvasViewportForSession(
@@ -2622,7 +2699,7 @@ async function initHistoryFromDisk(): Promise<void> {
         composer: composerPatch.composer,
         composerBySession: composerPatch.composerBySession,
         ...runProgress,
-        canvasViewport: activeRecord?.isWorkflow ? canvasViewport : null,
+        canvasViewport: activeRecordIsSimpleChat ? canvasViewport : null,
         mode: 'design',
         ...composerDraftPatchForSession(s, sessionKey),
       };
@@ -2745,18 +2822,10 @@ const seedLocale = loadLocale();
 const seedPromptAutoTranslate = loadPromptAutoTranslate();
 const seedAppearance = loadAppearance();
 
-// Seed the graph from the last autosaved workflow if present, otherwise start
-// from a fresh default blueprint (start → agent → end). We deliberately do NOT
-// seed the demo sample here: that caused "new workflow" to flicker back to the
-// review-changes sample whenever the store module re-initialised (e.g. on HMR).
-// Cold-start seed: prefer the last local workflow, but never boot straight into
-// a "simple workflow" (chat) surface — the default view is the normal blueprint
-// editor. A simple workflow is only entered by creating one or opening its
-// session from history.
-const localSeed = loadLocalWorkflow();
+// Cold-start directly into the plain chat surface. Hidden workflow snapshots
+// remain on disk, but they are no longer restored into the user-facing UI.
 const seedWorkflow = migrateWorkflowGateway(
-  (localSeed && localSeed.meta?.simple !== true ? localSeed : null) ??
-    defaultBlueprint(undefined, seedLocale),
+  simpleBlueprint(undefined, seedLocale),
   defaultComposer.model,
 );
 const seedWorkflowState = restoreWorkflowRunSnapshot(seedWorkflow);
@@ -2987,10 +3056,10 @@ export const useStore = create<StoreState>((set) => ({
   },
 
   setGlobalRunSelection: (selection) => {
-    clearActiveGatewaySelection();
     set((state) => {
       if (isWorkflowReadOnly(state)) return state;
       const normalized = normalizeGatewaySelection(selection);
+      setActiveGatewaySelection(normalized);
       const workflow = workflowWithoutRunSnapshot(
         withSessionGatewayDefaults(state.workflow, normalized),
       );
@@ -3003,7 +3072,7 @@ export const useStore = create<StoreState>((set) => ({
         state.composerBySession,
         snapshot,
       );
-      saveComposer({
+      saveComposerSoon({
         composer: state.composer,
         composerBySession,
         workspaceHistory: state.workspaceHistory,
@@ -3031,7 +3100,7 @@ export const useStore = create<StoreState>((set) => ({
         state.composerBySession,
         snapshot,
       );
-      saveComposer({
+      saveComposerSoon({
         composer: state.composer,
         composerBySession,
         workspaceHistory: state.workspaceHistory,
@@ -3067,6 +3136,11 @@ export const useStore = create<StoreState>((set) => ({
   // Load a minimal single-node starter graph (one agent, no sentinels).
   newSimpleWorkflow: () =>
     void createNewWorkflowSession(simpleBlueprint),
+
+  // Load the captain-loop starter graph (目标冻结 → 队长拆单 → 并行 worker →
+  // 验收门 → 汇总) for complex, decomposable, high-stakes long tasks.
+  newCaptainWorkflow: () =>
+    void createNewWorkflowSession(captainBlueprint),
 
   newSession: () => {
     void createNewChatSession();
@@ -3220,6 +3294,10 @@ export const useStore = create<StoreState>((set) => ({
         pushAssistant(
           '简单模式需要可用的模型后端：请在桌面版配置本地 CLI，或切到 Claude Code 并配置 API key 后再试。',
         );
+        syncAndPersistSessionRunStatus(
+          { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
+          'error',
+        );
         removeAiEditChannel(ch);
         return;
       }
@@ -3362,7 +3440,9 @@ export const useStore = create<StoreState>((set) => ({
         // Free-channel AI edits route through the built-in local proxy; ensure
         // it is up (latest keys/models) before resolving so the cached port is
         // current. No-op on web.
-        if (isFreeChannelSelection(gatewaySelection)) await ensureFreeProxy();
+        if (isFreeChannelSelection(gatewaySelection)) {
+          await ensureFreeProxy({ strict: true });
+        }
         return resolveCliGatewayRoute(gatewaySelection);
       })();
       return aiCliRoutePromise;
@@ -3378,6 +3458,8 @@ export const useStore = create<StoreState>((set) => ({
         cwd?: string;
         runId?: string;
         onProgress?: (chunk: string) => void;
+        sessionId?: string;
+        resume?: boolean;
       },
     ): Promise<string> => {
       const policy = timeoutPolicyForSelection(cli.selection, prompt);
@@ -3793,12 +3875,16 @@ export const useStore = create<StoreState>((set) => ({
         // prior conversation (text messages only, skipping system notices) into
         // the prompt as a transcript, then the current question. Keeps a bounded
         // tail so very long chats don't blow the context window.
-        const prior = state.messages
+        const priorMessages = state.messages
           .filter((m) => m.role !== 'system' && m.text.trim())
-          .slice(-SIMPLE_CHAT_HISTORY_TURNS)
-          .map((m) => `${m.role === 'user' ? '用户' : '助手'}：${m.text.trim()}`);
+        const chatTranscript = (messages: Message[]): string =>
+          messages
+            .slice(-SIMPLE_CHAT_HISTORY_TURNS)
+            .map((m) => `${m.role === 'user' ? '用户' : '助手'}：${m.text.trim()}`)
+            .join('\n\n');
+        const prior = chatTranscript(priorMessages);
         const chatPrompt = prior.length
-          ? `以下是之前的对话，请结合上下文继续回答最后一个「用户」消息：\n\n${prior.join('\n\n')}\n\n用户：${trimmed}`
+          ? `以下是之前的对话，请结合上下文继续回答最后一个「用户」消息：\n\n${prior}\n\n用户：${trimmed}`
           : trimmed;
         // Respect the permission the user picked in the composer (read-only /
         // ask-each-time / full), matching the other run paths instead of
@@ -3809,18 +3895,37 @@ export const useStore = create<StoreState>((set) => ({
           let answer = '';
           if (useCli) {
             const cli = await resolveAiCliRoute();
+            const nativeSession = chatNativeSessionFor(ch, cli);
+            const nativeResume = nativeSession?.started === true;
+            const coveredMessageCount = Math.min(
+              nativeSession?.coveredMessageCount ?? 0,
+              priorMessages.length,
+            );
+            const unseenTranscript =
+              nativeSession && nativeResume
+                ? chatTranscript(priorMessages.slice(coveredMessageCount))
+                : '';
+            const promptBody =
+              nativeSession && nativeResume
+                ? unseenTranscript
+                  ? `以下是你这个模型会话尚未看到的中间对话，请先吸收上下文，再回答最后一个「用户」消息：\n\n${unseenTranscript}\n\n用户：${trimmed}`
+                  : trimmed
+                : chatPrompt;
             let live = '';
-            answer = await aiEditViaCliWithSpeed(`${chatSystem}\n\n${chatPrompt}`, cli, {
+            answer = await aiEditViaCliWithSpeed(`${chatSystem}\n\n${promptBody}`, cli, {
               permission: chatPermission,
               model: cli.model,
               cliCommand: cli.cliCommand,
               env: cli.env,
               cwd: state.composer.workspace || undefined,
+              sessionId: nativeSession?.sessionId,
+              resume: nativeSession ? nativeResume : undefined,
               onProgress: (chunk) => {
                 live += chunk;
                 setActive(withAiTiming(live.trim() ? live : '⟳ 生成中…'));
               },
             });
+            if (nativeSession) nativeSession.started = true;
             if (!answer.trim() && live.trim()) answer = live;
           } else {
             let full = '';
@@ -3835,13 +3940,33 @@ export const useStore = create<StoreState>((set) => ({
             answer = full || returned;
           }
           setActive(withAiTiming(answer.trim() || '（模型没有返回内容）'), true);
+          if (useCli) {
+            const cli = await resolveAiCliRoute();
+            const nativeSession = chatNativeSessionFor(ch, cli);
+            if (nativeSession) {
+              nativeSession.started = true;
+              nativeSession.coveredMessageCount = ch.messages.filter(
+                (m) => m.role !== 'system' && m.text.trim(),
+              ).length;
+            }
+          }
           // Record the input on the node (keeps the graph a single node).
           commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [trimmed]));
+          syncAndPersistSessionRunStatus(
+            { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
+            'success',
+          );
         } catch (err) {
           const msg = (err as Error)?.message ?? String(err);
           if (activeId) setActive(withAiTiming(`✗ 调用失败: ${msg}`), true);
           else pushAssistant(withAiTiming(`✗ 调用失败: ${msg}`));
           persistAiMessages();
+          if (aiEditActive(ch)) {
+            syncAndPersistSessionRunStatus(
+              { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
+              'error',
+            );
+          }
         } finally {
           removeAiEditChannel(ch);
         }
@@ -4092,7 +4217,7 @@ export const useStore = create<StoreState>((set) => ({
         state.composerBySession,
         snapshot,
       );
-      saveComposer({
+      saveComposerSoon({
         composer,
         composerBySession,
         workspaceHistory: state.workspaceHistory,
@@ -4165,7 +4290,7 @@ export const useStore = create<StoreState>((set) => ({
         state.composerBySession,
         snapshot,
       );
-      saveComposer({ composer, composerBySession, workspaceHistory });
+      saveComposerSoon({ composer, composerBySession, workspaceHistory });
       return { composer, composerBySession, workspaceHistory };
     });
     void activateWorkspacePath(trimmed);
@@ -4755,6 +4880,47 @@ interface AiEditChannel {
 const activeAiEdits = new Map<string, AiEditChannel>();
 const aiEditSnapshots = new Map<string, AiEditChannel>();
 
+interface ChatNativeSession {
+  sessionId: string;
+  started: boolean;
+  coveredMessageCount: number;
+}
+
+const chatNativeSessions = new Map<string, ChatNativeSession>();
+
+function chatNativeSessionKey(
+  ch: Pick<AiEditChannel, 'sessionKey' | 'sessionId'>,
+  route: Awaited<ReturnType<typeof resolveCliGatewayRoute>>,
+): string {
+  return [
+    ch.sessionKey,
+    route.adapter,
+    route.providerId ?? '',
+    route.channelId ?? '',
+    route.model ?? route.modelClass ?? '',
+    route.env?.ANTHROPIC_BASE_URL ?? '',
+    route.env?.ANTHROPIC_MODEL ?? '',
+  ].join('::');
+}
+
+function chatNativeSessionFor(
+  ch: Pick<AiEditChannel, 'sessionKey' | 'sessionId'>,
+  route: Awaited<ReturnType<typeof resolveCliGatewayRoute>>,
+): ChatNativeSession | null {
+  if (!ch.sessionId) return null;
+  if (route.transport !== 'cli' || route.adapter !== 'claude-code') return null;
+  const key = chatNativeSessionKey(ch, route);
+  const existing = chatNativeSessions.get(key);
+  if (existing) return existing;
+  const created = {
+    sessionId: newSessionId(),
+    started: false,
+    coveredMessageCount: 0,
+  };
+  chatNativeSessions.set(key, created);
+  return created;
+}
+
 function runKey(workspaceId: string | null, sessionId: string | null): string {
   return workflowSessionKeyId({ workspaceId, sessionId });
 }
@@ -4796,6 +4962,31 @@ function getAiEditSnapshot(
   if (exact) return exact;
   const snapshots = getAiEditSnapshotsForSession(workspaceId, sessionId);
   return snapshots[snapshots.length - 1] ?? null;
+}
+
+/**
+ * Best message-source for restoring the AI-return view when switching back into
+ * a session. Prefers the LIVE channel (so we get the freshest in-flight text —
+ * snapshots can lag a single chunk behind), then any chat channel for the
+ * session (chat channels are deliberately excluded from getAiEditChannel because
+ * they don't lock the workflow), and finally the snapshot map. Returning the
+ * snapshot last means a session whose stream finished a while ago (channel
+ * removed but snapshot retained) still restores its final messages.
+ */
+function getAiEditViewSource(
+  workspaceId: string | null,
+  sessionId: string | null,
+): AiEditChannel | null {
+  const channels = getAiEditChannelsForSession(workspaceId, sessionId);
+  if (channels.length > 0) {
+    // Prefer blueprint-edit (non-chat); fall back to the most recently added chat
+    // channel, which carries the live streaming bubble for a simple-workflow turn.
+    return (
+      channels.find((ch) => !ch.chat) ??
+      channels[channels.length - 1]
+    );
+  }
+  return getAiEditSnapshot(workspaceId, sessionId);
 }
 
 function channelMatchesSession(
@@ -4957,6 +5148,10 @@ function stopActiveChat(): void {
     stoppedMsg,
   ];
   aiEditCommitMessages(ch, true);
+  syncAndPersistSessionRunStatus(
+    { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
+    'interrupted',
+  );
   for (const item of channels) {
     removeAiEditChannel(item);
   }
@@ -6019,7 +6214,7 @@ async function executeViaCliInterpreter(
   // up (and pointed at the latest keys/models) before the gateway route is
   // resolved, so the freshly-cached port is used. No-op on web.
   if (isFreeChannelSelection(launchSelection)) {
-    await ensureFreeProxy();
+    await ensureFreeProxy({ strict: true });
     if (!stillRunning(ch)) return;
   }
   if (!resolveDirectGatewayRoute(launchSelection)) {

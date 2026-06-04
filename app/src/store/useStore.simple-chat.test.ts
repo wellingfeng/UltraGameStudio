@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defaultBlueprint, simpleBlueprint } from '@/core/defaultBlueprint';
 import type { IRGraph } from '@/core/ir';
+import { refreshCliRuntime } from '@/lib/cliConfig';
+import { workflowDefaultGatewaySelection } from '@/lib/modelGateway/resolver';
 
 const gatewayMocks = vi.hoisted(() => ({
   completeGatewayText: vi.fn(),
@@ -11,6 +13,7 @@ const gatewayMocks = vi.hoisted(() => ({
 const tauriMocks = vi.hoisted(() => ({
   aiEditViaCli: vi.fn(),
   cancelAiCli: vi.fn(),
+  freeProxyEnsure: vi.fn(),
   isTauri: vi.fn(() => false),
   tauriAvailable: vi.fn(() => false),
 }));
@@ -35,6 +38,7 @@ vi.mock('@/lib/tauri', async () => {
     ...actual,
     aiEditViaCli: tauriMocks.aiEditViaCli,
     cancelAiCli: tauriMocks.cancelAiCli,
+    freeProxyEnsure: tauriMocks.freeProxyEnsure,
     isTauri: tauriMocks.isTauri,
     tauriAvailable: tauriMocks.tauriAvailable,
   };
@@ -84,6 +88,24 @@ function mockDirectRoute(): void {
   });
 }
 
+async function selectKnownCli(
+  adapter: 'claude-code' | 'codex' | 'gemini',
+): Promise<void> {
+  await historyStore.patchConfig({
+    cli: {
+      schemaVersion: 1,
+      selected: {
+        kind: 'known',
+        adapter,
+        command: adapter === 'claude-code' ? 'claude' : adapter,
+        selectedAt: '2026-06-04T00:00:00.000Z',
+      },
+      customPaths: [],
+    },
+  });
+  await refreshCliRuntime();
+}
+
 async function waitFor(
   condition: () => boolean | Promise<boolean>,
   description: string,
@@ -101,18 +123,21 @@ async function waitFor(
   }
 }
 
-afterEach(() => {
+afterEach(async () => {
   gatewayMocks.completeGatewayText.mockReset();
   gatewayMocks.resolveDirectGatewayRoute.mockReset();
   gatewayMocks.resolveCliGatewayRoute.mockReset();
   tauriMocks.aiEditViaCli.mockReset();
   tauriMocks.cancelAiCli.mockReset();
+  tauriMocks.freeProxyEnsure.mockReset();
   tauriMocks.isTauri.mockReset();
   tauriMocks.tauriAvailable.mockReset();
+  tauriMocks.freeProxyEnsure.mockResolvedValue({ port: 8765, token: 'test-token' });
   tauriMocks.isTauri.mockReturnValue(false);
   tauriMocks.tauriAvailable.mockReturnValue(false);
   resetStore(defaultBlueprint('Current workflow'));
   window.localStorage.clear();
+  await refreshCliRuntime();
 });
 
 describe('simple-workflow chat mode', () => {
@@ -147,6 +172,67 @@ describe('simple-workflow chat mode', () => {
     expect(record?.title).toBe('未命名会话');
     expect(record?.isWorkflow).toBe(false);
     expect(record?.workflow).toBeUndefined();
+  });
+
+  it('uses the General CLI selection as the default gateway for new simple sessions', async () => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    await selectKnownCli('codex');
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    resetStore(defaultBlueprint('Current workflow'));
+    useStore.setState({
+      historyReady: true,
+      activeWorkspaceId: workspace.id,
+      workspaces: [workspace],
+      sessions: [],
+      sessionTree: { [workspace.id]: [] },
+      locale: 'zh-CN',
+    });
+
+    useStore.getState().newSession();
+
+    await waitFor(
+      () => useStore.getState().workflow.meta.simple === true,
+      'plain chat mode activation',
+    );
+    expect(workflowDefaultGatewaySelection(useStore.getState().workflow)).toEqual({
+      adapter: 'codex',
+      modelClass: 'default',
+      systemDefault: true,
+    });
+
+    const chatSessionId = useStore.getState().activeSessionId;
+    useStore.getState().newSimpleWorkflow();
+
+    await waitFor(
+      async () => {
+        const state = useStore.getState();
+        if (!state.activeSessionId || state.activeSessionId === chatSessionId) {
+          return false;
+        }
+        const record = await historyStore.getSession(
+          workspace.id,
+          state.activeSessionId,
+        );
+        return record?.workflow?.meta.simple === true;
+      },
+      'simple workflow session creation',
+    );
+    const simpleSessionId = useStore.getState().activeSessionId;
+    const record = simpleSessionId
+      ? await historyStore.getSession(workspace.id, simpleSessionId)
+      : null;
+
+    expect(workflowDefaultGatewaySelection(useStore.getState().workflow)).toEqual({
+      adapter: 'codex',
+      modelClass: 'default',
+      systemDefault: true,
+    });
+    expect(record?.workflow?.meta.gateway?.defaults).toEqual({
+      adapter: 'codex',
+      modelClass: 'default',
+      systemDefault: true,
+    });
   });
 
   it('switches the active history workspace when the composer workspace changes after a new session', async () => {
@@ -351,8 +437,65 @@ describe('simple-workflow chat mode', () => {
     expect(requests[0].userContent).not.toContain('IRGraph');
     expect(state.workflow.meta.simple).toBe(true);
     expect(session?.isWorkflow).toBe(false);
+    expect(session?.runStatus).toBe('success');
     expect(record?.isWorkflow).toBe(false);
     expect(record?.workflow).toBeUndefined();
+    expect(record?.meta?.runStatus).toBe('success');
+  });
+
+  it('marks a plain chat history entry failed when the model call fails', async () => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    resetStore(defaultBlueprint('Current workflow'));
+    useStore.setState({
+      historyReady: true,
+      activeWorkspaceId: workspace.id,
+      workspaces: [workspace],
+      sessions: [],
+      sessionTree: { [workspace.id]: [] },
+      locale: 'zh-CN',
+    });
+
+    useStore.getState().newSession();
+    await waitFor(
+      () => useStore.getState().workflow.meta.simple === true,
+      'plain chat mode activation',
+    );
+
+    const sessionId = useStore.getState().activeSessionId;
+    expect(sessionId).toBeTruthy();
+    mockDirectRoute();
+    gatewayMocks.completeGatewayText.mockRejectedValue(new Error('boom'));
+
+    useStore.getState().sendPrompt('这次会失败吗？');
+
+    await waitFor(
+      () =>
+        !useStore.getState().aiStreaming &&
+        useStore
+          .getState()
+          .messages.some((m) => m.role === 'assistant' && m.text.includes('调用失败')),
+      'plain chat failure',
+    );
+    await waitFor(async () => {
+      if (!sessionId) return false;
+      const record = await historyStore.getSession(workspace.id, sessionId);
+      return record?.meta?.runStatus === 'error';
+    }, 'plain chat failed status persistence');
+
+    const session = useStore
+      .getState()
+      .sessions.find((item) => item.id === sessionId);
+    const record = sessionId
+      ? await historyStore.getSession(workspace.id, sessionId)
+      : null;
+
+    expect(session?.isWorkflow).toBe(false);
+    expect(session?.runStatus).toBe('error');
+    expect(record?.isWorkflow).toBe(false);
+    expect(record?.workflow).toBeUndefined();
+    expect(record?.meta?.runStatus).toBe('error');
   });
 
   it('creates history entries with an untitled session placeholder', async () => {
@@ -470,6 +613,115 @@ describe('simple-workflow chat mode', () => {
       '中国的首都是哪里？',
       '那它有多少人口？',
     ]);
+  });
+
+  it('reuses a native Claude CLI chat session for the same model and replays history after switching models', async () => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({
+      workspaceId: workspace.id,
+      isWorkflow: false,
+      messages: [],
+      title: 'Chat',
+    });
+    resetStore(simpleBlueprint('Chat'));
+    const session = {
+      id: record.id,
+      workspaceId: workspace.id,
+      title: record.title,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      isWorkflow: false,
+      messageCount: 0,
+    };
+    useStore.setState({
+      historyReady: true,
+      activeWorkspaceId: workspace.id,
+      activeSessionId: record.id,
+      workspaces: [workspace],
+      sessions: [session],
+      sessionTree: { [workspace.id]: [session] },
+      locale: 'zh-CN',
+    });
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockImplementation(async (selection) => ({
+      selection,
+      adapter: 'claude-code',
+      modelClass: selection.modelClass,
+      model: selection.modelClass,
+      transport: 'cli',
+      mode: 'cli',
+      label: 'Claude Code',
+      source: 'global',
+      cliCommand: 'claude',
+    }));
+    const calls: Array<{ prompt: string; opts: { sessionId?: string; resume?: boolean; model?: string } }> = [];
+    tauriMocks.aiEditViaCli.mockImplementation(async (prompt, _adapter, opts) => {
+      calls.push({ prompt, opts });
+      if (calls.length === 1) return '北京是中国的首都。';
+      if (calls.length === 2) return '它大约有 2000 多万人口。';
+      if (calls.length === 3) return '切换模型后的回答。';
+      return '切回原模型后的回答。';
+    });
+
+    useStore.getState().sendPrompt('中国的首都是哪里？');
+    await waitFor(
+      () => !useStore.getState().aiStreaming && calls.length === 1,
+      'first CLI chat call',
+    );
+
+    useStore.getState().sendPrompt('那它有多少人口？');
+    await waitFor(
+      () => !useStore.getState().aiStreaming && calls.length === 2,
+      'second CLI chat call',
+    );
+
+    useStore.getState().setGlobalRunSelection({
+      adapter: 'claude-code',
+      modelClass: 'opus',
+    });
+    useStore.getState().sendPrompt('换个模型后还能接上文吗？');
+    await waitFor(
+      () => !useStore.getState().aiStreaming && calls.length === 3,
+      'model-switched CLI chat call',
+    );
+
+    expect(calls[0].opts.sessionId).toEqual(expect.any(String));
+    expect(calls[0].opts.resume).toBe(false);
+    expect(calls[1].opts.sessionId).toBe(calls[0].opts.sessionId);
+    expect(calls[1].opts.resume).toBe(true);
+    expect(calls[1].prompt).not.toContain('之前的对话');
+    expect(calls[1].prompt).toContain('那它有多少人口？');
+
+    expect(calls[2].opts.model).toBe('opus');
+    expect(calls[2].opts.sessionId).toEqual(expect.any(String));
+    expect(calls[2].opts.sessionId).not.toBe(calls[0].opts.sessionId);
+    expect(calls[2].opts.resume).toBe(false);
+    expect(calls[2].prompt).toContain('之前的对话');
+    expect(calls[2].prompt).toContain('中国的首都是哪里？');
+    expect(calls[2].prompt).toContain('北京是中国的首都。');
+    expect(calls[2].prompt).toContain('换个模型后还能接上文吗？');
+
+    useStore.getState().setGlobalRunSelection({
+      adapter: 'claude-code',
+      modelClass: 'sonnet',
+    });
+    useStore.getState().sendPrompt('再切回原模型呢？');
+    await waitFor(
+      () => !useStore.getState().aiStreaming && calls.length === 4,
+      'switched-back CLI chat call',
+    );
+
+    expect(calls[3].opts.model).toBe('sonnet');
+    expect(calls[3].opts.sessionId).toBe(calls[0].opts.sessionId);
+    expect(calls[3].opts.resume).toBe(true);
+    expect(calls[3].prompt).toContain('尚未看到的中间对话');
+    expect(calls[3].prompt).toContain('换个模型后还能接上文吗？');
+    expect(calls[3].prompt).toContain('切换模型后的回答。');
+    expect(calls[3].prompt).toContain('再切回原模型呢？');
   });
 
   it('does NOT enter chat mode for a normal workflow (blueprint generation path)', async () => {
@@ -691,6 +943,214 @@ describe('simple-workflow chat mode', () => {
           .getState()
           .messages.some((m) => m.role === 'assistant' && m.text.includes('最终回答。')),
       'CLI final reply',
+    );
+  });
+
+  it('starts the free proxy before resolving a free-channel CLI chat route', async () => {
+    const workflow = simpleBlueprint('Simple chat');
+    workflow.meta.gateway = {
+      defaults: {
+        adapter: 'claude-code',
+        modelClass: 'sonnet',
+        providerId: 'freecc:kilo',
+        channelId: 'default',
+      },
+    };
+    resetStore(workflow);
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    const order: string[] = [];
+    tauriMocks.freeProxyEnsure.mockImplementation(async () => {
+      order.push('ensure');
+      return { port: 8765, token: 'test-token' };
+    });
+    gatewayMocks.resolveCliGatewayRoute.mockImplementation(async () => {
+      order.push('resolve');
+      return {
+        selection: {
+          adapter: 'claude-code',
+          modelClass: 'sonnet',
+          providerId: 'freecc:kilo',
+          channelId: 'default',
+        },
+        adapter: 'claude-code',
+        modelClass: 'sonnet',
+        model: 'poolside/laguna-xs.2:free',
+        transport: 'cli',
+        mode: 'cli',
+        label: 'Free · Kilo Gateway',
+        source: 'global',
+        cliCommand: 'claude',
+        env: {
+          ANTHROPIC_API_KEY: 'test-token',
+          ANTHROPIC_BASE_URL: 'http://127.0.0.1:8765/ch/kilo',
+          ANTHROPIC_MODEL: 'poolside/laguna-xs.2:free',
+        },
+      };
+    });
+    tauriMocks.aiEditViaCli.mockResolvedValue('Kilo answer');
+
+    useStore.getState().sendPrompt('测试免费渠道');
+
+    await waitFor(
+      () => tauriMocks.aiEditViaCli.mock.calls.length === 1,
+      'free-channel chat call',
+    );
+    expect(order).toEqual(['ensure', 'resolve']);
+    expect(tauriMocks.freeProxyEnsure).toHaveBeenCalled();
+    expect(tauriMocks.aiEditViaCli.mock.calls[0]?.[2]?.env).toMatchObject({
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:8765/ch/kilo',
+      ANTHROPIC_MODEL: 'poolside/laguna-xs.2:free',
+    });
+  });
+
+  it('surfaces free proxy startup failures before invoking the CLI', async () => {
+    const workflow = simpleBlueprint('Simple chat');
+    workflow.meta.gateway = {
+      defaults: {
+        adapter: 'claude-code',
+        modelClass: 'sonnet',
+        providerId: 'freecc:kilo',
+        channelId: 'default',
+      },
+    };
+    resetStore(workflow);
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    tauriMocks.freeProxyEnsure.mockRejectedValue(new Error('bind failed'));
+
+    useStore.getState().sendPrompt('测试免费渠道失败');
+
+    await waitFor(
+      () =>
+        useStore
+          .getState()
+          .messages.some(
+            (m) =>
+              m.role === 'assistant' &&
+              m.text.includes('free proxy failed to start: bind failed'),
+          ),
+      'free proxy startup error',
+    );
+    expect(gatewayMocks.resolveCliGatewayRoute).not.toHaveBeenCalled();
+    expect(tauriMocks.aiEditViaCli).not.toHaveBeenCalled();
+  });
+
+  it('restores the live assistant bubble when switching back to a session mid-stream', async () => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    resetStore(simpleBlueprint('Simple chat'));
+    // Create two simple-workflow sessions in history so we can flip between
+    // them while a stream is in flight on the first one.
+    const sessionA = await historyStore.createSession({
+      workspaceId: workspace.id,
+      isWorkflow: true,
+      workflow: simpleBlueprint('Chat A'),
+      title: 'Chat A',
+    });
+    const sessionB = await historyStore.createSession({
+      workspaceId: workspace.id,
+      isWorkflow: true,
+      workflow: simpleBlueprint('Chat B'),
+      title: 'Chat B',
+    });
+    const sessionTree = {
+      [workspace.id]: [
+        {
+          id: sessionA.id,
+          workspaceId: workspace.id,
+          title: sessionA.title,
+          createdAt: sessionA.createdAt,
+          updatedAt: sessionA.updatedAt,
+          isWorkflow: true,
+          messageCount: 0,
+          simple: true,
+        },
+        {
+          id: sessionB.id,
+          workspaceId: workspace.id,
+          title: sessionB.title,
+          createdAt: sessionB.createdAt,
+          updatedAt: sessionB.updatedAt,
+          isWorkflow: true,
+          messageCount: 0,
+          simple: true,
+        },
+      ],
+    };
+    useStore.setState({
+      historyReady: true,
+      activeWorkspaceId: workspace.id,
+      activeSessionId: sessionA.id,
+      workspaces: [workspace],
+      sessions: sessionTree[workspace.id],
+      sessionTree,
+      workflow: simpleBlueprint('Chat A'),
+      locale: 'zh-CN',
+    });
+
+    mockDirectRoute();
+    let finish!: (value: string) => void;
+    let progressEmit!: (chunk: string) => void;
+    gatewayMocks.completeGatewayText.mockImplementation(async (request) => {
+      progressEmit = (chunk: string) => request.onDelta?.(chunk);
+      return await new Promise<string>((resolve) => {
+        finish = resolve;
+      });
+    });
+
+    useStore.getState().sendPrompt('一个很长的问题');
+    await waitFor(
+      () => typeof progressEmit === 'function',
+      'stream to start',
+    );
+
+    // Emit some streaming chunks while the user is viewing sessionA.
+    progressEmit('partial-one. ');
+    await waitFor(
+      () =>
+        useStore
+          .getState()
+          .messages.some(
+            (m) => m.role === 'assistant' && m.text.includes('partial-one'),
+          ),
+      'first chunk to land in the view',
+    );
+
+    // Now switch AWAY to sessionB, simulating the user clicking another chat.
+    useStore.getState().selectSession(sessionB.id, workspace.id);
+    await waitFor(
+      () => useStore.getState().activeSessionId === sessionB.id,
+      'session B to become active',
+    );
+
+    // The stream continues in the background and produces more text the user
+    // is not currently seeing.
+    progressEmit('partial-two-while-away. ');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Switch BACK to sessionA. This is the bug surface: the assistant bubble
+    // should still be visible with the streamed text, not blank.
+    useStore.getState().selectSession(sessionA.id, workspace.id);
+    await waitFor(
+      () => useStore.getState().activeSessionId === sessionA.id,
+      'session A to become active again',
+    );
+
+    const assistant = useStore
+      .getState()
+      .messages.find((m) => m.role === 'assistant');
+    expect(assistant?.text ?? '').toContain('partial-one');
+    expect(assistant?.text ?? '').toContain('partial-two-while-away');
+
+    // Finish cleanly so the test doesn't leak the pending stream.
+    finish('done.');
+    await waitFor(
+      () => !useStore.getState().aiStreaming,
+      'stream to settle',
     );
   });
 });

@@ -47,7 +47,7 @@ export default function Select({
   }, [open]);
 
   return (
-    <div ref={rootRef} className={cn('relative', className)}>
+    <div ref={rootRef} className={cn('relative', open && 'z-50', className)}>
       <button
         type="button"
         title={title}
@@ -73,7 +73,7 @@ export default function Select({
 
       {open && !disabled && (
         <ul
-          className="absolute bottom-full left-0 z-10 mb-1 min-w-full overflow-hidden rounded-md border border-border bg-panel py-1 shadow-lg"
+          className="absolute bottom-full left-0 z-50 mb-1 max-h-96 min-w-full overflow-y-auto rounded-md border border-border bg-panel py-1 shadow-lg"
           role="listbox"
         >
           {options.map((opt, index) => {

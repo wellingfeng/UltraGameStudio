@@ -8,6 +8,10 @@
   "permissions": [
     "core:default",
     "dialog:allow-open",
+    "dialog:allow-save",
+    "fs:allow-read-text-file",
+    "fs:allow-write-text-file",
+    "fs:scope-home-recursive",
     "opener:allow-open-path",
     "opener:allow-reveal-item-in-dir"
   ]

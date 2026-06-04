@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  ACTIVE_PROVIDER_BY_KIND_STORAGE,
   ACTIVE_PROVIDER_STORAGE,
   PROVIDERS_STORAGE,
   addProvider,
+  exportDefaultChannelsConfig,
   getActiveProvider,
   getActiveProviderId,
   getProviderRuntimeInfo,
+  importDefaultChannelsConfig,
   importProviders,
   listProviders,
   readApiKey,
@@ -303,5 +306,69 @@ describe('apiConfig provider compatibility', () => {
 
     expect(readApiKey()).toBe('');
     expect(readBaseUrl()).toBe('');
+  });
+
+  it('exports and imports default channel JSON with active ids', () => {
+    seedProviders([
+      {
+        id: 'p_anthropic',
+        kind: 'anthropic',
+        name: 'Claude Relay',
+        apiKey: 'sk-claude',
+        baseUrl: 'https://relay.example/v1',
+      },
+      {
+        id: 'p_codex',
+        kind: 'codex',
+        transport: 'cli',
+        name: 'Codex CLI',
+        apiKey: '',
+        baseUrl: '',
+      },
+    ]);
+    window.localStorage.setItem(
+      ACTIVE_PROVIDER_BY_KIND_STORAGE,
+      JSON.stringify({ anthropic: 'p_anthropic', codex: 'p_codex' }),
+    );
+
+    const exported = exportDefaultChannelsConfig();
+    window.localStorage.clear();
+    const result = importDefaultChannelsConfig(exported);
+
+    expect(result).toEqual({ imported: 2, updated: 0, skipped: 0 });
+    expect(listProviders()).toHaveLength(2);
+    expect(getActiveProviderId('anthropic')).toBe('p_anthropic');
+    expect(getActiveProviderId('codex')).toBe('p_codex');
+  });
+
+  it('updates matching providers when importing default channel JSON', () => {
+    seedProviders(
+      [
+        {
+          id: 'p_1',
+          kind: 'anthropic',
+          name: 'Claude',
+          apiKey: 'old-key',
+          baseUrl: '',
+        },
+      ],
+      'p_1',
+    );
+
+    const result = importDefaultChannelsConfig({
+      providers: [
+        {
+          id: 'p_1',
+          kind: 'anthropic',
+          name: 'Claude',
+          apiKey: 'new-key',
+          baseUrl: '',
+        },
+      ],
+      activeProviderIds: { anthropic: 'p_1' },
+    });
+
+    expect(result).toEqual({ imported: 0, updated: 1, skipped: 0 });
+    expect(readApiKey()).toBe('new-key');
   });
 });

@@ -1,24 +1,24 @@
-# Claude Code 有了 Dynamic Workflows，那其他大模型怎么办？有开源版的替代-FreeUltraCode
+# Claude Code workflows 很好，但贵模型额度不够用怎么办？
 
-## 最近一直在看 Claude Code 新推出的 dynamic workflows，相比于MCP、Skill、Hooks等很少有人讨论这个新功能。(后面我们统一叫workflows)
+## Claude Code 新推出的 dynamic workflows，比 MCP、Skill、Hooks 低调很多。(后面统一叫 workflows)
 
-复杂的任务，很多人之前喜欢先做调研html，然后再转成技术方案的html，最后再交给AI来开发，但是很多时候发现结果并不好。最主要的原因是html是给人看的文本信息，它不是Script，缺少结构化信息，顺序一致性、任务并行程度、边界是否清晰、任务如何划分、任务之间如何交换信息 等都是不明确，更多依赖AI去猜测。
+复杂任务里，很多人会先做调研 html，再转成技术方案 html，最后交给模型实现。但结果经常不稳定。主要原因是 html 是给人看的文本，不是 script。顺序一致性、任务并行程度、边界是否清晰、任务怎么划分、任务之间怎么交换信息，这些都不明确，模型只能猜。
 
-而workflows本身就是Script，它能彻底的解决这个问题。
+workflows 本身就是 script，这类结构问题可以直接放进流程里处理。
 
-另外workflows还有多角度探索、对抗性验证、方案投票机制，这也就是为什么它准确率更高的原因，靠规模取胜，同一个问题让5个agents同时去跑，然后再由一个agent汇总起来，确实更准确了，token也花的的飞起。
+workflows 还能做多角度探索、对抗性验证和方案投票。同一个问题让 5 个 agents 同时跑，再由另一个 agent 汇总，结果通常更稳，token 也烧得很快。
 
 既然这么具有通用性，它为什么要绑在某一个模型或某一个 CLI 上？
 
-顺着这个思路，我开发了 FreeUltraCode(更确切的说是AI开发的)。它把 Claude Code 这类 workflows 做成可视化画布，并尝试让同一份流程面向 Claude Code、Codex、Gemini，甚至更多本地或云端运行时。
+FreeUltraCode 做的是这件事：把 Claude Code 这类 workflows 做成可视化画布，再让同一份流程可以跑向 Claude Code、Codex、Gemini，以及更多本地或云端运行时。
 
-这次我不讲抽象概念，直接按截图走一遍。例子也很具体：让 FreeUltraCode支持多种界面风格，默认使用 Pencil，并且能在“设置 / 外观”里切换。
+下面按一个真实改动走：让 FreeUltraCode 支持多种界面风格，默认使用 Pencil，并且能在“设置 / 外观”里切换。
 
-在开发过程中，我尽量在FreeUltraCode中进行，让它能够自举。
+开发过程尽量放在 FreeUltraCode 里完成，顺便验证它能不能自举。
 
-以下过程使用CodeX来作为默认大模型用于开发。
+下面用 Codex 作为默认大模型。
 
-### 0. 先看最终界面
+### 0. 主界面
 
 <p align="center">
   <img src="images/0-标题使用.png" alt="FreeUltraCode 主界面" width="960">
@@ -206,7 +206,7 @@ fuc run review.js                          # 把脚本跑起来
 
 常用的几个开关：`--dry-run` 只预检不真跑（省 token）、`--resume` 从上次失败的节点接着跑、`--model` 指定模型、`--json` 输出机器可读结果方便接进流水线。
 
-一句话总结这套命令行的取舍：**界面负责"看得见、改得动"，命令行负责"跑得快、接得上"，但它们背后是同一份 workflow。**
+这套命令行的取舍很简单：**界面负责"看得见、改得动"，命令行负责"跑得快、接得上"，背后还是同一份 workflow。**
 
 QQ群：149523963
 

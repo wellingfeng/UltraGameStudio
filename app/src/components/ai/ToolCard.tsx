@@ -29,7 +29,7 @@ function Panel({ label, body }: { label: string; body: string }) {
       <div className="mb-0.5 font-mono text-[10px] uppercase tracking-wider text-fg-faint">
         {label}
       </div>
-      <pre className="ai-tool-panel max-h-64 overflow-auto rounded border border-border-soft bg-[var(--code-bg)] px-2 py-1.5 font-mono text-[11px] leading-relaxed text-fg-dim">
+      <pre className="ai-tool-panel max-h-64 overflow-auto rounded-sm border px-2 py-1.5 font-mono text-[11px] leading-relaxed text-fg-dim">
         {body}
       </pre>
     </div>
@@ -87,7 +87,9 @@ export default function ToolCard({
 
   return (
     <div
-      className="ai-tool-card my-1 rounded-md border border-border-soft bg-panel-2/40"
+      className="ai-tool-card my-0.5 rounded-[4px]"
+      data-open={open ? 'true' : 'false'}
+      data-status={event.status}
       style={depth ? { marginLeft: depth * 14 } : undefined}
     >
       <div className="flex items-center gap-1.5 px-2 py-1 font-mono text-[11px] leading-snug">
@@ -107,10 +109,10 @@ export default function ToolCard({
         ) : (
           <span className="w-3 shrink-0" />
         )}
-        <ToolIcon name={event.name} size={12} className="shrink-0 text-accent/70" />
-        <span className="shrink-0 font-medium text-accent-2">{event.name}</span>
+        <ToolIcon name={event.name} size={12} className="shrink-0 text-fg-faint" />
+        <span className="shrink-0 font-medium text-fg-dim">{event.name}</span>
         {collapsedSubject && (
-          <span className="min-w-0 flex-1 truncate text-fg-dim">
+          <span className="min-w-0 flex-1 truncate text-fg-faint">
             {renderSubject(collapsedSubject)}
           </span>
         )}
@@ -124,7 +126,7 @@ export default function ToolCard({
       </div>
 
       {open && hasBody && (
-        <div className="border-t border-border-soft px-2.5 py-1.5">
+        <div className="ai-tool-body px-2.5 py-1.5">
           {subjectCompacted && !argsBody && <Panel label="详情" body={subject} />}
           {argsBody && <Panel label="请求" body={argsBody} />}
           {event.result != null && event.result !== '' && (

@@ -1,7 +1,7 @@
 {
   "name": "freeultracode-app",
   "private": true,
-  "version": "0.2.4",
+  "version": "0.2.5",
   "type": "module",
   "bin": {
     "fuc": "./cli/dist/fuc.mjs"

@@ -93,6 +93,19 @@ export interface LocalModelRuntimeStatus {
   message?: string | null;
 }
 
+export interface RemoteModelListRequest {
+  urls: string[];
+  apiKey?: string;
+  transport: 'anthropic' | 'openai';
+}
+
+export interface RemoteModelListResult {
+  models: string[];
+  url: string;
+}
+
+const REMOTE_MODEL_FETCH_TIMEOUT_MS = 6000;
+
 /** Disposer returned by the event listeners. */
 export type UnlistenFn = () => void;
 
@@ -324,6 +337,99 @@ export async function localModelStatus(
   return invoke<LocalModelRuntimeStatus>('local_model_status', {
     channelId,
     model: configuredModel,
+  });
+}
+
+/** List locally served models for Ollama / LM Studio / llama.cpp. */
+export async function listLocalModels(channelId: string): Promise<string[]> {
+  if (!tauriAvailable()) return [];
+  const invoke = await getInvoke();
+  return invoke<string[]>('local_model_list', { channelId });
+}
+
+function extractRemoteModelIds(value: unknown): string[] {
+  const out: string[] = [];
+  const push = (candidate: unknown) => {
+    if (typeof candidate !== 'string') return;
+    const model = candidate.trim();
+    if (!model) return;
+    if (out.some((existing) => existing.toLowerCase() === model.toLowerCase())) {
+      return;
+    }
+    out.push(model);
+  };
+  const visitModel = (item: unknown) => {
+    if (typeof item === 'string') {
+      push(item);
+      return;
+    }
+    if (typeof item !== 'object' || item === null) return;
+    const record = item as Record<string, unknown>;
+    push(record.id);
+    push(record.name);
+    push(record.model);
+  };
+
+  if (Array.isArray(value)) {
+    value.forEach(visitModel);
+    return out;
+  }
+  if (typeof value !== 'object' || value === null) return out;
+  const record = value as Record<string, unknown>;
+  if (Array.isArray(record.data)) record.data.forEach(visitModel);
+  if (Array.isArray(record.models)) record.models.forEach(visitModel);
+  visitModel(record);
+  return out;
+}
+
+async function fetchRemoteModels(
+  request: RemoteModelListRequest,
+): Promise<RemoteModelListResult> {
+  const errors: string[] = [];
+  const headers: Record<string, string> = { accept: 'application/json' };
+  const apiKey = request.apiKey?.trim();
+  if (apiKey) {
+    headers.authorization = `Bearer ${apiKey}`;
+    if (request.transport === 'anthropic') {
+      headers['x-api-key'] = apiKey;
+      headers['anthropic-version'] = '2023-06-01';
+    }
+  }
+
+  for (const url of request.urls) {
+    const controller = new AbortController();
+    const timeout = window.setTimeout(
+      () => controller.abort(),
+      REMOTE_MODEL_FETCH_TIMEOUT_MS,
+    );
+    try {
+      const response = await fetch(url, { headers, signal: controller.signal });
+      if (!response.ok) {
+        errors.push(`${url}: HTTP ${response.status}`);
+        continue;
+      }
+      const models = extractRemoteModelIds(await response.json());
+      if (models.length > 0) return { models, url };
+      errors.push(`${url}: empty model list`);
+    } catch (err) {
+      errors.push(`${url}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      window.clearTimeout(timeout);
+    }
+  }
+  throw new Error(errors.join('; ') || 'No model list endpoint available');
+}
+
+/** List remote provider models. Tauri backend is preferred to avoid CORS. */
+export async function listRemoteModels(
+  request: RemoteModelListRequest,
+): Promise<RemoteModelListResult> {
+  if (!tauriAvailable()) return fetchRemoteModels(request);
+  const invoke = await getInvoke();
+  return invoke<RemoteModelListResult>('list_remote_models', {
+    urls: request.urls,
+    apiKey: request.apiKey ?? '',
+    transport: request.transport,
   });
 }
 

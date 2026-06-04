@@ -1,6 +1,6 @@
 import { DATA, EXEC, type IREdge, type IRGraph, type IRNode } from './ir';
 import { sampleWorkflow } from './sample';
-import { defaultBlueprint } from './defaultBlueprint';
+import { defaultBlueprint, captainBlueprint } from './defaultBlueprint';
 
 /**
  * Round-trip fixtures exercising the runnable-fidelity emitter/parser:
@@ -323,6 +323,7 @@ export const roundtripFixtures: { name: string; ir: IRGraph }[] = [
   { name: 'F6 default blueprint', ir: defaultBlueprint() },
   { name: 'F7 composite (single in/out)', ir: compositeSingleSample },
   { name: 'F8 composite (nested)', ir: compositeNestedSample },
+  { name: 'F9 captain loop (manager + adversarial gate)', ir: captainBlueprint() },
 ];
 
 export const layoutFixtures: { name: string; ir: IRGraph }[] = [

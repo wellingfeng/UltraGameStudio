@@ -13,8 +13,10 @@
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::{Deserialize, Serialize};
@@ -26,7 +28,7 @@ use tiny_http::{Header, Method, Request, Response, Server};
 #[serde(rename_all = "camelCase")]
 pub struct FreeChannelCfg {
     pub id: String,
-    /// "openai" | "anthropic"
+    /// "openai" | "anthropic" | "auto"
     pub transport: String,
     pub base_url: String,
     pub api_key: String,
@@ -49,9 +51,22 @@ struct ProxyState {
 
 static SERVER_STATE: OnceLock<Mutex<Option<ProxyState>>> = OnceLock::new();
 static REGISTRY: OnceLock<Mutex<HashMap<String, FreeChannelCfg>>> = OnceLock::new();
+static REGISTRY_ORDER: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
 static MODEL_SUCCESS_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+static CHANNEL_COOLDOWNS: OnceLock<Mutex<HashMap<String, ChannelCooldown>>> = OnceLock::new();
+static AUTO_COUNTER: AtomicU64 = AtomicU64::new(0);
 static MSG_COUNTER: AtomicU64 = AtomicU64::new(1);
 const PROXY_AUTH_HEADER: &str = "X-FreeUltraCode-Proxy-Token";
+const AUTO_CHANNEL_ID: &str = "auto";
+const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
+const DEFAULT_UPSTREAM_COOLDOWN: Duration = Duration::from_secs(30);
+const DEFAULT_AUTH_COOLDOWN: Duration = Duration::from_secs(600);
+
+#[derive(Debug, Clone)]
+struct ChannelCooldown {
+    until: Instant,
+    reason: String,
+}
 
 fn state_lock() -> &'static Mutex<Option<ProxyState>> {
     SERVER_STATE.get_or_init(|| Mutex::new(None))
@@ -61,8 +76,16 @@ fn registry() -> &'static Mutex<HashMap<String, FreeChannelCfg>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+fn registry_order() -> &'static Mutex<Vec<String>> {
+    REGISTRY_ORDER.get_or_init(|| Mutex::new(Vec::new()))
+}
+
 fn model_success_cache() -> &'static Mutex<HashMap<String, String>> {
     MODEL_SUCCESS_CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn channel_cooldowns() -> &'static Mutex<HashMap<String, ChannelCooldown>> {
+    CHANNEL_COOLDOWNS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 fn next_message_id() -> String {
@@ -77,20 +100,31 @@ pub async fn free_proxy_ensure(channels: Vec<FreeChannelCfg>) -> Result<FreeProx
     // Swap the registry first (cheap, takes effect immediately).
     {
         let mut reg = registry().lock().map_err(|_| "registry poisoned")?;
+        let mut order = registry_order()
+            .lock()
+            .map_err(|_| "registry order poisoned")?;
         reg.clear();
+        order.clear();
         for c in channels {
+            order.push(c.id.clone());
             reg.insert(c.id.clone(), c);
         }
     }
 
-    // If already running, just return the existing port.
-    {
+    // If already running, just return the existing port. Verify the listener is
+    // still reachable first; a stale state record would otherwise make the CLI
+    // fail later with an opaque ConnectionRefused against the cached port.
+    let existing = {
         let guard = state_lock().lock().map_err(|_| "state poisoned")?;
-        if let Some(st) = guard.as_ref() {
-            return Ok(FreeProxyInfo {
-                port: st.port,
-                token: st.token.clone(),
-            });
+        guard.as_ref().map(|st| (st.port, st.token.clone()))
+    };
+    if let Some((port, token)) = existing {
+        if proxy_port_accepting(port) {
+            return Ok(FreeProxyInfo { port, token });
+        }
+        let mut guard = state_lock().lock().map_err(|_| "state poisoned")?;
+        if guard.as_ref().map(|st| st.port) == Some(port) {
+            *guard = None;
         }
     }
 
@@ -112,6 +146,9 @@ pub fn free_proxy_stop() -> Result<(), String> {
     if let Ok(mut reg) = registry().lock() {
         reg.clear();
     }
+    if let Ok(mut order) = registry_order().lock() {
+        order.clear();
+    }
     Ok(())
 }
 
@@ -120,10 +157,13 @@ pub fn free_proxy_stop() -> Result<(), String> {
 fn start_server() -> Result<FreeProxyInfo, String> {
     let mut guard = state_lock().lock().map_err(|_| "state poisoned")?;
     if let Some(st) = guard.as_ref() {
-        return Ok(FreeProxyInfo {
-            port: st.port,
-            token: st.token.clone(),
-        });
+        if proxy_port_accepting(st.port) {
+            return Ok(FreeProxyInfo {
+                port: st.port,
+                token: st.token.clone(),
+            });
+        }
+        *guard = None;
     }
 
     let mut bound: Option<(Server, u16)> = None;
@@ -159,6 +199,11 @@ fn start_server() -> Result<FreeProxyInfo, String> {
         token: token.clone(),
     });
     Ok(FreeProxyInfo { port, token })
+}
+
+fn proxy_port_accepting(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, Duration::from_millis(250)).is_ok()
 }
 
 fn generate_proxy_token() -> Result<String, String> {
@@ -318,6 +363,7 @@ fn handle_request(mut request: Request) {
     match cfg.transport.as_str() {
         "anthropic" => handle_anthropic_passthrough(request, &cfg, anthropic_body, anthropic_beta),
         "openai" => handle_openai_translate(request, &cfg, anthropic_body),
+        "auto" => handle_auto_route(request, &cfg, anthropic_body, anthropic_beta),
         other => {
             respond_json_error(
                 request,
@@ -533,6 +579,25 @@ fn builtin_models_for_channel(channel_id: &str) -> &'static [&'static str] {
             "z-ai/glm-4.7",
             "z-ai/glm-4.5-air:free",
         ],
+        "github_models" => &[
+            "openai/gpt-4.1-mini",
+            "openai/gpt-4.1",
+            "xai/grok-code-fast-1",
+        ],
+        "huggingface_router" => &[
+            "deepseek-ai/DeepSeek-V4-Pro",
+            "Qwen/Qwen3-Coder-480B-A35B-Instruct",
+            "zai-org/GLM-4.6",
+        ],
+        "sambanova" => &[
+            "DeepSeek-V3.1",
+            "DeepSeek-V3.2",
+            "Meta-Llama-3.3-70B-Instruct",
+        ],
+        "together" => &[
+            "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+            "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+        ],
         "gemini" => &[
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite",
@@ -641,6 +706,184 @@ fn with_json_model(body: &Value, model: &str) -> Value {
     next
 }
 
+#[derive(Debug)]
+struct ProxyAttemptError {
+    status: u16,
+    content_type: String,
+    detail: String,
+    raw_body: bool,
+    retry_after: Option<String>,
+}
+
+#[derive(Debug)]
+struct AutoFailure {
+    channel_id: String,
+    status: u16,
+    detail: String,
+}
+
+fn json_attempt_error(status: u16, detail: String) -> ProxyAttemptError {
+    ProxyAttemptError {
+        status,
+        content_type: "application/json".to_string(),
+        detail,
+        raw_body: false,
+        retry_after: None,
+    }
+}
+
+fn respond_attempt_error(request: Request, err: ProxyAttemptError) {
+    if err.raw_body {
+        respond_upstream_status(request, err.status, &err.content_type, err.detail);
+    } else {
+        respond_json_error(request, err.status, &err.detail);
+    }
+}
+
+fn retry_after_duration(value: Option<&str>) -> Option<Duration> {
+    let raw = value?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let seconds = raw.parse::<u64>().ok()?;
+    Some(Duration::from_secs(seconds.clamp(1, 3600)))
+}
+
+fn cooldown_for_attempt_error(err: &ProxyAttemptError) -> Option<Duration> {
+    if err.status == 429 {
+        return retry_after_duration(err.retry_after.as_deref())
+            .or(Some(DEFAULT_RATE_LIMIT_COOLDOWN));
+    }
+    if matches!(err.status, 401 | 403) {
+        return Some(DEFAULT_AUTH_COOLDOWN);
+    }
+    if matches!(err.status, 408 | 425 | 500 | 502 | 503 | 504) {
+        return retry_after_duration(err.retry_after.as_deref())
+            .or(Some(DEFAULT_UPSTREAM_COOLDOWN));
+    }
+    let lower = err.detail.to_ascii_lowercase();
+    if lower.contains("rate limit")
+        || lower.contains("ratelimit")
+        || lower.contains("quota")
+        || lower.contains("too many requests")
+        || lower.contains("tokens per")
+        || lower.contains("requests per")
+        || lower.contains("限速")
+        || lower.contains("额度")
+    {
+        return Some(DEFAULT_RATE_LIMIT_COOLDOWN);
+    }
+    None
+}
+
+fn brief_detail(detail: &str) -> String {
+    let one_line = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    const MAX: usize = 220;
+    if one_line.chars().count() <= MAX {
+        return one_line;
+    }
+    one_line.chars().take(MAX).collect::<String>() + "..."
+}
+
+fn remember_channel_cooldown(channel_id: &str, err: &ProxyAttemptError) {
+    let Some(duration) = cooldown_for_attempt_error(err) else {
+        return;
+    };
+    if let Ok(mut cooldowns) = channel_cooldowns().lock() {
+        cooldowns.insert(
+            channel_id.to_string(),
+            ChannelCooldown {
+                until: Instant::now() + duration,
+                reason: format!("HTTP {}: {}", err.status, brief_detail(&err.detail)),
+            },
+        );
+    }
+}
+
+fn clear_channel_cooldown(channel_id: &str) {
+    if let Ok(mut cooldowns) = channel_cooldowns().lock() {
+        cooldowns.remove(channel_id);
+    }
+}
+
+fn channel_cooldown_remaining(channel_id: &str) -> Option<(u64, String)> {
+    let mut cooldowns = channel_cooldowns().lock().ok()?;
+    let now = Instant::now();
+    let expired = cooldowns
+        .get(channel_id)
+        .map(|cooldown| cooldown.until <= now)
+        .unwrap_or(false);
+    if expired {
+        cooldowns.remove(channel_id);
+        return None;
+    }
+    cooldowns.get(channel_id).map(|cooldown| {
+        (
+            cooldown
+                .until
+                .saturating_duration_since(now)
+                .as_secs()
+                .max(1),
+            cooldown.reason.clone(),
+        )
+    })
+}
+
+fn auto_channel_candidates() -> Vec<FreeChannelCfg> {
+    let mut out = Vec::new();
+    if let (Ok(reg), Ok(order)) = (registry().lock(), registry_order().lock()) {
+        for id in order.iter() {
+            if id == AUTO_CHANNEL_ID {
+                continue;
+            }
+            let Some(cfg) = reg.get(id) else {
+                continue;
+            };
+            if cfg.transport == "anthropic" || cfg.transport == "openai" {
+                out.push(cfg.clone());
+            }
+        }
+    }
+
+    if out.is_empty() {
+        if let Ok(reg) = registry().lock() {
+            out.extend(
+                reg.values()
+                    .filter(|cfg| {
+                        cfg.id != AUTO_CHANNEL_ID
+                            && (cfg.transport == "anthropic" || cfg.transport == "openai")
+                    })
+                    .cloned(),
+            );
+        }
+    }
+
+    if out.len() > 1 {
+        let start = AUTO_COUNTER.fetch_add(1, Ordering::Relaxed) as usize % out.len();
+        out.rotate_left(start);
+    }
+    out
+}
+
+fn auto_failure_message(auto_id: &str, failures: &[AutoFailure]) -> String {
+    if failures.is_empty() {
+        return format!("free proxy auto channel '{auto_id}' has no configured ready channels");
+    }
+    let details = failures
+        .iter()
+        .map(|failure| {
+            format!(
+                "{} -> HTTP {}: {}",
+                failure.channel_id,
+                failure.status,
+                brief_detail(&failure.detail)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!("free proxy auto channel '{auto_id}' could not find an available upstream: {details}")
+}
+
 // ---------------------------------------------------------------------------
 // Native Anthropic reverse proxy
 // ---------------------------------------------------------------------------
@@ -651,6 +894,17 @@ fn handle_anthropic_passthrough(
     anthropic_body: Value,
     anthropic_beta: Option<String>,
 ) {
+    match try_anthropic_passthrough(cfg, &anthropic_body, anthropic_beta.as_deref()) {
+        Ok(response) => stream_passthrough(request, response),
+        Err(err) => respond_attempt_error(request, err),
+    }
+}
+
+fn try_anthropic_passthrough(
+    cfg: &FreeChannelCfg,
+    anthropic_body: &Value,
+    anthropic_beta: Option<&str>,
+) -> Result<ureq::Response, ProxyAttemptError> {
     let upstream_url = format!("{}/v1/messages", trim_base(&cfg.base_url));
     let requested_model = anthropic_body
         .get("model")
@@ -682,17 +936,18 @@ fn handle_anthropic_passthrough(
                 .set("x-api-key", &cfg.api_key)
                 .set("authorization", &format!("Bearer {}", cfg.api_key));
         }
-        if let Some(beta) = anthropic_beta.as_deref() {
+        if let Some(beta) = anthropic_beta {
             req = req.set("anthropic-beta", beta);
         }
 
         match req.send_string(&body_string) {
             Ok(response) => {
                 remember_model_success(&cache_key, model);
-                stream_passthrough(request, response);
-                return;
+                clear_channel_cooldown(&cfg.id);
+                return Ok(response);
             }
             Err(ureq::Error::Status(code, response)) => {
+                let retry_after = response.header("retry-after").map(|v| v.to_string());
                 let raw_ct = response
                     .header("content-type")
                     .unwrap_or("application/json")
@@ -711,44 +966,53 @@ fn handle_anthropic_passthrough(
                         continue;
                     }
                     let (last_code, _, last_detail) = last_error.as_ref().unwrap();
-                    respond_json_error(
-                        request,
+                    return Err(json_attempt_error(
                         422,
-                        &model_candidates_failed_message(
+                        model_candidates_failed_message(
                             &cfg.id,
                             *last_code,
                             last_detail,
                             &tried_models,
                         ),
-                    );
-                    return;
+                    ));
                 }
-                respond_upstream_status(request, code, &ct, detail);
-                return;
+                return Err(ProxyAttemptError {
+                    status: code,
+                    content_type: ct,
+                    detail,
+                    raw_body: true,
+                    retry_after,
+                });
             }
             Err(e) => {
-                respond_json_error(
-                    request,
+                return Err(json_attempt_error(
                     502,
-                    &format!("free proxy: upstream request failed: {e}"),
-                );
-                return;
+                    format!("free proxy: upstream request failed: {e}"),
+                ));
             }
         }
     }
 
     if let Some((code, ct, detail)) = last_error {
         if looks_like_model_error(code, &detail) {
-            respond_json_error(
-                request,
+            Err(json_attempt_error(
                 422,
-                &model_candidates_failed_message(&cfg.id, code, &detail, &tried_models),
-            );
+                model_candidates_failed_message(&cfg.id, code, &detail, &tried_models),
+            ))
         } else {
-            respond_upstream_status(request, code, &ct, detail);
+            Err(ProxyAttemptError {
+                status: code,
+                content_type: ct,
+                detail,
+                raw_body: true,
+                retry_after: None,
+            })
         }
     } else {
-        respond_json_error(request, 400, "free proxy: no model configured");
+        Err(json_attempt_error(
+            400,
+            "free proxy: no model configured".to_string(),
+        ))
     }
 }
 
@@ -825,10 +1089,100 @@ fn write_chunk<W: Write>(writer: &mut W, data: &[u8]) -> std::io::Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// Auto channel router
+// ---------------------------------------------------------------------------
+
+fn handle_auto_route(
+    request: Request,
+    cfg: &FreeChannelCfg,
+    anthropic_body: Value,
+    anthropic_beta: Option<String>,
+) {
+    let candidates = auto_channel_candidates();
+    if candidates.is_empty() {
+        respond_json_error(
+            request,
+            503,
+            &format!("free proxy auto channel '{}' has no ready channels", cfg.id),
+        );
+        return;
+    }
+
+    let mut failures: Vec<AutoFailure> = Vec::new();
+    for candidate in candidates {
+        if let Some((seconds, reason)) = channel_cooldown_remaining(&candidate.id) {
+            failures.push(AutoFailure {
+                channel_id: candidate.id.clone(),
+                status: 429,
+                detail: format!("cooling down for {seconds}s after {reason}"),
+            });
+            continue;
+        }
+
+        match candidate.transport.as_str() {
+            "anthropic" => match try_anthropic_passthrough(
+                &candidate,
+                &anthropic_body,
+                anthropic_beta.as_deref(),
+            ) {
+                Ok(response) => {
+                    stream_passthrough(request, response);
+                    return;
+                }
+                Err(err) => {
+                    remember_channel_cooldown(&candidate.id, &err);
+                    failures.push(AutoFailure {
+                        channel_id: candidate.id.clone(),
+                        status: err.status,
+                        detail: err.detail,
+                    });
+                }
+            },
+            "openai" => match try_openai_translate(&candidate, &anthropic_body) {
+                Ok((response, echo_model)) => {
+                    translate_openai_stream(request, response, &echo_model);
+                    return;
+                }
+                Err(err) => {
+                    remember_channel_cooldown(&candidate.id, &err);
+                    failures.push(AutoFailure {
+                        channel_id: candidate.id.clone(),
+                        status: err.status,
+                        detail: err.detail,
+                    });
+                }
+            },
+            other => failures.push(AutoFailure {
+                channel_id: candidate.id.clone(),
+                status: 400,
+                detail: format!("unsupported transport '{other}'"),
+            }),
+        }
+    }
+
+    let status = if failures.iter().all(|failure| failure.status == 429) {
+        429
+    } else {
+        503
+    };
+    respond_json_error(request, status, &auto_failure_message(&cfg.id, &failures));
+}
+
+// ---------------------------------------------------------------------------
 // OpenAI translation
 // ---------------------------------------------------------------------------
 
 fn handle_openai_translate(request: Request, cfg: &FreeChannelCfg, anthropic_body: Value) {
+    match try_openai_translate(cfg, &anthropic_body) {
+        Ok((response, echo_model)) => translate_openai_stream(request, response, &echo_model),
+        Err(err) => respond_attempt_error(request, err),
+    }
+}
+
+fn try_openai_translate(
+    cfg: &FreeChannelCfg,
+    anthropic_body: &Value,
+) -> Result<(ureq::Response, String), ProxyAttemptError> {
     // The model the CLI requested. We echo this back in message_start so the
     // response model matches the request (Anthropic contract).
     let requested_model = anthropic_body
@@ -856,7 +1210,7 @@ fn handle_openai_translate(request: Request, cfg: &FreeChannelCfg, anthropic_bod
 
     for model in candidates.iter() {
         tried_models.push(model.clone());
-        let openai_body = anthropic_to_openai_body(&anthropic_body, model);
+        let openai_body = anthropic_to_openai_body(anthropic_body, model);
         let mut req = ureq::post(&upstream_url)
             .set("content-type", "application/json")
             .set("accept", "text/event-stream");
@@ -873,15 +1227,16 @@ fn handle_openai_translate(request: Request, cfg: &FreeChannelCfg, anthropic_bod
         match resp {
             Ok(response) => {
                 remember_model_success(&cache_key, model);
+                clear_channel_cooldown(&cfg.id);
                 let echo_model = if model == &upstream_model {
                     requested_echo_model.clone()
                 } else {
                     model.clone()
                 };
-                translate_openai_stream(request, response, &echo_model);
-                return;
+                return Ok((response, echo_model));
             }
             Err(ureq::Error::Status(code, response)) => {
+                let retry_after = response.header("retry-after").map(|v| v.to_string());
                 let detail = response
                     .into_string()
                     .unwrap_or_else(|_| "<no body>".to_string());
@@ -891,52 +1246,50 @@ fn handle_openai_translate(request: Request, cfg: &FreeChannelCfg, anthropic_bod
                         continue;
                     }
                     let (last_code, last_detail) = last_error.as_ref().unwrap();
-                    respond_json_error(
-                        request,
+                    return Err(json_attempt_error(
                         422,
-                        &model_candidates_failed_message(
+                        model_candidates_failed_message(
                             &cfg.id,
                             *last_code,
                             last_detail,
                             &tried_models,
                         ),
-                    );
-                    return;
+                    ));
                 }
-                respond_json_error(
-                    request,
-                    code,
-                    &format!("free proxy: upstream {code}: {detail}"),
-                );
-                return;
+                return Err(ProxyAttemptError {
+                    status: code,
+                    content_type: "application/json".to_string(),
+                    detail: format!("free proxy: upstream {code}: {detail}"),
+                    raw_body: false,
+                    retry_after,
+                });
             }
             Err(e) => {
-                respond_json_error(
-                    request,
+                return Err(json_attempt_error(
                     502,
-                    &format!("free proxy: upstream request failed: {e}"),
-                );
-                return;
+                    format!("free proxy: upstream request failed: {e}"),
+                ));
             }
         }
     }
 
     if let Some((code, detail)) = last_error {
         if looks_like_model_error(code, &detail) {
-            respond_json_error(
-                request,
+            Err(json_attempt_error(
                 422,
-                &model_candidates_failed_message(&cfg.id, code, &detail, &tried_models),
-            );
+                model_candidates_failed_message(&cfg.id, code, &detail, &tried_models),
+            ))
         } else {
-            respond_json_error(
-                request,
+            Err(json_attempt_error(
                 code,
-                &format!("free proxy: upstream {code}: {detail}"),
-            );
+                format!("free proxy: upstream {code}: {detail}"),
+            ))
         }
     } else {
-        respond_json_error(request, 400, "free proxy: no model configured");
+        Err(json_attempt_error(
+            400,
+            "free proxy: no model configured".to_string(),
+        ))
     }
 }
 
@@ -1614,6 +1967,13 @@ mod tests {
     }
 
     #[test]
+    fn proxy_port_accepting_detects_listening_socket() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        assert!(proxy_port_accepting(port));
+    }
+
+    #[test]
     fn stream_head_does_not_allow_wildcard_cors() {
         let mut out = Vec::new();
         write_stream_head(&mut out, 200, "text/event-stream").unwrap();
@@ -1678,6 +2038,18 @@ mod tests {
         let (_, openrouter) = model_candidates_for_channel("open_router", "", &[]);
         assert_eq!(openrouter[0], "z-ai/glm-4.6");
         assert!(openrouter.contains(&"z-ai/glm-5.1".to_string()));
+
+        let (_, github_models) = model_candidates_for_channel("github_models", "", &[]);
+        assert_eq!(github_models[0], "openai/gpt-4.1-mini");
+
+        let (_, huggingface_router) = model_candidates_for_channel("huggingface_router", "", &[]);
+        assert!(huggingface_router.contains(&"Qwen/Qwen3-Coder-480B-A35B-Instruct".to_string()));
+
+        let (_, sambanova) = model_candidates_for_channel("sambanova", "", &[]);
+        assert_eq!(sambanova[0], "DeepSeek-V3.1");
+
+        let (_, together) = model_candidates_for_channel("together", "", &[]);
+        assert_eq!(together[0], "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8");
     }
 
     #[test]
@@ -1717,6 +2089,58 @@ mod tests {
         assert!(!looks_like_model_error(401, "invalid api key"));
         assert!(!looks_like_model_error(429, "rate limit exceeded"));
         assert!(!looks_like_model_error(500, "model server overloaded"));
+    }
+
+    #[test]
+    fn retry_after_duration_uses_seconds_and_clamps() {
+        assert_eq!(
+            retry_after_duration(Some("2")),
+            Some(Duration::from_secs(2))
+        );
+        assert_eq!(
+            retry_after_duration(Some("999999")),
+            Some(Duration::from_secs(3600))
+        );
+        assert_eq!(
+            retry_after_duration(Some("Wed, 21 Oct 2015 07:28:00 GMT")),
+            None
+        );
+    }
+
+    #[test]
+    fn auto_cooldown_classifies_rate_limit_and_auth_errors() {
+        let limited = ProxyAttemptError {
+            status: 429,
+            content_type: "application/json".to_string(),
+            detail: "rate limit exceeded".to_string(),
+            raw_body: false,
+            retry_after: Some("7".to_string()),
+        };
+        assert_eq!(
+            cooldown_for_attempt_error(&limited),
+            Some(Duration::from_secs(7))
+        );
+
+        let auth = ProxyAttemptError {
+            status: 401,
+            content_type: "application/json".to_string(),
+            detail: "invalid api key".to_string(),
+            raw_body: false,
+            retry_after: None,
+        };
+        assert_eq!(
+            cooldown_for_attempt_error(&auth),
+            Some(DEFAULT_AUTH_COOLDOWN)
+        );
+
+        let model = ProxyAttemptError {
+            status: 422,
+            content_type: "application/json".to_string(),
+            detail: "model unavailable".to_string(),
+            raw_body: false,
+            retry_after: None,
+        };
+        assert_eq!(cooldown_for_attempt_error(&model), None);
     }
 
     #[test]

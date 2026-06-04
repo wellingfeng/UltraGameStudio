@@ -45,7 +45,11 @@ export default function ToolLine({
   };
 
   return (
-    <div className="ai-tool-card group/tool my-1 rounded-md border border-border-soft bg-panel-2/40">
+    <div
+      className="ai-tool-card group/tool my-0.5 rounded-[4px]"
+      data-open={open ? 'true' : 'false'}
+      data-status="idle"
+    >
       <div className="flex items-center gap-1.5 px-2 py-1 font-mono text-[11px] leading-snug">
         {expandable ? (
           <button
@@ -63,12 +67,12 @@ export default function ToolLine({
         ) : (
           <span className="w-3 shrink-0" />
         )}
-        <ToolIcon name={name} size={12} className="shrink-0 text-accent/70" />
-        <span className="shrink-0 font-medium text-accent-2">{name}</span>
+        <ToolIcon name={name} size={12} className="shrink-0 text-fg-faint" />
+        <span className="shrink-0 font-medium text-fg-dim">{name}</span>
         {detail && (
           <span
             className={
-              'min-w-0 flex-1 text-fg-dim ' +
+              'min-w-0 flex-1 text-fg-faint ' +
               (open ? 'whitespace-pre-wrap break-words' : 'truncate')
             }
           >

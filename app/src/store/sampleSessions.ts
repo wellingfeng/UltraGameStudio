@@ -29,28 +29,28 @@ import { PROMPT_TRANSLATIONS } from './promptTranslations';
  */
 export const sampleSessions: Session[] = [
   {
-    id: 's_review_changes',
-    title: 'Review changes workflow',
+    id: 's_coding_chat',
+    title: 'Coding chat',
     createdAt: Date.parse('2026-05-29T09:12:00Z'),
-    isWorkflow: true,
+    isWorkflow: false,
   },
   {
-    id: 's_release_pipeline',
-    title: 'Release pipeline draft',
+    id: 's_release_notes',
+    title: 'Release notes help',
     createdAt: Date.parse('2026-05-28T16:40:00Z'),
-    isWorkflow: true,
+    isWorkflow: false,
   },
   {
     id: 's_bug_triage',
-    title: 'Bug triage loop',
+    title: 'Bug triage chat',
     createdAt: Date.parse('2026-05-27T11:05:00Z'),
-    isWorkflow: true,
+    isWorkflow: false,
   },
   {
     id: 's_docs_sync',
-    title: 'Docs sync automation',
+    title: 'Docs sync chat',
     createdAt: Date.parse('2026-05-26T14:22:00Z'),
-    isWorkflow: true,
+    isWorkflow: false,
   },
 ];
 
@@ -65,31 +65,31 @@ export const sampleMessages: Message[] = [
   {
     id: 'm_seed_system',
     role: 'system',
-    text: '已加载工作流「review-changes」。Workflow loaded — 5 nodes, 5 edges.',
+    text: '已创建普通聊天会话。',
     createdAt: Date.parse('2026-05-29T09:12:01Z'),
   },
   {
     id: 'm_seed_user_1',
     role: 'user',
-    text: '帮我把扫描和审查之间加一个变更分类步骤。',
+    text: '帮我检查最近的代码改动。',
     createdAt: Date.parse('2026-05-29T09:13:30Z'),
   },
   {
     id: 'm_seed_assistant_1',
     role: 'assistant',
-    text: '建议在 scan → review 之间插入一个 agent(classify) 节点：用 haiku 模型对改动按风险分级，输出经 data 边传给并行审查。要我直接修改图吗？',
+    text: '可以。我会先查看变更范围，再按风险和可验证性整理结果。',
     createdAt: Date.parse('2026-05-29T09:13:34Z'),
   },
   {
     id: 'm_seed_user_2',
     role: 'user',
-    text: '先确认 verify 步骤是否覆盖了所有审查产物。',
+    text: '重点关注 UI 回归和遗漏的测试。',
     createdAt: Date.parse('2026-05-29T09:15:10Z'),
   },
   {
     id: 'm_seed_assistant_2',
     role: 'assistant',
-    text: 'verify 当前只接收 scan 的 data_out。三路并行审查（quality / security / code）的结论尚未连线进 verify。建议补三条 data 边。',
+    text: '收到。我会优先检查交互路径、响应式布局、状态更新和相关验证命令。',
     createdAt: Date.parse('2026-05-29T09:15:18Z'),
   },
 ];

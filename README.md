@@ -1,13 +1,15 @@
 <p align="center">
-  <img src="app/doc/images/freeultracode-mark.svg" alt="FreeUltraCode animated workflow mark" width="560">
+  <img src="app/doc/images/freeultracode-mark.svg" alt="FreeUltraCode app mark" width="560">
 </p>
 
 <h1 align="center">FreeUltraCode</h1>
 
-<h3 align="center">Use free and low-cost models as dynamic coding workflows.</h3>
+<h3 align="center">Run coding agents without burning premium quota.</h3>
 
 <p align="center">
-  FreeUltraCode is a local desktop coding tool that combines free-model routing with editable Dynamic Workflows. It turns cheap and free models into multi-agent flows that research, generate, challenge, vote, and retry so difficult programming tasks can get higher accuracy without sending every step to the most expensive model.
+  FreeUltraCode gives developers one local chat surface for Claude Code, Codex,
+  Gemini, free provider channels, and local models. Use the expensive models
+  when they matter. Send the routine work somewhere cheaper.
 </p>
 
 <p align="center">
@@ -39,7 +41,7 @@
 </p>
 
 <p align="center">
-  <a href="app/package.json"><img src="https://img.shields.io/badge/version-0.2.2-2F6FED?style=flat-square&labelColor=161b22" alt="version 0.2.2"></a>
+  <a href="app/package.json"><img src="https://img.shields.io/badge/version-0.2.4-2F6FED?style=flat-square&labelColor=161b22" alt="version 0.2.4"></a>
   <a href="app/src-tauri/tauri.conf.json"><img src="https://img.shields.io/badge/Tauri-2.11-24C8DB?style=flat-square&labelColor=161b22&logo=tauri&logoColor=white" alt="Tauri 2.11"></a>
   <a href="app/package.json"><img src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&labelColor=161b22&logo=react&logoColor=white" alt="React 18"></a>
   <a href="app/package.json"><img src="https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square&labelColor=161b22&logo=typescript&logoColor=white" alt="TypeScript 5.6"></a>
@@ -53,68 +55,53 @@
   <img src="app/doc/images/hero-free-channels.png" alt="FreeUltraCode free channel routing screenshot" width="960">
 </p>
 
-<p align="center">
-  <strong>Two modes — Chat &amp; Workflow</strong><br>
-  <img src="app/doc/images/hero-dual-mode.png" alt="FreeUltraCode Chat and Workflow dual-mode screenshot" width="960">
-</p>
-
 > [!IMPORTANT]
-> **Community · 加入社区** — join the FreeUltraCode Discord or QQ group for setup help, workflow examples, feature ideas, and contributor coordination. Discord: <https://discord.gg/2C9ptSEFG> · QQ Group: `149523963`
+> **Community · 加入社区** — join the FreeUltraCode Discord or QQ group for setup help, model routing ideas, and contributor coordination. Discord: <https://discord.gg/2C9ptSEFG> · QQ Group: `149523963`
 
 ## Why FreeUltraCode
 
-Modern coding agents become much more reliable when they do not answer once and stop. Dynamic Workflows improve output quality by splitting a request into multiple agents, exploring from different angles, validating adversarially, and voting over competing answers. The tradeoff is cost: a serious workflow can burn through premium-model quota quickly.
+Coding agents are useful, but premium model quota can disappear quickly. FreeUltraCode focuses on a simpler path: keep the chat experience local, then make it easy to route requests through cheaper channels when they are good enough.
 
-FreeUltraCode makes that pattern visible, editable, and cheaper:
-
-- Use free or low-cost channels such as Gemini, DeepSeek, Kimi, Groq, OpenRouter, NVIDIA NIM, Z.ai, Ollama, LM Studio, and llama.cpp.
-- Fan out only the steps that need extra certainty; keep simple steps as single-pass calls.
-- Let critical coding tasks pass through multi-angle research, adversarial review, tournament selection, or self-consistency voting.
-- Route different nodes to different runtimes and model tiers, so expensive models are reserved for judgment, review, or high-risk steps.
-- Keep the whole workflow graph local, inspectable, exportable, and reusable.
-
-FreeUltraCode is not just a chat UI. It is a way to turn a collection of cheap models into a structured programming workflow.
+- Use free, trial-credit, or low-cost channels such as GitHub Models, Hugging Face Router, SambaNova Cloud, Together AI, Gemini, DeepSeek, Kimi, Groq, OpenRouter, NVIDIA NIM, Z.ai, Kilo, LLM7, Ollama, LM Studio, and llama.cpp.
+- Keep API keys and provider settings on your machine.
+- Switch runtime, channel, permission mode, and workspace directly from the chat composer.
+- Preserve chat history, favorites, scheduled prompts, and workspace context locally.
+- Use local models with zero API keys when your hardware supports them.
 
 ## What It Can Do
 
-### Free-Model Coding Chat
+### Coding Chat
 
-- **17+ built-in channels**: NVIDIA NIM, OpenRouter, Google Gemini, DeepSeek, Mistral, Mistral Codestral, Groq, Cerebras, Fireworks, Kimi, Z.ai, OpenCode, Wafer, plus local runtimes such as Ollama, LM Studio, and llama.cpp.
-- Local Rust proxy translates between Anthropic and OpenAI-compatible protocols, so the same interface can talk to different providers.
-- API keys stay on your machine. Local runtimes can run with zero API keys.
+- Ask for code edits, bug investigation, refactor help, tests, release notes, or documentation.
+- Attach file paths or drag files into the composer.
+- Review streamed assistant output, command logs, file references, and generated summaries in one chat surface.
+- Continue with follow-up requests in the same session.
 
-### Dynamic Workflow Canvas
+### Free-Model Routing
 
-- Generate an editable workflow blueprint from a natural-language coding goal.
-- Build agent steps, parallel branches, pipelines, loops, branches, consensus nodes, and reusable composite workflows on a React Flow canvas.
-- Compile the graph into runnable Claude Code-style workflow scripts, then parse scripts back into the same graph model.
-- Run workflows from the desktop app while tracking node-level execution state.
-- Export and import workflow graphs as portable `.fuc.json` files.
+- **20+ remote channels plus local runtimes**: NVIDIA NIM, OpenRouter, GitHub Models, Hugging Face Router, SambaNova Cloud, Together AI, Google Gemini, DeepSeek, Mistral, Mistral Codestral, OpenCode, Wafer, Kimi, Cerebras, Groq, Fireworks, Z.ai, LLM7, Kilo Gateway, plus local runtimes such as Ollama, LM Studio, and llama.cpp.
+- **Keyless experimental routes**: LLM7 and Kilo Gateway can be tried without an API key, but should only be used for non-sensitive coding prompts.
+- **Official free/trial-credit routes**: GitHub Models, Hugging Face Router, SambaNova Cloud, Together AI, Gemini, Groq, Cerebras, NVIDIA NIM, OpenRouter, Mistral/Codestral, DeepSeek, Kimi, Z.ai, OpenCode, Wafer, and Fireworks use provider keys kept locally in the app.
+- Local Rust proxy translates between Anthropic and OpenAI-compatible protocols.
+- Claude Code can route through configured free channels without changing the chat UI.
+- Provider keys, model overrides, and local model settings are managed from the app settings.
 
-### Multi-Round Accuracy Loop
+Current default coding-oriented models:
 
-FreeUltraCode supports the quality patterns that make Dynamic Workflows useful for programming:
-
-| Pattern | Use it for | What happens |
-| --- | --- | --- |
-| Multi-angle research | Ambiguous requirements, architecture, migrations | Several agents inspect the same goal from different lenses before generation. |
-| Adversarial validation | Security, code review, risky refactors | Candidate answers are challenged and only conclusions that survive critique are kept. |
-| Tournament selection | Competing implementation plans | Multiple plans are scored; the winner can absorb useful ideas from the others. |
-| Self-consistency voting | Deterministic decisions and structured outputs | The same prompt runs multiple times and the majority answer is selected. |
-| Adaptive escalation | Hard nodes and final verification | The runner can start with a small sample count, measure disagreement, and add more samples only when needed. |
-
-### Runtime and Model Routing
-
-- Use Claude Code, Codex, Gemini, or extensible provider routing.
-- Configure model/provider choices globally or per node.
-- Route Claude Code through free channels via the local proxy.
-- Use cheaper models for discovery and stronger models for synthesis, review, or final judgment.
+| Channel | Default model |
+| --- | --- |
+| GitHub Models | `openai/gpt-4.1-mini` |
+| Hugging Face Router | `deepseek-ai/DeepSeek-V4-Pro` |
+| SambaNova Cloud | `DeepSeek-V3.1` |
+| Together AI | `Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8` |
+| Kilo Gateway | `poolside/laguna-xs.2:free` |
+| LLM7 | `codestral-latest` |
 
 ### Local-First Workspace
 
-- Sessions, favorites, history, API keys, and workflow files are stored locally.
-- Chat sessions and workflow sessions are both preserved in the sidebar history.
+- Sessions, favorites, scheduled prompts, API keys, and workspace history are stored locally.
 - No hosted FreeUltraCode server is required.
+- The desktop app can use local CLI credentials and local model runtimes already available on your machine.
 
 ## Quick Start
 
@@ -148,115 +135,74 @@ From the repository root, `run.bat` rebuilds when needed and launches the Window
 
 ### Register a Free Channel
 
-1. Select **Claude Code** from the bottom runtime menu if you want Claude Code to route through a free channel.
+1. Open the bottom **Channel** menu and choose a free channel with a warning mark, for example **Free · OpenRouter**.
 
 <p align="center">
-  <img src="app/doc/images/注册免费渠道/0-切换到ClaudeCode.png" alt="Select Claude Code runtime" width="960">
+  <img src="app/doc/images/注册免费渠道/1-配置大模型.png" alt="Choose an unconfigured free channel from the Channel menu" width="960">
 </p>
 
-2. Open the channel menu and choose a channel with a warning mark, for example **Free · OpenRouter**.
+2. In the API key dialog, click **Open registration site**.
 
 <p align="center">
-  <img src="app/doc/images/注册免费渠道/1-随便找一个没有配置的渠道.png" alt="Choose an unconfigured free channel" width="960">
+  <img src="app/doc/images/注册免费渠道/2-注册.png" alt="Open the provider registration site from the API key dialog" width="960">
 </p>
 
-3. Click **Open registration site**, create an API key on the provider page, then paste it back into FreeUltraCode and click **Save and Use**.
+3. Create a new API key on the provider page, then copy it.
 
 <p align="center">
-  <img src="app/doc/images/注册免费渠道/2-打开注册网站.png" alt="Open the provider registration site" width="960">
+  <img src="app/doc/images/注册免费渠道/3-新建token.png" alt="Create a provider API key" width="960">
 </p>
+
+4. Paste the key back into FreeUltraCode and click **Save and Use**. After saving, the warning mark disappears from that channel.
 
 <p align="center">
-  <img src="app/doc/images/注册免费渠道/3-新建Key.png" alt="Create a provider API key" width="960">
+  <img src="app/doc/images/注册免费渠道/4-配置好了.png" alt="Configured free channel without warning mark" width="960">
 </p>
+
+5. You can also manage every free channel from **Settings** -> **Channels** -> **Free Channels**. Channels marked **Ready** have the required configuration.
 
 <p align="center">
-  <img src="app/doc/images/注册免费渠道/4-配置好好就没有警告符号了.png" alt="Configured free channel without warning mark" width="960">
+  <img src="app/doc/images/注册免费渠道/5-设置中的免费渠道.png" alt="Manage free channels in settings" width="960">
 </p>
 
-4. You can also manage every free channel from **Settings** → **Free Channels**. Channels marked **Ready** have the required configuration.
-
-<p align="center">
-  <img src="app/doc/images/注册免费渠道/5-配置中的免费渠道.png" alt="Manage free channels in settings" width="960">
-</p>
-
-After the channel is ready, use the bottom input to chat or run a workflow through that route. See the [free channel registration guide](app/doc/register-free-channel.md) for the full Chinese walkthrough.
+After the channel is ready, use the bottom input to chat through that route. See the [free channel registration guide](app/doc/register-free-channel.md) for the full Chinese walkthrough.
 
 ### Use Chat for Programming
 
-Chat mode is the fastest path for a single coding task: ask for the change, let FreeUltraCode inspect and edit the project, then review the command log and final result. Use Workflow mode when the task needs multiple agents, voting, or a reusable process.
-
-1. Click **+ New Chat** in the left sidebar.
+1. Click **+ New Session** in the left sidebar.
 2. Choose the runtime, permission mode, and workspace from the bottom controls. For code edits, make sure the selected workspace is the repository you want to modify.
 3. Describe the programming request with enough implementation context: target behavior, affected UI or files, acceptance criteria, and any constraints. Press `Ctrl+Enter` or click the send button.
 
 <p align="center">
-  <img src="app/doc/images/chat/h-新建chat.png" alt="Create a new Chat session and enter a coding request" width="960">
+  <img src="app/doc/images/chat/h-新建chat.png" alt="Create a new chat session and enter a coding request" width="960">
 </p>
 
-4. While the task is running, watch the message stream and command rows. FreeUltraCode shows file reads, searches, edits, checks, and tool calls as separate entries, so you can see what the agent is doing. Click **Stop** if the request is going in the wrong direction.
+4. While the task is running, watch the message stream and command rows. FreeUltraCode shows file reads, searches, edits, checks, and tool calls as separate entries, so you can see what the assistant is doing. Click **Stop** if the request is going in the wrong direction.
 
 <p align="center">
-  <img src="app/doc/images/chat/i-等待完成.png" alt="Wait for Chat mode to inspect, edit, and verify the coding task" width="960">
+  <img src="app/doc/images/chat/i-等待完成.png" alt="Wait for chat mode to inspect, edit, and verify the coding task" width="960">
 </p>
 
-5. After completion, review the summary, changed behavior, and verification commands. If the result needs adjustment, continue in the same chat with a follow-up request or use the right-side prompt shortcuts to clarify goals, boundaries, error handling, structure, cost, or reliability.
+5. After completion, review the summary, changed behavior, and verification commands. If the result needs adjustment, continue in the same chat with a follow-up request.
 6. For UI changes, run the app and check the feature directly. In this example, the chat request adds a scheduled task dialog for favorites, then verifies the modal and saved weekly schedule.
 
 <p align="center">
   <img src="app/doc/images/chat/j-周报.png" alt="Chat mode result showing a scheduled task dialog added to the app" width="960">
 </p>
 
-### Build a Coding Workflow
-
-1. Click **+ New Workflow**.
-2. Describe the programming task in the AI input: code review, migration, refactor plan, bug investigation, test generation, architecture audit, or implementation plan.
-3. Let FreeUltraCode generate a blueprint, then refine it with follow-up instructions or right-panel prompt shortcuts for structure, completeness, cost, reliability, and rollback.
-4. Select important nodes and configure prompt text, schema, model tier, provider, or execution parameters.
-5. Convert high-risk nodes to **Consensus** when they need adversarial checking or voting.
-6. Click **Run** and watch node-level status updates.
-
-## CLI Preview
-
-The CLI exposes two user-facing commands:
-
-- `fuc gen` generates or modifies a workflow script from natural language.
-- `fuc run` runs a workflow script, with dry-run and resume support.
-
-Build it first if `app/cli/dist/fuc.mjs` does not exist:
-
-```bash
-cd app
-npm run cli:build
-```
-
-Then run it from the repository root:
-
-```bash
-node app/cli/dist/fuc.mjs gen "Create a code-review workflow" -o review.js
-node app/cli/dist/fuc.mjs run review.js --dry-run
-```
-
-See [FreeUltraCode CLI usage](app/doc/freeultracode-cli-usage.md) and the [CLI skill spec](app/doc/freeultracode-cli-skill-spec.md) for details.
-
 ## How It Works
 
-`IRGraph` is the single source of truth. The canvas, parser, emitter, AI mutation path, runtime, and local persistence all operate on the same model-agnostic graph.
-
 ```text
-Coding goal
+User request
     |
-    +-- Chat mode ------> simpleBlueprint -> single-node IRGraph -> free-channel proxy -> answer
+    v
+Chat composer
     |
-    +-- Workflow mode --> multi-angle research -> blueprint consensus -> IRGraph -> React Flow canvas
-                                                                       |
-                                                                       +--> emitter -> runnable workflow script
-                                                                       |
-                                                                       +--> parser  -> round-trip graph recovery
-                                                                       |
-                                                                       +--> runtime -> Claude Code / Codex / Gemini
-                                                                                     |
-                                                                                     +--> consensus / vote / retry
+    +--> selected runtime / channel / permission / workspace
+             |
+             +--> direct provider API, local CLI, or local free-channel proxy
+                        |
+                        +--> streamed assistant output, tool log, and chat history
 ```
 
 Free-channel proxy:
@@ -272,45 +218,34 @@ Free-channel proxy:
 | --- | --- |
 | Desktop shell | Tauri 2, Rust |
 | Frontend | React 18, Vite 5, TypeScript 5 |
-| Canvas | React Flow / `@xyflow/react` |
 | State | Zustand |
 | Styling | Tailwind CSS, CSS variables |
 | Icons | lucide-react |
-| Workflow core | `IRGraph`, parser, emitter, round-trip checks |
-| Runtime | DAG execution, provider gateway, per-node status, consensus runner |
+| Provider routing | Claude Code, Codex, Gemini, extensible provider settings |
 | Free-channel proxy | Rust `tiny_http` + `ureq`, Anthropic/OpenAI protocol translation |
-| Runtime adapters | Claude Code, Codex, Gemini, extensible provider routing |
 
 ## Project Structure
 
 ```text
 app/
   src/
-    core/        IR, parser, emitter, fixtures, consensus heuristics, round-trip checks
-    canvas/      React Flow projection, node components, toolbar
-    panels/      Sidebar, prompt panel, AI dock, node inspector, settings
-    runtime/     DAG execution, provider gateway, consensus, run state
-    store/       Zustand state and history
-    lib/
-      freeChannels.ts  17+ free channel catalog + helpers
+    components/  Shared UI and rich assistant-message rendering
+    lib/         Provider settings, free-channel routing, persistence helpers
+    panels/      Sidebar, chat dock, settings, scheduling UI
+    store/       Zustand state and local history
   src-tauri/
     src/
       free_proxy.rs    Rust reverse proxy + Anthropic/OpenAI translation
       lib.rs           Tauri commands, filesystem/history bridge
-  doc/                 Tutorials, localized READMEs, CLI docs, screenshots
+  doc/                 Tutorials, localized READMEs, screenshots
 docs/                  Research notes, static docs, assets
 pencil/                Pencil design files
 ```
 
 ## Documentation
 
-- [Usage tutorial](app/doc/claude-code-workflow-freeultracode.en.md) - walkthrough from settings and AI input to blueprint generation, running, and appearance switching.
-- [Chinese usage tutorial](app/doc/claude-code-workflow-freeultracode.md)
 - [Free channel registration guide](app/doc/register-free-channel.md) - Chinese walkthrough for creating and saving a free-channel API key.
-- [FreeUltraCode CLI usage](app/doc/freeultracode-cli-usage.md)
-- [FreeUltraCode CLI skill spec](app/doc/freeultracode-cli-skill-spec.md)
 - [Chinese README](app/doc/README.zh-CN.md)
-- [Workflow syntax reference](docs/workflow-syntax-reference.html)
 
 ## Development
 
@@ -323,13 +258,6 @@ npm run lint       # ESLint for .ts and .tsx files
 npm run test       # Vitest suite
 npm run desktop    # Tauri development mode
 npm run package    # Production Tauri build
-```
-
-For parser, emitter, or IR changes, run the app and use the browser console helpers exposed on `window.FreeUltraCode`, especially:
-
-```js
-FreeUltraCode.roundtrip()
-FreeUltraCode.roundtripAll()
 ```
 
 ## Community

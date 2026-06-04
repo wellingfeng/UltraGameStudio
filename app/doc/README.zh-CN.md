@@ -4,7 +4,7 @@
   <a href="../../README.md">English</a> | 中文 | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | <a href="README.pt-BR.md">Português</a> | <a href="README.ru.md">Русский</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.hi.md">हिन्दी</a> | <a href="README.ar.md">العربية</a>
 </div>
 
-FreeUltraCode 是一个本地优先的编程工作流工具。它把免费和低成本大模型接入到可编辑的 Dynamic Workflow 里，让多个便宜模型通过多角度探索、对抗验证、方案投票和自适应重试来提高复杂编程任务的准确率，而不是每一步都依赖最贵的模型。
+不是每个编程任务都值得烧最贵的模型额度。FreeUltraCode 把 Claude Code、Codex、Gemini、免费渠道和本地模型放到同一个本地聊天界面里，常规任务走便宜模型，关键判断再交给强模型。
 
 <p align="center">
   <strong>免费渠道路由</strong><br>
@@ -16,27 +16,38 @@ FreeUltraCode 是一个本地优先的编程工作流工具。它把免费和低
   <img src="images/hero-dual-mode.zh-CN.png" alt="FreeUltraCode 同时支持 Chat 与 Workflow 双模式截图" width="960">
 </p>
 
-## 为什么做 FreeUltraCode
+## 它解决什么问题
 
 Dynamic Workflows 的价值不在于“多叫几个模型”，而在于把一次性回答改造成一个可验证的流程：先拆解需求，再从不同角度探索，随后互相质疑、投票、综合。这个机制对代码审查、迁移、重构、架构判断和复杂 Bug 排查很有用，但如果全部使用高价模型，成本会快速失控。
 
-FreeUltraCode 的目标是把这套机制变得可视、可控、可复用，并尽量降低成本：
+FreeUltraCode 把这套机制放进一个本地工具里：
 
-- 免费或低成本渠道内置：Gemini、DeepSeek、Kimi、Groq、OpenRouter、NVIDIA NIM、Z.ai、Ollama、LM Studio、llama.cpp 等。
+- 内置免费、试用额度或低成本渠道：GitHub Models、Hugging Face Router、SambaNova Cloud、Together AI、Gemini、DeepSeek、Kimi、Groq、OpenRouter、NVIDIA NIM、Z.ai、Kilo、LLM7、Ollama、LM Studio、llama.cpp 等。
 - 简单步骤保持单次调用，复杂或高风险步骤再升级为多样本、多轮校验。
 - 支持多角度研究、对抗式验证、锦标赛式方案选择和自一致投票。
 - 每个节点可以单独选择运行时、模型等级和渠道，把强模型留给最终判断或高风险节点。
 - 工作流图保存在本机，可以检查、编辑、导出、复用。
 
-简言之，FreeUltraCode 不是普通聊天界面，而是把一组便宜模型组织成可执行编程流程的工具。
-
 ## 主要能力
 
 ### 免费大模型编程聊天
 
-- **17+ 个免费/低成本渠道**：NVIDIA NIM、OpenRouter、Google Gemini、DeepSeek、Mistral、Mistral Codestral、Groq、Cerebras、Fireworks、Kimi、Z.ai、OpenCode、Wafer，以及 Ollama、LM Studio、llama.cpp 等本地运行时。
+- **20+ 个远程渠道 + 本地运行时**：NVIDIA NIM、OpenRouter、GitHub Models、Hugging Face Router、SambaNova Cloud、Together AI、Google Gemini、DeepSeek、Mistral、Mistral Codestral、OpenCode、Wafer、Kimi、Cerebras、Groq、Fireworks、Z.ai、LLM7、Kilo Gateway，以及 Ollama、LM Studio、llama.cpp 等本地运行时。
+- **免 Key 实验渠道**：LLM7 和 Kilo Gateway 可以不填 API Key 直接试用，但只建议用于非敏感编程任务。
+- **官方免费/试用额度渠道**：GitHub Models、Hugging Face Router、SambaNova Cloud、Together AI、Gemini、Groq、Cerebras、NVIDIA NIM、OpenRouter、Mistral/Codestral、DeepSeek、Kimi、Z.ai、OpenCode、Wafer、Fireworks 等需要填写 provider API Key，Key 只保存在本机。
 - 内置 Rust 本地反向代理，自动翻译 Anthropic 和 OpenAI-compatible 协议。
 - API Key 只保存在本机。本地模型运行时可以零 API Key 使用。
+
+当前默认的编程向模型：
+
+| 渠道 | 默认模型 |
+| --- | --- |
+| GitHub Models | `openai/gpt-4.1-mini` |
+| Hugging Face Router | `deepseek-ai/DeepSeek-V4-Pro` |
+| SambaNova Cloud | `DeepSeek-V3.1` |
+| Together AI | `Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8` |
+| Kilo Gateway | `poolside/laguna-xs.2:free` |
+| LLM7 | `codestral-latest` |
 
 ### 可视化 Dynamic Workflow
 
@@ -53,7 +64,7 @@ FreeUltraCode 支持几类适合编程任务的质量机制：
 | 机制 | 适用场景 | 运行方式 |
 | --- | --- | --- |
 | 多角度研究 | 需求不清、架构设计、项目迁移 | 多个 agent 从不同视角先调研，再汇总为生成上下文。 |
-| 对抗式验证 | 安全审计、代码审查、高风险重构 | 候选结论会被专门反驳，扛住质疑的结论才被保留。 |
+| 对抗式验证 | 安全审计、代码审查、高风险重构 | 候选方案会被专门反驳，扛住质疑的方案才被保留。 |
 | 方案锦标赛 | 多种实现路径可选 | 多个方案分别生成，再由评审选择最佳并吸收其它方案亮点。 |
 | 自一致投票 | 结构化判断、确定性决策 | 同一提示运行多次，选择多数一致的结果。 |
 | 自适应升级 | 复杂节点、最终校验节点 | 先少量采样，检测分歧；分歧高时再增加样本并投票。 |
@@ -103,39 +114,37 @@ npm run package
 
 ### 注册免费渠道
 
-1. 如果希望 Claude Code 通过免费渠道路由访问模型，先在底部运行时菜单里选择 **Claude Code**。
+1. 打开底部 **Channel** 下拉列表，选择一个带警告符号的免费渠道，例如 **Free · OpenRouter**。
 
 <p align="center">
-  <img src="images/注册免费渠道/0-切换到ClaudeCode.png" alt="切换到 Claude Code 运行时" width="960">
+  <img src="images/注册免费渠道/1-配置大模型.png" alt="在 Channel 下拉列表中选择未配置的免费渠道" width="960">
 </p>
 
-2. 打开底部渠道菜单，选择一个带警告符号的免费渠道，例如 **Free · OpenRouter**。
+2. 在 API Key 弹窗里点击 **打开注册网址**。
 
 <p align="center">
-  <img src="images/注册免费渠道/1-随便找一个没有配置的渠道.png" alt="选择一个还没有配置的免费渠道" width="960">
+  <img src="images/注册免费渠道/2-注册.png" alt="从 API Key 弹窗打开渠道注册网站" width="960">
 </p>
 
-3. 在弹窗里点击 **打开注册网址**，到平台官网创建 API Key，再粘贴回 FreeUltraCode 并点击 **保存并使用**。
+3. 到平台官网创建新的 API Key，并复制出来。
 
 <p align="center">
-  <img src="images/注册免费渠道/2-打开注册网站.png" alt="打开渠道注册网站" width="960">
+  <img src="images/注册免费渠道/3-新建token.png" alt="在渠道平台新建 API Key" width="960">
 </p>
+
+4. 回到 FreeUltraCode 粘贴 API Key，点击 **保存并使用**。保存成功后，这个渠道后面的警告符号会消失。
 
 <p align="center">
-  <img src="images/注册免费渠道/3-新建Key.png" alt="在渠道平台新建 API Key" width="960">
+  <img src="images/注册免费渠道/4-配置好了.png" alt="配置完成后渠道警告符号消失" width="960">
 </p>
+
+5. 也可以从左下角 **设置** 进入 **渠道** -> **免费渠道**，集中查看每个渠道的 API Key、默认模型和配置状态。
 
 <p align="center">
-  <img src="images/注册免费渠道/4-配置好好就没有警告符号了.png" alt="配置完成后渠道警告符号消失" width="960">
+  <img src="images/注册免费渠道/5-设置中的免费渠道.png" alt="在设置里查看和配置免费渠道" width="960">
 </p>
 
-4. 也可以从左下角 **设置** 进入 **免费渠道**，集中查看每个渠道的 API Key、默认模型和配置状态。
-
-<p align="center">
-  <img src="images/注册免费渠道/5-配置中的免费渠道.png" alt="在设置里查看和配置免费渠道" width="960">
-</p>
-
-渠道状态显示 **已就绪** 后，就可以在底部输入框提问，或者运行 workflow。完整步骤见 [注册并配置免费渠道 API Key](register-free-channel.md)。
+渠道状态显示 **已就绪** 后，就可以在底部输入框提问。完整步骤见 [注册并配置免费渠道 API Key](register-free-channel.md)。
 
 ### 使用 Chat 编程
 
@@ -155,7 +164,7 @@ Chat 模式适合单个明确的编程任务：直接描述要改什么，让 Fr
   <img src="images/chat/i-等待完成.png" alt="等待 Chat 执行代码检查、修改和验证" width="960">
 </p>
 
-5. 完成后，先看 AI 的结果总结、改动范围和验证命令。如果还需要调整，直接在同一个 Chat 里继续补充要求；也可以点击右侧 **常用提示词**，让 AI 继续补目标、边界、错误处理、结构、成本或可靠性。
+5. 完成后，先看 AI 的结果摘要、改动范围和验证命令。如果还需要调整，直接在同一个 Chat 里继续补充要求；也可以点击右侧 **常用提示词**，让 AI 继续补目标、边界、错误处理、结构、成本或可靠性。
 6. 如果是界面功能，最后运行应用实测一次。下面这个例子里，Chat 根据需求给收藏任务增加了定时执行弹窗，并验证了周报提醒、执行时间、重复执行和运行时提醒开关。
 
 <p align="center">
@@ -267,7 +276,7 @@ app/
     runtime/     DAG 执行、provider gateway、consensus、运行状态
     store/       Zustand 状态和历史
     lib/
-      freeChannels.ts  17+ 免费渠道目录和辅助函数
+      freeChannels.ts  20+ 远程免费/低成本渠道目录和辅助函数
   src-tauri/
     src/
       free_proxy.rs    Rust 反向代理 + Anthropic/OpenAI 协议翻译

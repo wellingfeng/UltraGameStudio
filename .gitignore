@@ -12,6 +12,7 @@ app/*.tsbuildinfo
 .omc/
 .gstack/
 .claude/
+memory/
 app/.gstack/
 app/src-tauri/.gstack/
 

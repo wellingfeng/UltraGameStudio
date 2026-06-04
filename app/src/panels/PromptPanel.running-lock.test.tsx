@@ -4,6 +4,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import AIDock from './AIDock';
 import PromptPanel from './PromptPanel';
 import { defaultBlueprint, simpleBlueprint } from '@/core/defaultBlueprint';
+import {
+  ACTIVE_PROVIDER_BY_KIND_STORAGE,
+  PROVIDERS_STORAGE,
+  type Provider,
+} from '@/lib/apiConfig';
+import { isFreeChannelSelection } from '@/lib/freeChannels';
+import { workflowDefaultGatewaySelection } from '@/lib/modelGateway/resolver';
 import { defaultComposer, samplePromptGroups } from '@/store/sampleSessions';
 import type { Message } from '@/store/types';
 import { useStore } from '@/store/useStore';
@@ -136,6 +143,89 @@ function modelStrategyButton(container: HTMLElement): HTMLButtonElement | null {
   );
 }
 
+function channelButton(container: HTMLElement): HTMLButtonElement {
+  const button = container.querySelector('button[title="渠道"]');
+  if (!button) throw new Error('Missing channel selector');
+  return button as HTMLButtonElement;
+}
+
+function seedDefaultChannels(): void {
+  const providers: Provider[] = [
+    {
+      id: 'p_sss',
+      kind: 'anthropic',
+      name: 'SSSAiCode',
+      apiKey: 'sk-sss',
+      baseUrl: 'https://sss.example/v1',
+      transport: 'cli',
+      model: 'claude-opus-4-8',
+    },
+    {
+      id: 'p_deepseek',
+      kind: 'anthropic',
+      name: 'DeepSeek',
+      apiKey: 'sk-deepseek',
+      baseUrl: 'https://deepseek.example/v1',
+      transport: 'cli',
+      model: 'deepseek-v4-pro',
+    },
+    {
+      id: 'p_kimi',
+      kind: 'anthropic',
+      name: 'Kimi For Coding',
+      apiKey: 'sk-kimi',
+      baseUrl: 'https://kimi.example/v1',
+      transport: 'cli',
+      model: 'kimi-for-coding',
+    },
+    {
+      id: 'p_packy',
+      kind: 'anthropic',
+      name: 'PackyCode',
+      apiKey: 'sk-packy',
+      baseUrl: 'https://packy.example/v1',
+      transport: 'cli',
+      model: 'packy-code',
+    },
+    {
+      id: 'p_opencode',
+      kind: 'anthropic',
+      name: 'OpenCode Zen',
+      apiKey: 'sk-opencode',
+      baseUrl: 'https://opencode.example/v1',
+      transport: 'cli',
+      model: 'opencode-zen',
+    },
+    {
+      id: 'p_codex',
+      kind: 'codex',
+      name: 'Codex Relay',
+      apiKey: 'sk-codex',
+      baseUrl: 'https://codex.example/v1',
+      transport: 'cli',
+      model: 'gpt-5.1',
+    },
+    {
+      id: 'p_gemini',
+      kind: 'gemini',
+      name: 'Gemini Relay',
+      apiKey: 'sk-gemini',
+      baseUrl: 'https://gemini.example/v1',
+      transport: 'cli',
+      model: 'gemini-3-pro',
+    },
+  ];
+  window.localStorage.setItem(PROVIDERS_STORAGE, JSON.stringify(providers));
+  window.localStorage.setItem(
+    ACTIVE_PROVIDER_BY_KIND_STORAGE,
+    JSON.stringify({
+      anthropic: 'p_sss',
+      codex: 'p_codex',
+      gemini: 'p_gemini',
+    }),
+  );
+}
+
 function typeIntoInput(input: HTMLInputElement, value: string): void {
   const setter = Object.getOwnPropertyDescriptor(
     window.HTMLInputElement.prototype,
@@ -243,6 +333,85 @@ describe('PromptPanel running lock', () => {
     }
   });
 
+  it('groups default and free channels in the bottom selector', async () => {
+    seedDefaultChannels();
+    resetStoreForPromptLock('design');
+    const view = await renderChatDock();
+
+    try {
+      const selector = channelButton(view.container);
+
+      expect(selector.textContent).toContain('SSSAiCode');
+      expect(selector.textContent).toContain('Claude Code · 默认渠道');
+
+      await act(async () => {
+        selector.click();
+      });
+
+      const groupHeaders = Array.from(
+        view.container.querySelectorAll('li[role="presentation"]'),
+      ).map((item) => item.textContent?.trim());
+      expect(groupHeaders).toEqual([
+        'Claude Code',
+        'Codex',
+        'Gemini',
+        '免费渠道',
+      ]);
+      expect(view.container.textContent).toContain('Claude Code · 默认渠道');
+      expect(view.container.textContent).toContain('Codex · 默认渠道');
+      expect(view.container.textContent).toContain('Gemini · 默认渠道');
+      expect(view.container.textContent).toContain('免费渠道');
+      expect(view.container.textContent).toContain('DeepSeek');
+      expect(view.container.textContent).toContain('Kimi For Coding');
+      expect(view.container.textContent).toContain('Codex Relay');
+      expect(view.container.textContent).toContain('Gemini Relay');
+      expect(view.container.textContent).toContain('Free · LLM7');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('switches configured default channels and a free channel from the same selector', async () => {
+    seedDefaultChannels();
+    resetStoreForPromptLock('design');
+    const view = await renderChatDock();
+
+    try {
+      await act(async () => {
+        channelButton(view.container).click();
+      });
+      await act(async () => {
+        buttonByText(view.container, 'Codex Relay').click();
+      });
+
+      expect(workflowDefaultGatewaySelection(useStore.getState().workflow)).toEqual({
+        adapter: 'codex',
+        modelClass: 'gpt-5.1',
+        providerId: 'p_codex',
+        channelId: 'default',
+      });
+
+      await act(async () => {
+        channelButton(view.container).click();
+      });
+      await act(async () => {
+        buttonByText(view.container, 'LLM7').click();
+        await Promise.resolve();
+      });
+
+      const selection = workflowDefaultGatewaySelection(
+        useStore.getState().workflow,
+      );
+      expect(isFreeChannelSelection(selection)).toBe('llm7');
+      expect(selection).toMatchObject({
+        adapter: 'claude-code',
+        channelId: 'default',
+      });
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   it('uses the chat-specific empty state copy in simple chat mode', async () => {
     resetStoreForPromptLock('design');
     useStore.setState({
@@ -258,6 +427,122 @@ describe('PromptPanel running lock', () => {
       );
     } finally {
       await view.cleanup();
+    }
+  });
+
+  it('updates the chat header when the active session is renamed', async () => {
+    resetStoreForPromptLock('design');
+    const originalSession = {
+      id: 's_chat',
+      workspaceId: 'ws_chat',
+      title: 'Original chat',
+      createdAt: 1,
+      updatedAt: 1,
+      isWorkflow: false,
+    };
+    useStore.setState({
+      workflow: simpleBlueprint('Stale workflow title'),
+      activeWorkspaceId: 'ws_chat',
+      activeSessionId: originalSession.id,
+      sessions: [originalSession],
+      sessionTree: { ws_chat: [originalSession] },
+    });
+    const view = await renderChatDock();
+
+    try {
+      expect(
+        view.container.querySelector(
+          'header [data-testid="chat-title-display"][title="Original chat"]',
+        ),
+      ).toBeInstanceOf(HTMLElement);
+
+      const renamedSession = {
+        ...originalSession,
+        title: 'Renamed chat',
+        updatedAt: 2,
+      };
+      await act(async () => {
+        useStore.setState({
+          sessions: [renamedSession],
+          sessionTree: { ws_chat: [renamedSession] },
+        });
+      });
+
+      expect(
+        view.container.querySelector(
+          'header [data-testid="chat-title-display"][title="Renamed chat"]',
+        ),
+      ).toBeInstanceOf(HTMLElement);
+      expect(
+        view.container.querySelector(
+          'header [data-testid="chat-title-display"][title="Stale workflow title"]',
+        ),
+      ).toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('renames the active chat from the header title editor', async () => {
+    resetStoreForPromptLock('design');
+    const originalRenameWorkflowSession =
+      useStore.getState().renameWorkflowSession;
+    const renameWorkflowSession = vi.fn().mockResolvedValue(undefined);
+    const originalSession = {
+      id: 's_chat',
+      workspaceId: 'ws_chat',
+      title: 'Original chat',
+      createdAt: 1,
+      updatedAt: 1,
+      isWorkflow: false,
+    };
+    useStore.setState({
+      workflow: simpleBlueprint('Stale workflow title'),
+      activeWorkspaceId: 'ws_chat',
+      activeSessionId: originalSession.id,
+      sessions: [originalSession],
+      sessionTree: { ws_chat: [originalSession] },
+      renameWorkflowSession,
+    });
+    const view = await renderChatDock();
+
+    try {
+      const titleButton = view.container.querySelector(
+        'button[data-testid="chat-title-display"]',
+      ) as HTMLButtonElement | null;
+      expect(titleButton).toBeInstanceOf(HTMLButtonElement);
+
+      await act(async () => {
+        titleButton?.click();
+      });
+
+      const titleInput = view.container.querySelector(
+        'input[data-testid="chat-title-input"]',
+      ) as HTMLInputElement | null;
+      expect(titleInput).toBeInstanceOf(HTMLInputElement);
+      expect(titleInput?.value).toBe('Original chat');
+      expect(titleInput?.selectionStart).toBe(0);
+      expect(titleInput?.selectionEnd).toBe('Original chat'.length);
+
+      await act(async () => {
+        if (!titleInput) return;
+        typeIntoInput(titleInput, 'Renamed from top');
+        titleInput.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+        await Promise.resolve();
+      });
+
+      expect(renameWorkflowSession).toHaveBeenCalledWith(
+        's_chat',
+        'ws_chat',
+        'Renamed from top',
+      );
+    } finally {
+      await view.cleanup();
+      useStore.setState({
+        renameWorkflowSession: originalRenameWorkflowSession,
+      });
     }
   });
 

@@ -216,6 +216,46 @@ export type IRRunStatus =
   | 'error'
   | 'interrupted';
 
+/**
+ * One row of a captain-loop task ledger. The "队长" (manager) node decomposes a
+ * frozen goal into these; the acceptance gate marks each accepted/rejected with
+ * evidence and gaps. Persisted inside the run snapshot (see {@link TaskLedger})
+ * so reopen/resume recovers task-level state — not just node success/failure.
+ */
+export interface TaskLedgerEntry {
+  /** Stable id within the ledger (e.g. "t1"). */
+  id: string;
+  /** Short human-readable task title. */
+  title: string;
+  /** Who/which worker owns this subtask. */
+  owner?: string;
+  /** The acceptance line: what must be true for this task to pass. */
+  acceptance?: string;
+  /** Evidence form / pointer (command output, file path, screenshot, link). */
+  evidence?: string;
+  /** Acceptance state, set by the gate. */
+  status: 'pending' | 'running' | 'accepted' | 'rejected' | 'blocked';
+  /** Path / identifier of the produced artifact. */
+  artifact?: string;
+  /** Outstanding gaps blocking acceptance (rework reasons). */
+  gaps?: string[];
+}
+
+/**
+ * Captain-loop task ledger: the structured, recoverable record of subtasks,
+ * their acceptance state, evidence and gaps — kept on the run snapshot (not in
+ * the chat stream) so long tasks don't "forget". `anchor` is the current
+ * best accepted artifact; `round` is the rework iteration count. Ignored by
+ * emit/parse (it lives under meta.run, which they skip).
+ */
+export interface TaskLedger {
+  tasks: TaskLedgerEntry[];
+  /** Current best accepted artifact (the "已验收锚点"). */
+  anchor?: string;
+  /** Rework/acceptance round number. */
+  round?: number;
+}
+
 /** Runtime snapshot persisted with the workflow so reopen/resume can recover. */
 export interface IRRunSnapshot {
   status: IRRunStatus;
@@ -225,6 +265,12 @@ export interface IRRunSnapshot {
   error?: Record<string, unknown> | null;
   route?: GatewaySelection;
   usage?: Record<string, unknown> | null;
+  /**
+   * Captain-loop task ledger (subtask status / acceptance / evidence / gaps).
+   * Populated by the acceptance gate during a captain-loop run; surfaced in the
+   * right-hand panel. Absent for ordinary workflows. Ignored by emit/parse.
+   */
+  taskLedger?: TaskLedger;
   updatedAt?: number;
 }
 

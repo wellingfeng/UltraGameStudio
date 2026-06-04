@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { useStore } from '@/store/useStore';
 import AutoTextarea from '@/components/AutoTextarea';
 import NodeInspector from './NodeInspector';
+import TaskLedgerPanel from './TaskLedgerPanel';
 import { useResizableWidth } from '@/lib/useResizableWidth';
 import { isPromptEntryDisabled } from '@/lib/composerEntryPolicy';
 import {
@@ -41,6 +42,7 @@ export default function PromptPanel() {
   const locale = useStore((s) => s.locale);
   const autoTranslate = useStore((s) => s.promptAutoTranslate);
   const selectedNodeId = useStore((s) => s.selectedNodeId);
+  const taskLedger = useStore((s) => s.workflow.meta.run?.taskLedger);
   const mode = useStore((s) => s.mode);
   const appendComposerDraft = useStore((s) => s.appendComposerDraft);
   const addPromptItem = useStore((s) => s.addPromptItem);
@@ -171,10 +173,12 @@ export default function PromptPanel() {
         <span className="text-sm font-semibold tracking-tight text-fg">
           {selectedNodeId
             ? t(locale, 'prompt.nodeProperties')
-            : t(locale, 'prompt.commonPrompts')}
+            : taskLedger
+              ? t(locale, 'prompt.taskLedger')
+              : t(locale, 'prompt.commonPrompts')}
         </span>
         <div className="ml-auto flex items-center gap-1.5">
-          {!selectedNodeId && (
+          {!selectedNodeId && !taskLedger && (
             <button
               type="button"
               onClick={() => {
@@ -193,6 +197,8 @@ export default function PromptPanel() {
       <div className="min-h-0 flex-1 overflow-y-auto p-3">
         {selectedNodeId ? (
           <NodeInspector />
+        ) : taskLedger ? (
+          <TaskLedgerPanel ledger={taskLedger} />
         ) : (
           <div className="flex flex-col gap-4">
             {promptGroups.map((group) => {
@@ -372,7 +378,7 @@ export default function PromptPanel() {
         )}
       </div>
 
-      {!selectedNodeId && (
+      {!selectedNodeId && !taskLedger && (
         <div className="border-t border-border-soft px-4 py-2.5 text-[10px] leading-relaxed text-fg-faint">
           {statusText ??
             (editMode

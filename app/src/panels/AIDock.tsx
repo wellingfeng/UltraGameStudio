@@ -8,9 +8,10 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  ArrowDownToLine,
+  ArrowUpToLine,
   ChevronDown,
   ChevronUp,
-  Play,
   Plus,
   Search,
   Square,
@@ -23,7 +24,22 @@ import {
   systemDefaultGatewaySelection,
   workflowDefaultGatewaySelection,
 } from '@/lib/modelGateway/resolver';
-import { RUNTIME_ADAPTERS } from '@/lib/adapters';
+import {
+  RUNTIME_ADAPTERS,
+  type RuntimeAdapterId,
+} from '@/lib/adapters';
+import {
+  getProviderRuntimeInfo,
+  listProviders,
+  updateProvider,
+  type Provider,
+  type ProviderKind,
+  type ProviderRuntimeStatus,
+} from '@/lib/apiConfig';
+import {
+  getCliRuntimeSnapshot,
+  isCliAdapterAvailable,
+} from '@/lib/cliConfig';
 import {
   FREE_CHANNELS,
   ensureFreeProxy,
@@ -31,6 +47,7 @@ import {
   freeChannelReady,
   freeChannelSelection,
   getFreeChannelKey,
+  getFreeChannelModel,
   getFreeChannelModelOverride,
   isFreeChannelSelection,
   loadFreeChannelKeyFromAutoConfig,
@@ -39,7 +56,7 @@ import {
   type FreeChannel,
 } from '@/lib/freeChannels';
 import LocalModelSetupDialog from '@/components/LocalModelSetupDialog';
-import type { ModelStrategy, SelectOption } from '@/store/types';
+import type { SelectOption } from '@/store/types';
 import { localizeSelectOption, t, type Locale } from '@/lib/i18n';
 import type { Message } from '@/store/types';
 import {
@@ -55,6 +72,13 @@ import {
   openExternal,
   type LocalModelRuntimeStatus,
 } from '@/lib/tauri';
+import {
+  canRefreshFreeChannelModels,
+  freeChannelModelOptions,
+  providerModelOptions,
+  refreshFreeChannelModels,
+  refreshProviderModels,
+} from '@/lib/modelLists';
 import LazyMessageContent from '@/components/ai/LazyMessageContent';
 import FilePreviewDrawer from '@/components/ai/FilePreviewDrawer';
 import type { FileRef } from '@/components/ai/lib/filePath';
@@ -63,7 +87,11 @@ import {
   hasToolSentinel,
 } from '@/components/ai/lib/toolEvent';
 import { shallow } from 'zustand/shallow';
-import { isActiveAiEditingSession, useStore } from '@/store/useStore';
+import {
+  isActiveAiEditingSession,
+  useStore,
+  type StoreState,
+} from '@/store/useStore';
 
 const DEFAULT_DOCK_HEIGHT = 208; // matches the former h-52
 const MIN_DOCK_HEIGHT = 120;
@@ -74,7 +102,7 @@ const MIN_DOCK_HEIGHT = 120;
  */
 const EAGER_MESSAGE_TAIL = 6;
 /** Fixed height of the bottom input area in 'chat' layout (return fills the rest). */
-const CHAT_INPUT_HEIGHT = 232;
+const CHAT_INPUT_HEIGHT = 300;
 
 /** localStorage key + bounds for the AI-input pane width (right column). */
 const INPUT_WIDTH_KEY = 'freeultracode.aiInputWidth.v1';
@@ -86,8 +114,9 @@ const NARROW_INPUT_WIDTH_RATIO = 0.4;
 
 /** localStorage key + bounds for the bottom input area height in 'chat' layout. */
 const CHAT_INPUT_HEIGHT_KEY = 'freeultracode.chatInputHeight.v1';
-const MIN_CHAT_INPUT_HEIGHT = 140;
+const MIN_CHAT_INPUT_HEIGHT = 180;
 const MIN_CHAT_RETURN_HEIGHT = 160; // keep the chat return area usable
+const MAX_CHAT_TITLE_LENGTH = 80;
 
 /** Clamp the chat input-area height so neither it nor the return area collapses. */
 function clampChatInputHeight(h: number): number {
@@ -102,6 +131,34 @@ function clampHeight(h: number): number {
   const max =
     typeof window !== 'undefined' ? window.innerHeight * 0.75 : 600;
   return Math.min(Math.max(h, MIN_DOCK_HEIGHT), max);
+}
+
+type ChatTitleState = Pick<
+  StoreState,
+  | 'activeSessionId'
+  | 'activeWorkspaceId'
+  | 'sessions'
+  | 'sessionTree'
+  | 'workflow'
+>;
+
+function activeChatTitle(state: ChatTitleState): string {
+  const activeSessionId = state.activeSessionId;
+  if (!activeSessionId) return state.workflow.meta?.name ?? '';
+
+  const activeSession = state.activeWorkspaceId
+    ? (state.sessionTree[state.activeWorkspaceId]?.find(
+        (session) => session.id === activeSessionId,
+      ) ??
+      state.sessions.find(
+        (session) =>
+          session.id === activeSessionId &&
+          (session.workspaceId == null ||
+            session.workspaceId === state.activeWorkspaceId),
+      ))
+    : state.sessions.find((session) => session.id === activeSessionId);
+
+  return activeSession?.title?.trim() || state.workflow.meta?.name || '';
 }
 
 function formatMessageTime(ts: number): string {
@@ -307,6 +364,93 @@ function describeLocalModelStatus(
     return `${channel.label}: ${t(locale, 'settings.freeChannels.localUnsupported')}。${suffix}`;
   }
   return `${channel.label}: ${t(locale, 'settings.freeChannels.localServiceError')}。${suffix}`;
+}
+
+const DEFAULT_PROVIDER_OPTION_PREFIX = 'default-provider:';
+const SYSTEM_DEFAULT_OPTION_PREFIX = 'system-default:';
+const FREE_CHANNEL_OPTION_PREFIX = 'free:';
+
+function defaultProviderOptionId(providerId: string): string {
+  return `${DEFAULT_PROVIDER_OPTION_PREFIX}${providerId}`;
+}
+
+function systemDefaultOptionId(adapter: RuntimeAdapterId): string {
+  return `${SYSTEM_DEFAULT_OPTION_PREFIX}${adapter}`;
+}
+
+function freeChannelOptionId(channelId: string): string {
+  return `${FREE_CHANNEL_OPTION_PREFIX}${channelId}`;
+}
+
+function providerIdFromDefaultOption(optionId: string): string | null {
+  if (!optionId.startsWith(DEFAULT_PROVIDER_OPTION_PREFIX)) return null;
+  return optionId.slice(DEFAULT_PROVIDER_OPTION_PREFIX.length) || null;
+}
+
+function adapterFromSystemDefaultOption(
+  optionId: string,
+): RuntimeAdapterId | null {
+  if (!optionId.startsWith(SYSTEM_DEFAULT_OPTION_PREFIX)) return null;
+  const adapterId = optionId.slice(SYSTEM_DEFAULT_OPTION_PREFIX.length);
+  const adapter = RUNTIME_ADAPTERS.find((item) => item.id === adapterId);
+  return adapter?.id ?? null;
+}
+
+function freeChannelFromOption(optionId: string): string | null {
+  if (!optionId.startsWith(FREE_CHANNEL_OPTION_PREFIX)) return null;
+  const channelId = optionId.slice(FREE_CHANNEL_OPTION_PREFIX.length);
+  return freeChannelById(channelId) ? channelId : null;
+}
+
+function defaultChannelRuntimeLabel(
+  locale: Locale,
+  adapter: { label: string },
+): string {
+  return `${adapter.label} · ${t(locale, 'dock.channelKindDefault')}`;
+}
+
+function defaultChannelRuntimeGroup(
+  locale: Locale,
+  adapter: { label: string },
+): string {
+  return `${t(locale, 'dock.channelGroupDefault')} · ${adapter.label}`;
+}
+
+function providerKindToAdapter(kind: ProviderKind): RuntimeAdapterId {
+  if (kind === 'codex') return 'codex';
+  if (kind === 'gemini') return 'gemini';
+  return 'claude-code';
+}
+
+function providerSelection(provider: Provider, modelOverride?: string) {
+  const adapter = providerKindToAdapter(provider.kind);
+  const model = (modelOverride ?? provider.model ?? '').trim();
+  return {
+    adapter,
+    modelClass: model || 'default',
+    providerId: provider.id,
+    channelId: 'default',
+  };
+}
+
+function uniqueModelSelectOptions(values: string[]): SelectOption[] {
+  const out: SelectOption[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    const model = raw.trim();
+    if (!model) continue;
+    const key = model.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ id: model, label: model });
+  }
+  return out;
+}
+
+function providerSortRank(status: ProviderRuntimeStatus): number {
+  if (status === 'direct') return 1;
+  if (status === 'cli') return 2;
+  return 3;
 }
 
 /**
@@ -534,30 +678,10 @@ export default function AIDock({
   const messages = useStore((s) => s.messages);
   const sendPrompt = useStore((s) => s.sendPrompt);
   const stopChat = useStore((s) => s.stopChat);
-  const chatTitle = useStore((s) => s.workflow.meta?.name ?? '');
-  const simpleMode = useStore((s) => s.workflow.meta?.simple === true);
-  const activeSessionIsWorkflow = useStore((s) => {
-    if (!s.activeSessionId) return true;
-    const active =
-      s.sessions.find((session) => session.id === s.activeSessionId) ??
-      (s.activeWorkspaceId
-        ? s.sessionTree[s.activeWorkspaceId]?.find(
-            (session) => session.id === s.activeSessionId,
-          )
-        : undefined);
-    return active?.isWorkflow ?? true;
-  });
-  const activeSessionFavorite = useStore((s) => {
-    if (!s.activeSessionId) return false;
-    const active =
-      s.sessions.find((session) => session.id === s.activeSessionId) ??
-      (s.activeWorkspaceId
-        ? s.sessionTree[s.activeWorkspaceId]?.find(
-            (session) => session.id === s.activeSessionId,
-          )
-        : undefined);
-    return active?.favorite === true;
-  });
+  const chatTitle = useStore(activeChatTitle);
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
+  const renameWorkflowSession = useStore((s) => s.renameWorkflowSession);
   const runSelection = useStore((s) => workflowDefaultGatewaySelection(s.workflow), shallow);
   const setGlobalRunSelection = useStore((s) => s.setGlobalRunSelection);
   const composer = useStore((s) => s.composer);
@@ -568,6 +692,7 @@ export default function AIDock({
   const setComposerDraft = useStore((s) => s.setComposerDraft);
   const setWorkspace = useStore((s) => s.setWorkspace);
   const permissionOptions = useStore((s) => s.permissionOptions);
+  const composerModelOptions = useStore((s) => s.modelOptions);
   const workspaceHistory = useStore((s) => s.workspaceHistory);
   const mode = useStore((s) => s.mode);
   const activeAiEditing = useStore((s) => isActiveAiEditingSession(s));
@@ -582,6 +707,9 @@ export default function AIDock({
   const dismissInteraction = useStore((s) => s.dismissInteraction);
   const streamRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const chatTitleInputRef = useRef<HTMLInputElement>(null);
+  const chatTitleCommitInFlightRef = useRef(false);
+  const skipNextTitleBlurCommitRef = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const draftRef = useRef(draft);
   const selectionRef = useRef<TextSelection>({ start: 0, end: 0 });
@@ -594,6 +722,9 @@ export default function AIDock({
   const isReadOnly = mode === 'running';
   const [dropActive, setDropActive] = useState(false);
   const [filePreviewRef, setFilePreviewRef] = useState<FileRef | null>(null);
+  const [chatTitleEditing, setChatTitleEditing] = useState(false);
+  const [chatTitleDraft, setChatTitleDraft] = useState('');
+  const [chatTitleSaving, setChatTitleSaving] = useState(false);
   const [returnSearchOpen, setReturnSearchOpen] = useState(false);
   const [returnSearch, setReturnSearch] = useState('');
   const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(0);
@@ -613,26 +744,80 @@ export default function AIDock({
     () => new Set(searchMatches.map((match) => match.messageId)),
     [searchMatches],
   );
-  const reusableFavoritePrompt = useMemo(() => {
-    if (!isChat || !activeSessionFavorite) return '';
-    return messages.find((message) => message.role === 'user')?.text.trim() ?? '';
-  }, [activeSessionFavorite, isChat, messages]);
-  const runtimeSelectOptions = useMemo<SelectOption[]>(
+  const topicMessageIds = useMemo(
     () =>
-      RUNTIME_ADAPTERS.map((adapter) => ({
-        id: adapter.id,
-        label: adapter.label,
-      })),
-    [],
+      messages
+        .filter((message) => message.role === 'user')
+        .map((message) => message.id),
+    [messages],
   );
-  const runtimeSelectValue =
-    RUNTIME_ADAPTERS.find((adapter) => adapter.id === runSelection.adapter)?.id ??
-    RUNTIME_ADAPTERS[0].id;
+  useEffect(() => {
+    if (!chatTitleEditing) setChatTitleDraft(chatTitle);
+  }, [chatTitle, chatTitleEditing]);
 
-  // "Channel" select — only shown when the selected runtime is claude-code.
-  // Option 1 = system default (no proxy), options 2..n = the free channels
-  // routed through the built-in local proxy. See lib/freeChannels.ts.
-  const isClaudeCodeRuntime = runtimeSelectValue === 'claude-code';
+  useLayoutEffect(() => {
+    if (!chatTitleEditing) return;
+    const input = chatTitleInputRef.current;
+    if (!input) return;
+    input.focus();
+    input.select();
+  }, [chatTitleEditing]);
+
+  const beginChatTitleEdit = useCallback(() => {
+    if (!isChat || !activeSessionId || chatTitleSaving) return;
+    skipNextTitleBlurCommitRef.current = false;
+    setChatTitleDraft(chatTitle);
+    setChatTitleEditing(true);
+  }, [activeSessionId, chatTitle, chatTitleSaving, isChat]);
+
+  const cancelChatTitleEdit = useCallback(() => {
+    skipNextTitleBlurCommitRef.current = true;
+    setChatTitleDraft(chatTitle);
+    setChatTitleEditing(false);
+  }, [chatTitle]);
+
+  const commitChatTitleEdit = useCallback(async () => {
+    if (chatTitleCommitInFlightRef.current) return;
+
+    const sessionId = activeSessionId;
+    if (!sessionId) {
+      setChatTitleEditing(false);
+      return;
+    }
+
+    const trimmed = chatTitleDraft.trim();
+    if (!trimmed || trimmed === chatTitle.trim()) {
+      setChatTitleDraft(chatTitle);
+      setChatTitleEditing(false);
+      return;
+    }
+
+    chatTitleCommitInFlightRef.current = true;
+    setChatTitleSaving(true);
+    try {
+      await renameWorkflowSession(
+        sessionId,
+        activeWorkspaceId ?? null,
+        trimmed,
+      );
+      setChatTitleEditing(false);
+    } catch {
+      setChatTitleDraft(chatTitle);
+    } finally {
+      chatTitleCommitInFlightRef.current = false;
+      setChatTitleSaving(false);
+    }
+  }, [
+    activeSessionId,
+    activeWorkspaceId,
+    chatTitle,
+    chatTitleDraft,
+    renameWorkflowSession,
+  ]);
+
+  // One bottom "Channel" select owns the active runtime route. The default
+  // group mirrors Settings -> Default Channels: each configured provider is a
+  // real channel; system CLI entries are only fallbacks for empty categories.
   const [freeChannelRevision, setFreeChannelRevision] = useState(0);
   useEffect(() => {
     const refresh = () => setFreeChannelRevision((n) => n + 1);
@@ -642,28 +827,195 @@ export default function AIDock({
   const [localRuntimeStatuses, setLocalRuntimeStatuses] = useState<
     Record<string, LocalModelRuntimeStatus | undefined>
   >({});
+  const defaultChannelProviders = useMemo(
+    () => {
+      // Refresh after Settings edits/imports, because provider config is backed
+      // by localStorage and surfaced through the gateway-config-changed event.
+      void freeChannelRevision;
+      const cliRuntime = getCliRuntimeSnapshot();
+      const desktop = tauriAvailable();
+      return listProviders()
+        .map((provider) => {
+          const adapter = providerKindToAdapter(provider.kind);
+          const runtime = getProviderRuntimeInfo(provider, {
+            canUseCliFallback:
+              desktop && isCliAdapterAvailable(adapter, cliRuntime),
+          });
+          return { provider, adapter, status: runtime.status };
+        })
+        .sort((a, b) => {
+          const adapterRank =
+            RUNTIME_ADAPTERS.findIndex((item) => item.id === a.adapter) -
+            RUNTIME_ADAPTERS.findIndex((item) => item.id === b.adapter);
+          if (adapterRank !== 0) return adapterRank;
+          const rankA = providerSortRank(a.status);
+          const rankB = providerSortRank(b.status);
+          if (rankA !== rankB) return rankA - rankB;
+          return a.provider.name.localeCompare(b.provider.name);
+        });
+    },
+    [freeChannelRevision],
+  );
   const channelSelectOptions = useMemo<SelectOption[]>(
     () => {
-      // Refresh labels after localStorage-backed channel config changes.
-      void freeChannelRevision;
+      const defaultOptions = RUNTIME_ADAPTERS.flatMap((adapter) => {
+        const hint = defaultChannelRuntimeLabel(locale, adapter);
+        const group = defaultChannelRuntimeGroup(locale, adapter);
+        return [
+          {
+            id: systemDefaultOptionId(adapter.id),
+            label: `${adapter.label} · ${t(locale, 'dock.channelSystemDefault')}`,
+            hint,
+            group,
+          },
+          ...defaultChannelProviders
+            .filter((item) => item.adapter === adapter.id)
+            .map(({ provider }) => ({
+              id: defaultProviderOptionId(provider.id),
+              label: provider.name.trim() || adapter.label,
+              hint,
+              group,
+            })),
+        ];
+      });
+
       return [
-        { id: '__system__', label: t(locale, 'dock.channelSystemDefault') },
+        ...defaultOptions,
         ...FREE_CHANNELS.map((c) => {
           const localStatus = c.local ? localRuntimeStatuses[c.id] : undefined;
           const needsAttention =
             !freeChannelReady(c.id) ||
             (c.local && localStatus && !localStatus.ready);
           return {
-            id: c.id,
+            id: freeChannelOptionId(c.id),
             label: 'Free · ' + c.label + (needsAttention ? ' ⚠' : ''),
+            hint: t(locale, 'dock.channelKindFree'),
+            group: t(locale, 'dock.channelGroupFree'),
           };
         }),
       ];
     },
-    [locale, freeChannelRevision, localRuntimeStatuses],
+    [locale, defaultChannelProviders, localRuntimeStatuses],
   );
-  const channelSelectValue =
-    isFreeChannelSelection(runSelection) ?? '__system__';
+  const selectedFreeChannelId = isFreeChannelSelection(runSelection);
+  const selectedAdapter =
+    RUNTIME_ADAPTERS.find((adapter) => adapter.id === runSelection.adapter)?.id ??
+    RUNTIME_ADAPTERS[0].id;
+  const pinnedDefaultProvider = runSelection.providerId
+    ? defaultChannelProviders.find(
+        (item) =>
+          item.provider.id === runSelection.providerId &&
+          item.adapter === selectedAdapter,
+      )
+    : undefined;
+  const channelSelectValue = selectedFreeChannelId
+    ? freeChannelOptionId(selectedFreeChannelId)
+    : pinnedDefaultProvider
+      ? defaultProviderOptionId(pinnedDefaultProvider.provider.id)
+      : systemDefaultOptionId(selectedAdapter);
+  const selectedFreeChannel = selectedFreeChannelId
+    ? freeChannelById(selectedFreeChannelId)
+    : undefined;
+  const selectedDefaultProvider = selectedFreeChannel
+    ? undefined
+    : pinnedDefaultProvider;
+  const [modelListRevision, setModelListRevision] = useState(0);
+  const [loadingChannelModels, setLoadingChannelModels] = useState(false);
+  useEffect(() => {
+    const refresh = () => setModelListRevision((n) => n + 1);
+    window.addEventListener('fuc:model-list-changed', refresh);
+    return () => window.removeEventListener('fuc:model-list-changed', refresh);
+  }, []);
+  useEffect(() => {
+    if (!selectedFreeChannel) return;
+    if (!canRefreshFreeChannelModels(selectedFreeChannel)) return;
+    let disposed = false;
+    setLoadingChannelModels(true);
+    void refreshFreeChannelModels(selectedFreeChannel)
+      .catch(() => undefined)
+      .finally(() => {
+        if (!disposed) setLoadingChannelModels(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [selectedFreeChannel, freeChannelRevision]);
+  useEffect(() => {
+    if (selectedFreeChannel || !selectedDefaultProvider) return;
+    let disposed = false;
+    setLoadingChannelModels(true);
+    void refreshProviderModels(selectedDefaultProvider.provider)
+      .catch(() => undefined)
+      .finally(() => {
+        if (!disposed) setLoadingChannelModels(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [
+    selectedFreeChannel,
+    selectedDefaultProvider,
+    selectedDefaultProvider?.provider.id,
+    selectedDefaultProvider?.provider.apiKey,
+    selectedDefaultProvider?.provider.baseUrl,
+    selectedDefaultProvider?.provider.model,
+  ]);
+  const modelSelectOptions = useMemo<SelectOption[]>(() => {
+    void modelListRevision;
+    const defaultModelOption = {
+      id: 'default',
+      label: t(locale, 'dock.channelSystemDefault'),
+    };
+    if (selectedFreeChannel) {
+      const options = uniqueModelSelectOptions(
+        freeChannelModelOptions(selectedFreeChannel),
+      );
+      return options.length > 0 ? options : [defaultModelOption];
+    }
+    if (selectedDefaultProvider) {
+      const provider = selectedDefaultProvider.provider;
+      const fallback =
+        selectedDefaultProvider.adapter === 'claude-code'
+          ? [
+              runSelection.modelClass,
+              ...composerModelOptions.map((option) => option.id),
+              'sonnet',
+              'opus',
+              'haiku',
+            ]
+          : ['default', runSelection.modelClass];
+      return uniqueModelSelectOptions([
+        provider.model ?? '',
+        ...providerModelOptions(provider),
+        ...fallback,
+      ]);
+    }
+    if (selectedAdapter === 'claude-code') {
+      return uniqueModelSelectOptions([
+        runSelection.modelClass,
+        ...composerModelOptions.map((option) => option.id),
+        'sonnet',
+        'opus',
+        'haiku',
+      ]);
+    }
+    return uniqueModelSelectOptions(['default', runSelection.modelClass]);
+  }, [
+    locale,
+    selectedFreeChannel,
+    selectedDefaultProvider,
+    selectedAdapter,
+    runSelection.modelClass,
+    composerModelOptions,
+    modelListRevision,
+  ]);
+  const modelSelectValue = selectedFreeChannel
+    ? getFreeChannelModel(selectedFreeChannel.id) || 'default'
+    : selectedDefaultProvider
+      ? (selectedDefaultProvider.provider.model ?? '').trim() ||
+        runSelection.modelClass ||
+        'default'
+      : runSelection.modelClass || 'default';
   const [keyModalChannel, setKeyModalChannel] = useState<FreeChannel | null>(null);
   const [keyModalValue, setKeyModalValue] = useState('');
   const [localSetupChannel, setLocalSetupChannel] =
@@ -673,7 +1025,7 @@ export default function AIDock({
   const [checkingLocalModel, setCheckingLocalModel] = useState(false);
 
   useEffect(() => {
-    if (!isClaudeCodeRuntime || !tauriAvailable()) return;
+    if (!tauriAvailable()) return;
     let disposed = false;
     const localChannels = FREE_CHANNELS.filter((channel) => {
       if (!channel.local) return false;
@@ -699,12 +1051,12 @@ export default function AIDock({
     return () => {
       disposed = true;
     };
-  }, [isClaudeCodeRuntime, freeChannelRevision]);
+  }, [freeChannelRevision]);
   const selectFreeChannel = useCallback(
     (channel: FreeChannel) => {
       void ensureFreeProxy();
       setGlobalRunSelection(
-        freeChannelSelection(channel.id, runSelection.modelClass),
+        freeChannelSelection(channel.id, getFreeChannelModel(channel.id)),
       );
       setKeyModalChannel(null);
       setKeyModalValue('');
@@ -712,19 +1064,30 @@ export default function AIDock({
       setLocalModelValue('');
       setLocalSetupMessage(null);
     },
-    [runSelection.modelClass, setGlobalRunSelection],
+    [setGlobalRunSelection],
   );
   const onChannelChange = useCallback(
     (id: string) => {
       void (async () => {
-        if (id === '__system__') {
-          setGlobalRunSelection(systemDefaultGatewaySelection('claude-code'));
+        const providerId = providerIdFromDefaultOption(id);
+        if (providerId) {
+          const provider = defaultChannelProviders.find(
+            (item) => item.provider.id === providerId,
+          )?.provider;
+          if (provider) setGlobalRunSelection(providerSelection(provider));
           return;
         }
-        const channel = freeChannelById(id);
+        const defaultAdapter = adapterFromSystemDefaultOption(id);
+        if (defaultAdapter) {
+          setGlobalRunSelection(systemDefaultGatewaySelection(defaultAdapter));
+          return;
+        }
+        const freeChannelId = freeChannelFromOption(id);
+        if (!freeChannelId) return;
+        const channel = freeChannelById(freeChannelId);
         if (!channel) return;
         if (channel.local) {
-          const model = getFreeChannelModelOverride(id);
+          const model = getFreeChannelModelOverride(freeChannelId);
           if (!model.trim()) {
             setLocalSetupChannel(channel);
             setLocalModelValue(model);
@@ -734,8 +1097,11 @@ export default function AIDock({
           if (tauriAvailable()) {
             setCheckingLocalModel(true);
             try {
-              const status = await localModelStatus(id, model);
-              setLocalRuntimeStatuses((prev) => ({ ...prev, [id]: status }));
+              const status = await localModelStatus(freeChannelId, model);
+              setLocalRuntimeStatuses((prev) => ({
+                ...prev,
+                [freeChannelId]: status,
+              }));
               if (!status.ready) {
                 setLocalSetupChannel(channel);
                 setLocalModelValue(model);
@@ -746,7 +1112,7 @@ export default function AIDock({
               }
             } catch (err) {
               const status: LocalModelRuntimeStatus = {
-                channelId: id,
+                channelId: freeChannelId,
                 configuredModel: model,
                 reachable: false,
                 ready: false,
@@ -754,7 +1120,10 @@ export default function AIDock({
                 models: [],
                 message: err instanceof Error ? err.message : String(err),
               };
-              setLocalRuntimeStatuses((prev) => ({ ...prev, [id]: status }));
+              setLocalRuntimeStatuses((prev) => ({
+                ...prev,
+                [freeChannelId]: status,
+              }));
               setLocalSetupChannel(channel);
               setLocalModelValue(model);
               setLocalSetupMessage(
@@ -769,9 +1138,9 @@ export default function AIDock({
           return;
         }
         const key =
-          channel.needsKey && !getFreeChannelKey(id)
-            ? await loadFreeChannelKeyFromAutoConfig(id)
-            : getFreeChannelKey(id);
+          channel.needsKey && !getFreeChannelKey(freeChannelId)
+            ? await loadFreeChannelKeyFromAutoConfig(freeChannelId)
+            : getFreeChannelKey(freeChannelId);
         if (channel.needsKey && !key) {
           setKeyModalChannel(channel);
           setKeyModalValue('');
@@ -780,7 +1149,43 @@ export default function AIDock({
         selectFreeChannel(channel);
       })();
     },
-    [locale, setGlobalRunSelection, selectFreeChannel],
+    [defaultChannelProviders, locale, setGlobalRunSelection, selectFreeChannel],
+  );
+  const onModelChange = useCallback(
+    (model: string) => {
+      const selectedModel = model.trim();
+      if (!selectedModel) return;
+      if (selectedFreeChannel) {
+        setFreeChannelModel(selectedFreeChannel.id, selectedModel);
+        void ensureFreeProxy();
+        setGlobalRunSelection(
+          freeChannelSelection(selectedFreeChannel.id, selectedModel),
+        );
+        return;
+      }
+      if (selectedDefaultProvider) {
+        const nextModel =
+          selectedModel === 'default' ? undefined : selectedModel;
+        const provider = selectedDefaultProvider.provider;
+        updateProvider(provider.id, { model: nextModel });
+        setGlobalRunSelection(
+          providerSelection({ ...provider, model: nextModel }, nextModel),
+        );
+        return;
+      }
+      setGlobalRunSelection(
+        {
+          ...systemDefaultGatewaySelection(selectedAdapter),
+          modelClass: selectedModel === 'default' ? 'default' : selectedModel,
+        },
+      );
+    },
+    [
+      selectedAdapter,
+      selectedDefaultProvider,
+      selectedFreeChannel,
+      setGlobalRunSelection,
+    ],
   );
   const saveKeyModal = useCallback(() => {
     if (!keyModalChannel) return;
@@ -909,16 +1314,6 @@ export default function AIDock({
   }, [messages]);
   const aiBusy = mode === 'running' || activeAiEditing || activeChatting;
 
-  const modelStrategyOptions = useMemo<SelectOption[]>(
-    () => [
-      { id: 'inherit', label: t(locale, 'dock.modelStrategy.inherit') },
-      { id: 'smart', label: t(locale, 'dock.modelStrategy.smart') },
-      { id: 'prefer-better', label: t(locale, 'dock.modelStrategy.better') },
-      { id: 'prefer-cheaper', label: t(locale, 'dock.modelStrategy.cheaper') },
-    ],
-    [locale],
-  );
-
   const [height, setHeight] = useState<number>(
     () => loadDockHeight() ?? DEFAULT_DOCK_HEIGHT,
   );
@@ -971,6 +1366,53 @@ export default function AIDock({
       });
     },
     [searchMatches.length],
+  );
+
+  const scrollToStreamEdge = useCallback((edge: 'top' | 'bottom') => {
+    const stream = streamRef.current;
+    if (!stream) return;
+    stream.scrollTo({
+      top: edge === 'top' ? 0 : stream.scrollHeight,
+      behavior: 'smooth',
+    });
+  }, []);
+
+  const scrollToTopic = useCallback(
+    (direction: -1 | 1) => {
+      const stream = streamRef.current;
+      if (!stream || topicMessageIds.length === 0) return;
+
+      const streamRect = stream.getBoundingClientRect();
+      const topics = topicMessageIds
+        .map((id) => {
+          const node = messageRefs.current.get(id);
+          if (!node) return null;
+          return {
+            id,
+            top:
+              node.getBoundingClientRect().top -
+              streamRect.top +
+              stream.scrollTop,
+          };
+        })
+        .filter((item): item is { id: string; top: number } => item !== null);
+      if (topics.length === 0) return;
+
+      const threshold = 4;
+      const currentTop = stream.scrollTop;
+      const target =
+        direction > 0
+          ? topics.find((topic) => topic.top > currentTop + threshold)
+          : [...topics]
+              .reverse()
+              .find((topic) => topic.top < currentTop - threshold);
+
+      if (!target) return;
+      messageRefs.current
+        .get(target.id)
+        ?.scrollIntoView({ block: 'start', inline: 'nearest', behavior: 'smooth' });
+    },
+    [topicMessageIds],
   );
 
   useEffect(() => {
@@ -1320,12 +1762,6 @@ export default function AIDock({
     })();
   };
 
-  const chatRunText = draft.trim() || reusableFavoritePrompt;
-  const runChat = () => {
-    if (draft.trim()) submit();
-    else submit(reusableFavoritePrompt);
-  };
-
   const addFiles = async () => {
     if (isReadOnly) return;
     rememberSelection();
@@ -1338,6 +1774,74 @@ export default function AIDock({
       ? t(locale, 'dock.searchNoMatch')
       : `${activeSearchMatchIndex + 1}/${searchMatches.length}`
     : '';
+  const searchToggleButton = (
+    <button
+      type="button"
+      onClick={() => {
+        if (returnSearchOpen) closeReturnSearch();
+        else openReturnSearch();
+      }}
+      title={t(locale, 'dock.searchAria')}
+      aria-label={t(locale, 'dock.searchAria')}
+      aria-expanded={returnSearchOpen}
+      aria-controls="ai-return-search"
+      className={
+        'flex h-7 w-7 shrink-0 items-center justify-center rounded-md border transition-colors ' +
+        (returnSearchOpen
+          ? 'border-accent bg-accent/10 text-accent'
+          : 'border-border bg-panel-2 text-fg-dim hover:border-accent hover:text-fg')
+      }
+    >
+      <Search size={14} />
+    </button>
+  );
+  const streamNavButtonClass =
+    'fuc-stream-nav-button flex h-7 w-7 items-center justify-center rounded-md text-fg-dim transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-35';
+  const streamNavigation = isChat && messages.length > 0 && (
+    <div
+      className="fuc-stream-nav absolute right-2 top-1/2 z-20 flex -translate-y-1/2 flex-col gap-1 rounded-lg p-1"
+      aria-label={t(locale, 'dock.streamNavAria')}
+    >
+      <button
+        type="button"
+        onClick={() => scrollToStreamEdge('top')}
+        title={t(locale, 'dock.navTop')}
+        aria-label={t(locale, 'dock.navTop')}
+        className={streamNavButtonClass}
+      >
+        <ArrowUpToLine size={14} />
+      </button>
+      <button
+        type="button"
+        onClick={() => scrollToTopic(-1)}
+        disabled={topicMessageIds.length === 0}
+        title={t(locale, 'dock.navPrevTopic')}
+        aria-label={t(locale, 'dock.navPrevTopic')}
+        className={streamNavButtonClass}
+      >
+        <ChevronUp size={14} />
+      </button>
+      <button
+        type="button"
+        onClick={() => scrollToTopic(1)}
+        disabled={topicMessageIds.length === 0}
+        title={t(locale, 'dock.navNextTopic')}
+        aria-label={t(locale, 'dock.navNextTopic')}
+        className={streamNavButtonClass}
+      >
+        <ChevronDown size={14} />
+      </button>
+      <button
+        type="button"
+        onClick={() => scrollToStreamEdge('bottom')}
+        title={t(locale, 'dock.navBottom')}
+        aria-label={t(locale, 'dock.navBottom')}
+        className={streamNavButtonClass}
+      >
+        <ArrowDownToLine size={14} />
+      </button>
+    </div>
+  );
 
   return (
     <div
@@ -1364,13 +1868,55 @@ export default function AIDock({
       {/* AI return stream */}
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         <header className="relative flex flex-wrap items-center gap-2 border-b border-border-soft px-3 py-2">
+          {isChat && searchToggleButton}
           {isChat ? (
-            <span
-              className="min-w-0 flex-1 truncate text-sm font-medium text-fg"
-              title={chatTitle}
-            >
-              {chatTitle || t(locale, 'dock.aiReturn')}
-            </span>
+            chatTitleEditing ? (
+              <input
+                ref={chatTitleInputRef}
+                type="text"
+                aria-label={t(locale, 'sidebar.renameSession')}
+                data-testid="chat-title-input"
+                value={chatTitleDraft}
+                maxLength={MAX_CHAT_TITLE_LENGTH}
+                disabled={chatTitleSaving}
+                onChange={(e) => setChatTitleDraft(e.target.value)}
+                onFocus={(e) => e.currentTarget.select()}
+                onBlur={() => {
+                  if (skipNextTitleBlurCommitRef.current) {
+                    skipNextTitleBlurCommitRef.current = false;
+                    return;
+                  }
+                  void commitChatTitleEdit();
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    void commitChatTitleEdit();
+                  } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    cancelChatTitleEdit();
+                  }
+                }}
+                className="min-w-0 flex-1 rounded-md border border-accent bg-bg px-2 py-1 text-sm font-medium text-fg outline-none transition-colors disabled:opacity-70"
+              />
+            ) : activeSessionId ? (
+              <button
+                type="button"
+                onClick={beginChatTitleEdit}
+                className="min-w-0 flex-1 truncate rounded-sm text-left text-sm font-medium text-fg transition-colors hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                title={chatTitle}
+                data-testid="chat-title-display"
+              >
+                {chatTitle || t(locale, 'dock.aiReturn')}
+              </button>
+            ) : (
+              <span
+                className="min-w-0 flex-1 truncate text-sm font-medium text-fg"
+                title={chatTitle}
+              >
+                {chatTitle || t(locale, 'dock.aiReturn')}
+              </span>
+            )
           ) : (
             <span className="font-mono text-[10px] uppercase tracking-wider text-accent">
               {t(locale, 'dock.aiReturn')}
@@ -1383,53 +1929,27 @@ export default function AIDock({
             </span>
           )}
           <div className="ml-auto flex shrink-0 items-center gap-1">
-            {isChat &&
-              (activeChatting ? (
-                <button
-                  type="button"
-                  onClick={stopChat}
-                  title={t(locale, 'dock.stopChatTitle')}
-                  aria-label={t(locale, 'dock.stopChatTitle')}
-                  className="flex shrink-0 items-center gap-1.5 rounded-md border border-status-error/40 bg-status-error/15 px-3 py-1.5 text-xs font-semibold text-status-error transition-opacity hover:opacity-90"
-                >
-                  <Square size={12} fill="currentColor" strokeWidth={2.2} />
-                  <span>{t(locale, 'dock.runningStop')}</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={runChat}
-                  disabled={!chatRunText || isReadOnly || activeAiEditing}
-                  title={t(locale, 'dock.runChatTitle')}
-                  aria-label={t(locale, 'dock.runChatTitle')}
-                  className="flex shrink-0 items-center gap-1.5 rounded-md bg-status-success px-3 py-1.5 text-xs font-semibold text-status-success-contrast transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <Play size={13} fill="currentColor" strokeWidth={2.2} />
-                  <span>{t(locale, 'canvas.run')}</span>
-                </button>
-              ))}
-            <button
-              type="button"
-              onClick={() => {
-                if (returnSearchOpen) closeReturnSearch();
-                else openReturnSearch();
-              }}
-              title={t(locale, 'dock.searchAria')}
-              aria-label={t(locale, 'dock.searchAria')}
-              aria-expanded={returnSearchOpen}
-              aria-controls="ai-return-search"
-              className={
-                'flex h-7 w-7 shrink-0 items-center justify-center rounded-md border transition-colors ' +
-                (returnSearchOpen
-                  ? 'border-accent bg-accent/10 text-accent'
-                  : 'border-border bg-panel-2 text-fg-dim hover:border-accent hover:text-fg')
-              }
-            >
-              <Search size={14} />
-            </button>
+            {isChat && activeChatting && (
+              <button
+                type="button"
+                onClick={stopChat}
+                title={t(locale, 'dock.stopChatTitle')}
+                aria-label={t(locale, 'dock.stopChatTitle')}
+                className="flex shrink-0 items-center gap-1.5 rounded-md border border-status-error/40 bg-status-error/15 px-3 py-1.5 text-xs font-semibold text-status-error transition-opacity hover:opacity-90"
+              >
+                <Square size={12} fill="currentColor" strokeWidth={2.2} />
+                <span>{t(locale, 'dock.runningStop')}</span>
+              </button>
+            )}
+            {!isChat && searchToggleButton}
           </div>
           {returnSearchOpen && (
-            <div className="absolute left-3 right-3 top-full z-30 mt-2 flex items-center gap-1 rounded-lg border border-border bg-panel/95 p-1.5 shadow-2xl backdrop-blur sm:left-auto sm:w-96">
+            <div
+              className={
+                'absolute left-3 right-3 top-full z-30 mt-2 flex items-center gap-1 rounded-lg border border-border bg-panel/95 p-1.5 shadow-2xl backdrop-blur sm:w-96 ' +
+                (isChat ? 'sm:right-auto' : 'sm:left-auto')
+              }
+            >
               <div className="flex min-w-0 flex-1 items-center gap-1 rounded-md border border-border bg-bg px-2 py-1 transition-colors focus-within:border-accent">
                 <Search size={13} className="shrink-0 text-fg-faint" />
                 <input
@@ -1502,121 +2022,137 @@ export default function AIDock({
             </div>
           )}
         </header>
-        <div ref={streamRef} className="min-h-0 flex-1 overflow-y-auto p-3">
-          {messages.length === 0 ? (
-            <div
-              className={
-                isChat
-                  ? 'flex h-full items-start justify-center pt-16 text-base font-medium text-fg-dim'
-                  : 'text-xs text-fg-faint'
-              }
-            >
-              {t(locale, isChat ? 'dock.chatEmpty' : 'dock.empty')}
-            </div>
-          ) : (
-            <ul className="flex flex-col gap-3">
-              {messages.map((m) => {
-                const isUser = m.role === 'user';
-                const isChatUser = isChat && isUser;
-                const isSystem = m.role === 'system';
-                const isSearchHit = searchMatchMessageIds.has(m.id);
-                const isCurrentSearchHit = activeSearchMatchMessageId === m.id;
-                const roleLabel = isUser
-                  ? '› you'
-                  : isSystem
-                    ? '• system'
-                    : '⟳ assistant';
-                const roleClass = isUser
-                  ? 'text-accent'
-                  : isSystem
-                    ? 'text-accent-3'
-                    : 'text-accent-2';
-                return (
-                  <li
-                    key={m.id}
-                    ref={(node) => {
-                      if (node) messageRefs.current.set(m.id, node);
-                      else messageRefs.current.delete(m.id);
-                    }}
-                    className={
-                      'flex flex-col gap-1 rounded-md px-1 py-0.5 transition-colors ' +
-                      (isChatUser ? 'items-end ' : '') +
-                      (isCurrentSearchHit
-                        ? 'bg-accent/5 ring-1 ring-inset ring-accent-3/40'
-                        : isSearchHit
-                          ? 'ring-1 ring-inset ring-accent/20'
-                          : '')
-                    }
-                  >
-                    <div className="flex items-center gap-2">
-                      <span
-                        className={
-                          'font-mono text-[10px] uppercase tracking-wider ' + roleClass
-                        }
-                      >
-                        {roleLabel}
-                      </span>
-                      <span
-                        className="font-mono text-[10px] text-fg-faint"
-                        title={new Date(m.createdAt).toLocaleString()}
-                      >
-                        {formatMessageTime(m.createdAt)}
-                      </span>
-                    </div>
-                    {m.interaction ? (
-                      <InteractionWidget
-                        message={m}
-                        locale={locale}
-                        active={
-                          (m.interactionStatus ?? 'pending') === 'pending' &&
-                          (mode === 'running' || activeAiEditing)
-                        }
-                        onAnswer={(answer) => answerInteraction(m.id, answer)}
-                        onDismiss={() => dismissInteraction(m.id)}
-                      />
-                    ) : isUser || normalizedSearch ? (
-                      // User turns stay plain text; while a return search is
-                      // active we fall back to the plain highlighter for every
-                      // message so match marks land on real text nodes.
-                      <span
-                        className={
-                          'whitespace-pre-wrap break-words text-sm leading-relaxed ' +
-                          (isChatUser
-                            ? 'max-w-[min(78%,42rem)] rounded-md border border-accent/20 bg-accent/10 px-3 py-2 text-left text-fg'
-                            : 'text-fg-dim')
-                        }
-                      >
-                        {renderHighlightedText(
-                          isUser ? m.text : cleanMessageText(m.text),
-                          m.id,
-                          normalizedSearch,
-                          activeSearchMatchId,
-                          setActiveSearchMatchNode,
-                        )}
-                      </span>
-                    ) : (
-                      // Assistant / system: rich markdown, code, tables, file
-                      // chips, links, and collapsible reasoning blocks. Off-screen
-                      // messages render as plain text first and upgrade lazily so
-                      // opening a long history doesn't block on parsing every one.
-                      <LazyMessageContent
-                        text={m.text}
-                        fallback={cleanMessageText(m.text)}
-                        streaming={aiBusy && m.id === lastAssistantId}
-                        showActions={!isSystem}
-                        onOpenFile={onOpenFile}
-                        eager={
-                          eagerMessageIds.has(m.id) ||
-                          (aiBusy && m.id === lastAssistantId)
-                        }
-                        scrollRootRef={streamRef}
-                      />
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+        <div className="relative min-h-0 flex-1">
+          <div
+            ref={streamRef}
+            className={
+              'h-full min-h-0 overflow-y-auto p-3 ' + (isChat ? 'pr-10' : '')
+            }
+          >
+            {messages.length === 0 ? (
+              <div
+                className={
+                  isChat
+                    ? 'flex h-full items-center justify-center px-4 text-center text-xl font-medium text-fg-dim'
+                    : 'text-xs text-fg-faint'
+                }
+              >
+                {t(locale, isChat ? 'dock.chatEmpty' : 'dock.empty')}
+              </div>
+            ) : (
+              <ul className="flex flex-col gap-3">
+                {messages.map((m) => {
+                  const isUser = m.role === 'user';
+                  const isChatUser = isChat && isUser;
+                  const isSystem = m.role === 'system';
+                  const isSearchHit = searchMatchMessageIds.has(m.id);
+                  const isCurrentSearchHit = activeSearchMatchMessageId === m.id;
+                  const roleLabel = isUser
+                    ? '› you'
+                    : isSystem
+                      ? '• system'
+                      : '⟳ assistant';
+                  const roleClass = isUser
+                    ? 'text-accent'
+                    : isSystem
+                      ? 'text-accent-3'
+                      : 'text-accent-2';
+                  return (
+                    <li
+                      key={m.id}
+                      ref={(node) => {
+                        if (node) messageRefs.current.set(m.id, node);
+                        else messageRefs.current.delete(m.id);
+                      }}
+                      className={
+                        'flex flex-col gap-1 rounded-md px-1 py-0.5 transition-colors ' +
+                        (isChatUser ? 'items-end ' : '') +
+                        (isCurrentSearchHit
+                          ? 'bg-accent/5 ring-1 ring-inset ring-accent-3/40'
+                          : isSearchHit
+                            ? 'ring-1 ring-inset ring-accent/20'
+                            : '')
+                      }
+                    >
+                      <div className="flex items-center gap-2">
+                        <span
+                          className={
+                            'font-mono text-[10px] uppercase tracking-wider ' + roleClass
+                          }
+                        >
+                          {roleLabel}
+                        </span>
+                        <span
+                          className="font-mono text-[10px] text-fg-faint"
+                          title={new Date(m.createdAt).toLocaleString()}
+                        >
+                          {formatMessageTime(m.createdAt)}
+                        </span>
+                      </div>
+                      {m.interaction ? (
+                        <InteractionWidget
+                          message={m}
+                          locale={locale}
+                          active={
+                            (m.interactionStatus ?? 'pending') === 'pending' &&
+                            (mode === 'running' || activeAiEditing)
+                          }
+                          onAnswer={(answer) => answerInteraction(m.id, answer)}
+                          onDismiss={() => dismissInteraction(m.id)}
+                        />
+                      ) : isUser || normalizedSearch ? (
+                        // User turns stay plain text; while a return search is
+                        // active we fall back to the plain highlighter for every
+                        // message so match marks land on real text nodes.
+                        <span
+                          className={
+                            'whitespace-pre-wrap break-words text-sm leading-relaxed ' +
+                            (isChatUser
+                              ? 'max-w-[86%] rounded-md border border-accent/20 bg-accent/10 px-3 py-2 text-left text-fg'
+                              : isChat
+                                ? 'w-[min(100%,calc(100%_-_2rem))] text-fg-dim'
+                                : 'text-fg-dim')
+                          }
+                        >
+                          {renderHighlightedText(
+                            isUser ? m.text : cleanMessageText(m.text),
+                            m.id,
+                            normalizedSearch,
+                            activeSearchMatchId,
+                            setActiveSearchMatchNode,
+                          )}
+                        </span>
+                      ) : (
+                        // Assistant / system: rich markdown, code, tables, file
+                        // chips, links, and collapsible reasoning blocks. Off-screen
+                        // messages render as plain text first and upgrade lazily so
+                        // opening a long history doesn't block on parsing every one.
+                        <div
+                          className={
+                            isChat ? 'w-[min(100%,calc(100%_-_2rem))]' : 'w-full'
+                          }
+                        >
+                          <LazyMessageContent
+                            text={m.text}
+                            fallback={cleanMessageText(m.text)}
+                            streaming={aiBusy && m.id === lastAssistantId}
+                            showActions={!isSystem}
+                            onOpenFile={onOpenFile}
+                            eager={
+                              eagerMessageIds.has(m.id) ||
+                              (aiBusy && m.id === lastAssistantId)
+                            }
+                            scrollRootRef={streamRef}
+                          />
+                        </div>
+                      )}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+          {streamNavigation}
         </div>
       </section>
 
@@ -1645,19 +2181,26 @@ export default function AIDock({
       )}
 
       {/* AI input box. Dock: right column (resizable width). Chat: full-width
-          row pinned below the return stream (resizable height). */}
+          row pinned below the return stream (resizable height).
+          The textarea and tool row are wrapped in a single bordered card so they
+          read as one big input area, with controls anchored at the bottom edge:
+          left = + (add file), permission, workspace; right = runtime + send. */}
       <section
-        className="relative flex shrink-0 flex-col bg-panel"
+        className="relative flex shrink-0 flex-col bg-panel p-3"
         style={isChat ? { height: chatInputHeight } : { width: renderedInputWidth }}
+        aria-label={t(locale, 'dock.aiInput') + (isReadOnly ? t(locale, 'dock.readonlySuffix') : '')}
       >
-        <header className="flex items-center justify-between gap-2 border-b border-border-soft px-3 py-2">
-          <span className="font-mono text-[10px] uppercase tracking-wider text-fg-faint">
-            {t(locale, 'dock.aiInput')}
-            {isReadOnly ? t(locale, 'dock.readonlySuffix') : ''}
-          </span>
-        </header>
-
-        <div className="flex min-h-0 flex-1 flex-col gap-2 p-3">
+        <div
+          className={
+            'fuc-ai-input-card relative flex min-h-0 flex-1 flex-col rounded-lg border bg-bg transition-colors focus-within:border-accent ' +
+            (dropActive
+              ? 'fuc-ai-input--drop border-accent '
+              : isChat
+                ? 'fuc-ai-input--chat border-border '
+                : 'border-border ') +
+            (isReadOnly ? 'opacity-60 ' : '')
+          }
+        >
           <textarea
             ref={inputRef}
             value={draft}
@@ -1697,18 +2240,42 @@ export default function AIDock({
                 : t(locale, 'dock.placeholder')
             }
             className={
-              'fuc-ai-input min-h-0 flex-1 resize-none rounded-md border bg-bg p-2.5 text-sm leading-relaxed text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-accent ' +
-              (dropActive
-                ? 'fuc-ai-input--drop border-accent '
-                : isChat
-                  ? 'fuc-ai-input--chat border-border '
-                  : 'border-border ') +
-              (isReadOnly ? 'cursor-not-allowed opacity-60' : '')
+              'min-h-0 flex-1 resize-none border-0 bg-transparent px-3 pt-3 pb-2 text-sm leading-relaxed text-fg outline-none placeholder:text-fg-faint ' +
+              (isReadOnly ? 'cursor-not-allowed' : '')
             }
           />
 
-          {/* Tool row: add file · permission · global run selection · send */}
-          <div className="flex flex-wrap items-center gap-2">
+          {/* Tool row pinned to the bottom edge of the card. Left cluster groups
+              channel/file/permission/workspace; the send button stays
+              aligned to the right.
+              rounded-b-lg: parent has no overflow-hidden so dropdown menus can
+              extend above the card; this keeps the toolbar visually flush with
+              the parent's rounded bottom corners. */}
+          <div className="flex flex-wrap items-center gap-2 rounded-b-lg bg-bg px-2 py-2">
+            <Select
+              title={t(locale, 'dock.channelTitle')}
+              options={channelSelectOptions}
+              value={channelSelectValue}
+              onChange={onChannelChange}
+              disabled={isReadOnly}
+              className="min-w-0"
+              icon="✦"
+            />
+            {modelSelectOptions.length > 0 && (
+              <Select
+                title={
+                  loadingChannelModels
+                    ? t(locale, 'dock.modelVersionLoading')
+                    : t(locale, 'dock.modelVersionTitle')
+                }
+                options={modelSelectOptions}
+                value={modelSelectValue}
+                onChange={onModelChange}
+                disabled={isReadOnly}
+                className="min-w-0 max-w-[14rem]"
+                icon={loadingChannelModels ? '↻' : '◇'}
+              />
+            )}
             <button
               type="button"
               onMouseDown={(e) => e.preventDefault()}
@@ -1734,41 +2301,6 @@ export default function AIDock({
               disabled={isReadOnly}
               icon="⚠"
             />
-            <Select
-              title={t(locale, 'dock.modelTitle')}
-              options={runtimeSelectOptions}
-              value={runtimeSelectValue}
-              onChange={(id) => {
-                setGlobalRunSelection(systemDefaultGatewaySelection(id));
-              }}
-              disabled={isReadOnly}
-              className="min-w-0"
-              icon="▣"
-            />
-            {isClaudeCodeRuntime && (
-              <Select
-                title={t(locale, 'dock.channelTitle')}
-                options={channelSelectOptions}
-                value={channelSelectValue}
-                onChange={onChannelChange}
-                disabled={isReadOnly}
-                className="min-w-0"
-                icon="✦"
-              />
-            )}
-            {activeSessionIsWorkflow && !simpleMode && (
-              <Select
-                title={t(locale, 'dock.modelStrategyTitle')}
-                options={modelStrategyOptions}
-                value={composer.modelStrategy}
-                onChange={(id) =>
-                  setComposer({ modelStrategy: id as ModelStrategy })
-                }
-                disabled={isReadOnly}
-                className="min-w-0"
-                icon="🧠"
-              />
-            )}
             <WorkspaceSelect
               value={composer.workspace}
               history={workspaceHistory}
@@ -1776,27 +2308,25 @@ export default function AIDock({
               disabled={activeAiEditing}
               className="min-w-0"
             />
-            <span className="min-w-fit font-mono text-[10px] text-fg-faint">
-              {isReadOnly
-                ? t(locale, 'dock.runningReadonly')
-                : t(locale, 'dock.sendShortcut')}
-            </span>
-            <div className="min-w-0 flex-1" />
-            <button
-              type="button"
-              onClick={() => submit()}
-              disabled={!draft.trim() || isReadOnly || activeAiEditing}
-              title={
-                isReadOnly
-                  ? t(locale, 'dock.inputLockedTitle')
-                  : activeAiEditing
-                    ? t(locale, 'dock.aiGeneratingTitle')
-                    : t(locale, 'dock.sendShortcut')
-              }
-              className="rounded-md bg-accent px-2.5 py-1.5 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-            >
-              {activeAiEditing ? '…' : '↑'}
-            </button>
+
+            <div className="ml-auto flex items-center">
+              <button
+                type="button"
+                onClick={() => submit()}
+                disabled={!draft.trim() || isReadOnly || activeAiEditing}
+                title={
+                  isReadOnly
+                    ? t(locale, 'dock.inputLockedTitle')
+                    : activeAiEditing
+                      ? t(locale, 'dock.aiGeneratingTitle')
+                      : t(locale, 'dock.sendShortcut')
+                }
+                aria-label={t(locale, 'dock.sendShortcut')}
+                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {activeAiEditing ? '…' : '↑'}
+              </button>
+            </div>
           </div>
         </div>
       </section>
