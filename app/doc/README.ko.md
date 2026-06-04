@@ -4,45 +4,51 @@
   <a href="../../README.md">English</a> | <a href="README.zh-CN.md">中文</a> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | <a href="README.pt-BR.md">Português</a> | <a href="README.ru.md">Русский</a> | <a href="README.ja.md">日本語</a> | 한국어 | <a href="README.hi.md">हिन्दी</a> | <a href="README.ar.md">العربية</a>
 </div>
 
-FreeUltraCode는 무료 AI 모델 채팅과 시각적 멀티 에이전트 워크플로우 편집을 결합한 데스크톱 앱입니다. 17+ 무료 채널(Gemini, DeepSeek, Groq, Ollama…)으로 직접 채팅하거나, 캔버스에서 멀티 에이전트 워크플로우 그래프를 구축하여 Claude Code, Codex, Gemini 등 런타임용 실행 스크립트로 컴파일할 수 있습니다.
+모든 프로그래밍 작업에 가장 비싼 모델 할당량을 쓸 필요는 없습니다. FreeUltraCode는 Claude Code, Codex, Gemini, 무료 채널, 로컬 모델을 하나의 로컬 채팅 화면에 모읍니다. 탐색과 반복 작업은 저렴한 모델로 처리하고, 중요한 판단은 더 안정적인 모델에 맡길 수 있습니다.
 
 <p align="center">
   <strong>무료 채널 라우팅</strong><br>
   <img src="images/hero-free-channels.ko.png" alt="FreeUltraCode 무료 채널 라우팅 스크린샷" width="960">
 </p>
 
-<p align="center">
-  <strong>Chat과 Workflow 두 가지 모드</strong><br>
-  <img src="images/hero-dual-mode.ko.png" alt="FreeUltraCode Chat 및 Workflow 듀얼 모드 스크린샷" width="960">
-</p>
+## FreeUltraCode가 필요한 이유
+
+코딩 에이전트는 유용하지만 프리미엄 모델 할당량은 빠르게 줄어듭니다. FreeUltraCode는 채팅 경험을 로컬에 두고, 충분한 경우 무료, 체험 크레딧, 저비용 채널로 요청을 쉽게 보낼 수 있게 합니다.
+
+- GitHub Models, Hugging Face Router, SambaNova Cloud, Together AI, Gemini, DeepSeek, Kimi, Groq, OpenRouter, NVIDIA NIM, Z.ai, Kilo, LLM7, Ollama, LM Studio, llama.cpp를 사용할 수 있습니다.
+- API 키와 provider 설정은 사용자 컴퓨터에 저장됩니다.
+- runtime, channel, permission mode, workspace를 채팅 입력 영역에서 바로 바꿀 수 있습니다.
+- 채팅 기록, 즐겨찾기, 예약 prompt, workspace context를 로컬에 보관합니다.
+- 하드웨어가 지원하면 로컬 모델은 API 키 없이 사용할 수 있습니다.
 
 ## 주요 기능
 
-### 🧊 무료 AI 모델 채팅
-- **17+ 무료 채널** 내장 — NVIDIA NIM, OpenRouter, Google Gemini, DeepSeek, Mistral, Groq, Cerebras, Fireworks, Kimi, Z.ai, OpenCode, Wafer, 로컬 런타임(Ollama, LM Studio, llama.cpp).
-- 내장 Rust 프로xy가 Anthropic과 OpenAI 프로토콜을 번역하여 모든 채널이 동일한 채팅 인터페이스로 작동.
-- 채널 선택, API 키 붙여넣기, 즉시 채팅 시작 — 추가 설정 없음.
-- 로컬 런타임(Ollama, LM Studio, llama.cpp)은 **API 키 없이** 작동.
+### 프로그래밍 Chat
 
-### 🕸️ 시각적 워크플로우 편집기
-- 오른쪽 하단 AI 입력창에 목표를 설명하면 편집 가능한 Workflow 블루프린트가 생성됩니다.
-- 대규모 멀티 에이전트 스크립트를 수동으로 편집하는 대신 시각적 워크플로우 작성.
-- 블루프린트를 Claude Code 스타일의 실행 가능 Workflow 스크립트로 컴파일; 스크립트에서 블루프린트로 역변환 가능.
-- 런타임 어댑터(Claude Code, Codex, Gemini) 선택 및 각 노드 모델 설정.
-- 데스크톱 앱에서 워크플로우 시작/중지, 노드별 실행 상태 추적.
+- 코드 수정, 버그 조사, 리팩터링, 테스트, 릴리스 노트, 문서 작성을 요청할 수 있습니다.
+- 파일 경로를 붙이거나 파일을 입력창에 드래그할 수 있습니다.
+- 스트리밍 응답, 명령 로그, 파일 참조, 요약을 한 채팅 화면에서 확인할 수 있습니다.
+- 같은 세션에서 후속 요청을 이어갈 수 있습니다.
 
-### ⭐ 즐겨찾기 및 기록
-- 세션에 스탰를 표시하여 **즐겨찾기** 탭에 고정하고 빠르게 접근.
-- **기록** 탭은 모든 세션을 배지와 함께 표시: **CHAT**은 단순 대화, **WF**은 워크플로우 세션.
-- 전체 워크스페이스 및 세션 기록 — 컨텍스트 전환 시 진행 상태 유지.
+### 무료 모델 라우팅
 
-### 🔒 개인정보 보호 우선
-- API 키는 로컬 기기에만 저장되며, 서버로 전송되지 않습니다.
-- 모든 워크플로우 데이터, 세션 및 설정은 기기에 남습니다.
+- **20+ 원격 채널과 로컬 runtime**: NVIDIA NIM, OpenRouter, GitHub Models, Hugging Face Router, SambaNova Cloud, Together AI, Google Gemini, DeepSeek, Mistral, Mistral Codestral, OpenCode, Wafer, Kimi, Cerebras, Groq, Fireworks, Z.ai, LLM7, Kilo Gateway, 그리고 Ollama, LM Studio, llama.cpp.
+- **키 없는 실험 채널**: LLM7과 Kilo Gateway는 API 키 없이 테스트할 수 있지만, 민감하지 않은 코딩 prompt에만 쓰는 것이 좋습니다.
+- **공식 무료 또는 체험 크레딧 채널**: provider key는 앱에 로컬로 저장됩니다.
+- 로컬 Rust proxy가 Anthropic과 OpenAI-compatible 프로토콜을 변환합니다.
+- Claude Code는 채팅 UI를 바꾸지 않고 설정된 무료 채널을 통해 사용할 수 있습니다.
+- 키, 모델 override, 로컬 모델 설정은 settings에서 관리합니다.
 
-## 사용 튜토리얼
+현재 기본 프로그래밍 모델:
 
-- [FreeUltraCode 사용 튜토리얼](claude-code-workflow-freeultracode.ko.md) - 일반 설정과 AI 입력창의 런타임 선택부터 블루프린트 생성, 실행, 외관 전환까지 스크린샷과 함께 단계별로 안내합니다.
+| 채널 | 기본 모델 |
+| --- | --- |
+| GitHub Models | `openai/gpt-4.1-mini` |
+| Hugging Face Router | `deepseek-ai/DeepSeek-V4-Pro` |
+| SambaNova Cloud | `DeepSeek-V3.1` |
+| Together AI | `Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8` |
+| Kilo Gateway | `poolside/laguna-xs.2:free` |
+| LLM7 | `codestral-latest` |
 
 ## 빠른 시작
 
@@ -52,75 +58,128 @@ npm install
 npm run dev
 ```
 
-데스크톱 앱의 경우:
+데스크톱 앱 실행:
 
 ```bash
 cd app
 npm run desktop
 ```
 
-Windows 릴리스 패키지의 경우:
+프로덕션 패키지 빌드:
 
 ```bash
 cd app
 npm run package
 ```
 
-저장소 루트에서 `run.bat`은 필요 시 앱을 빌드하고 실행하며, `build.bat`은 Windows 설치 프로그램을 패키징합니다.
+## 기본 사용법
 
-## 사용법
+### 무료 채널 등록
 
-### 채팅 모드
+1. 하단 **Channel** 메뉴를 열고 경고 표시가 있는 무료 채널을 선택합니다. 예: **Free · OpenRouter**.
 
-1. 사이드바에서 **+ 새 세션** 클릭.
-2. 무료 채널(예: Gemini, DeepSeek, Ollama)을 선택하거나 원하는 런타임에 자신의 API 키를 사용.
-3. 하단 입력창에 질문 입력. 답변은 상단 채팅 영역에 표시됩니다.
-4. 세션에 스탰를 표시하여 **즐겨찾기** 탭에 고정.
+<p align="center">
+  <img src="images/注册免费渠道/1-配置大模型.png" alt="Channel 메뉴에서 설정되지 않은 무료 채널 선택" width="960">
+</p>
 
-### 워크플로우 모드
+2. API key 대화상자에서 **Open registration site**를 클릭합니다.
 
-1. 사이드바에서 **+ 새 워크플로우** 클릭.
-2. 오른쪽 하단 AI 입력창에 작업을 설명. FreeUltraCode가 Workflow 블루프린트를 자동 생성.
-3. 동일한 입력창에 후속 지침을 입력하여 블루프린트를 다듬거나, 오른쪽 패널의 일반 프롬프트를 클릭.
-4. 프롬프트, 모델, 스키마 또는 실행 매개변수를 수동으로 편집해야 할 때는 개별 노드를 선택.
-5. Claude Code, Codex, Gemini 등의 런타임 어댑터를 선택.
-6. 상단의 실행 버튼을 클릭하여 워크플로우를 실행하고 노드별 상태 업데이트를 확인.
+<p align="center">
+  <img src="images/注册免费渠道/2-注册.png" alt="provider 등록 사이트 열기" width="960">
+</p>
+
+3. provider 페이지에서 새 API key를 만들고 복사합니다.
+
+<p align="center">
+  <img src="images/注册免费渠道/3-新建token.png" alt="provider API key 생성" width="960">
+</p>
+
+4. FreeUltraCode에 key를 붙여넣고 **Save and Use**를 클릭합니다. 저장 후 경고 표시가 사라집니다.
+
+<p align="center">
+  <img src="images/注册免费渠道/4-配置好了.png" alt="설정 완료된 무료 채널" width="960">
+</p>
+
+5. **Settings** -> **Channels** -> **Free Channels**에서도 모든 무료 채널을 관리할 수 있습니다.
+
+<p align="center">
+  <img src="images/注册免费渠道/5-设置中的免费渠道.png" alt="settings에서 무료 채널 관리" width="960">
+</p>
+
+채널이 준비되면 하단 입력창에서 해당 경로로 대화할 수 있습니다.
+
+### Chat으로 프로그래밍하기
+
+1. 왼쪽 사이드바에서 **+ New Session**을 클릭합니다.
+2. 하단 컨트롤에서 runtime, channel, permission mode, workspace를 선택합니다.
+3. 목표 동작, 관련 파일, 승인 기준, 제약 조건을 포함해 요청을 작성합니다.
+4. 실행 중에는 파일 읽기, 검색, 수정, 검증 단계가 별도 항목으로 표시됩니다.
+5. 결과를 조정해야 하면 같은 채팅에서 후속 요청을 이어가면 됩니다.
+
+## 동작 방식
+
+```text
+사용자 요청
+    |
+    v
+Chat composer
+    |
+    +--> selected runtime / channel / permission / workspace
+             |
+             +--> provider API, local CLI, or local free-channel proxy
+                        |
+                        +--> streamed output, tool log, and chat history
+```
+
+## 기술 스택
+
+| 영역 | 기술 |
+| --- | --- |
+| Desktop shell | Tauri 2, Rust |
+| Frontend | React 18, Vite 5, TypeScript 5 |
+| State | Zustand |
+| Styling | Tailwind CSS, CSS variables |
+| Icons | lucide-react |
+| Provider routing | Claude Code, Codex, Gemini, extensible provider settings |
+| Free-channel proxy | Rust `tiny_http` + `ureq`, Anthropic/OpenAI protocol translation |
 
 ## 프로젝트 구조
 
 ```text
 app/
-  src/                 React + TypeScript 프론트엔드
-    core/              IR, 파서, 에미터, 왕복 검증 로직
-    canvas/            React Flow 캔버스 및 노드 컴포넌트
-    panels/            사이드바(기록 + 즐겨찾기), 프롬프트 패널, AI 도크(채팅 + 워크플로우), 설정(무료 채널)
-    runtime/           DAG 실행, 프로바이더 게이트웨이, 실행 상태
-    store/             Zustand 애플리케션 상태
-    lib/
-      freeChannels.ts  17+ 무료 채널 카탈로그 + 헬퍼
+  src/
+    components/  공용 UI 컴포넌트
+    lib/         provider 설정, 무료 채널 라우팅, persistence
+    panels/      Sidebar, chat dock, settings, scheduling UI
+    store/       Zustand state와 로컬 기록
   src-tauri/
     src/
-      free_proxy.rs    Rust 리버스 프록시 + Anthropic↔OpenAI 변환
-      lib.rs           Tauri 명령, 파일시스템/기록 브리지
-  doc/                 사용 튜토리얼 및 스크린샷
-pencil/                Pencil 디자인 파일
-run.bat                필요 시 빌드하고 Windows 앱 실행
-build.bat              Windows 설치 프로그램 패키징
+      free_proxy.rs    Rust reverse proxy + Anthropic/OpenAI translation
+      lib.rs           Tauri commands, filesystem/history bridge
+  doc/                 튜토리얼, 현지화 README, 스크린샷
 ```
 
-## 추가 문서
+## 문서
 
-- [영어 README](../../README.md)
-- [영어 사용 튜토리얼](claude-code-workflow-freeultracode.en.md)
+- [무료 채널 등록 가이드 중국어](register-free-channel.md)
+- [English README](../../README.md)
 
-## 검증
+## 개발
 
 ```bash
-cd app
+npm run dev
 npm run typecheck
 npm run lint
+npm run test
+npm run desktop
 npm run package
 ```
+
+## 커뮤니티
+
+- Discord: <https://discord.gg/2C9ptSEFG>
+- QQ Group: `149523963`
+- Issues: <https://github.com/wellingfeng/FreeUltraCode/issues>
 
 ## 라이선스
 

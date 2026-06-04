@@ -4,47 +4,53 @@
   <a href="../../README.md">English</a> | <a href="README.zh-CN.md">中文</a> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | <a href="README.pt-BR.md">Português</a> | <a href="README.ru.md">Русский</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | हिन्दी | <a href="README.ar.md">العربية</a>
 </div>
 
-FreeUltraCode एक डेस्कटॉप एप्लिकेशन है जो मुफ्त AI मॉडल चैट और विज़ुअल मल्टी-एजेंट वर्कफ़्लो संपादन को जोड़ती है। 17+ मुफ्त चैनलों (Gemini, DeepSeek, Groq, Ollama…) के माध्यम से सीधे चैट करें, या कैनवास पर मल्टी-एजेंट वर्कफ़्लो ग्राफ़ बनाएं जो Claude Code, Codex, Gemini और अन्य रनटाइम के लिए चलाने-योग्य स्क्रिप्ट में संकलित होते हैं।
+हर programming task के लिए सबसे महंगे model quota को खर्च करना जरूरी नहीं है। FreeUltraCode Claude Code, Codex, Gemini, free channels और local models को एक local chat interface में रखता है। सामान्य exploration सस्ते models से करें और critical judgment ज्यादा stable models को दें।
 
 <p align="center">
-  <strong>मुफ्त चैनल रूटिंग</strong><br>
+  <strong>Free channel routing</strong><br>
   <img src="images/hero-free-channels.hi.png" alt="FreeUltraCode मुफ्त चैनल रूटिंग स्क्रीनशॉट" width="960">
 </p>
 
-<p align="center">
-  <strong>दो मोड — Chat और Workflow</strong><br>
-  <img src="images/hero-dual-mode.hi.png" alt="FreeUltraCode के Chat और Workflow डुअल मोड का स्क्रीनशॉट" width="960">
-</p>
+## FreeUltraCode क्यों
 
-## मुख्य विशेषताएं
+Coding agents काम आते हैं, लेकिन premium model quota जल्दी खत्म होता है। FreeUltraCode chat experience को local रखता है और जब free, trial-credit या low-cost channel पर्याप्त हों, तब requests को उन्हीं के जरिए भेजना आसान बनाता है।
 
-### 🧊 मुफ्त AI मॉडल चैट
-- **17+ मुफ्त चैनल** अंतर्निहित — NVIDIA NIM, OpenRouter, Google Gemini, DeepSeek, Mistral, Groq, Cerebras, Fireworks, Kimi, Z.ai, OpenCode, Wafer, साथ ही लोकल रनटाइम (Ollama, LM Studio, llama.cpp)।
-- अंतर्निहित Rust प्रॉक्सी Anthropic और OpenAI प्रोटोकॉल के बीच अनुवाद करता है, ताकि सभी चैनल एक ही चैट इंटरफ़ेस का उपयोग कर सकें।
-- चैनल चुनें, API कुंजी पेस्ट करें, चैट शुरू करें — कोई अतिरिक्त सेटअप नहीं।
-- लोकल रनटाइम (Ollama, LM Studio, llama.cpp) **बिना API कुंजी** काम करते हैं।
+- GitHub Models, Hugging Face Router, SambaNova Cloud, Together AI, Gemini, DeepSeek, Kimi, Groq, OpenRouter, NVIDIA NIM, Z.ai, Kilo, LLM7, Ollama, LM Studio और llama.cpp इस्तेमाल करें।
+- API keys और provider settings आपकी machine पर रहती हैं।
+- runtime, channel, permission mode और workspace chat composer से ही बदलें।
+- chat history, favorites, scheduled prompts और workspace context local रहते हैं।
+- hardware support होने पर local models बिना API key के चल सकते हैं।
 
-### 🕸️ विज़ुअल वर्कफ़्लो संपादक
-- नीचे-दाईं ओर AI इनपुट में लक्ष्य का वर्णन करें और एक संपादन-योग्य Workflow ब्लूप्रिंट तैयार करें।
-- बड़ी मल्टी-एजेंट स्क्रिप्ट को हाथ से संपादित करने के बजाय विज़ुअल वर्कफ़्लो रचना।
-- ब्लूप्रिंट Claude Code-शैली के चलाने-योग्य Workflow स्क्रिप्ट में संकलित होता है; स्क्रिप्ट वापस ब्लूप्रिंट में लोड हो सकती हैं।
-- रनटाइम अडैप्टर चुनें (Claude Code, Codex, Gemini) और प्रत्येक नोड का मॉडल कॉन्फ़िगर करें।
-- डेस्कटॉप एप्लिकेशन से वर्कफ़्लो शुरू/रोकें, प्रति-नोड निष्पादन स्थिति ट्रैक करें।
+## क्या कर सकता है
 
-### ⭐ पसंदीदा और इतिहास
-- किसी सत्र को स्टार करें और उसे **पसंदीदा** टैब में पिन करें ताकि तेज़ी से पहुंच सकें।
-- **इतिहास** टैब सभी सत्रों को बैज के साथ दिखाता है: **CHAT** साधारण वार्तालाप के लिए, **WF** वर्कफ़्लो सत्रों के लिए।
-- पूर्ण वर्कस्पेस और सत्र इतिहास — संदर्भ बदलें, प्रगति खोएं नहीं।
+### Programming Chat
 
-### 🔒 गोपनीयता पहले
-- API कुंजी आपकी मशीन पर लोकल रूप से संग्रहीत होती है, कभी किसी सर्वर पर नहीं भेजी जाती।
-- सभी वर्कफ़्लो डेटा, सत्र और सेटिंग्स आपकी मशीन पर रहते हैं।
+- code edits, bug investigation, refactor, tests, release notes या documentation के लिए पूछें।
+- file paths जोड़ें या files को composer में drag करें।
+- streamed output, command logs, file references और summaries एक ही chat surface में देखें।
+- उसी session में follow-up requests जारी रखें।
 
-## उपयोग ट्यूटोरियल
+### Free-model routing
 
-- [FreeUltraCode उपयोग ट्यूटोरियल](claude-code-workflow-freeultracode.hi.md) - सामान्य सेटिंग्स और AI इनपुट में runtime selection से लेकर blueprint generation, running और appearance switching तक स्क्रीनशॉट के साथ चरण-दर-चरण मार्गदर्शिका।
+- **20+ remote channels और local runtimes**: NVIDIA NIM, OpenRouter, GitHub Models, Hugging Face Router, SambaNova Cloud, Together AI, Google Gemini, DeepSeek, Mistral, Mistral Codestral, OpenCode, Wafer, Kimi, Cerebras, Groq, Fireworks, Z.ai, LLM7, Kilo Gateway, साथ में Ollama, LM Studio और llama.cpp।
+- **Keyless experimental routes**: LLM7 और Kilo Gateway बिना API key के test हो सकते हैं, लेकिन इन्हें non-sensitive coding prompts के लिए ही इस्तेमाल करें।
+- **Official free/trial-credit routes**: provider keys app में local रूप से stored रहती हैं।
+- Local Rust proxy Anthropic और OpenAI-compatible protocols के बीच translate करता है।
+- Claude Code configured free channels के जरिए चल सकता है, chat UI बदले बिना।
+- keys, model overrides और local model settings app settings में manage होते हैं।
 
-## त्वरित शुरुआत
+Current coding-oriented default models:
+
+| Channel | Default model |
+| --- | --- |
+| GitHub Models | `openai/gpt-4.1-mini` |
+| Hugging Face Router | `deepseek-ai/DeepSeek-V4-Pro` |
+| SambaNova Cloud | `DeepSeek-V3.1` |
+| Together AI | `Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8` |
+| Kilo Gateway | `poolside/laguna-xs.2:free` |
+| LLM7 | `codestral-latest` |
+
+## Quick Start
 
 ```bash
 cd app
@@ -52,76 +58,129 @@ npm install
 npm run dev
 ```
 
-डेस्कटॉप ऐप के लिए:
+Desktop app चलाने के लिए:
 
 ```bash
 cd app
 npm run desktop
 ```
 
-Windows रिलीज़ पैकेज के लिए:
+Production package बनाने के लिए:
 
 ```bash
 cd app
 npm run package
 ```
 
-रिपॉज़िटरी रूट से, `run.bat` ऐप को लॉन्च करता है और ज़रूरत पड़ने पर पुनः बिल्ड करता है, और `build.bat` Windows इंस्टॉलर को पैकेज करता है।
+## Basic Usage
 
-## उपयोग
+### Free channel register करें
 
-### चैट मोड
+1. नीचे वाला **Channel** menu खोलें और warning mark वाला free channel चुनें, जैसे **Free · OpenRouter**।
 
-1. साइडबार में **+ नया सत्र** क्लिक करें।
-2. एक मुफ्त चैनल (जैसे Gemini, DeepSeek, Ollama) चुनें या किसी रनटाइम के साथ अपनी API कुंजी का उपयोग करें।
-3. नीचे इनपुट बॉक्स में प्रश्न टाइप करें। उत्तर ऊपर चैट क्षेत्र में दिखेंगे।
-4. सत्र को स्टार करें और **पसंदीदा** टैब में पिन करें।
+<p align="center">
+  <img src="images/注册免费渠道/1-配置大模型.png" alt="Channel menu से unconfigured free channel चुनना" width="960">
+</p>
 
-### वर्कफ़्लो मोड
+2. API key dialog में **Open registration site** पर click करें।
 
-1. साइडबार में **+ नया वर्कफ़्लो** क्लिक करें।
-2. नीचे-दाईं ओर AI इनपुट में कार्य का वर्णन करें। FreeUltraCode स्वचालित रूप से Workflow ब्लूप्रिंट तैयार करता है।
-3. उसी इनपुट में अनुवर्ती निर्देश टाइप करके ब्लूप्रिंट को परिष्कृत करते रहें, या दाएं पैनल पर सामान्य प्रॉम्प्ट क्लिक करें।
-4. प्रॉम्प्ट, मॉडल, schema, या निष्पादन पैरामीटर मैन्युअल रूप से संपादित करने की आवश्यकता हो तो अलग-अलग नोड चुनें।
-5. Claude Code, Codex, या Gemini जैसे रनटाइम अडैप्टर का चयन करें।
-6. वर्कफ़्लो को निष्पादित करने के लिए शीर्ष Run बटन क्लिक करें, प्रति-नोड स्थिति अपडेट देखें।
+<p align="center">
+  <img src="images/注册免费渠道/2-注册.png" alt="provider registration site खोलना" width="960">
+</p>
 
-## प्रोजेक्ट लेआउट
+3. provider page पर नई API key बनाएं और copy करें।
+
+<p align="center">
+  <img src="images/注册免费渠道/3-新建token.png" alt="provider API key बनाना" width="960">
+</p>
+
+4. key को FreeUltraCode में paste करें और **Save and Use** पर click करें। save होने के बाद warning mark हट जाएगा।
+
+<p align="center">
+  <img src="images/注册免费渠道/4-配置好了.png" alt="configured free channel ready" width="960">
+</p>
+
+5. सभी channels को **Settings** -> **Channels** -> **Free Channels** से भी manage किया जा सकता है।
+
+<p align="center">
+  <img src="images/注册免费渠道/5-设置中的免费渠道.png" alt="settings में free channels manage करना" width="960">
+</p>
+
+Channel ready होने के बाद नीचे के input से उसी route पर chat करें।
+
+### Chat से programming करें
+
+1. left sidebar में **+ New Session** click करें।
+2. नीचे runtime, channel, permission mode और workspace चुनें।
+3. expected behavior, affected files, acceptance criteria और constraints के साथ task लिखें।
+4. चलने के दौरान FreeUltraCode file reads, searches, edits और checks को अलग entries में दिखाता है।
+5. result adjust करना हो तो उसी chat में follow-up request भेजें।
+
+## कैसे काम करता है
+
+```text
+User request
+    |
+    v
+Chat composer
+    |
+    +--> selected runtime / channel / permission / workspace
+             |
+             +--> provider API, local CLI, or local free-channel proxy
+                        |
+                        +--> streamed output, tool log, and chat history
+```
+
+## Technology Stack
+
+| Area | Technology |
+| --- | --- |
+| Desktop shell | Tauri 2, Rust |
+| Frontend | React 18, Vite 5, TypeScript 5 |
+| State | Zustand |
+| Styling | Tailwind CSS, CSS variables |
+| Icons | lucide-react |
+| Provider routing | Claude Code, Codex, Gemini, extensible provider settings |
+| Free-channel proxy | Rust `tiny_http` + `ureq`, Anthropic/OpenAI protocol translation |
+
+## Project Structure
 
 ```text
 app/
-  src/                 React + TypeScript frontend
-    core/              IR, parser, emitter, round-trip logic
-    canvas/            React Flow canvas and node components
-    panels/            Sidebar (history + favorites), prompt panel, AI dock (chat + workflow), settings (free channels)
-    runtime/           DAG execution, provider gateway, run state
-    store/             Zustand application state
-    lib/
-      freeChannels.ts  17+ free channel catalog + helpers
+  src/
+    components/  Shared UI components
+    lib/         Provider settings, free-channel routing, persistence
+    panels/      Sidebar, chat dock, settings, scheduling UI
+    store/       Zustand state and local history
   src-tauri/
     src/
-      free_proxy.rs    Rust reverse-proxy + Anthropic↔OpenAI translation
+      free_proxy.rs    Rust reverse proxy + Anthropic/OpenAI translation
       lib.rs           Tauri commands, filesystem/history bridge
-  doc/                 Usage tutorial and screenshots
-pencil/                Pencil design files
-run.bat                Build-if-needed and launch the Windows app
-build.bat              Build the Windows installer
+  doc/                 Tutorials, localized READMEs, screenshots
 ```
 
-## और दस्तावेज़
+## Documentation
 
-- [अंग्रेज़ी README](../../README.md)
-- [अंग्रेज़ी उपयोग ट्यूटोरियल](claude-code-workflow-freeultracode.en.md)
+- [Free channel registration guide in Chinese](register-free-channel.md)
+- [English README](../../README.md)
 
-## सत्यापन
+## Development
 
 ```bash
-cd app
+npm run dev
 npm run typecheck
 npm run lint
+npm run test
+npm run desktop
 npm run package
 ```
 
-## लाइसेंस
+## Community
 
-अभी तक कोई लाइसेंस निर्दिष्ट नहीं किया गया है।
+- Discord: <https://discord.gg/2C9ptSEFG>
+- QQ Group: `149523963`
+- Issues: <https://github.com/wellingfeng/FreeUltraCode/issues>
+
+## License
+
+License अभी specified नहीं है।
