@@ -30,6 +30,7 @@ function resetStoreForPromptLock(
     aiStreaming: false,
     aiEditingSessions: [],
     chattingSessions: [],
+    blockedSendTip: null,
     locale: 'zh-CN',
     promptAutoTranslate: false,
     promptGroups: samplePromptGroups,
@@ -341,7 +342,7 @@ describe('PromptPanel running lock', () => {
     try {
       const selector = channelButton(view.container);
 
-      expect(selector.textContent).toContain('SSSAiCode');
+      expect(selector.textContent).toContain('Claude Code · 系统默认');
       expect(selector.textContent).toContain('Claude Code · 默认渠道');
 
       await act(async () => {
@@ -352,11 +353,12 @@ describe('PromptPanel running lock', () => {
         view.container.querySelectorAll('li[role="presentation"]'),
       ).map((item) => item.textContent?.trim());
       expect(groupHeaders).toEqual([
-        'Claude Code',
-        'Codex',
-        'Gemini',
+        '默认渠道 · Claude Code',
+        '默认渠道 · Codex',
+        '默认渠道 · Gemini',
         '免费渠道',
       ]);
+      expect(view.container.textContent).toContain('SSSAiCode');
       expect(view.container.textContent).toContain('Claude Code · 默认渠道');
       expect(view.container.textContent).toContain('Codex · 默认渠道');
       expect(view.container.textContent).toContain('Gemini · 默认渠道');
@@ -365,7 +367,7 @@ describe('PromptPanel running lock', () => {
       expect(view.container.textContent).toContain('Kimi For Coding');
       expect(view.container.textContent).toContain('Codex Relay');
       expect(view.container.textContent).toContain('Gemini Relay');
-      expect(view.container.textContent).toContain('Free · LLM7');
+      expect(view.container.textContent).toContain('LLM7');
     } finally {
       await view.cleanup();
     }
@@ -648,6 +650,23 @@ describe('PromptPanel running lock', () => {
 
       expect(stopButton.disabled).toBe(false);
       expect(stopButton.textContent).toContain('停止');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('shows a tip when a send is blocked by switching models mid-answer', async () => {
+    resetStoreForPromptLock('design', 'next question');
+    useStore.setState({
+      workflow: simpleBlueprint('Simple chat'),
+      blockedSendTip: 'model-switched-while-chatting',
+    });
+    const view = await renderChatDock();
+
+    try {
+      const tip = view.container.querySelector('[data-testid="blocked-send-tip"]');
+      expect(tip?.textContent).toContain('当前回答仍在使用原模型生成');
+      expect(aiInput(view.container).disabled).toBe(false);
     } finally {
       await view.cleanup();
     }

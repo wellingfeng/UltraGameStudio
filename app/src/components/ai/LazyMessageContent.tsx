@@ -92,7 +92,7 @@ function LazyMessageContentImpl({
   return (
     <div
       ref={holderRef}
-      className="whitespace-pre-wrap break-words text-sm leading-relaxed text-fg-dim"
+      className="ai-stream-text whitespace-pre-wrap break-words text-sm leading-relaxed"
     >
       {fallback}
     </div>

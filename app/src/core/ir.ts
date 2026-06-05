@@ -107,6 +107,8 @@ export type ModelClass = 'haiku' | 'sonnet' | 'opus' | string;
 export interface GatewaySelection {
   adapter: 'claude-code' | 'codex' | 'gemini' | string;
   modelClass: ModelClass;
+  /** Exact provider/free-channel model for a session, without changing global defaults. */
+  modelOverride?: string;
   /** Use the selected runtime CLI exactly as configured on the machine. */
   systemDefault?: boolean;
   providerId?: string;

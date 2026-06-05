@@ -25,13 +25,25 @@ import {
   SlidersHorizontal,
   Sparkles,
   Trash2,
+  Type,
   UploadCloud,
   X,
   type LucideIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/cn';
+import type { GatewaySelection } from '@/core/ir';
+import {
+  personalInstructionsForSelection,
+  personalInstructionsKey,
+  personalInstructionsSample,
+  selectionFromPersonalInstructionsKey,
+  shouldInjectPersonalInstructions,
+  type PersonalInstructionsByModel,
+} from '@/core/personalInstructions';
 import {
   FREE_CHANNELS,
+  FREE_CHANNEL_AUTO_ID,
+  FREE_CHANNEL_AUTO_MODEL,
   ensureFreeProxy,
   exportFreeChannelsConfig,
   freeChannelById,
@@ -105,8 +117,12 @@ import {
 } from '@/lib/i18n';
 import {
   DEFAULT_STYLE_PRESET_ID,
+  FONT_FAMILY_LIST,
+  FONT_SIZE_LIMITS,
   STYLE_PRESET_LIST,
   isUnsupportedStylePreset,
+  resolveFontFamilyId,
+  resolveFontSizePx,
   resolveStylePresetId,
   type StylePresetDefinition,
 } from '@/lib/appearance';
@@ -125,13 +141,15 @@ import {
   refreshProviderModels,
 } from '@/lib/modelLists';
 import {
+  listGatewayRunOptions,
   systemDefaultGatewaySelection,
   workflowDefaultGatewaySelection,
 } from '@/lib/modelGateway/resolver';
-import { shallow } from 'zustand/shallow';
+import { getActiveGatewaySelection } from '@/lib/gatewayConfig';
 
 type SettingsTab =
   | 'general'
+  | 'personalization'
   | 'models'
   | 'consensus'
   | 'shortcuts'
@@ -141,6 +159,7 @@ type LanguageOption = (typeof LANGUAGE_SELECT_OPTIONS)[number];
 
 const tabs: { id: SettingsTab; labelKey: TranslationKey; Icon: LucideIcon }[] = [
   { id: 'general', labelKey: 'settings.tabs.general', Icon: SlidersHorizontal },
+  { id: 'personalization', labelKey: 'settings.tabs.personalization', Icon: FileText },
   { id: 'models', labelKey: 'settings.tabs.models', Icon: Cpu },
   { id: 'shortcuts', labelKey: 'settings.tabs.shortcuts', Icon: Keyboard },
   { id: 'appearance', labelKey: 'settings.tabs.appearance', Icon: Palette },
@@ -241,6 +260,14 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
   const setLocale = useStore((s) => s.setLocale);
   const promptAutoTranslate = useStore((s) => s.promptAutoTranslate);
   const setPromptAutoTranslate = useStore((s) => s.setPromptAutoTranslate);
+  const workflow = useStore((s) => s.workflow);
+  const composer = useStore((s) => s.composer);
+  const activeGatewaySelection = useMemo(
+    () => workflowDefaultGatewaySelection(workflow, composer.model),
+    [composer.model, workflow],
+  );
+  const personalInstructionsByModel = useStore((s) => s.personalInstructionsByModel);
+  const setPersonalInstructions = useStore((s) => s.setPersonalInstructions);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -353,6 +380,13 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                   promptAutoTranslate={promptAutoTranslate}
                   setLocale={setLocale}
                   setPromptAutoTranslate={setPromptAutoTranslate}
+                />
+              ) : tab === 'personalization' ? (
+                <PersonalizationSettings
+                  locale={locale}
+                  activeSelection={activeGatewaySelection}
+                  personalInstructionsByModel={personalInstructionsByModel}
+                  setPersonalInstructions={setPersonalInstructions}
                 />
               ) : tab === 'models' ? (
                 <ChannelsSettings locale={locale} cliRuntime={cliRuntime} />
@@ -559,6 +593,286 @@ function GeneralSettings({
       </SettingRow>
     </div>
   );
+}
+
+function PersonalizationSettings({
+  locale,
+  activeSelection,
+  personalInstructionsByModel,
+  setPersonalInstructions,
+}: {
+  locale: Locale;
+  activeSelection: GatewaySelection;
+  personalInstructionsByModel: PersonalInstructionsByModel;
+  setPersonalInstructions: (
+    instructions: string,
+    selection?: GatewaySelection | null,
+  ) => void;
+}) {
+  const activeKey = personalInstructionsKey(activeSelection);
+  const activeLabel = personalInstructionsSelectionLabel(activeSelection);
+  const entries = useMemo(
+    () =>
+      personalInstructionsEntries(
+        activeSelection,
+        activeLabel,
+        personalInstructionsByModel,
+      ),
+    [activeKey, activeLabel, activeSelection, personalInstructionsByModel],
+  );
+  const [drafts, setDrafts] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    setDrafts((previous) => {
+      const visibleKeys = new Set(entries.map((entry) => entry.key));
+      let changed = false;
+      const next = { ...previous };
+      for (const entry of entries) {
+        if (entry.key in next) continue;
+        next[entry.key] = personalInstructionsForSelection(
+          personalInstructionsByModel,
+          entry.selection,
+        );
+        changed = true;
+      }
+      for (const key of Object.keys(next)) {
+        if (visibleKeys.has(key)) continue;
+        delete next[key];
+        changed = true;
+      }
+      return changed ? next : previous;
+    });
+  }, [entries, personalInstructionsByModel]);
+
+  const setDraft = (key: string, value: string) => {
+    setDrafts((previous) => ({ ...previous, [key]: value }));
+  };
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-lg font-semibold text-fg">
+          {t(locale, 'settings.personalizationTitle')}
+        </h3>
+        <p className="mt-1 text-xs leading-relaxed text-fg-faint">
+          {t(locale, 'settings.personalizationDescription')}
+        </p>
+        <p className="mt-2 text-xs leading-relaxed text-fg-faint">
+          {t(locale, 'settings.personalizationFieldDescription')}
+        </p>
+      </div>
+
+      <div className="space-y-3">
+        {entries.map((entry) => {
+          const savedInstructions = personalInstructionsForSelection(
+            personalInstructionsByModel,
+            entry.selection,
+          );
+          const draft = drafts[entry.key] ?? savedInstructions;
+          return (
+            <PersonalizationModelCard
+              key={entry.key}
+              locale={locale}
+              entry={entry}
+              savedInstructions={savedInstructions}
+              draft={draft}
+              onDraftChange={(value) => setDraft(entry.key, value)}
+              onUseSample={() =>
+                setDraft(entry.key, personalInstructionsSample(entry.selection))
+              }
+              onClear={() => {
+                setDraft(entry.key, '');
+                setPersonalInstructions('', entry.selection);
+              }}
+              onSave={() => setPersonalInstructions(draft, entry.selection)}
+            />
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+interface PersonalizationEntry {
+  key: string;
+  selection: GatewaySelection;
+  label: string;
+  hint?: string;
+  current: boolean;
+  saved: boolean;
+  available: boolean;
+}
+
+function personalInstructionsEntries(
+  activeSelection: GatewaySelection,
+  activeLabel: string,
+  personalInstructionsByModel: PersonalInstructionsByModel,
+): PersonalizationEntry[] {
+  const activeKey = personalInstructionsKey(activeSelection);
+  const byKey = new Map<string, PersonalizationEntry>();
+  const upsert = (
+    selection: GatewaySelection,
+    label: string,
+    hint: string | undefined,
+    flags: Partial<Pick<PersonalizationEntry, 'current' | 'available'>>,
+  ) => {
+    const key = personalInstructionsKey(selection);
+    const saved = Boolean(personalInstructionsByModel[key]?.trim());
+    const existing = byKey.get(key);
+    if (!existing) {
+      byKey.set(key, {
+        key,
+        selection,
+        label,
+        hint,
+        current: flags.current === true || key === activeKey,
+        saved,
+        available: flags.available === true,
+      });
+      return;
+    }
+    const replaceLabel = !existing.current && flags.available === true;
+    byKey.set(key, {
+      ...existing,
+      selection,
+      label: replaceLabel ? label : existing.label,
+      hint: replaceLabel ? hint : existing.hint ?? hint,
+      current: existing.current || flags.current === true || key === activeKey,
+      saved: existing.saved || saved,
+      available: existing.available || flags.available === true,
+    });
+  };
+
+  upsert(activeSelection, activeLabel, undefined, {
+    current: true,
+    available: true,
+  });
+
+  for (const [key, instructions] of Object.entries(personalInstructionsByModel)) {
+    if (!instructions.trim()) continue;
+    const selection = selectionFromPersonalInstructionsKey(key);
+    if (!selection) continue;
+    upsert(selection, personalInstructionsSelectionLabel(selection), undefined, {});
+  }
+
+  for (const option of listGatewayRunOptions()) {
+    upsert(option.selection, option.label, option.hint, { available: true });
+  }
+
+  return Array.from(byKey.values()).sort((a, b) => {
+    const rank = (entry: PersonalizationEntry) =>
+      entry.current ? 0 : entry.saved ? 1 : entry.available ? 2 : 3;
+    const rankDelta = rank(a) - rank(b);
+    if (rankDelta !== 0) return rankDelta;
+    return a.label.localeCompare(b.label);
+  });
+}
+
+function PersonalizationModelCard({
+  locale,
+  entry,
+  savedInstructions,
+  draft,
+  onDraftChange,
+  onUseSample,
+  onClear,
+  onSave,
+}: {
+  locale: Locale;
+  entry: PersonalizationEntry;
+  savedInstructions: string;
+  draft: string;
+  onDraftChange: (value: string) => void;
+  onUseSample: () => void;
+  onClear: () => void;
+  onSave: () => void;
+}) {
+  const dirty = draft !== savedInstructions;
+  const injects = shouldInjectPersonalInstructions(entry.selection.adapter);
+  return (
+    <div className="rounded-lg border border-border bg-bg-alt p-4">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
+        <h4 className="min-w-0 flex-1 truncate font-mono text-[12px] font-semibold text-fg">
+          {entry.label}
+        </h4>
+        {entry.current && (
+          <span className="rounded-md border border-accent/40 bg-accent/10 px-2 py-0.5 text-[11px] text-accent">
+            {t(locale, 'settings.personalizationCurrentModel')}
+          </span>
+        )}
+        {entry.saved && (
+          <span className="rounded-md border border-border bg-panel px-2 py-0.5 text-[11px] text-fg-dim">
+            {t(locale, 'settings.personalizationSaved')}
+          </span>
+        )}
+        {!injects && (
+          <span className="rounded-md border border-amber-400/40 bg-amber-400/10 px-2 py-0.5 text-[11px] text-amber-200">
+            {t(locale, 'settings.personalizationCodexSkipped')}
+          </span>
+        )}
+      </div>
+      {entry.hint && (
+        <p className="mb-2 truncate text-[11px] text-fg-faint">{entry.hint}</p>
+      )}
+      <label className="block space-y-2">
+        <span className="text-sm font-medium text-fg">
+          {t(locale, 'settings.personalizationFieldLabel')}
+        </span>
+        <textarea
+          value={draft}
+          onChange={(event: ChangeEvent<HTMLTextAreaElement>) =>
+            onDraftChange(event.target.value)
+          }
+          placeholder={t(locale, 'settings.personalizationPlaceholder')}
+          spellCheck={false}
+          className="min-h-[8.5rem] max-h-[16rem] w-full resize-y rounded-md border border-border bg-panel px-3 py-2 font-mono text-xs leading-relaxed text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-accent"
+        />
+      </label>
+
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={onUseSample}
+          className="rounded-md border border-border bg-panel px-3 py-1.5 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+        >
+          {t(locale, 'settings.personalizationUseSample')}
+        </button>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onClear}
+            disabled={!draft && !savedInstructions}
+            className="rounded-md border border-border bg-panel px-3 py-1.5 text-xs text-fg-dim transition-colors hover:border-rose-400 hover:text-rose-200 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {t(locale, 'settings.personalizationClear')}
+          </button>
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={!dirty}
+            className="rounded-md bg-accent px-3 py-1.5 text-xs font-semibold text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {dirty
+              ? t(locale, 'settings.personalizationSave')
+              : t(locale, 'settings.personalizationSaved')}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function personalInstructionsSelectionLabel(selection: GatewaySelection): string {
+  const adapter =
+    RUNTIME_ADAPTERS.find((item) => item.id === selection.adapter)?.label ??
+    runtimeAdapterLabel(selection.adapter as RuntimeAdapterId);
+  const channel = selection.systemDefault
+    ? 'system'
+    : [selection.providerId, selection.channelId].filter(Boolean).join('/') ||
+      'default';
+  const model =
+    selection.modelOverride?.trim() || selection.modelClass || 'default';
+  return `${adapter} · ${channel} · ${model}`;
 }
 
 function SelectControl<T extends string>({
@@ -819,15 +1133,15 @@ function GlobalRunControls({
   locale: Locale;
   cliRuntime: CliRuntimeSnapshot;
 }) {
-  const runSelection = useStore(
-    (s) => workflowDefaultGatewaySelection(s.workflow),
-    shallow,
-  );
   const setGlobalRunSelection = useStore((s) => s.setGlobalRunSelection);
   const composerModelOptions = useStore((s) => s.modelOptions);
   const [revision, setRevision] = useState(0);
   const [modelListRevision, setModelListRevision] = useState(0);
   const [loadingModels, setLoadingModels] = useState(false);
+  const runSelection = useMemo(
+    () => getActiveGatewaySelection(),
+    [revision],
+  );
 
   useEffect(() => {
     const refresh = () => setRevision((n) => n + 1);
@@ -889,14 +1203,22 @@ function GlobalRunControls({
 
       return [
         ...defaultOptions,
-        ...FREE_CHANNELS.map((channel) => ({
-          id: freeChannelOptionId(channel.id),
-          label: `Free · ${channel.label}`,
-          hint: freeChannelReady(channel.id)
-            ? t(locale, 'settings.freeChannels.ready')
-            : t(locale, 'settings.freeChannels.needsKey'),
-          group: t(locale, 'dock.channelGroupFree'),
-        })),
+        ...FREE_CHANNELS.map((channel) => {
+          const ready = freeChannelReady(channel.id);
+          const hint = channel.local
+            ? ready
+              ? t(locale, 'settings.freeChannels.localConfigured')
+              : t(locale, 'settings.freeChannels.localNeedsSetup')
+            : ready
+              ? t(locale, 'settings.freeChannels.ready')
+              : t(locale, 'settings.freeChannels.needsKey');
+          return {
+            id: freeChannelOptionId(channel.id),
+            label: channel.label,
+            hint,
+            group: t(locale, 'dock.channelGroupFree'),
+          };
+        }),
       ];
     },
     [defaultChannelProviders, locale],
@@ -969,6 +1291,9 @@ function GlobalRunControls({
       hint: 'default',
     };
     if (selectedFreeChannel) {
+      if (selectedFreeChannel.id === FREE_CHANNEL_AUTO_ID) {
+        return uniqueModelOptions(freeChannelModelOptions(selectedFreeChannel));
+      }
       return [
         defaultOption,
         ...uniqueModelOptions(freeChannelModelOptions(selectedFreeChannel)),
@@ -1018,7 +1343,9 @@ function GlobalRunControls({
   ]);
 
   const modelValue = selectedFreeChannel
-    ? getFreeChannelModel(selectedFreeChannel.id) || MODEL_DEFAULT_OPTION_ID
+    ? selectedFreeChannel.id === FREE_CHANNEL_AUTO_ID
+      ? getFreeChannelModel(selectedFreeChannel.id) || FREE_CHANNEL_AUTO_MODEL
+      : getFreeChannelModel(selectedFreeChannel.id) || MODEL_DEFAULT_OPTION_ID
     : selectedDefaultProvider
       ? (selectedDefaultProvider.provider.model ?? '').trim() ||
         MODEL_DEFAULT_OPTION_ID
@@ -3369,7 +3696,19 @@ function ConsensusRangeRow({
 function AppearanceSettings({ locale }: { locale: Locale }) {
   const appearance = useStore((s) => s.appearance);
   const setStylePresetId = useStore((s) => s.setStylePresetId);
+  const setFontFamilyId = useStore((s) => s.setFontFamilyId);
+  const setFontSizePx = useStore((s) => s.setFontSizePx);
   const activePresetId = resolveStylePresetId(appearance.stylePresetId);
+  const activeFontFamilyId = resolveFontFamilyId(appearance.fontFamilyId);
+  const activeFontSizePx = resolveFontSizePx(appearance.fontSizePx);
+  const fontFamilyOptions = useMemo(
+    () =>
+      FONT_FAMILY_LIST.map((font) => ({
+        id: font.id,
+        label: t(locale, font.labelKey),
+      })),
+    [locale],
+  );
   const hasUnsupportedStyle = isUnsupportedStylePreset(appearance.stylePresetId);
 
   return (
@@ -3395,6 +3734,35 @@ function AppearanceSettings({ locale }: { locale: Locale }) {
           </button>
         </div>
       )}
+
+      <SettingRow
+        title={t(locale, 'settings.fontFamilyLabel')}
+        description={t(locale, 'settings.fontFamilyDescription')}
+      >
+        <div className="w-full max-w-[20rem]">
+          <SelectControl
+            value={activeFontFamilyId}
+            options={fontFamilyOptions}
+            onChange={setFontFamilyId}
+            icon={<Type size={15} strokeWidth={2.1} />}
+          />
+        </div>
+      </SettingRow>
+
+      <SettingRow
+        title={t(locale, 'settings.fontSizeLabel')}
+        description={t(locale, 'settings.fontSizeDescription')}
+      >
+        <div className="inline-flex items-center gap-2">
+          <StepperControl
+            value={activeFontSizePx}
+            min={FONT_SIZE_LIMITS.min}
+            max={FONT_SIZE_LIMITS.max}
+            onChange={setFontSizePx}
+          />
+          <span className="w-6 font-mono text-xs text-fg-faint">px</span>
+        </div>
+      </SettingRow>
 
       <SettingRow
         title={t(locale, 'settings.appearanceStyleLabel')}

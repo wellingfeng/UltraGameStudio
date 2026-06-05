@@ -15,8 +15,11 @@ import {
   isCliAdapterAvailable,
 } from '@/lib/cliConfig';
 import {
+  FREE_CHANNEL_AUTO_ID,
+  FREE_CHANNEL_AUTO_MODEL,
   FREE_CHANNEL_PROVIDER_PREFIX,
   freeChannelReady,
+  isFreeChannelAutoModel,
 } from '@/lib/freeChannels';
 import {
   getDefaultGatewaySelection,
@@ -70,12 +73,17 @@ export function normalizeGatewaySelection(
 ): GatewaySelection {
   const adapter = normalizeAdapter(value?.adapter);
   const systemDefault = value?.systemDefault === true;
+  const modelOverride =
+    typeof value?.modelOverride === 'string' && value.modelOverride.trim()
+      ? value.modelOverride.trim()
+      : undefined;
   return {
     adapter,
     modelClass:
       typeof value?.modelClass === 'string' && value.modelClass
         ? value.modelClass
         : DEFAULT_GATEWAY_SELECTION.modelClass,
+    ...(modelOverride ? { modelOverride } : {}),
     ...(systemDefault ? { systemDefault: true } : {}),
     ...(systemDefault
       ? {}
@@ -318,6 +326,7 @@ export function mergeGatewaySelection(
   return normalizeGatewaySelection({
     ...global,
     modelClass: override.modelClass ?? global.modelClass,
+    modelOverride: override.modelClass ? undefined : global.modelOverride,
     providerId,
     channelId: override.channelId ?? global.channelId,
     systemDefault: hasProviderOverride ? undefined : global.systemDefault,
@@ -348,7 +357,7 @@ export function resolveGatewayRoute(
     return cliFallbackRoute(selection, source);
   }
 
-  const model = resolveChannelModel(provider, channel, selection.modelClass);
+  const model = resolveChannelModel(provider, channel, selection);
   const baseUrl = (channel.route.baseUrl ?? channel.baseUrl ?? '').trim();
   const apiKey = (channel.apiKey ?? '').trim();
   const route: ResolvedGatewayRoute = {
@@ -505,6 +514,7 @@ export function selectionKey(selection: GatewaySelection): string {
     selection.providerId ?? '',
     selection.channelId ?? '',
     selection.systemDefault ? 'system' : '',
+    selection.modelOverride ?? '',
   ].join('|');
 }
 
@@ -523,12 +533,20 @@ export function bestAvailableSelection(
 }
 
 export function selectionFromKey(key: string): GatewaySelection | null {
-  const [adapter, modelClass, providerId, channelId, systemDefault] =
+  const [
+    adapter,
+    modelClass,
+    providerId,
+    channelId,
+    systemDefault,
+    modelOverride,
+  ] =
     key.split('|');
   if (!adapter || !modelClass) return null;
   return normalizeGatewaySelection({
     adapter: normalizeAdapter(adapter),
     modelClass,
+    modelOverride: modelOverride || undefined,
     providerId: providerId || undefined,
     channelId: channelId || undefined,
     systemDefault: systemDefault === 'system' || systemDefault === 'true',
@@ -696,9 +714,22 @@ function gatewayChannelHint(
 function resolveChannelModel(
   provider: GatewayProvider,
   channel: GatewayProvider['channels'][number],
-  modelClass: ModelClass,
+  selection: GatewaySelection,
 ): string | undefined {
   const baseUrl = channel.route.baseUrl ?? channel.baseUrl;
+  const isFreeAutoProvider =
+    provider.id === `${FREE_CHANNEL_PROVIDER_PREFIX}${FREE_CHANNEL_AUTO_ID}`;
+  const modelOverride = normalizeKnownProviderModel(
+    baseUrl,
+    isFreeAutoProvider && isFreeChannelAutoModel(selection.modelOverride)
+      ? undefined
+      : selection.modelOverride,
+  );
+  if (modelOverride) return modelOverride;
+
+  const modelClass = isFreeAutoProvider
+    ? FREE_CHANNEL_AUTO_MODEL
+    : selection.modelClass;
   // litellm-style per-tier maps win: an explicit tier->modelId mapping is a
   // deliberate real model id, so it is always honoured (claude-code included).
   const tierModel =
@@ -707,7 +738,9 @@ function resolveChannelModel(
 
   const channelModel = normalizeKnownProviderModel(
     baseUrl,
-    channel.route.model ?? channel.model,
+    isFreeAutoProvider && isFreeChannelAutoModel(channel.route.model ?? channel.model)
+      ? undefined
+      : channel.route.model ?? channel.model,
   );
 
   if (provider.adapter === 'claude-code') {
@@ -737,16 +770,17 @@ function cliFallbackRoute(
   source: ResolvedGatewayRoute['source'],
 ): ResolvedGatewayRoute {
   const adapter = normalizeAdapter(selection.adapter);
+  const modelLabel = selection.modelOverride?.trim() || selection.modelClass;
   const model =
-    selection.modelClass === 'default'
+    modelLabel === 'default'
       ? undefined
       : adapter === 'claude-code'
       ? // Tier alias (sonnet/opus/haiku) -> let the CLI map it; any other
         // modelClass (a custom label) -> omit --model and use the relay default.
-        CLI_TIER_ALIASES.has(selection.modelClass)
-        ? selection.modelClass
+        CLI_TIER_ALIASES.has(modelLabel)
+        ? modelLabel
         : undefined
-      : selection.modelClass;
+      : modelLabel;
   return {
     selection: { ...selection, adapter },
     adapter,
@@ -757,7 +791,7 @@ function cliFallbackRoute(
     transport: 'cli',
     mode: 'cli',
     label: `${runtimeAdapterLabel(adapter)} CLI · ${
-      selection.systemDefault ? 'system default' : selection.modelClass
+      selection.systemDefault ? 'system default' : modelLabel
     }`,
     source,
   };

@@ -1,9 +1,0 @@
-{
-  "keys": {
-    "open_router": "OPENROUTER_API_KEY_HERE",
-    "gemini": "GEMINI_API_KEY_HERE",
-    "deepseek": "DEEPSEEK_API_KEY_HERE",
-    "groq": "GROQ_API_KEY_HERE",
-    "kimi": "MOONSHOT_OR_KIMI_API_KEY_HERE"
-  }
-}

@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defaultBlueprint, simpleBlueprint } from '@/core/defaultBlueprint';
 import type { IRGraph } from '@/core/ir';
+import { personalInstructionsKey } from '@/core/personalInstructions';
+import { encodeToolPatch } from '@/components/ai/lib/toolEvent';
 import { refreshCliRuntime } from '@/lib/cliConfig';
-import { workflowDefaultGatewaySelection } from '@/lib/modelGateway/resolver';
+import {
+  systemDefaultGatewaySelection,
+  workflowDefaultGatewaySelection,
+} from '@/lib/modelGateway/resolver';
 
 const gatewayMocks = vi.hoisted(() => ({
   completeGatewayText: vi.fn(),
@@ -62,6 +67,7 @@ function resetStore(workflow: IRGraph): void {
     aiStreaming: false,
     aiEditingSessions: [],
     chattingSessions: [],
+    blockedSendTip: null,
     dirty: false,
     currentFilePath: null,
     messages: [],
@@ -75,6 +81,8 @@ function resetStore(workflow: IRGraph): void {
     runState: {},
     runOutputs: {},
     lastRunFailedNodeId: null,
+    personalInstructions: '',
+    personalInstructionsByModel: {},
   });
 }
 
@@ -132,7 +140,7 @@ afterEach(async () => {
   tauriMocks.freeProxyEnsure.mockReset();
   tauriMocks.isTauri.mockReset();
   tauriMocks.tauriAvailable.mockReset();
-  tauriMocks.freeProxyEnsure.mockResolvedValue({ port: 8765, token: 'test-token' });
+  tauriMocks.freeProxyEnsure.mockResolvedValue({ port: 8766, token: 'test-token' });
   tauriMocks.isTauri.mockReturnValue(false);
   tauriMocks.tauriAvailable.mockReturnValue(false);
   resetStore(defaultBlueprint('Current workflow'));
@@ -577,6 +585,103 @@ describe('simple-workflow chat mode', () => {
     expect(assistant?.text).toContain('这是直接的回答。');
   });
 
+  it('skips app personal instructions for Codex simple chat prompts', async () => {
+    const workflow = simpleBlueprint('Simple chat');
+    workflow.meta.gateway = {
+      defaults: { adapter: 'codex', modelClass: 'default' },
+    };
+    resetStore(workflow);
+    const codexSelection = { adapter: 'codex', modelClass: 'default' };
+    useStore.setState({
+      personalInstructionsByModel: {
+        [personalInstructionsKey(codexSelection)]:
+          '# Personal Defaults\n\n- 默认使用中文',
+      },
+      personalInstructions: '# Personal Defaults\n\n- 默认使用中文',
+    });
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue({
+      selection: { adapter: 'codex', modelClass: 'default' },
+      adapter: 'codex',
+      apiKey: 'test-key',
+      model: 'gpt-5-codex',
+      transport: 'openai-compatible',
+    });
+    const systems: string[] = [];
+    gatewayMocks.completeGatewayText.mockImplementation(async (request) => {
+      systems.push(String(request.system));
+      return 'Codex answer.';
+    });
+
+    useStore.getState().sendPrompt('测试 Codex 个性化是否重复');
+
+    await waitFor(
+      () =>
+        !useStore.getState().aiStreaming &&
+        useStore.getState().messages.some((m) => m.role === 'assistant'),
+      'codex simple chat answer',
+    );
+
+    expect(systems[0]).toContain('简单 Workflow');
+    expect(systems[0]).not.toContain('【用户个人默认指令（低优先级）】');
+    expect(systems[0]).not.toContain('- 默认使用中文');
+  });
+
+  it('switches simple chat personal instructions with the active model', async () => {
+    const workflow = simpleBlueprint('Simple chat');
+    workflow.meta.gateway = {
+      defaults: { adapter: 'claude-code', modelClass: 'sonnet' },
+    };
+    resetStore(workflow);
+    const claudeSelection = { adapter: 'claude-code', modelClass: 'sonnet' };
+    const geminiSelection = systemDefaultGatewaySelection('gemini');
+    useStore.setState({
+      personalInstructionsByModel: {
+        [personalInstructionsKey(claudeSelection)]: 'Claude-only defaults',
+        [personalInstructionsKey(geminiSelection)]: 'Gemini-only defaults',
+      },
+      personalInstructions: 'Claude-only defaults',
+    });
+    const systems: string[] = [];
+    gatewayMocks.completeGatewayText.mockImplementation(async (request) => {
+      systems.push(String(request.system));
+      return `Answer ${systems.length}`;
+    });
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue({
+      selection: claudeSelection,
+      adapter: 'claude-code',
+      apiKey: 'test-key',
+      model: 'sonnet',
+      transport: 'anthropic',
+    });
+
+    useStore.getState().sendPrompt('第一轮');
+    await waitFor(
+      () => systems.length === 1 && !useStore.getState().aiStreaming,
+      'first model answer',
+    );
+
+    useStore.getState().setSessionRunSelection(geminiSelection);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue({
+      selection: geminiSelection,
+      adapter: 'gemini',
+      apiKey: 'test-key',
+      model: 'gemini-pro',
+      transport: 'openai-compatible',
+    });
+
+    useStore.getState().sendPrompt('第二轮');
+    await waitFor(
+      () => systems.length === 2 && !useStore.getState().aiStreaming,
+      'second model answer',
+    );
+
+    expect(systems[0]).toContain('Claude-only defaults');
+    expect(systems[0]).not.toContain('Gemini-only defaults');
+    expect(systems[1]).toContain('Gemini-only defaults');
+    expect(systems[1]).not.toContain('Claude-only defaults');
+    expect(useStore.getState().personalInstructions).toBe('Gemini-only defaults');
+  });
+
   it('folds prior turns into the prompt for multi-turn context', async () => {
     resetStore(simpleBlueprint('Simple chat'));
     mockDirectRoute();
@@ -612,6 +717,59 @@ describe('simple-workflow chat mode', () => {
     expect(node.params.userInputs).toEqual([
       '中国的首都是哪里？',
       '那它有多少人口？',
+    ]);
+  });
+
+  it('reruns a favorited simple chat with a fresh direct context', async () => {
+    resetStore(simpleBlueprint('Reusable chat'));
+    useStore.setState({
+      activeSessionId: 's_reusable_direct',
+      sessions: [
+        {
+          id: 's_reusable_direct',
+          title: 'Reusable chat',
+          createdAt: 1,
+          updatedAt: 4,
+          isWorkflow: true,
+          simple: true,
+          favorite: true,
+        },
+      ],
+      messages: [
+        { id: 'm_user_1', role: 'user', text: 'repeat this task', createdAt: 1 },
+        { id: 'm_ai_1', role: 'assistant', text: 'old answer', createdAt: 2 },
+        { id: 'm_user_2', role: 'user', text: 'old follow-up', createdAt: 3 },
+      ],
+    });
+    mockDirectRoute();
+    const userContents: string[] = [];
+    gatewayMocks.completeGatewayText.mockImplementation(async (request) => {
+      userContents.push(String(request.userContent));
+      return 'fresh answer';
+    });
+
+    useStore.getState().sendPrompt('repeat this task');
+
+    await waitFor(
+      () => !useStore.getState().aiStreaming && userContents.length === 1,
+      'favorite direct rerun',
+    );
+
+    expect(userContents[0]).toBe('repeat this task');
+    expect(userContents[0]).not.toContain('之前的对话');
+    expect(userContents[0]).not.toContain('old answer');
+    expect(useStore.getState().messages.map((message) => message.role)).toEqual([
+      'user',
+      'assistant',
+    ]);
+    expect(
+      useStore
+        .getState()
+        .messages.filter((message) => message.role === 'user')
+        .map((message) => message.text),
+    ).toEqual(['repeat this task']);
+    expect(useStore.getState().workflow.nodes[0].params.userInputs).toEqual([
+      'repeat this task',
     ]);
   });
 
@@ -722,6 +880,63 @@ describe('simple-workflow chat mode', () => {
     expect(calls[3].prompt).toContain('换个模型后还能接上文吗？');
     expect(calls[3].prompt).toContain('切换模型后的回答。');
     expect(calls[3].prompt).toContain('再切回原模型呢？');
+  });
+
+  it('does not resume a native Claude CLI session for favorited simple chat reruns', async () => {
+    resetStore(simpleBlueprint('Reusable CLI chat'));
+    useStore.setState({
+      activeSessionId: 's_reusable_cli',
+      sessions: [
+        {
+          id: 's_reusable_cli',
+          title: 'Reusable CLI chat',
+          createdAt: 1,
+          updatedAt: 4,
+          isWorkflow: true,
+          simple: true,
+          favorite: true,
+        },
+      ],
+      messages: [
+        { id: 'm_user_1', role: 'user', text: 'repeat this task', createdAt: 1 },
+        { id: 'm_ai_1', role: 'assistant', text: 'old answer', createdAt: 2 },
+      ],
+    });
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockResolvedValue({
+      selection: { adapter: 'claude-code', modelClass: 'sonnet' },
+      adapter: 'claude-code',
+      modelClass: 'sonnet',
+      model: 'sonnet',
+      transport: 'cli',
+      mode: 'cli',
+      label: 'Claude Code',
+      source: 'fallback',
+      cliCommand: 'claude',
+    });
+    const calls: Array<{
+      prompt: string;
+      opts: { sessionId?: string; resume?: boolean };
+    }> = [];
+    tauriMocks.aiEditViaCli.mockImplementation(async (prompt, _adapter, opts) => {
+      calls.push({ prompt, opts });
+      return 'fresh CLI answer';
+    });
+
+    useStore.getState().sendPrompt('repeat this task');
+
+    await waitFor(
+      () => !useStore.getState().aiStreaming && calls.length === 1,
+      'favorite CLI rerun',
+    );
+
+    expect(calls[0].opts.sessionId).toBeUndefined();
+    expect(calls[0].opts.resume).toBeUndefined();
+    expect(calls[0].prompt).toContain('repeat this task');
+    expect(calls[0].prompt).not.toContain('之前的对话');
+    expect(calls[0].prompt).not.toContain('old answer');
   });
 
   it('does NOT enter chat mode for a normal workflow (blueprint generation path)', async () => {
@@ -891,6 +1106,47 @@ describe('simple-workflow chat mode', () => {
     ]);
   });
 
+  it('blocks sending to a different model while the current model is still answering', async () => {
+    resetStore(simpleBlueprint('Simple chat'));
+    mockDirectRoute();
+    const resolvers: Array<(value: string) => void> = [];
+    gatewayMocks.completeGatewayText.mockImplementation(
+      async () => new Promise<string>((resolve) => resolvers.push(resolve)),
+    );
+
+    useStore.getState().sendPrompt('问题一');
+    await waitFor(() => resolvers.length === 1, 'first chat call');
+
+    useStore.getState().setSessionRunSelection({
+      adapter: 'claude-code',
+      modelClass: 'opus',
+    });
+    useStore.getState().sendPrompt('问题二');
+
+    expect(gatewayMocks.completeGatewayText).toHaveBeenCalledTimes(1);
+    expect(
+      useStore.getState().messages.filter((message) => message.role === 'user'),
+    ).toHaveLength(1);
+    expect(useStore.getState().blockedSendTip).toBe('model-switched-while-chatting');
+
+    resolvers[0]('答一');
+    await waitFor(
+      () => !useStore.getState().aiStreaming,
+      'first chat to finish',
+    );
+
+    useStore.getState().sendPrompt('问题二');
+    await waitFor(() => resolvers.length === 2, 'second chat after finish');
+    expect(gatewayMocks.completeGatewayText).toHaveBeenCalledTimes(2);
+    expect(useStore.getState().blockedSendTip).toBeNull();
+
+    resolvers[1]('答二');
+    await waitFor(
+      () => !useStore.getState().aiStreaming,
+      'second chat to finish',
+    );
+  });
+
   it('streams CLI progress into the plain chat bubble before the final reply', async () => {
     resetStore(simpleBlueprint('Simple chat'));
     tauriMocks.isTauri.mockReturnValue(true);
@@ -929,6 +1185,8 @@ describe('simple-workflow chat mode', () => {
     const live = useStore
       .getState()
       .messages.find((m) => m.role === 'assistant');
+    expect(live?.routeLabel).toBe('Claude Code · sonnet');
+    expect(live?.text).toContain('⚙ 路由：Claude Code · 模型：sonnet');
     expect(live?.text).toContain('⚙ 会话已启动');
     expect(live?.text).toContain('🔎 正在读取上下文');
     expect(tauriMocks.aiEditViaCli.mock.calls[0]?.[2]?.onProgress).toEqual(
@@ -963,7 +1221,7 @@ describe('simple-workflow chat mode', () => {
     const order: string[] = [];
     tauriMocks.freeProxyEnsure.mockImplementation(async () => {
       order.push('ensure');
-      return { port: 8765, token: 'test-token' };
+      return { port: 8766, token: 'test-token' };
     });
     gatewayMocks.resolveCliGatewayRoute.mockImplementation(async () => {
       order.push('resolve');
@@ -979,12 +1237,12 @@ describe('simple-workflow chat mode', () => {
         model: 'poolside/laguna-xs.2:free',
         transport: 'cli',
         mode: 'cli',
-        label: 'Free · Kilo Gateway',
+        label: 'Kilo Gateway',
         source: 'global',
         cliCommand: 'claude',
         env: {
           ANTHROPIC_API_KEY: 'test-token',
-          ANTHROPIC_BASE_URL: 'http://127.0.0.1:8765/ch/kilo',
+          ANTHROPIC_BASE_URL: 'http://127.0.0.1:8766/ch/kilo',
           ANTHROPIC_MODEL: 'poolside/laguna-xs.2:free',
         },
       };
@@ -1000,9 +1258,82 @@ describe('simple-workflow chat mode', () => {
     expect(order).toEqual(['ensure', 'resolve']);
     expect(tauriMocks.freeProxyEnsure).toHaveBeenCalled();
     expect(tauriMocks.aiEditViaCli.mock.calls[0]?.[2]?.env).toMatchObject({
-      ANTHROPIC_BASE_URL: 'http://127.0.0.1:8765/ch/kilo',
+      ANTHROPIC_BASE_URL: 'http://127.0.0.1:8766/ch/kilo',
       ANTHROPIC_MODEL: 'poolside/laguna-xs.2:free',
     });
+    await waitFor(
+      () =>
+        useStore
+          .getState()
+          .messages.some((m) => m.role === 'assistant' && m.text.includes('Kilo answer')),
+      'free-channel final answer',
+    );
+    expect(
+      useStore
+        .getState()
+        .messages.find((m) => m.role === 'assistant')
+        ?.routeLabel,
+    ).toBe('Kilo Gateway · poolside/laguna-xs.2:free');
+    expect(
+      useStore
+        .getState()
+        .messages.find((m) => m.role === 'assistant')
+        ?.text,
+    ).toContain('⚙ 路由：Kilo Gateway · 模型：poolside/laguna-xs.2:free');
+  });
+
+  it('shows the route and strips route/tool logs from the next transcript', async () => {
+    resetStore(simpleBlueprint('Simple chat'));
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue({
+      selection: { adapter: 'claude-code', modelClass: 'sonnet' },
+      adapter: 'claude-code',
+      modelClass: 'sonnet',
+      model: 'z-ai/glm-4.6',
+      providerName: 'OpenRouter',
+      channelName: 'Default',
+      transport: 'anthropic',
+      mode: 'direct',
+      apiKey: 'test-key',
+      label: 'Claude Code · OpenRouter · Default · sonnet',
+      source: 'global',
+    });
+    const routeLog = encodeToolPatch({
+      id: 'route-1',
+      name: 'free_proxy',
+      status: 'done',
+      subject: '已切到 OpenRouter · z-ai/glm-4.6',
+    });
+    gatewayMocks.completeGatewayText
+      .mockResolvedValueOnce(`${routeLog}第一轮回答`)
+      .mockResolvedValueOnce('第二轮回答');
+
+    useStore.getState().sendPrompt('第一问');
+    await waitFor(
+      () =>
+        !useStore.getState().aiStreaming &&
+        useStore
+          .getState()
+          .messages.some((m) => m.role === 'assistant' && m.text.includes('第一轮回答')),
+      'first routed answer',
+    );
+    const firstAssistant = useStore
+      .getState()
+      .messages.find((m) => m.role === 'assistant');
+    expect(firstAssistant?.routeLabel).toBe('OpenRouter · Default · z-ai/glm-4.6');
+    expect(firstAssistant?.text).toContain('⚙ 路由：OpenRouter · Default · 模型：z-ai/glm-4.6');
+
+    useStore.getState().sendPrompt('第二问');
+    await waitFor(
+      () => gatewayMocks.completeGatewayText.mock.calls.length === 2,
+      'second routed request',
+    );
+    const secondUserContent =
+      gatewayMocks.completeGatewayText.mock.calls[1]?.[0]?.userContent ?? '';
+    expect(secondUserContent).toContain('助手：第一轮回答');
+    expect(secondUserContent).not.toContain('⚙ 路由');
+    expect(secondUserContent).not.toContain('<<FUC_TOOL>>');
+    expect(secondUserContent).not.toContain('free_proxy');
+    expect(secondUserContent).not.toContain('⏱');
   });
 
   it('surfaces free proxy startup failures before invoking the CLI', async () => {

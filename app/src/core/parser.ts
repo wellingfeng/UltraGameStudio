@@ -881,6 +881,7 @@ function readGatewaySelectionObject(obj: ObjectExpression): GatewaySelection {
     if (!value) continue;
     if (prop.key.name === 'adapter') out.adapter = value;
     else if (prop.key.name === 'modelClass') out.modelClass = value;
+    else if (prop.key.name === 'modelOverride') out.modelOverride = value;
     else if (prop.key.name === 'providerId') out.providerId = value;
     else if (prop.key.name === 'channelId') out.channelId = value;
   }

@@ -47,28 +47,31 @@ export default function Select({
   }, [open]);
 
   return (
-    <div ref={rootRef} className={cn('relative', open && 'z-50', className)}>
+    <div
+      ref={rootRef}
+      className={cn('relative min-w-0', open && 'z-50', className)}
+    >
       <button
         type="button"
         title={title}
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
         className={cn(
-          'flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors',
+          'flex max-w-full items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors',
           open
             ? 'border-accent bg-border-soft text-fg'
             : 'border-border bg-panel-2 text-fg-dim hover:border-accent hover:text-fg',
           disabled && 'cursor-not-allowed opacity-50 hover:border-border hover:text-fg-dim',
         )}
       >
-        {icon && <span className="text-fg-faint">{icon}</span>}
-        <span className="truncate">{selected?.label}</span>
+        {icon && <span className="shrink-0 text-fg-faint">{icon}</span>}
+        <span className="min-w-0 flex-1 truncate">{selected?.label}</span>
         {selected?.hint && (
-          <span className="rounded bg-border-soft px-1 py-0.5 text-[10px] text-fg-faint">
+          <span className="shrink-0 rounded bg-border-soft px-1 py-0.5 text-[10px] text-fg-faint">
             {selected.hint}
           </span>
         )}
-        <span className="text-[9px] text-fg-faint">▾</span>
+        <span className="shrink-0 text-[9px] text-fg-faint">▾</span>
       </button>
 
       {open && !disabled && (

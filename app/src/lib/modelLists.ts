@@ -2,6 +2,7 @@ import type { Provider } from '@/lib/apiConfig';
 import {
   FREE_CHANNELS,
   FREE_CHANNEL_AUTO_ID,
+  FREE_CHANNEL_AUTO_MODEL,
   getFreeChannelKey,
   getFreeChannelModel,
   getFreeChannelModelOverride,
@@ -159,7 +160,18 @@ export function freeChannelModelCacheKey(channelId: string): string {
 
 export function freeChannelModelOptions(channel: FreeChannel): string[] {
   if (channel.id === FREE_CHANNEL_AUTO_ID) {
-    return uniqueModels(['sonnet', 'opus', 'haiku']);
+    return uniqueModels([
+      FREE_CHANNEL_AUTO_MODEL,
+      getFreeChannelModelOverride(FREE_CHANNEL_AUTO_ID),
+      ...FREE_CHANNELS.filter((candidate) => candidate.id !== FREE_CHANNEL_AUTO_ID)
+        .flatMap((candidate) => [
+          getFreeChannelModelOverride(candidate.id),
+          getFreeChannelModel(candidate.id),
+          ...(getCachedModels(freeChannelModelCacheKey(candidate.id))?.models ?? []),
+          candidate.defaultModel,
+          ...(candidate.fallbackModels ?? []),
+        ]),
+    ]);
   }
   const cached = getCachedModels(freeChannelModelCacheKey(channel.id));
   return uniqueModels([

@@ -18,6 +18,10 @@ import {
   stripInteraction,
 } from '../core/interaction';
 import type { GatewaySelection } from '../core/ir';
+import {
+  appendPersonalInstructions,
+  personalInstructionsForSelection,
+} from '../core/personalInstructions';
 import { appendExecutionContract } from './contract';
 import { parseRunFailure } from './failure';
 import { formatFailureLine } from './failure';
@@ -212,7 +216,18 @@ export async function runAgentWithInteraction(opts: {
       round === 0 ? opts.head : `${opts.head}（已根据你的回答继续）\n`,
     );
     const schemaSuffix = opts.schema ? `\n\n${opts.schema.instruction}` : '';
-    const prompt = `${appendExecutionContract(opts.basePrompt)}\n\n${INTERACTION_PROTOCOL}${appendix}${schemaSuffix}`;
+    const personalInstructions = context.personalInstructionsByModel
+      ? personalInstructionsForSelection(
+          context.personalInstructionsByModel,
+          opts.selection,
+        )
+      : context.personalInstructions;
+    const promptBase = appendPersonalInstructions(
+      opts.basePrompt,
+      personalInstructions,
+      opts.selection.adapter,
+    );
+    const prompt = `${appendExecutionContract(promptBase)}\n\n${INTERACTION_PROTOCOL}${appendix}${schemaSuffix}`;
     const timeoutPolicy = context.gateway.timeoutPolicy(opts.selection, prompt);
 
     let raw: string;

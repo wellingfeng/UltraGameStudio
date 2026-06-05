@@ -36,6 +36,7 @@ const CATEGORY: Array<[RegExp, ToolCategory]> = [
   [/^(bash|shell|command_?execution|exec|run|terminal|powershell)/i, 'exec'],
   [/^(grep|search|search_?content|ripgrep|find_?text)/i, 'search'],
   [/^(glob|find|ls|list_?dir|directory)/i, 'list'],
+  [/^(free_?proxy|model_?route|llm_?route|provider_?route)/i, 'web'],
   [/^(web_?fetch|web_?search|fetch|browse|http|url)/i, 'web'],
   [/^(task|agent|subagent|dispatch)/i, 'task'],
 ];

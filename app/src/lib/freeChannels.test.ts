@@ -2,16 +2,19 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   FREE_CHANNELS,
   FREE_CHANNEL_AUTO_ID,
+  FREE_CHANNEL_AUTO_MODEL,
   FREE_CHANNEL_PROVIDER_PREFIX,
   applyFreeChannelEnvKeys,
   exportFreeChannelsConfig,
   freeChannelGatewayProviders,
   freeChannelReady,
   freeChannelSelection,
+  getCachedFreeProxyPort,
   getFreeChannelFallbackModels,
   getFreeChannelKey,
   getFreeChannelModel,
   getFreeChannelModelOverride,
+  getFreeChannelRouteModel,
   importFreeChannelsConfig,
   isFreeChannelSelection,
   setFreeChannelKey,
@@ -29,6 +32,22 @@ describe('free channel selection encoding', () => {
     expect(sel.modelClass).toBe('opus');
     expect(sel.providerId).toBe(`${FREE_CHANNEL_PROVIDER_PREFIX}groq`);
     expect(isFreeChannelSelection(sel)).toBe('groq');
+  });
+
+  it('defaults the auto channel to Auto without sending Auto as an upstream model', () => {
+    const sel = freeChannelSelection(FREE_CHANNEL_AUTO_ID);
+
+    expect(sel.modelClass).toBe(FREE_CHANNEL_AUTO_MODEL);
+    expect(getFreeChannelModel(FREE_CHANNEL_AUTO_ID)).toBe(FREE_CHANNEL_AUTO_MODEL);
+    expect(getFreeChannelRouteModel(FREE_CHANNEL_AUTO_ID)).toBe('');
+
+    expect(setFreeChannelModel(FREE_CHANNEL_AUTO_ID, 'z-ai/glm-5.1')).toBe(true);
+    expect(getFreeChannelModel(FREE_CHANNEL_AUTO_ID)).toBe('z-ai/glm-5.1');
+    expect(getFreeChannelRouteModel(FREE_CHANNEL_AUTO_ID)).toBe('z-ai/glm-5.1');
+
+    expect(setFreeChannelModel(FREE_CHANNEL_AUTO_ID, FREE_CHANNEL_AUTO_MODEL)).toBe(true);
+    expect(getFreeChannelModelOverride(FREE_CHANNEL_AUTO_ID)).toBe('');
+    expect(getFreeChannelRouteModel(FREE_CHANNEL_AUTO_ID)).toBe('');
   });
 
   it('returns null for non-free and unknown selections', () => {
@@ -297,6 +316,13 @@ describe('channel catalog', () => {
 });
 
 describe('freeChannelGatewayProviders', () => {
+  it('drops cached proxy ports outside the free proxy range', () => {
+    window.localStorage.setItem('fuc_free_proxy_port_v1', String(8766 - 1));
+
+    expect(getCachedFreeProxyPort()).toBe(8766);
+    expect(window.localStorage.getItem('fuc_free_proxy_port_v1')).toBeNull();
+  });
+
   it('builds a CLI claude-code provider per channel pointed at the local proxy', () => {
     window.localStorage.setItem('fuc_free_proxy_token_v1', 'local-token-123');
     const providers = freeChannelGatewayProviders();
@@ -310,6 +336,8 @@ describe('freeChannelGatewayProviders', () => {
       const id = provider.id.slice(FREE_CHANNEL_PROVIDER_PREFIX.length);
       expect(channel.route.baseUrl).toContain(`/ch/${id}`);
       expect(channel.route.baseUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/ch\//);
+      const source = FREE_CHANNELS.find((item) => item.id === id)!;
+      expect(provider.name).toBe(source.label);
     }
   });
 });

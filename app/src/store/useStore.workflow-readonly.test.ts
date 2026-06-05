@@ -10,6 +10,7 @@ import {
   type WorkflowSessionKey,
 } from './useStore';
 import { workflowDefaultGatewaySelection } from '@/lib/modelGateway/resolver';
+import { ACTIVE_GATEWAY_SELECTION_STORAGE } from '@/lib/gatewayConfig';
 import { historyStore } from './history/store';
 import type { SessionRecord, WorkspaceSummary } from './history/types';
 import type { Session } from './types';
@@ -706,6 +707,29 @@ describe('workflow read-only guard', () => {
       adapter: 'gemini',
       modelClass: 'haiku',
     });
+  });
+
+  it('keeps input-box run selection scoped to the active session', () => {
+    resetStore('design', false);
+    window.localStorage.setItem(
+      ACTIVE_GATEWAY_SELECTION_STORAGE,
+      JSON.stringify({ adapter: 'claude-code', modelClass: 'sonnet' }),
+    );
+
+    useStore.getState().setSessionRunSelection({
+      adapter: 'codex',
+      modelClass: 'gpt-5.5',
+      modelOverride: 'gpt-5.5',
+    });
+
+    expect(workflowDefaultGatewaySelection(useStore.getState().workflow)).toEqual({
+      adapter: 'codex',
+      modelClass: 'gpt-5.5',
+      modelOverride: 'gpt-5.5',
+    });
+    expect(
+      JSON.parse(window.localStorage.getItem(ACTIVE_GATEWAY_SELECTION_STORAGE)!),
+    ).toEqual({ adapter: 'claude-code', modelClass: 'sonnet' });
   });
 
   it.each([

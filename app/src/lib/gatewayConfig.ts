@@ -95,9 +95,14 @@ function normalizeSelection(value: unknown): GatewaySelection | null {
           typeof raw.model === 'string' ? raw.model : undefined,
         );
   const systemDefault = raw.systemDefault === true;
+  const modelOverride =
+    typeof raw.modelOverride === 'string' && raw.modelOverride.trim()
+      ? raw.modelOverride.trim()
+      : undefined;
   return {
     adapter: normalizeAdapter(raw.adapter),
     modelClass,
+    ...(modelOverride ? { modelOverride } : {}),
     ...(systemDefault ? { systemDefault: true } : {}),
     ...(systemDefault
       ? {}

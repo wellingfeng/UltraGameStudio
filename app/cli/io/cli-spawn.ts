@@ -400,6 +400,18 @@ export function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<
       cleanupCodex();
       resolve(out);
     };
+    const currentOutput = () => {
+      let output = result.trim() ? result : acc;
+      if (isCodex && codexOutPath) {
+        try {
+          const final = readFileSync(codexOutPath, 'utf8');
+          if (final.trim()) output = final;
+        } catch {
+          /* none */
+        }
+      }
+      return output;
+    };
 
     // --- spawn errors (ENOENT etc.) ---
     child.on('error', (err) => {
@@ -435,7 +447,13 @@ export function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<
         const status = codexTurnCompletionStatus(v);
         if (status != null) {
           codexTurnStatus = status;
+          const output = currentOutput();
           terminateProcessTree(child.pid!);
+          if (codexStatusSuccess(status)) finishResolve(output);
+          else {
+            const detail = stderrBuf.trim() || output.trim();
+            finishReject(`CLI "${binary}" turn status ${status}: ${detail}`);
+          }
           return;
         }
         const item = codexCompletedItem(v);
@@ -589,16 +607,7 @@ export function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<
     // --- exit: decide success/failure (mirrors the Rust match) ---
     child.on('close', (code, signal) => {
       // Read codex sidecar final message if present.
-      let output = result.trim() ? result : acc;
-      if (isCodex && codexOutPath) {
-        let final = '';
-        try {
-          final = readFileSync(codexOutPath, 'utf8');
-        } catch {
-          /* none */
-        }
-        if (final.trim()) output = final;
-      }
+      const output = currentOutput();
 
       if (cancelled) {
         finishReject(`CLI "${binary}" 已由用户中断。`);

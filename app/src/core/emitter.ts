@@ -610,12 +610,16 @@ function emitMeta(ir: IRGraph): string {
 function emitGatewaySelection(selection: {
   adapter?: string;
   modelClass?: string;
+  modelOverride?: string;
   providerId?: string;
   channelId?: string;
 }): string {
   const parts: string[] = [];
   if (selection.adapter) parts.push(`adapter: ${str(selection.adapter)}`);
   if (selection.modelClass) parts.push(`modelClass: ${str(selection.modelClass)}`);
+  if (selection.modelOverride) {
+    parts.push(`modelOverride: ${str(selection.modelOverride)}`);
+  }
   if (selection.providerId) parts.push(`providerId: ${str(selection.providerId)}`);
   if (selection.channelId) parts.push(`channelId: ${str(selection.channelId)}`);
   return `{ ${parts.join(', ')} }`;

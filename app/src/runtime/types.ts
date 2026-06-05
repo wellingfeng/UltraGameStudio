@@ -22,6 +22,7 @@ import type {
   IRRunStatus,
   NodeGatewayOverride,
 } from '../core/ir';
+import type { PersonalInstructionsByModel } from '../core/personalInstructions';
 import type {
   InteractionAnswer,
   InteractionRequest,
@@ -243,6 +244,10 @@ export interface RunGateway {
 export interface RunContext {
   /** The run's default gateway selection (adapter / model / provider). */
   selection: GatewaySelection;
+  /** User-authored long-lived instructions injected into each model call. */
+  personalInstructions?: string;
+  /** Same instructions, keyed by adapter/provider/channel/model selection. */
+  personalInstructionsByModel?: PersonalInstructionsByModel;
   cwd?: string;
   permission?: string;
   /** Bounded-concurrency cap for independent nodes (already host-configured). */

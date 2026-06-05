@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { createElement } from 'react';
+import { act, createElement } from 'react';
+import { createRoot } from 'react-dom/client';
 import MessageContent from './MessageContent';
 
 /**
@@ -35,6 +36,7 @@ describe('MessageContent integration', () => {
     expect(html).toMatch(/hljs-/); // syntax highlighting applied
     expect(html).toMatch(/<table/); // GFM table
     expect(html).toMatch(/ai-file-chip/); // inline file reference became a chip
+    expect(html).not.toMatch(/ai-file-chip--interactive/); // no preview handler wired
     expect(html).toMatch(/JetBrains|ai-code/); // code block chrome rendered
     expect(html).toMatch(/example\.com/); // external link survived
     expect(html).toMatch(/Heading/);
@@ -61,6 +63,76 @@ describe('MessageContent integration', () => {
     );
     // The raw <img> must be escaped/stripped, not rendered as a live element.
     expect(html).not.toMatch(/<img[^>]*onerror/);
+  });
+
+  it('renders sandbox markdown links with unicode local filenames as file chips', () => {
+    const name = 'Moon亮晶分析和渲染整体架构.html';
+    const html = renderToStaticMarkup(
+      createElement(MessageContent, {
+        text: `[${name}](sandbox:/mnt/data/${name})`,
+        streaming: false,
+        onOpenFile: () => {},
+      }),
+    );
+    expect(html).toMatch(/ai-file-chip/);
+    expect(html).toMatch(/ai-file-chip--interactive/);
+    expect(html).toMatch(/Moon亮晶分析/);
+  });
+
+  it('shows a reveal-in-folder menu for interactive file chips', async () => {
+    const calls: Array<{ path: string; reveal?: boolean }> = [];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    try {
+      await act(async () => {
+        root.render(
+          createElement(MessageContent, {
+            text: 'Open `src/store/useStore.ts:42`.',
+            streaming: false,
+            onOpenFile: (ref, intent) => {
+              calls.push({ path: ref.path, reveal: intent?.reveal });
+            },
+          }),
+        );
+      });
+
+      const chip = container.querySelector<HTMLButtonElement>('.ai-file-chip');
+      expect(chip).not.toBeNull();
+      await act(async () => {
+        chip!.dispatchEvent(
+          new MouseEvent('contextmenu', {
+            bubbles: true,
+            cancelable: true,
+            clientX: 16,
+            clientY: 18,
+          }),
+        );
+      });
+
+      const menuItem = container.querySelector<HTMLButtonElement>(
+        '.ai-file-chip-menu [role="menuitem"]',
+      );
+      expect(menuItem?.textContent).toContain('在文件夹中显示');
+      await act(async () => {
+        menuItem!.dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, cancelable: true }),
+        );
+      });
+      expect(container.querySelector('.ai-file-chip-menu')).not.toBeNull();
+      await act(async () => {
+        menuItem!.click();
+      });
+
+      expect(calls).toEqual([{ path: 'src/store/useStore.ts', reveal: true }]);
+      expect(container.querySelector('.ai-file-chip-menu')).toBeNull();
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
   });
 
   it('renders legacy command progress lines as isolated tool cards', () => {

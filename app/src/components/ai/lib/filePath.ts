@@ -29,38 +29,109 @@ export interface FileRef {
   col?: number;
 }
 
+export interface FileRefParseOptions {
+  /** Markdown links / inline code are explicit file surfaces, so spaces are OK. */
+  allowSpaces?: boolean;
+}
+
 // path  :  (windows drive prefix | anything not : or #)   then optional :line[:col] or -range or #Lline
 const FILE_REF =
   /^([A-Za-z]:[^:#\r\n]*|[^:#\r\n]+?)(?:[:#]L?(\d+)(?:[-:]L?(\d+))?)?$/;
 
 /**
- * Known source/code/config file extensions. A token WITHOUT a path separator
- * must end in one of these to count as a file (so prose like `2.0`, `1.5.0`, or
- * `react.useState` is never mistaken for a path). Tokens WITH a separator are
- * accepted regardless — a slash is itself strong evidence of a path.
+ * Known source/code/config/doc/image extensions. A token WITHOUT a path
+ * separator must end in one of these to count as a file (so prose like `2.0`,
+ * `1.5.0`, or `react.useState` is never mistaken for a path). Tokens WITH a
+ * separator are usually accepted; Unicode prose with a stray slash still needs
+ * a known filename identity.
  */
 const KNOWN_EXT = new Set([
   // web / js / ts
-  'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'json', 'jsonc', 'html', 'htm',
-  'css', 'scss', 'sass', 'less', 'vue', 'svelte', 'astro',
+  'ts', 'tsx', 'mts', 'cts', 'js', 'jsx', 'mjs', 'cjs', 'json', 'jsonc',
+  'json5', 'map', 'webmanifest', 'ipynb', 'html', 'htm', 'xhtml', 'shtml',
+  'xht', 'hta', 'mht', 'mhtml', 'mjml', 'css', 'scss', 'sass', 'less',
+  'pcss', 'postcss', 'styl', 'vue', 'svelte', 'astro',
   // backend / systems
   'rs', 'go', 'py', 'rb', 'java', 'kt', 'kts', 'c', 'h', 'cc', 'cpp', 'cxx',
-  'hpp', 'cs', 'php', 'swift', 'scala', 'clj', 'ex', 'exs', 'erl', 'dart',
-  'lua', 'r', 'sql', 'graphql', 'proto',
+  'c++', 'hh', 'hpp', 'hxx', 'h++', 'mm', 'cs', 'fs', 'fsx', 'vb',
+  'php', 'phtml', 'swift', 'scala', 'sc', 'groovy', 'gvy', 'clj', 'cljs',
+  'cljc', 'edn', 'ex', 'exs', 'erl', 'hrl', 'dart', 'lua', 'r', 'jl', 'nim',
+  'zig', 'odin', 'vala', 'pas', 'pp', 'inc', 'asm', 'ml', 'mli', 'hs', 'lhs',
+  'elm', 'sol', 'move',
+  // API / schema / DB
+  'sql', 'graphql', 'gql', 'proto', 'thrift', 'avsc', 'prisma',
   // shell / config / data
-  'sh', 'bash', 'zsh', 'fish', 'ps1', 'bat', 'cmd', 'toml', 'yaml', 'yml',
-  'ini', 'cfg', 'conf', 'env', 'lock', 'xml', 'svg', 'csv', 'tsv',
-  // docs / misc
-  'md', 'mdx', 'txt', 'rst', 'tex', 'log', 'gitignore', 'dockerfile',
-  'makefile', 'gradle', 'pen',
+  'sh', 'bash', 'zsh', 'fish', 'ksh', 'ps1', 'psm1', 'psd1', 'bat', 'cmd',
+  'awk', 'sed', 'toml', 'yaml', 'yml', 'ini', 'cfg', 'conf', 'config',
+  'properties', 'props', 'targets', 'env', 'envrc', 'lock', 'hcl', 'tf',
+  'tfvars', 'nomad', 'rego', 'nix', 'dhall', 'ron', 'plist', 'desktop',
+  'service', 'timer', 'xml', 'xsd', 'xsl', 'xslt', 'dtd', 'rss', 'atom',
+  'wsdl', 'csproj', 'fsproj', 'vbproj', 'vcxproj',
+  // text data / docs
+  'csv', 'tsv', 'ssv', 'psv', 'ndjson', 'jsonl', 'geojson', 'topojson',
+  'har', 'http', 'rest', 'md', 'mdx', 'txt', 'text', 'rst', 'adoc',
+  'asciidoc', 'markdown', 'mkd', 'mkdn', 'mdown', 'mdwn', 'mdtxt',
+  'mdtext', 'rmd', 'qmd', 'tex', 'ltx', 'bib', 'org', 'wiki', 'log',
+  'patch', 'diff', 'rej', 'mmd', 'mermaid', 'puml', 'plantuml', 'dot', 'gv',
+  'drawio', 'dio', 'prompt', 'prompty',
+  // templates / build files
+  'ejs', 'hbs', 'handlebars', 'mustache', 'njk', 'jinja', 'jinja2', 'twig',
+  'liquid', 'erb', 'haml', 'pug', 'jade', 'cshtml', 'razor', 'cmake', 'mak',
+  'mk', 'bazel', 'bzl', 'buck', 'gradle', 'tpl', 'tmpl', 'snippet',
+  'snippets', 'code-snippets', 'code-workspace', 'sublime-project',
+  'sublime-workspace', 'rules', 'mdc',
+  // shaders / GPU
+  'glsl', 'vert', 'frag', 'geom', 'tesc', 'tese', 'comp', 'hlsl', 'fx', 'fxh',
+  'wgsl', 'metal', 'shader', 'slang',
+  // browser-previewable images
+  'png', 'apng', 'jpg', 'jpeg', 'jpe', 'jfif', 'pjpeg', 'pjp', 'gif', 'webp',
+  'bmp', 'dib', 'ico', 'cur', 'svg', 'avif',
 ]);
 
-function extensionOf(token: string): string | null {
+const KNOWN_BASENAME = new Set([
+  '.babelrc', '.browserslistrc', '.dockerignore', '.editorconfig',
+  '.eslintignore', '.eslintrc', '.gitattributes', '.gitignore', '.gitmodules',
+  '.npmrc', '.prettierignore', '.prettierrc', '.stylelintrc', '.yarnrc',
+  'brewfile', 'containerfile', 'dockerfile', 'gemfile', 'justfile', 'makefile',
+  'podfile', 'procfile', 'rakefile', 'taskfile', 'vagrantfile',
+  'cmakelists.txt', 'go.mod', 'go.sum', 'pipfile', 'pipfile.lock',
+  'poetry.lock', 'readme', 'license', 'licence', 'copying', 'notice',
+  'changelog', 'changes', 'authors', 'contributors', 'todo',
+]);
+
+function basenameFromToken(token: string): string {
   const noLine = token.split(/[:#]/, 1)[0]; // drop any :line / #L suffix
-  const base = noLine.replace(/[\\/]+$/, '');
+  const clean = noLine.replace(/[\\/]+$/, '');
+  const idx = Math.max(clean.lastIndexOf('/'), clean.lastIndexOf('\\'));
+  return idx === -1 ? clean : clean.slice(idx + 1);
+}
+
+function extensionOf(token: string): string | null {
+  const base = basenameFromToken(token);
   const dot = base.lastIndexOf('.');
   if (dot <= 0 || dot === base.length - 1) return null;
   return base.slice(dot + 1).toLowerCase();
+}
+
+function knownBasename(token: string): boolean {
+  const base = basenameFromToken(token).toLowerCase();
+  if (!base) return false;
+  return (
+    KNOWN_BASENAME.has(base) ||
+    /^\.env(?:[.-].+)?$/.test(base) ||
+    /^(?:readme|license|licence|copying|notice|changelog|changes|todo)(?:[._-].+)?$/.test(
+      base,
+    )
+  );
+}
+
+function decodePercentPath(raw: string): string {
+  if (!raw.includes('%')) return raw;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
 }
 
 function pathFromFileUrl(raw: string): string | null {
@@ -79,18 +150,18 @@ function pathFromFileUrl(raw: string): string | null {
 }
 
 /** Cheap pre-filter: reject obvious non-paths before the precise regex. */
-export function looksLikePath(raw: string): boolean {
-  const s = raw.trim();
+export function looksLikePath(raw: string, opts: FileRefParseOptions = {}): boolean {
+  const s = decodePercentPath(raw.trim());
   if (!s || s.length > 240) return false;
-  if (/\s/.test(s)) return false; // file refs never contain whitespace
+  if (!opts.allowSpaces && /\s/.test(s)) return false;
   const fileUrlPath = pathFromFileUrl(s);
-  if (fileUrlPath) return looksLikePath(fileUrlPath);
+  if (fileUrlPath) return looksLikePath(fileUrlPath, opts);
   if (/^[a-z]+:\/\//i.test(s)) return false; // url scheme -> not a file chip
   if (/[\\/]/.test(s)) return true; // a path separator is strong evidence
   // No separator: require a recognised file extension so `2.0` / `react.foo`
-  // are not mistaken for files.
+  // are not mistaken for files, or a known extensionless config/build filename.
   const ext = extensionOf(s);
-  return ext != null && KNOWN_EXT.has(ext);
+  return (ext != null && KNOWN_EXT.has(ext)) || knownBasename(s);
 }
 
 function basenameOf(path: string): string {
@@ -99,15 +170,27 @@ function basenameOf(path: string): string {
   return idx === -1 ? cleaned : cleaned.slice(idx + 1);
 }
 
+function hasKnownFileIdentity(path: string): boolean {
+  return KNOWN_EXT.has(extensionOf(path) ?? '') || knownBasename(path);
+}
+
+function containsNonAscii(path: string): boolean {
+  return /[^\x00-\x7f]/.test(path);
+}
+
 /**
  * Parse a candidate token into a {@link FileRef}, or return null when it is not
  * a plausible local file reference. The path part must look like a file (see
  * {@link looksLikePath}); a bare word such as `config` is rejected, while
  * `config.ts`, `./config`, or `src/store/useStore.ts:42` are accepted.
  */
-export function parseFileRef(raw: string): FileRef | null {
-  const s = pathFromFileUrl(raw.trim()) ?? raw.trim();
-  if (!looksLikePath(s)) return null;
+export function parseFileRef(
+  raw: string,
+  opts: FileRefParseOptions = {},
+): FileRef | null {
+  const trimmed = raw.trim();
+  const s = pathFromFileUrl(trimmed) ?? decodePercentPath(trimmed);
+  if (!looksLikePath(s, opts)) return null;
 
   const m = FILE_REF.exec(s);
   if (!m) return null;
@@ -117,7 +200,13 @@ export function parseFileRef(raw: string): FileRef | null {
   // consumed a trailing number, so re-check the captured path part): a
   // separator, or a recognised file extension.
   const hasSep = /[\\/]/.test(path);
-  if (!hasSep && !KNOWN_EXT.has(extensionOf(path) ?? '')) return null;
+  const knownFile = hasKnownFileIdentity(path);
+  if (!hasSep && !knownFile) {
+    return null;
+  }
+  if (hasSep && !knownFile && containsNonAscii(path)) {
+    return null;
+  }
 
   const basename = basenameOf(path);
   if (!basename) return null; // e.g. "C:\" — nothing to label the chip with

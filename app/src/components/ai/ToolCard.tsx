@@ -26,10 +26,10 @@ function StatusGlyph({ status }: { status: ToolEvent['status'] }) {
 function Panel({ label, body }: { label: string; body: string }) {
   return (
     <div className="mt-1">
-      <div className="mb-0.5 font-mono text-[10px] uppercase tracking-wider text-fg-faint">
+      <div className="ai-tool-label mb-0.5 font-mono text-[10px] uppercase tracking-wider">
         {label}
       </div>
-      <pre className="ai-tool-panel max-h-64 overflow-auto rounded-sm border px-2 py-1.5 font-mono text-[11px] leading-relaxed text-fg-dim">
+      <pre className="ai-tool-panel ai-stream-text max-h-64 overflow-auto rounded-sm border px-2 py-1.5 font-mono text-[11px] leading-relaxed">
         {body}
       </pre>
     </div>
@@ -99,7 +99,7 @@ export default function ToolCard({
             onClick={() => setOpen((o) => !o)}
             aria-expanded={open}
             aria-label={open ? '收起' : '展开'}
-            className="-ml-0.5 flex shrink-0 items-center text-fg-faint transition-colors hover:text-fg"
+            className="ai-tool-toggle -ml-0.5 flex shrink-0 items-center transition-colors"
           >
             <ChevronRight
               size={12}
@@ -109,16 +109,16 @@ export default function ToolCard({
         ) : (
           <span className="w-3 shrink-0" />
         )}
-        <ToolIcon name={event.name} size={12} className="shrink-0 text-fg-faint" />
-        <span className="shrink-0 font-medium text-fg-dim">{event.name}</span>
+        <ToolIcon name={event.name} size={12} className="ai-tool-icon shrink-0" />
+        <span className="ai-tool-name shrink-0 font-medium">{event.name}</span>
         {collapsedSubject && (
-          <span className="min-w-0 flex-1 truncate text-fg-faint">
+          <span className="ai-tool-subject min-w-0 flex-1 truncate">
             {renderSubject(collapsedSubject)}
           </span>
         )}
         {!collapsedSubject && <span className="flex-1" />}
         {event.durationMs != null && (
-          <span className="shrink-0 tabular-nums text-fg-faint">
+          <span className="ai-tool-meta shrink-0 tabular-nums">
             {fmtDuration(event.durationMs)}
           </span>
         )}

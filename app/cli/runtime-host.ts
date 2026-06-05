@@ -68,6 +68,13 @@ export interface RunOptions {
   maxRetries?: number;
   /** Default consensus fan-out samples (default 3). */
   consensusSamples?: number;
+  runtimeVoteSamplesMin?: number;
+  runtimeVoteSamplesMax?: number;
+  terminalVoteSamplesMin?: number;
+  terminalVoteSamplesMax?: number;
+  complexityScaling?: number;
+  escalationBudget?: number;
+  adaptiveEscalation?: boolean;
   /** Per-node hard timeout seconds (`--timeout`). */
   timeoutSeconds?: number;
   idleTimeoutSeconds?: number;
@@ -369,6 +376,13 @@ export async function runBlueprint(ir: IRGraph, opts: RunOptions = {}): Promise<
     concurrency: clampPositive(opts.concurrency, 3),
     maxRetries: clampNonNeg(opts.maxRetries, 2),
     consensusSamples: clampPositive(opts.consensusSamples, 3),
+    runtimeVoteSamplesMin: opts.runtimeVoteSamplesMin,
+    runtimeVoteSamplesMax: opts.runtimeVoteSamplesMax,
+    terminalVoteSamplesMin: opts.terminalVoteSamplesMin,
+    terminalVoteSamplesMax: opts.terminalVoteSamplesMax,
+    complexityScaling: opts.complexityScaling,
+    escalationBudget: opts.escalationBudget,
+    adaptiveEscalation: opts.adaptiveEscalation,
     gateway,
   };
 

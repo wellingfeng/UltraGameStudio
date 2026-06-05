@@ -50,6 +50,8 @@ export interface Message {
   id: string;
   role: MessageRole;
   text: string;
+  /** Assistant route shown in the message header, e.g. "OpenRouter · glm-4.6". */
+  routeLabel?: string;
   /** Epoch milliseconds. */
   createdAt: number;
   /**

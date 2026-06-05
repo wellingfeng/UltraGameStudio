@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ClipboardEvent as ReactClipboardEvent,
   type ReactNode,
 } from 'react';
 import {
@@ -20,6 +21,7 @@ import {
 import Select from '@/components/Select';
 import WorkspaceSelect from '@/components/WorkspaceSelect';
 import { summarizeAnswer, type InteractionAnswer } from '@/core/interaction';
+import { readStartUserInputs } from '@/core/startInputs';
 import {
   systemDefaultGatewaySelection,
   workflowDefaultGatewaySelection,
@@ -31,7 +33,6 @@ import {
 import {
   getProviderRuntimeInfo,
   listProviders,
-  updateProvider,
   type Provider,
   type ProviderKind,
   type ProviderRuntimeStatus,
@@ -42,6 +43,8 @@ import {
 } from '@/lib/cliConfig';
 import {
   FREE_CHANNELS,
+  FREE_CHANNEL_AUTO_ID,
+  FREE_CHANNEL_AUTO_MODEL,
   ensureFreeProxy,
   freeChannelById,
   freeChannelReady,
@@ -57,7 +60,11 @@ import {
 } from '@/lib/freeChannels';
 import LocalModelSetupDialog from '@/components/LocalModelSetupDialog';
 import type { SelectOption } from '@/store/types';
-import { localizeSelectOption, t, type Locale } from '@/lib/i18n';
+import {
+  localizeSelectOption,
+  t,
+  type Locale,
+} from '@/lib/i18n';
 import type { Message } from '@/store/types';
 import {
   loadDockHeight,
@@ -69,8 +76,13 @@ import { shouldRefocusComposerAfterAppend } from '@/lib/composerEntryPolicy';
 import {
   tauriAvailable,
   localModelStatus,
+  onSlashCatalogUpdated,
   openExternal,
+  openLocalPath,
+  saveClipboardImage,
+  slashCatalog,
   type LocalModelRuntimeStatus,
+  type SlashCatalogEntry,
 } from '@/lib/tauri';
 import {
   canRefreshFreeChannelModels,
@@ -82,6 +94,7 @@ import {
 import LazyMessageContent from '@/components/ai/LazyMessageContent';
 import FilePreviewDrawer from '@/components/ai/FilePreviewDrawer';
 import type { FileRef } from '@/components/ai/lib/filePath';
+import type { OpenFileIntent } from '@/components/ai/FileChip';
 import {
   extractToolSentinels,
   hasToolSentinel,
@@ -178,8 +191,305 @@ interface SearchMatch {
   source: SearchMatchSource;
 }
 
+interface SlashTrigger {
+  start: number;
+  end: number;
+  query: string;
+}
+
+type SlashSuggestionKind = 'command' | 'skill';
+type SlashSourceAdapter = RuntimeAdapterId | 'app' | 'agent';
+
+interface StaticSlashEntry {
+  id: string;
+  kind: SlashSuggestionKind;
+  name: string;
+  label: Partial<Record<Locale, string>>;
+  detail: Partial<Record<Locale, string>>;
+  insertText: Partial<Record<Locale, string>>;
+  source?: string | null;
+  sourceAdapter?: SlashSourceAdapter | null;
+}
+
+interface SlashSuggestion {
+  id: string;
+  kind: SlashSuggestionKind;
+  name: string;
+  label: string;
+  detail: string;
+  insertText: string;
+  source?: string | null;
+  sourceAdapter?: SlashSourceAdapter | null;
+  searchText: string;
+}
+
+const MAX_SLASH_SUGGESTIONS = 10;
+
+const SLASH_COMMANDS = [
+  {
+    name: '/help',
+    label: { 'zh-CN': '帮助', 'en-US': 'Help' },
+    detail: {
+      'zh-CN': '列出当前可用 command / skill',
+      'en-US': 'List available commands and skills',
+    },
+    text: {
+      'zh-CN': '列出当前可用的 slash command 和 Skill，按用途分组，并给出每个条目的触发词和适用场景。',
+      'en-US': 'List the available slash commands and skills, grouped by use case, with each trigger and when to use it.',
+    },
+  },
+  {
+    name: '/plan',
+    label: { 'zh-CN': '计划', 'en-US': 'Plan' },
+    detail: {
+      'zh-CN': '先拆步骤，再执行',
+      'en-US': 'Break down steps before acting',
+    },
+    text: {
+      'zh-CN': '先给出简短执行计划，再按计划完成任务；只保留必要步骤和风险点。',
+      'en-US': 'Start with a short execution plan, then complete the task; keep only necessary steps and risks.',
+    },
+  },
+  {
+    name: '/diagnose',
+    label: { 'zh-CN': '诊断', 'en-US': 'Diagnose' },
+    detail: {
+      'zh-CN': '复现 -> 根因 -> 修复 -> 验证',
+      'en-US': 'Reproduce -> root cause -> fix -> verify',
+    },
+    text: {
+      'zh-CN': '诊断这个问题：先复现或定位触发条件，再找根因，最后给出修复和验证结果。',
+      'en-US': 'Diagnose this: reproduce or identify the trigger, find the root cause, then provide the fix and verification.',
+    },
+  },
+  {
+    name: '/review',
+    label: { 'zh-CN': '审查', 'en-US': 'Review' },
+    detail: {
+      'zh-CN': '按代码审查视角找风险',
+      'en-US': 'Review for bugs and risks',
+    },
+    text: {
+      'zh-CN': '按代码审查视角检查：优先列出 bug、回归风险和缺失测试，给出文件/位置和修复建议。',
+      'en-US': 'Review this as code: list bugs, regression risks, and missing tests first, with file/location references and fixes.',
+    },
+  },
+  {
+    name: '/explain',
+    label: { 'zh-CN': '解释', 'en-US': 'Explain' },
+    detail: {
+      'zh-CN': '解释执行路径和关键依赖',
+      'en-US': 'Explain flow and dependencies',
+    },
+    text: {
+      'zh-CN': '解释这段内容的执行路径、关键依赖和容易误解的点，结论先行。',
+      'en-US': 'Explain the execution flow, key dependencies, and easy-to-misread parts. Start with the conclusion.',
+    },
+  },
+  {
+    name: '/test',
+    label: { 'zh-CN': '测试', 'en-US': 'Test' },
+    detail: {
+      'zh-CN': '补充或运行相关测试',
+      'en-US': 'Add or run relevant tests',
+    },
+    text: {
+      'zh-CN': '为当前任务补充或运行最相关的测试；若失败，说明失败点、可能根因和下一步。',
+      'en-US': 'Add or run the most relevant tests for this task; if they fail, report the failure, likely cause, and next step.',
+    },
+  },
+] as const;
+
+const STATIC_SLASH_ENTRIES: StaticSlashEntry[] = SLASH_COMMANDS.map(
+  (command) => ({
+    id: `command:${command.name}`,
+    kind: 'command',
+    name: command.name,
+    label: command.label,
+    detail: command.detail,
+    insertText: command.text,
+    source: 'app',
+    sourceAdapter: 'app',
+  }),
+);
+
+function slashText(
+  value: Partial<Record<Locale, string>> | Record<string, string | undefined>,
+  locale: Locale,
+): string {
+  return value[locale] ?? value['en-US'] ?? value['zh-CN'] ?? '';
+}
+
+function normalizeSlashSourceAdapter(value: unknown): SlashSourceAdapter | null {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === 'claude' || normalized === 'anthropic') {
+    return 'claude-code';
+  }
+  if (
+    normalized === 'claude-code' ||
+    normalized === 'codex' ||
+    normalized === 'gemini' ||
+    normalized === 'app' ||
+    normalized === 'agent'
+  ) {
+    return normalized;
+  }
+  return null;
+}
+
+function slashSourceAdapterFromPath(value: unknown): SlashSourceAdapter | null {
+  if (typeof value !== 'string' || !value.trim()) return null;
+  const source = value.replace(/\\/g, '/').toLowerCase();
+  if (source.includes('/.claude/')) return 'claude-code';
+  if (source.includes('/.codex/')) return 'codex';
+  if (source.includes('/.gemini/')) return 'gemini';
+  if (source.includes('/.agents/')) return 'agent';
+  return null;
+}
+
+function slashEntrySourceAdapter(
+  entry: StaticSlashEntry | SlashCatalogEntry,
+): SlashSourceAdapter | null {
+  const direct = normalizeSlashSourceAdapter(
+    (entry as { sourceAdapter?: string | null }).sourceAdapter,
+  );
+  if (direct) return direct;
+
+  const source = entry.source ?? '';
+  const fromSource =
+    normalizeSlashSourceAdapter(source) ?? slashSourceAdapterFromPath(source);
+  if (fromSource) return fromSource;
+
+  const idSource = /^(?:command|skill):([^:]+):/.exec(entry.id)?.[1];
+  return (
+    normalizeSlashSourceAdapter(idSource) ??
+    slashSourceAdapterFromPath(entry.id)
+  );
+}
+
+function slashSuggestionRankForAdapter(
+  suggestion: SlashSuggestion,
+  adapter: RuntimeAdapterId,
+): number {
+  const sourceAdapter = suggestion.sourceAdapter;
+  if (sourceAdapter === adapter) return 2;
+  if (!sourceAdapter || sourceAdapter === 'app' || sourceAdapter === 'agent') {
+    return 1;
+  }
+  return 0;
+}
+
+function scopeSlashSuggestionsForAdapter(
+  suggestions: SlashSuggestion[],
+  adapter: RuntimeAdapterId,
+): SlashSuggestion[] {
+  const scoped = suggestions
+    .filter((suggestion) => slashSuggestionRankForAdapter(suggestion, adapter) > 0)
+    .sort(
+      (a, b) =>
+        slashSuggestionRankForAdapter(b, adapter) -
+        slashSuggestionRankForAdapter(a, adapter),
+    );
+  const seen = new Set<string>();
+  const out: SlashSuggestion[] = [];
+  for (const suggestion of scoped) {
+    const key = `${suggestion.kind}:${suggestion.name.toLowerCase()}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(suggestion);
+  }
+  return out;
+}
+
+function findSlashTrigger(text: string, caret: number): SlashTrigger | null {
+  if (caret < 1) return null;
+
+  const beforeCaret = text.slice(0, caret);
+  const match = /(^|\s)\/([^\s/]*)$/.exec(beforeCaret);
+  if (!match) return null;
+
+  const query = match[2] ?? '';
+  const start = beforeCaret.length - query.length - 1;
+  return { start, end: caret, query };
+}
+
+function buildSlashSuggestions(
+  catalogEntries: SlashCatalogEntry[],
+  locale: Locale,
+): SlashSuggestion[] {
+  const seen = new Set<string>();
+  const out: SlashSuggestion[] = [];
+  const entries = catalogEntries.length > 0 ? catalogEntries : STATIC_SLASH_ENTRIES;
+
+  for (const entry of entries) {
+    const label = slashText(entry.label, locale);
+    const detail = slashText(entry.detail, locale);
+    const insertText = slashText(entry.insertText, locale);
+    const source = entry.source ?? '';
+    const sourceAdapter = slashEntrySourceAdapter(entry);
+    const key = `${entry.kind}:${source || entry.id}:${entry.name}`.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({
+      id: entry.id,
+      kind: entry.kind,
+      name: entry.name,
+      label,
+      detail,
+      insertText,
+      source,
+      sourceAdapter,
+      searchText:
+        `${entry.name} ${label} ${detail} ${insertText} ${source} ${
+          sourceAdapter ?? ''
+        }`.toLowerCase(),
+    });
+  }
+
+  return out;
+}
+
+function filterSlashSuggestions(
+  suggestions: SlashSuggestion[],
+  query: string,
+): SlashSuggestion[] {
+  const q = query.trim().toLowerCase();
+  if (!q) return suggestions.slice(0, MAX_SLASH_SUGGESTIONS);
+
+  const starts: SlashSuggestion[] = [];
+  const contains: SlashSuggestion[] = [];
+  for (const suggestion of suggestions) {
+    const name = suggestion.name.slice(1).toLowerCase();
+    const label = suggestion.label.toLowerCase();
+    if (name.startsWith(q) || label.startsWith(q)) {
+      starts.push(suggestion);
+      continue;
+    }
+    if (suggestion.searchText.includes(q)) contains.push(suggestion);
+  }
+
+  return [...starts, ...contains].slice(0, MAX_SLASH_SUGGESTIONS);
+}
+
 function normalizeSearchQuery(value: string): string {
   return value.trim().toLowerCase();
+}
+
+const ROUTE_LINE_RE =
+  /^⚙ (?:(?:路由：(?<route>.*?)(?: · 模型：(?<model>.*))?)|(?:模型：(?<modelOnly>.*)))$/m;
+
+function routeLabelFromText(text: string): string {
+  const match = text.match(ROUTE_LINE_RE);
+  const groups = match?.groups;
+  if (!groups) return '';
+  const route = groups.route?.trim() ?? '';
+  const model = (groups.model ?? groups.modelOnly ?? '').trim();
+  return [route, model].filter(Boolean).join(' · ');
+}
+
+function stripRouteLine(text: string): string {
+  return text.replace(ROUTE_LINE_RE, '').replace(/\n{3,}/g, '\n\n').trimStart();
 }
 
 /**
@@ -188,7 +498,16 @@ function normalizeSearchQuery(value: string): string {
  * protocol JSON that the rich renderer would otherwise turn into tool cards.
  */
 function cleanMessageText(text: string): string {
-  return hasToolSentinel(text) ? extractToolSentinels(text).text : text;
+  const visible = hasToolSentinel(text) ? extractToolSentinels(text).text : text;
+  return stripRouteLine(visible);
+}
+
+function renderMessageText(text: string): string {
+  return stripRouteLine(text);
+}
+
+function assistantHeaderLabel(message: Message): string {
+  return message.routeLabel?.trim() || routeLabelFromText(message.text);
 }
 
 function interactionSearchText(message: Message): string {
@@ -342,6 +661,54 @@ function pathsFromDataTransfer(dataTransfer: DataTransfer): string[] {
     .filter(Boolean);
 }
 
+function clipboardImageFiles(dataTransfer: DataTransfer): File[] {
+  const seen = new Set<string>();
+  const images: File[] = [];
+
+  const add = (file: File | null, mimeHint = '') => {
+    if (!file) return;
+    const mime = (file.type || mimeHint).toLowerCase();
+    if (!mime.startsWith('image/')) return;
+    const key = [mime, file.name, file.size, file.lastModified].join('\0');
+    if (seen.has(key)) return;
+    seen.add(key);
+    images.push(file);
+  };
+
+  for (const item of Array.from(dataTransfer.items)) {
+    if (item.kind !== 'file') continue;
+    if (!item.type.toLowerCase().startsWith('image/')) continue;
+    add(item.getAsFile(), item.type);
+  }
+  if (images.length > 0) return images;
+
+  for (const file of Array.from(dataTransfer.files)) add(file);
+
+  return images;
+}
+
+function bytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + chunkSize));
+  }
+  return btoa(binary);
+}
+
+async function fileToBase64(file: File): Promise<string> {
+  return bytesToBase64(new Uint8Array(await file.arrayBuffer()));
+}
+
+async function savePastedImageFile(file: File, cwd: string): Promise<string> {
+  return saveClipboardImage({
+    bytesBase64: await fileToBase64(file),
+    mime: file.type || 'image/png',
+    fileName: file.name || null,
+    cwd: cwd || null,
+  });
+}
+
 function describeLocalModelStatus(
   locale: Locale,
   channel: FreeChannel,
@@ -433,11 +800,13 @@ function providerSelection(provider: Provider, modelOverride?: string) {
   };
 }
 
-function uniqueModelSelectOptions(values: string[]): SelectOption[] {
+function uniqueModelSelectOptions(
+  values: Array<string | undefined | null>,
+): SelectOption[] {
   const out: SelectOption[] = [];
   const seen = new Set<string>();
   for (const raw of values) {
-    const model = raw.trim();
+    const model = raw?.trim();
     if (!model) continue;
     const key = model.toLowerCase();
     if (seen.has(key)) continue;
@@ -445,6 +814,19 @@ function uniqueModelSelectOptions(values: string[]): SelectOption[] {
     out.push({ id: model, label: model });
   }
   return out;
+}
+
+function modelStrategyLabelKey(strategy: string | undefined) {
+  switch (strategy) {
+    case 'prefer-better':
+      return 'dock.modelStrategy.better';
+    case 'prefer-cheaper':
+      return 'dock.modelStrategy.cheaper';
+    case 'smart':
+      return 'dock.modelStrategy.smart';
+    default:
+      return 'dock.modelStrategy.inherit';
+  }
 }
 
 function providerSortRank(status: ProviderRuntimeStatus): number {
@@ -677,13 +1059,19 @@ export default function AIDock({
   const isChat = layout === 'chat';
   const messages = useStore((s) => s.messages);
   const sendPrompt = useStore((s) => s.sendPrompt);
+  const runUltracodePrompt = useStore((s) => s.runUltracodePrompt);
   const stopChat = useStore((s) => s.stopChat);
+  const blockedSendTip = useStore((s) => s.blockedSendTip);
+  const clearBlockedSendTip = useStore((s) => s.clearBlockedSendTip);
   const chatTitle = useStore(activeChatTitle);
   const activeSessionId = useStore((s) => s.activeSessionId);
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
   const renameWorkflowSession = useStore((s) => s.renameWorkflowSession);
   const runSelection = useStore((s) => workflowDefaultGatewaySelection(s.workflow), shallow);
-  const setGlobalRunSelection = useStore((s) => s.setGlobalRunSelection);
+  const selectedAdapter =
+    RUNTIME_ADAPTERS.find((adapter) => adapter.id === runSelection.adapter)?.id ??
+    RUNTIME_ADAPTERS[0].id;
+  const setSessionRunSelection = useStore((s) => s.setSessionRunSelection);
   const composer = useStore((s) => s.composer);
   const draft = useStore((s) => s.composerDraft);
   const composerFocusVersion = useStore((s) => s.composerFocusVersion);
@@ -703,6 +1091,39 @@ export default function AIDock({
         session.sessionId === (s.activeSessionId ?? null),
     ),
   );
+  const simpleChatMode = useStore((s) => s.workflow.meta?.simple === true);
+  const activeSessionIsWorkflow = useStore((s) => {
+    // A workflow is a workflow (not simple chat) if:
+    // 1. The active session exists and has isWorkflow: true, OR
+    // 2. There's no active session but the workflow has multiple nodes (design mode)
+    if (!s.activeSessionId) return false;
+    const session = s.sessions.find((sess) => sess.id === s.activeSessionId);
+    if (session) return session.isWorkflow;
+    // No session found - infer from workflow structure
+    // A workflow mode has start -> agent -> end (multiple nodes)
+    // A simple chat has just a start node
+    return s.workflow.nodes.length > 1;
+  });
+  const firstStartUserInput = useStore((s) => {
+    const startNode = s.workflow.nodes.find((node) => node.type === 'start');
+    return readStartUserInputs(startNode?.params)[0]?.trim() ?? '';
+  });
+  const activeChatFavorite = useStore((s) => {
+    const sessionId = s.activeSessionId;
+    if (!sessionId) return false;
+    const activeSession = s.activeWorkspaceId
+      ? (s.sessionTree[s.activeWorkspaceId]?.find(
+          (session) => session.id === sessionId,
+        ) ??
+        s.sessions.find(
+          (session) =>
+            session.id === sessionId &&
+            (session.workspaceId == null ||
+              session.workspaceId === s.activeWorkspaceId),
+        ))
+      : s.sessions.find((session) => session.id === sessionId);
+    return activeSession?.favorite === true;
+  });
   const answerInteraction = useStore((s) => s.answerInteraction);
   const dismissInteraction = useStore((s) => s.dismissInteraction);
   const streamRef = useRef<HTMLDivElement>(null);
@@ -713,6 +1134,7 @@ export default function AIDock({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const draftRef = useRef(draft);
   const selectionRef = useRef<TextSelection>({ start: 0, end: 0 });
+  const slashTriggerRef = useRef<SlashTrigger | null>(null);
   const lastComposerFocusVersion = useRef(composerFocusVersion);
   const messageRefs = useRef(new Map<string, HTMLLIElement>());
   const activeSearchMatchNodeRef = useRef<HTMLElement | null>(null);
@@ -728,6 +1150,52 @@ export default function AIDock({
   const [returnSearchOpen, setReturnSearchOpen] = useState(false);
   const [returnSearch, setReturnSearch] = useState('');
   const [activeSearchMatchIndex, setActiveSearchMatchIndex] = useState(0);
+  const [slashTrigger, setSlashTrigger] = useState<SlashTrigger | null>(null);
+  const [activeSlashIndex, setActiveSlashIndex] = useState(0);
+  const [slashCatalogEntries, setSlashCatalogEntries] = useState<
+    SlashCatalogEntry[]
+  >([]);
+  const [modelStrategyOpen, setModelStrategyOpen] = useState(false);
+  const blockedSendTipText =
+    blockedSendTip === 'model-switched-while-chatting'
+      ? t(locale, 'dock.modelSwitchBlockedTip')
+      : '';
+
+  useEffect(() => {
+    if (!blockedSendTip) return;
+    const id = window.setTimeout(() => clearBlockedSendTip(), 3200);
+    return () => window.clearTimeout(id);
+  }, [blockedSendTip, clearBlockedSendTip]);
+
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    const applyCatalog = (entries: SlashCatalogEntry[] | undefined) => {
+      if (cancelled) return;
+      const next = entries ?? [];
+      setSlashCatalogEntries((current) =>
+        current.length === next.length &&
+        current.every((entry, index) => entry.id === next[index]?.id)
+          ? current
+          : next,
+      );
+    };
+
+    void slashCatalog()
+      .then((catalog) => applyCatalog(catalog.entries))
+      .catch(() => applyCatalog([]));
+    void onSlashCatalogUpdated((catalog) => applyCatalog(catalog.entries))
+      .then((dispose) => {
+        if (cancelled) dispose();
+        else unlisten = dispose;
+      })
+      .catch(() => {});
+
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
   const normalizedSearch = useMemo(
     () => normalizeSearchQuery(returnSearch),
     [returnSearch],
@@ -751,6 +1219,38 @@ export default function AIDock({
         .map((message) => message.id),
     [messages],
   );
+  const slashSuggestions = useMemo(
+    () => buildSlashSuggestions(slashCatalogEntries, locale),
+    [locale, slashCatalogEntries],
+  );
+  const activeAdapterSlashSuggestions = useMemo(
+    () => scopeSlashSuggestionsForAdapter(slashSuggestions, selectedAdapter),
+    [selectedAdapter, slashSuggestions],
+  );
+  const filteredSlashSuggestions = useMemo(
+    () =>
+      slashTrigger
+        ? filterSlashSuggestions(
+            activeAdapterSlashSuggestions,
+            slashTrigger.query,
+          )
+        : [],
+    [activeAdapterSlashSuggestions, slashTrigger],
+  );
+  const slashOpen =
+    !isReadOnly && slashTrigger !== null && filteredSlashSuggestions.length > 0;
+  const firstUserMessageText = useMemo(
+    () =>
+      messages.find((message) => message.role === 'user' && message.text.trim())
+        ?.text.trim() ?? '',
+    [messages],
+  );
+  const reusableChatText = firstUserMessageText || firstStartUserInput;
+  const useChatRunButton = isChat && simpleChatMode;
+  const chatRunText =
+    useChatRunButton && activeChatFavorite && reusableChatText
+      ? reusableChatText
+      : draft.trim();
   useEffect(() => {
     if (!chatTitleEditing) setChatTitleDraft(chatTitle);
   }, [chatTitle, chatTitleEditing]);
@@ -883,13 +1383,23 @@ export default function AIDock({
         ...defaultOptions,
         ...FREE_CHANNELS.map((c) => {
           const localStatus = c.local ? localRuntimeStatuses[c.id] : undefined;
+          const ready = freeChannelReady(c.id);
           const needsAttention =
-            !freeChannelReady(c.id) ||
+            !ready ||
             (c.local && localStatus && !localStatus.ready);
+          const hint = c.local
+            ? localStatus?.ready
+              ? t(locale, 'settings.freeChannels.localReady')
+              : ready
+                ? t(locale, 'settings.freeChannels.localConfigured')
+                : t(locale, 'settings.freeChannels.localNeedsSetup')
+            : ready
+              ? t(locale, 'settings.freeChannels.ready')
+              : t(locale, 'settings.freeChannels.needsKey');
           return {
             id: freeChannelOptionId(c.id),
-            label: 'Free · ' + c.label + (needsAttention ? ' ⚠' : ''),
-            hint: t(locale, 'dock.channelKindFree'),
+            label: c.label + (needsAttention ? ' ⚠' : ''),
+            hint,
             group: t(locale, 'dock.channelGroupFree'),
           };
         }),
@@ -898,9 +1408,6 @@ export default function AIDock({
     [locale, defaultChannelProviders, localRuntimeStatuses],
   );
   const selectedFreeChannelId = isFreeChannelSelection(runSelection);
-  const selectedAdapter =
-    RUNTIME_ADAPTERS.find((adapter) => adapter.id === runSelection.adapter)?.id ??
-    RUNTIME_ADAPTERS[0].id;
   const pinnedDefaultProvider = runSelection.providerId
     ? defaultChannelProviders.find(
         (item) =>
@@ -968,7 +1475,7 @@ export default function AIDock({
     };
     if (selectedFreeChannel) {
       const options = uniqueModelSelectOptions(
-        freeChannelModelOptions(selectedFreeChannel),
+        [runSelection.modelOverride, ...freeChannelModelOptions(selectedFreeChannel)],
       );
       return options.length > 0 ? options : [defaultModelOption];
     }
@@ -1010,11 +1517,21 @@ export default function AIDock({
     modelListRevision,
   ]);
   const modelSelectValue = selectedFreeChannel
-    ? getFreeChannelModel(selectedFreeChannel.id) || 'default'
+    ? selectedFreeChannel.id === FREE_CHANNEL_AUTO_ID
+      ? (runSelection.modelOverride ??
+        getFreeChannelModelOverride(selectedFreeChannel.id)) ||
+        FREE_CHANNEL_AUTO_MODEL
+      : runSelection.modelOverride ??
+        (runSelection.modelClass === 'default'
+          ? 'default'
+          : getFreeChannelModel(selectedFreeChannel.id) || 'default')
     : selectedDefaultProvider
-      ? (selectedDefaultProvider.provider.model ?? '').trim() ||
-        runSelection.modelClass ||
-        'default'
+      ? runSelection.modelOverride ??
+        (runSelection.modelClass === 'default'
+          ? 'default'
+          : (selectedDefaultProvider.provider.model ?? '').trim() ||
+            runSelection.modelClass ||
+            'default')
       : runSelection.modelClass || 'default';
   const [keyModalChannel, setKeyModalChannel] = useState<FreeChannel | null>(null);
   const [keyModalValue, setKeyModalValue] = useState('');
@@ -1055,7 +1572,7 @@ export default function AIDock({
   const selectFreeChannel = useCallback(
     (channel: FreeChannel) => {
       void ensureFreeProxy();
-      setGlobalRunSelection(
+      setSessionRunSelection(
         freeChannelSelection(channel.id, getFreeChannelModel(channel.id)),
       );
       setKeyModalChannel(null);
@@ -1064,7 +1581,7 @@ export default function AIDock({
       setLocalModelValue('');
       setLocalSetupMessage(null);
     },
-    [setGlobalRunSelection],
+    [setSessionRunSelection],
   );
   const onChannelChange = useCallback(
     (id: string) => {
@@ -1074,12 +1591,12 @@ export default function AIDock({
           const provider = defaultChannelProviders.find(
             (item) => item.provider.id === providerId,
           )?.provider;
-          if (provider) setGlobalRunSelection(providerSelection(provider));
+          if (provider) setSessionRunSelection(providerSelection(provider));
           return;
         }
         const defaultAdapter = adapterFromSystemDefaultOption(id);
         if (defaultAdapter) {
-          setGlobalRunSelection(systemDefaultGatewaySelection(defaultAdapter));
+          setSessionRunSelection(systemDefaultGatewaySelection(defaultAdapter));
           return;
         }
         const freeChannelId = freeChannelFromOption(id);
@@ -1149,31 +1666,48 @@ export default function AIDock({
         selectFreeChannel(channel);
       })();
     },
-    [defaultChannelProviders, locale, setGlobalRunSelection, selectFreeChannel],
+    [defaultChannelProviders, locale, setSessionRunSelection, selectFreeChannel],
   );
   const onModelChange = useCallback(
     (model: string) => {
       const selectedModel = model.trim();
       if (!selectedModel) return;
+      const modelOverride =
+        selectedModel === 'default' ? undefined : selectedModel;
       if (selectedFreeChannel) {
-        setFreeChannelModel(selectedFreeChannel.id, selectedModel);
         void ensureFreeProxy();
-        setGlobalRunSelection(
-          freeChannelSelection(selectedFreeChannel.id, selectedModel),
+        if (selectedFreeChannel.id === FREE_CHANNEL_AUTO_ID) {
+          const autoModel =
+            selectedModel === 'default' ? FREE_CHANNEL_AUTO_MODEL : selectedModel;
+          const modelOverride =
+            autoModel === FREE_CHANNEL_AUTO_MODEL ? undefined : autoModel;
+          setSessionRunSelection(
+            {
+              ...freeChannelSelection(selectedFreeChannel.id, autoModel),
+              ...(modelOverride ? { modelOverride } : {}),
+            },
+          );
+          return;
+        }
+        setSessionRunSelection(
+          {
+            ...freeChannelSelection(selectedFreeChannel.id, selectedModel),
+            ...(modelOverride ? { modelOverride } : {}),
+          },
         );
         return;
       }
       if (selectedDefaultProvider) {
-        const nextModel =
-          selectedModel === 'default' ? undefined : selectedModel;
         const provider = selectedDefaultProvider.provider;
-        updateProvider(provider.id, { model: nextModel });
-        setGlobalRunSelection(
-          providerSelection({ ...provider, model: nextModel }, nextModel),
+        setSessionRunSelection(
+          {
+            ...providerSelection(provider, selectedModel),
+            ...(modelOverride ? { modelOverride } : {}),
+          },
         );
         return;
       }
-      setGlobalRunSelection(
+      setSessionRunSelection(
         {
           ...systemDefaultGatewaySelection(selectedAdapter),
           modelClass: selectedModel === 'default' ? 'default' : selectedModel,
@@ -1184,7 +1718,7 @@ export default function AIDock({
       selectedAdapter,
       selectedDefaultProvider,
       selectedFreeChannel,
-      setGlobalRunSelection,
+      setSessionRunSelection,
     ],
   );
   const saveKeyModal = useCallback(() => {
@@ -1285,10 +1819,17 @@ export default function AIDock({
   // Paths resolve against the active workspace folder in the Tauri command.
   const workspaceCwd = composer.workspace;
   const onOpenFile = useCallback(
-    (ref: FileRef) => {
+    (ref: FileRef, intent?: OpenFileIntent) => {
+      if (intent?.reveal) {
+        void openLocalPath(ref.path, {
+          cwd: workspaceCwd || undefined,
+          reveal: true,
+        });
+        return;
+      }
       setFilePreviewRef(ref);
     },
-    [],
+    [workspaceCwd],
   );
 
   // Heuristic "live bubble": the last assistant message is streaming while the
@@ -1431,6 +1972,34 @@ export default function AIDock({
     [],
   );
 
+  const closeSlashSuggestions = useCallback(() => {
+    slashTriggerRef.current = null;
+    setSlashTrigger(null);
+    setActiveSlashIndex(0);
+  }, []);
+
+  const syncSlashTrigger = useCallback(
+    (target: HTMLTextAreaElement | null = inputRef.current) => {
+      if (!target || isReadOnly || target.selectionStart !== target.selectionEnd) {
+        closeSlashSuggestions();
+        return;
+      }
+
+      const next = findSlashTrigger(target.value, target.selectionStart);
+      const prev = slashTriggerRef.current;
+      const unchanged =
+        prev?.start === next?.start &&
+        prev?.end === next?.end &&
+        prev?.query === next?.query;
+      if (unchanged) return;
+
+      slashTriggerRef.current = next;
+      setSlashTrigger(next);
+      setActiveSlashIndex(0);
+    },
+    [closeSlashSuggestions, isReadOnly],
+  );
+
   const insertComposerText = useCallback(
     (text: string, selection = selectionRef.current) => {
       if (isReadOnly || !text) return;
@@ -1455,11 +2024,76 @@ export default function AIDock({
     [isReadOnly, setComposerDraft],
   );
 
+  const applySlashSuggestion = useCallback(
+    (suggestion: SlashSuggestion) => {
+      if (isReadOnly) return;
+
+      const trigger = slashTriggerRef.current;
+      if (!trigger) return;
+
+      const current = draftRef.current;
+      const start = clampSelection(trigger.start, current.length);
+      const end = clampSelection(trigger.end, current.length);
+      const after = current.slice(end);
+      const spacer = after.length > 0 && /^\s/.test(after) ? '' : ' ';
+      const inserted =
+        suggestion.name.toLowerCase() === '/ultracode'
+          ? `${suggestion.name} `
+          : suggestion.insertText + spacer;
+      const next = current.slice(0, start) + inserted + after;
+      const caret = start + inserted.length;
+
+      draftRef.current = next;
+      selectionRef.current = { start: caret, end: caret };
+      setComposerDraft(next);
+      closeSlashSuggestions();
+
+      window.requestAnimationFrame(() => {
+        const el = inputRef.current;
+        if (!el) return;
+        el.focus();
+        el.setSelectionRange(caret, caret);
+      });
+    },
+    [closeSlashSuggestions, isReadOnly, setComposerDraft],
+  );
+
   const insertFilePaths = useCallback(
     (paths: string[], selection = selectionRef.current) => {
       insertComposerText(formatFilePathInsertion(paths), selection);
     },
     [insertComposerText],
+  );
+
+  const handlePaste = useCallback(
+    (event: ReactClipboardEvent<HTMLTextAreaElement>) => {
+      if (isReadOnly || !tauriAvailable()) return;
+
+      const images = clipboardImageFiles(event.clipboardData);
+      if (images.length === 0) return;
+
+      event.preventDefault();
+      const selection = {
+        start: event.currentTarget.selectionStart,
+        end: event.currentTarget.selectionEnd,
+      };
+      selectionRef.current = selection;
+
+      void Promise.allSettled(
+        images.map((file) => savePastedImageFile(file, workspaceCwd)),
+      ).then((results) => {
+        const paths = results
+          .filter(
+            (result): result is PromiseFulfilledResult<string> =>
+              result.status === 'fulfilled',
+          )
+          .map((result) => result.value);
+        if (paths.length === 0) return;
+        closeSlashSuggestions();
+        insertFilePaths(paths, selection);
+      });
+    },
+    [closeSlashSuggestions, insertFilePaths, isReadOnly, workspaceCwd],
   );
 
   /** Clamp the input width to keep both panes usable within the dock. */
@@ -1485,6 +2119,14 @@ export default function AIDock({
   useEffect(() => {
     setActiveSearchMatchIndex(0);
   }, [normalizedSearch]);
+
+  useEffect(() => {
+    setActiveSlashIndex((current) =>
+      filteredSlashSuggestions.length > 0
+        ? Math.min(current, filteredSlashSuggestions.length - 1)
+        : 0,
+    );
+  }, [filteredSlashSuggestions.length]);
 
   useEffect(() => {
     if (returnSearchOpen) focusSearchInput();
@@ -1747,14 +2389,29 @@ export default function AIDock({
     [chatInputHeight],
   );
 
-  const submit = (overrideText?: string) => {
+  const submit = (
+    overrideText?: string,
+    options: { clearDraft?: boolean } = {},
+  ) => {
     if (isReadOnly || activeAiEditing) return;
     const text = (overrideText ?? draft).trim();
     if (!text) return;
+    const ultracodeMatch = /^\/ultracode(?:\s+([\s\S]*))?$/i.exec(text);
+    if (ultracodeMatch) {
+      const task = (ultracodeMatch[1] ?? '').trim();
+      if (!task || activeChatting) return;
+      runUltracodePrompt(task);
+      if (overrideText === undefined || options.clearDraft) {
+        setComposerDraft('');
+        draftRef.current = '';
+        selectionRef.current = { start: 0, end: 0 };
+      }
+      return;
+    }
     void (async () => {
       if (!(await ensureSelectedLocalChannelReady())) return;
       sendPrompt(text);
-      if (overrideText === undefined) {
+      if (overrideText === undefined || options.clearDraft) {
         setComposerDraft('');
         draftRef.current = '';
         selectionRef.current = { start: 0, end: 0 };
@@ -1866,8 +2523,8 @@ export default function AIDock({
         </div>
       )}
       {/* AI return stream */}
-      <section className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <header className="relative flex flex-wrap items-center gap-2 border-b border-border-soft px-3 py-2">
+      <section className="fuc-ai-return-pane flex min-h-0 min-w-0 flex-1 flex-col">
+        <header className="fuc-ai-return-header relative flex flex-wrap items-center gap-2 border-b border-border-soft px-3 py-2">
           {isChat && searchToggleButton}
           {isChat ? (
             chatTitleEditing ? (
@@ -1946,11 +2603,11 @@ export default function AIDock({
           {returnSearchOpen && (
             <div
               className={
-                'absolute left-3 right-3 top-full z-30 mt-2 flex items-center gap-1 rounded-lg border border-border bg-panel/95 p-1.5 shadow-2xl backdrop-blur sm:w-96 ' +
+                'fuc-ai-return-search absolute left-3 right-3 top-full z-30 mt-2 flex items-center gap-1 rounded-lg border border-border bg-panel/95 p-1.5 shadow-2xl backdrop-blur sm:w-96 ' +
                 (isChat ? 'sm:right-auto' : 'sm:left-auto')
               }
             >
-              <div className="flex min-w-0 flex-1 items-center gap-1 rounded-md border border-border bg-bg px-2 py-1 transition-colors focus-within:border-accent">
+              <div className="fuc-ai-return-search-input flex min-w-0 flex-1 items-center gap-1 rounded-md border border-border bg-bg px-2 py-1 transition-colors focus-within:border-accent">
                 <Search size={13} className="shrink-0 text-fg-faint" />
                 <input
                   id="ai-return-search"
@@ -1993,7 +2650,7 @@ export default function AIDock({
                 disabled={searchMatches.length === 0}
                 title={t(locale, 'dock.searchPrevious')}
                 aria-label={t(locale, 'dock.searchPrevious')}
-                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+                className="fuc-ai-return-search-button flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <ChevronUp size={14} />
               </button>
@@ -2004,7 +2661,7 @@ export default function AIDock({
                 disabled={searchMatches.length === 0}
                 title={t(locale, 'dock.searchNext')}
                 aria-label={t(locale, 'dock.searchNext')}
-                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+                className="fuc-ai-return-search-button flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <ChevronDown size={14} />
               </button>
@@ -2026,15 +2683,16 @@ export default function AIDock({
           <div
             ref={streamRef}
             className={
-              'h-full min-h-0 overflow-y-auto p-3 ' + (isChat ? 'pr-10' : '')
+              'fuc-ai-return-stream h-full min-h-0 overflow-y-auto p-3 ' +
+              (isChat ? 'pr-10' : '')
             }
           >
             {messages.length === 0 ? (
               <div
                 className={
                   isChat
-                    ? 'flex h-full items-center justify-center px-4 text-center text-xl font-medium text-fg-dim'
-                    : 'text-xs text-fg-faint'
+                    ? 'fuc-ai-return-empty flex h-full items-center justify-center px-4 text-center text-xl font-medium text-fg-dim'
+                    : 'fuc-ai-return-empty text-xs text-fg-faint'
                 }
               >
                 {t(locale, isChat ? 'dock.chatEmpty' : 'dock.empty')}
@@ -2047,16 +2705,21 @@ export default function AIDock({
                   const isSystem = m.role === 'system';
                   const isSearchHit = searchMatchMessageIds.has(m.id);
                   const isCurrentSearchHit = activeSearchMatchMessageId === m.id;
+                  const assistantLabel =
+                    !isUser && !isSystem ? assistantHeaderLabel(m) : '';
                   const roleLabel = isUser
                     ? '› you'
                     : isSystem
                       ? '• system'
-                      : '⟳ assistant';
+                      : assistantLabel
+                        ? `⟳ ${assistantLabel}`
+                        : '⟳ assistant';
                   const roleClass = isUser
                     ? 'text-accent'
                     : isSystem
                       ? 'text-accent-3'
                       : 'text-accent-2';
+                  const preserveRoleCase = !!assistantLabel;
                   return (
                     <li
                       key={m.id}
@@ -2074,16 +2737,21 @@ export default function AIDock({
                             : '')
                       }
                     >
-                      <div className="flex items-center gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
                         <span
+                          title={roleLabel}
                           className={
-                            'font-mono text-[10px] uppercase tracking-wider ' + roleClass
+                            'min-w-0 truncate font-mono text-[10px] ' +
+                            (preserveRoleCase
+                              ? 'normal-case tracking-normal '
+                              : 'uppercase tracking-wider ') +
+                            roleClass
                           }
                         >
                           {roleLabel}
                         </span>
                         <span
-                          className="font-mono text-[10px] text-fg-faint"
+                          className="shrink-0 font-mono text-[10px] text-fg-faint"
                           title={new Date(m.createdAt).toLocaleString()}
                         >
                           {formatMessageTime(m.createdAt)}
@@ -2104,16 +2772,16 @@ export default function AIDock({
                         // User turns stay plain text; while a return search is
                         // active we fall back to the plain highlighter for every
                         // message so match marks land on real text nodes.
-                        <span
-                          className={
-                            'whitespace-pre-wrap break-words text-sm leading-relaxed ' +
-                            (isChatUser
-                              ? 'max-w-[86%] rounded-md border border-accent/20 bg-accent/10 px-3 py-2 text-left text-fg'
-                              : isChat
-                                ? 'w-[min(100%,calc(100%_-_2rem))] text-fg-dim'
-                                : 'text-fg-dim')
-                          }
-                        >
+                          <span
+                            className={
+                              'whitespace-pre-wrap break-words text-sm leading-relaxed ' +
+                              (isChatUser
+                                ? 'ai-stream-user-bubble max-w-[86%] rounded-md px-3 py-2 text-left'
+                                : isChat
+                                  ? 'ai-stream-text w-[min(100%,calc(100%_-_2rem))]'
+                                  : 'ai-stream-text')
+                            }
+                          >
                           {renderHighlightedText(
                             isUser ? m.text : cleanMessageText(m.text),
                             m.id,
@@ -2133,7 +2801,7 @@ export default function AIDock({
                           }
                         >
                           <LazyMessageContent
-                            text={m.text}
+                            text={renderMessageText(m.text)}
                             fallback={cleanMessageText(m.text)}
                             streaming={aiBusy && m.id === lastAssistantId}
                             showActions={!isSystem}
@@ -2190,6 +2858,68 @@ export default function AIDock({
         style={isChat ? { height: chatInputHeight } : { width: renderedInputWidth }}
         aria-label={t(locale, 'dock.aiInput') + (isReadOnly ? t(locale, 'dock.readonlySuffix') : '')}
       >
+        {slashOpen && (
+          <div
+            id="fuc-slash-suggestions"
+            role="listbox"
+            aria-label="Slash suggestions"
+            className="absolute bottom-[calc(100%+0.375rem)] left-3 right-3 z-50 max-h-64 overflow-y-auto rounded-md border border-border bg-panel shadow-2xl"
+          >
+            {filteredSlashSuggestions.map((suggestion, index) => {
+              const active = index === activeSlashIndex;
+              return (
+                <button
+                  key={suggestion.id}
+                  id={`fuc-slash-suggestion-${index}`}
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseEnter={() => setActiveSlashIndex(index)}
+                  onClick={() => applySlashSuggestion(suggestion)}
+                  className={
+                    'flex w-full items-start gap-2 border-l-2 px-2.5 py-2 text-left transition-colors ' +
+                    (active
+                      ? 'border-l-accent bg-accent/20 text-fg ring-1 ring-inset ring-accent/40'
+                      : 'border-l-transparent text-fg-dim hover:border-l-accent/50 hover:bg-border-soft hover:text-fg')
+                  }
+                >
+                  <span
+                    className={
+                      'mt-0.5 rounded border px-1.5 py-0.5 font-mono text-[11px] leading-none ' +
+                      (active
+                        ? 'border-accent bg-accent text-bg'
+                        : 'border-border bg-bg text-accent')
+                    }
+                  >
+                    {suggestion.name}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="flex min-w-0 items-center gap-2">
+                      <span className="truncate text-sm font-medium">
+                        {suggestion.label}
+                      </span>
+                      <span
+                        className={
+                          'shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px] uppercase tracking-wider ' +
+                          (active
+                            ? 'border-accent/50 text-accent'
+                            : 'border-border-soft text-fg-faint')
+                        }
+                      >
+                        {suggestion.kind}
+                      </span>
+                    </span>
+                    <span className="mt-0.5 block truncate text-xs text-fg-faint">
+                      {suggestion.detail}
+                    </span>
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         <div
           className={
             'fuc-ai-input-card relative flex min-h-0 flex-1 flex-col rounded-lg border bg-bg transition-colors focus-within:border-accent ' +
@@ -2208,14 +2938,59 @@ export default function AIDock({
               draftRef.current = e.target.value;
               setComposerDraft(e.target.value);
               rememberSelection(e.currentTarget);
+              syncSlashTrigger(e.currentTarget);
             }}
-            onClick={(e) => rememberSelection(e.currentTarget)}
-            onKeyUp={(e) => rememberSelection(e.currentTarget)}
-            onSelect={(e) => rememberSelection(e.currentTarget)}
-            onFocus={(e) => rememberSelection(e.currentTarget)}
+            onClick={(e) => {
+              rememberSelection(e.currentTarget);
+              syncSlashTrigger(e.currentTarget);
+            }}
+            onKeyUp={(e) => {
+              rememberSelection(e.currentTarget);
+              syncSlashTrigger(e.currentTarget);
+            }}
+            onSelect={(e) => {
+              rememberSelection(e.currentTarget);
+              syncSlashTrigger(e.currentTarget);
+            }}
+            onFocus={(e) => {
+              rememberSelection(e.currentTarget);
+              syncSlashTrigger(e.currentTarget);
+            }}
+            onBlur={closeSlashSuggestions}
+            onPaste={handlePaste}
             onKeyDown={(e) => {
+              if (slashOpen) {
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setActiveSlashIndex((index) =>
+                    (index + 1) % filteredSlashSuggestions.length,
+                  );
+                  return;
+                }
+                if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setActiveSlashIndex(
+                    (index) =>
+                      (index - 1 + filteredSlashSuggestions.length) %
+                      filteredSlashSuggestions.length,
+                  );
+                  return;
+                }
+                if (e.key === 'Escape') {
+                  e.preventDefault();
+                  closeSlashSuggestions();
+                  return;
+                }
+                if (e.key === 'Tab' || (e.key === 'Enter' && !e.ctrlKey)) {
+                  e.preventDefault();
+                  const suggestion = filteredSlashSuggestions[activeSlashIndex];
+                  if (suggestion) applySlashSuggestion(suggestion);
+                  return;
+                }
+              }
               if (e.key === 'Enter' && e.ctrlKey) {
                 e.preventDefault();
+                closeSlashSuggestions();
                 submit();
               }
             }}
@@ -2239,11 +3014,27 @@ export default function AIDock({
                 ? t(locale, 'dock.runningPlaceholder')
                 : t(locale, 'dock.placeholder')
             }
+            aria-expanded={slashOpen}
+            aria-controls={slashOpen ? 'fuc-slash-suggestions' : undefined}
+            aria-activedescendant={
+              slashOpen ? `fuc-slash-suggestion-${activeSlashIndex}` : undefined
+            }
             className={
               'min-h-0 flex-1 resize-none border-0 bg-transparent px-3 pt-3 pb-2 text-sm leading-relaxed text-fg outline-none placeholder:text-fg-faint ' +
               (isReadOnly ? 'cursor-not-allowed' : '')
             }
           />
+
+          {blockedSendTipText && (
+            <div
+              role="status"
+              aria-live="polite"
+              data-testid="blocked-send-tip"
+              className="mx-2 mb-1 rounded-md border border-status-error/40 bg-status-error/10 px-2.5 py-1.5 text-xs leading-snug text-status-error"
+            >
+              {blockedSendTipText}
+            </div>
+          )}
 
           {/* Tool row pinned to the bottom edge of the card. Left cluster groups
               channel/file/permission/workspace; the send button stays
@@ -2261,6 +3052,48 @@ export default function AIDock({
               className="min-w-0"
               icon="✦"
             />
+            {!simpleChatMode && activeSessionIsWorkflow && (
+              <button
+                type="button"
+                title={t(locale, 'dock.modelStrategyTitle')}
+                onClick={() => setModelStrategyOpen((v) => !v)}
+                className="flex items-center gap-1 rounded-md border border-border bg-panel-2 px-2 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+              >
+                <span className="text-fg-faint">◇</span>
+                <span className="truncate">
+                  {t(locale, modelStrategyLabelKey(composer.modelStrategy))}
+                </span>
+              </button>
+            )}
+            {modelStrategyOpen && (
+              <div className="absolute bottom-full left-0 mb-1 w-56 rounded-md border border-border bg-panel shadow-lg">
+                <ul role="listbox">
+                  {(['inherit', 'smart', 'prefer-better', 'prefer-cheaper'] as const).map(
+                    (strategy) => (
+                      <li key={strategy}>
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={composer.modelStrategy === strategy}
+                          onClick={() => {
+                            setComposer({ modelStrategy: strategy });
+                            setModelStrategyOpen(false);
+                          }}
+                          className={
+                            'block w-full px-3 py-1.5 text-left text-xs transition-colors ' +
+                            (composer.modelStrategy === strategy
+                              ? 'bg-border-soft text-fg'
+                              : 'text-fg-dim hover:bg-border-soft hover:text-fg')
+                          }
+                        >
+                          {t(locale, modelStrategyLabelKey(strategy))}
+                        </button>
+                      </li>
+                    ),
+                  )}
+                </ul>
+              </div>
+            )}
             {modelSelectOptions.length > 0 && (
               <Select
                 title={
@@ -2312,19 +3145,40 @@ export default function AIDock({
             <div className="ml-auto flex items-center">
               <button
                 type="button"
-                onClick={() => submit()}
-                disabled={!draft.trim() || isReadOnly || activeAiEditing}
+                onClick={() =>
+                  useChatRunButton
+                    ? submit(chatRunText, { clearDraft: true })
+                    : submit()
+                }
+                disabled={
+                  !(useChatRunButton ? chatRunText : draft.trim()) ||
+                  isReadOnly ||
+                  activeAiEditing
+                }
                 title={
                   isReadOnly
                     ? t(locale, 'dock.inputLockedTitle')
                     : activeAiEditing
                       ? t(locale, 'dock.aiGeneratingTitle')
-                      : t(locale, 'dock.sendShortcut')
+                      : useChatRunButton
+                        ? t(locale, 'dock.runChatTitle')
+                        : t(locale, 'dock.sendShortcut')
                 }
-                aria-label={t(locale, 'dock.sendShortcut')}
-                className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label={
+                  useChatRunButton
+                    ? t(locale, 'dock.runChatTitle')
+                    : t(locale, 'dock.sendShortcut')
+                }
+                className={
+                  'flex h-7 shrink-0 items-center justify-center rounded-md bg-accent text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 ' +
+                  (useChatRunButton ? 'px-2.5' : 'w-7')
+                }
               >
-                {activeAiEditing ? '…' : '↑'}
+                {activeAiEditing
+                  ? '…'
+                  : useChatRunButton
+                    ? t(locale, 'canvas.run')
+                    : '↑'}
               </button>
             </div>
           </div>

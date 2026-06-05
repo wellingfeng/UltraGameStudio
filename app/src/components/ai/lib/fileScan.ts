@@ -6,9 +6,9 @@
  * in ordinary text (not inside backticks or a markdown link) can be rendered as
  * a clickable chip.
  *
- * Detection scans for maximal runs of ASCII path characters (so a CJK clause
- * with a stray `/` never forms a candidate — CJK chars are not path chars and
- * therefore terminate a run). Each run is trimmed of trailing sentence
+ * Detection scans for maximal runs of path-ish characters, including Unicode
+ * letters for generated filenames such as `Moon亮晶分析.html`. Each run is
+ * trimmed of trailing sentence
  * punctuation, then validated by {@link parseFileRef}, which stays strict (known
  * extension or a real separator) so prose like `2.0` or `react.useState` is
  * never matched. The colon introducing a `:line` suffix is preserved.
@@ -18,9 +18,9 @@ import { parseFileRef, type FileRef } from './filePath';
 
 export type FileScanPart = string | FileRef;
 
-// A maximal run of ASCII path-ish characters. Anything else (CJK, whitespace,
-// most punctuation, quotes, pipes) ends the run.
-const PATH_RUN = /[A-Za-z0-9._~$@+\-/\\:#]+/g;
+// A maximal run of path-ish characters. Whitespace, quotes, pipes, and most
+// punctuation end the run; parseFileRef keeps false positives low.
+const PATH_RUN = /[\p{L}\p{N}._~$@+%\-/\\:#]+/gu;
 
 // Trailing punctuation to peel off a token before validation (but NOT a digit
 // after ':' — that is a line number). We only strip from the very end.

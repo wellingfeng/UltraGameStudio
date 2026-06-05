@@ -1,4 +1,4 @@
-import type { MouseEvent, ReactNode } from 'react';
+import { isValidElement, type MouseEvent, type ReactNode } from 'react';
 import { ExternalLink } from 'lucide-react';
 import { openExternal } from '@/lib/tauri';
 import { parseFileRef } from './lib/filePath';
@@ -20,11 +20,15 @@ export default function SmartLink({
   onOpenFile?: OpenFileFn;
 }) {
   const url = href ?? '';
-  const ref = parseFileRef(url);
-  if (ref) return <FileChip refData={ref} onOpenFile={onOpenFile} />;
-
   const isWebUrl = /^https?:/i.test(url);
   const isExternal = /^(https?:|mailto:)/i.test(url);
+  const ref = parseFileRef(url, { allowSpaces: true });
+  if (ref) return <FileChip refData={ref} onOpenFile={onOpenFile} />;
+
+  if (!isExternal) {
+    const childRef = parseFileRef(childrenToText(children), { allowSpaces: true });
+    if (childRef) return <FileChip refData={childRef} onOpenFile={onOpenFile} />;
+  }
 
   if (isExternal) {
     const openWebUrl = (event: MouseEvent<HTMLAnchorElement>) => {
@@ -49,4 +53,14 @@ export default function SmartLink({
 
   // Unknown scheme / relative anchor — render as plain styled text.
   return <span className="text-accent underline underline-offset-2">{children}</span>;
+}
+
+function childrenToText(children: ReactNode): string {
+  if (typeof children === 'string') return children;
+  if (typeof children === 'number') return String(children);
+  if (Array.isArray(children)) return children.map(childrenToText).join('');
+  if (isValidElement(children)) {
+    return childrenToText((children.props as { children?: ReactNode }).children);
+  }
+  return '';
 }

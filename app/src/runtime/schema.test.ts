@@ -20,6 +20,7 @@ import {
   type RunGateway,
   type SpawnCliAgentOpts,
 } from '@/runtime';
+import { personalInstructionsKey } from '@/core/personalInstructions';
 
 /* ------------------------------------------------------------------ extractJson */
 
@@ -185,6 +186,84 @@ function fakeCtx(gateway: RunGateway): RunContext {
 }
 
 describe('runAgentWithInteraction + schema enforcement', () => {
+  it('injects personal instructions into the executed prompt', async () => {
+    let seenPrompt = '';
+    const gw = fakeGateway(async (prompt) => {
+      seenPrompt = prompt;
+      return 'ok';
+    });
+
+    await runAgentWithInteraction({
+      context: {
+        ...fakeCtx(gw),
+        personalInstructions: '# Personal Defaults\n\n- 默认使用中文',
+      },
+      callbacks: fakeCallbacks([]),
+      head: '【test】\n',
+      label: 'test',
+      basePrompt: 'do it',
+      selection: { adapter: 'claude-code', modelClass: 'sonnet' },
+      cli: {},
+    });
+
+    expect(seenPrompt).toContain('【用户个人默认指令（低优先级）】');
+    expect(seenPrompt).toContain('- 默认使用中文');
+  });
+
+  it('skips app personal instructions for the Codex adapter', async () => {
+    let seenPrompt = '';
+    const gw = fakeGateway(async (prompt) => {
+      seenPrompt = prompt;
+      return 'ok';
+    });
+
+    await runAgentWithInteraction({
+      context: {
+        ...fakeCtx(gw),
+        selection: { adapter: 'codex', modelClass: 'default' },
+        personalInstructions: '# Personal Defaults\n\n- 默认使用中文',
+      },
+      callbacks: fakeCallbacks([]),
+      head: '【test】\n',
+      label: 'test',
+      basePrompt: 'do it',
+      selection: { adapter: 'codex', modelClass: 'default' },
+      cli: {},
+    });
+
+    expect(seenPrompt).not.toContain('【用户个人默认指令（低优先级）】');
+    expect(seenPrompt).not.toContain('- 默认使用中文');
+  });
+
+  it('selects personal instructions by the executed model selection', async () => {
+    let seenPrompt = '';
+    const gw = fakeGateway(async (prompt) => {
+      seenPrompt = prompt;
+      return 'ok';
+    });
+    const claudeSelection = { adapter: 'claude-code', modelClass: 'sonnet' };
+    const geminiSelection = { adapter: 'gemini', modelClass: 'default' };
+
+    await runAgentWithInteraction({
+      context: {
+        ...fakeCtx(gw),
+        personalInstructionsByModel: {
+          [personalInstructionsKey(claudeSelection)]: 'Claude-only defaults',
+          [personalInstructionsKey(geminiSelection)]: 'Gemini-only defaults',
+        },
+      },
+      callbacks: fakeCallbacks([]),
+      head: '【test】\n',
+      label: 'test',
+      basePrompt: 'do it',
+      selection: geminiSelection,
+      cli: {},
+    });
+
+    expect(seenPrompt).toContain('Gemini-only defaults');
+    expect(seenPrompt).not.toContain('Claude-only defaults');
+  });
+
   it('retries once on invalid JSON then returns normalized JSON', async () => {
     const shape = { name: '', count: 0 };
     let calls = 0;

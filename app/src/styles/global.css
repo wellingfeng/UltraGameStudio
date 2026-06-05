@@ -27,6 +27,9 @@
   --fuc-status-error-contrast: #2a0a1a;
   --fuc-status-interrupted: #d995a6;
   --fuc-status-interrupted-contrast: #2a0a1a;
+  --fuc-font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  --fuc-mono-font-family: 'JetBrains Mono', ui-monospace, monospace;
+  --fuc-font-size: 16px;
 
   /* Semantic tokens consumed by Tailwind and component styles. */
   --bg: var(--fuc-color-bg);
@@ -42,6 +45,15 @@
   --accent-2: var(--fuc-color-accent-2);
   --accent-3: var(--fuc-color-accent-3);
   --accent-4: var(--fuc-color-accent-4);
+  --file-preview-link: color-mix(in oklab, var(--accent-2) 82%, var(--fg) 18%);
+  --file-preview-link-hover: color-mix(in oklab, var(--accent-2) 64%, var(--fg) 36%);
+  --file-preview-link-bg: color-mix(in oklab, var(--accent-2) 12%, transparent);
+  --file-preview-link-border: color-mix(in oklab, var(--accent-2) 48%, var(--border));
+  --file-preview-link-decoration: color-mix(
+    in oklab,
+    var(--file-preview-link) 62%,
+    transparent
+  );
   --status-ai-edit: var(--fuc-status-ai-edit);
   --status-ai-edit-contrast: var(--fuc-status-ai-edit-contrast);
   --status-ai-edit-border: #2c6fb3;
@@ -279,6 +291,118 @@ html.fuc-style-ember {
   --fuc-status-interrupted-contrast: #1c1510;
 }
 
+html[data-fuc-style='campbell'],
+html.fuc-style-campbell {
+  color-scheme: dark;
+  --fuc-color-bg: #0c0c0c;
+  --fuc-color-bg-alt: #111111;
+  --fuc-color-panel: #1a1a1a;
+  --fuc-color-panel-2: #242424;
+  --fuc-color-border: #3a3a3a;
+  --fuc-color-border-soft: #2a2a2a;
+  --fuc-color-text: #f2f2f2;
+  --fuc-color-text-muted: #cccccc;
+  --fuc-color-text-faint: #767676;
+  --fuc-color-accent: #3b78ff;
+  --fuc-color-accent-2: #16c60c;
+  --fuc-color-accent-3: #f9f1a5;
+  --fuc-color-accent-4: #b4009e;
+  --fuc-status-ai-edit: #3b78ff;
+  --fuc-status-ai-edit-contrast: #05080d;
+  --fuc-status-running: #f9f1a5;
+  --fuc-status-running-contrast: #1a1700;
+  --fuc-status-success: #16c60c;
+  --fuc-status-success-contrast: #031a02;
+  --fuc-status-error: #e74856;
+  --fuc-status-error-contrast: #260407;
+  --fuc-status-interrupted: #767676;
+  --fuc-status-interrupted-contrast: #050505;
+}
+
+html[data-fuc-style='campbell-powershell'],
+html.fuc-style-campbell-powershell {
+  color-scheme: dark;
+  --fuc-color-bg: #012456;
+  --fuc-color-bg-alt: #082448;
+  --fuc-color-panel: #0b2f61;
+  --fuc-color-panel-2: #123a70;
+  --fuc-color-border: #1c4a86;
+  --fuc-color-border-soft: #123a70;
+  --fuc-color-text: #ffffff;
+  --fuc-color-text-muted: #d7e8ff;
+  --fuc-color-text-faint: #84a8d6;
+  --fuc-color-accent: #79c0ff;
+  --fuc-color-accent-2: #61d6d6;
+  --fuc-color-accent-3: #f9f1a5;
+  --fuc-color-accent-4: #d2a8ff;
+  --fuc-status-ai-edit: #79c0ff;
+  --fuc-status-ai-edit-contrast: #031224;
+  --fuc-status-running: #f9f1a5;
+  --fuc-status-running-contrast: #1a1700;
+  --fuc-status-success: #6ee787;
+  --fuc-status-success-contrast: #03210f;
+  --fuc-status-error: #ff9da4;
+  --fuc-status-error-contrast: #2a0509;
+  --fuc-status-interrupted: #84a8d6;
+  --fuc-status-interrupted-contrast: #061529;
+}
+
+html[data-fuc-style='one-half-dark'],
+html.fuc-style-one-half-dark {
+  color-scheme: dark;
+  --fuc-color-bg: #282c34;
+  --fuc-color-bg-alt: #23272f;
+  --fuc-color-panel: #2d323c;
+  --fuc-color-panel-2: #343b48;
+  --fuc-color-border: #3a404d;
+  --fuc-color-border-soft: #313744;
+  --fuc-color-text: #f5f7fb;
+  --fuc-color-text-muted: #dcdfe4;
+  --fuc-color-text-faint: #8b94a7;
+  --fuc-color-accent: #61afef;
+  --fuc-color-accent-2: #98c379;
+  --fuc-color-accent-3: #e5c07b;
+  --fuc-color-accent-4: #c678dd;
+  --fuc-status-ai-edit: #61afef;
+  --fuc-status-ai-edit-contrast: #071421;
+  --fuc-status-running: #e5c07b;
+  --fuc-status-running-contrast: #241803;
+  --fuc-status-success: #98c379;
+  --fuc-status-success-contrast: #0b1d08;
+  --fuc-status-error: #e06c75;
+  --fuc-status-error-contrast: #2a090b;
+  --fuc-status-interrupted: #8b94a7;
+  --fuc-status-interrupted-contrast: #0b0e12;
+}
+
+html[data-fuc-style='solarized-dark'],
+html.fuc-style-solarized-dark {
+  color-scheme: dark;
+  --fuc-color-bg: #002b36;
+  --fuc-color-bg-alt: #073642;
+  --fuc-color-panel: #0d404d;
+  --fuc-color-panel-2: #144b57;
+  --fuc-color-border: #1d5965;
+  --fuc-color-border-soft: #144b57;
+  --fuc-color-text: #d6e2e4;
+  --fuc-color-text-muted: #93a1a1;
+  --fuc-color-text-faint: #657b83;
+  --fuc-color-accent: #268bd2;
+  --fuc-color-accent-2: #2aa198;
+  --fuc-color-accent-3: #b58900;
+  --fuc-color-accent-4: #d33682;
+  --fuc-status-ai-edit: #268bd2;
+  --fuc-status-ai-edit-contrast: #00121a;
+  --fuc-status-running: #b58900;
+  --fuc-status-running-contrast: #1f1700;
+  --fuc-status-success: #859900;
+  --fuc-status-success-contrast: #111600;
+  --fuc-status-error: #dc322f;
+  --fuc-status-error-contrast: #260605;
+  --fuc-status-interrupted: #657b83;
+  --fuc-status-interrupted-contrast: #00131a;
+}
+
 * {
   box-sizing: border-box;
 }
@@ -290,10 +414,14 @@ body,
   margin: 0;
 }
 
+html {
+  font-size: var(--fuc-font-size);
+}
+
 body {
   background: var(--bg);
   color: var(--fg);
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  font-family: var(--fuc-font-family);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -301,7 +429,7 @@ body {
 code,
 pre,
 .mono {
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: var(--fuc-mono-font-family);
 }
 
 /* Scrollbar */
@@ -340,30 +468,54 @@ pre,
 }
 
 .fuc-stream-nav {
-  background: color-mix(in oklab, var(--panel) 28%, transparent);
+  background: color-mix(
+    in oklab,
+    var(--stream-surface-control-bg) 28%,
+    transparent
+  );
   opacity: 0.28;
   transform: translateY(-50%) translateX(4px);
   transition: opacity 160ms ease, transform 160ms ease, background 160ms ease;
 }
 .fuc-stream-nav:hover,
 .fuc-stream-nav:focus-within {
-  background: color-mix(in oklab, var(--panel) 72%, transparent);
+  background: color-mix(
+    in oklab,
+    var(--stream-surface-control-bg) 72%,
+    transparent
+  );
   opacity: 1;
   transform: translateY(-50%) translateX(0);
 }
 .fuc-stream-nav-button {
-  border: 1px solid color-mix(in oklab, var(--fg-faint) 18%, transparent);
-  background: color-mix(in oklab, var(--panel-2) 56%, transparent);
+  border: 1px solid var(--stream-surface-border);
+  background: color-mix(
+    in oklab,
+    var(--stream-surface-control-bg) 56%,
+    transparent
+  );
   box-shadow: 0 8px 24px -18px rgba(0, 0, 0, 0.7);
   backdrop-filter: blur(8px);
 }
 .fuc-stream-nav-button:hover,
 .fuc-stream-nav-button:focus-visible {
-  border-color: color-mix(in oklab, var(--accent) 50%, var(--border));
-  background: color-mix(in oklab, var(--panel-2) 88%, var(--accent) 8%);
+  border-color: color-mix(
+    in oklab,
+    var(--stream-link) 50%,
+    var(--stream-surface-border)
+  );
+  background: color-mix(
+    in oklab,
+    var(--stream-surface-control-bg) 88%,
+    var(--stream-link) 8%
+  );
 }
 .fuc-stream-nav-button:disabled {
-  background: color-mix(in oklab, var(--panel-2) 36%, transparent);
+  background: color-mix(
+    in oklab,
+    var(--stream-surface-control-bg) 36%,
+    transparent
+  );
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -544,9 +696,361 @@ pre,
   --code-bg: color-mix(in oklab, var(--bg) 86%, #000 14%);
   --code-header-bg: color-mix(in oklab, var(--panel-2) 70%, var(--bg));
   --code-border: var(--border);
+  /* Message-stream semantic tokens. "current" keeps following the UI theme;
+     dedicated stream schemes override these below. */
+  --stream-surface-bg: transparent;
+  --stream-surface-header-bg: transparent;
+  --stream-surface-border: var(--border-soft);
+  --stream-surface-popover-bg: color-mix(
+    in oklab,
+    var(--panel) 95%,
+    transparent
+  );
+  --stream-surface-input-bg: var(--bg);
+  --stream-surface-control-bg: var(--panel-2);
+  --stream-fg: var(--fg-dim);
+  --stream-fg-strong: var(--fg);
+  --stream-fg-muted: var(--fg-faint);
+  --stream-link: var(--accent);
+  --stream-user-bubble-bg: color-mix(in oklab, var(--accent) 10%, transparent);
+  --stream-user-bubble-border: color-mix(
+    in oklab,
+    var(--accent) 20%,
+    transparent
+  );
+  --stream-user-bubble-text: var(--fg);
+  --stream-blockquote-border: var(--accent);
+  --stream-blockquote-bg: color-mix(
+    in oklab,
+    var(--accent) 8%,
+    transparent
+  );
+  --stream-blockquote-text: var(--fg-dim);
+  --stream-table-header-bg: var(--code-header-bg);
+  --stream-table-row-alt-bg: color-mix(in oklab, var(--bg) 50%, var(--panel));
+  --stream-reasoning-fg: var(--fg-faint);
+  --stream-reasoning-header-hover: var(--fg-dim);
+  --stream-reasoning-icon: color-mix(in oklab, var(--accent) 70%, var(--fg));
+  --stream-reasoning-accent: color-mix(
+    in oklab,
+    var(--accent) 70%,
+    var(--fg)
+  );
+  --stream-caret: var(--accent);
+  --stream-tool-card-bg: color-mix(in oklab, var(--panel-2) 18%, transparent);
+  --stream-tool-card-border: color-mix(
+    in oklab,
+    var(--fg-faint) 14%,
+    transparent
+  );
+  --stream-tool-card-hover-bg: color-mix(
+    in oklab,
+    var(--panel-2) 28%,
+    transparent
+  );
+  --stream-tool-card-hover-border: color-mix(
+    in oklab,
+    var(--fg-faint) 14%,
+    transparent
+  );
+  --stream-tool-rail: color-mix(in oklab, var(--fg-faint) 38%, transparent);
+  --stream-tool-running-bg: color-mix(
+    in oklab,
+    var(--status-running) 5%,
+    transparent
+  );
+  --stream-tool-running-rail: color-mix(
+    in oklab,
+    var(--status-running) 76%,
+    var(--accent)
+  );
+  --stream-tool-done-rail: color-mix(
+    in oklab,
+    var(--fg-faint) 32%,
+    transparent
+  );
+  --stream-tool-error-bg: color-mix(
+    in oklab,
+    var(--status-error) 6%,
+    transparent
+  );
+  --stream-tool-error-rail: color-mix(
+    in oklab,
+    var(--status-error) 70%,
+    transparent
+  );
+  --stream-tool-panel-bg: color-mix(in oklab, var(--code-bg) 90%, transparent);
+  --stream-tool-panel-border: color-mix(
+    in oklab,
+    var(--fg-faint) 18%,
+    transparent
+  );
+  --stream-tool-name: var(--fg-dim);
+  --stream-tool-subject: var(--fg-faint);
+  --stream-tool-meta: var(--fg-faint);
+}
+
+html[data-fuc-stream-scheme='campbell'],
+html.fuc-stream-scheme-campbell {
+  --hl-comment: #767676;
+  --hl-keyword: #e74856;
+  --hl-string: #16c60c;
+  --hl-number: #3b78ff;
+  --hl-func: #61d6d6;
+  --hl-type: #f9f1a5;
+  --hl-attr: #b4009e;
+  --hl-deletion: #e74856;
+  --hl-addition: #16c60c;
+  --diff-add-bg: rgba(22, 198, 12, 0.18);
+  --diff-del-bg: rgba(231, 72, 86, 0.18);
+  --code-bg: #0f1115;
+  --code-header-bg: #1a1a1a;
+  --code-border: #2a2a2a;
+  --stream-surface-bg: #0c0c0c;
+  --stream-surface-header-bg: #0c0c0c;
+  --stream-surface-border: #2a2a2a;
+  --stream-surface-popover-bg: rgba(26, 26, 26, 0.96);
+  --stream-surface-input-bg: #0f1115;
+  --stream-surface-control-bg: #1a1a1a;
+  --stream-fg: #cccccc;
+  --stream-fg-strong: #f2f2f2;
+  --stream-fg-muted: #767676;
+  --stream-link: #3b78ff;
+  --stream-user-bubble-bg: rgba(59, 120, 255, 0.14);
+  --stream-user-bubble-border: rgba(59, 120, 255, 0.38);
+  --stream-user-bubble-text: #f2f2f2;
+  --stream-blockquote-border: #3b78ff;
+  --stream-blockquote-bg: rgba(59, 120, 255, 0.1);
+  --stream-blockquote-text: #cccccc;
+  --stream-table-header-bg: #1a1a1a;
+  --stream-table-row-alt-bg: rgba(118, 118, 118, 0.08);
+  --stream-reasoning-fg: #9d9d9d;
+  --stream-reasoning-header-hover: #d9d9d9;
+  --stream-reasoning-icon: #61d6d6;
+  --stream-reasoning-accent: #3b78ff;
+  --stream-caret: #3b78ff;
+  --stream-tool-card-bg: rgba(26, 26, 26, 0.72);
+  --stream-tool-card-border: rgba(118, 118, 118, 0.2);
+  --stream-tool-card-hover-bg: rgba(36, 36, 36, 0.94);
+  --stream-tool-card-hover-border: rgba(204, 204, 204, 0.14);
+  --stream-tool-rail: rgba(118, 118, 118, 0.45);
+  --stream-tool-running-bg: rgba(249, 241, 165, 0.08);
+  --stream-tool-running-rail: #f9f1a5;
+  --stream-tool-done-rail: rgba(22, 198, 12, 0.8);
+  --stream-tool-error-bg: rgba(231, 72, 86, 0.08);
+  --stream-tool-error-rail: rgba(231, 72, 86, 0.82);
+  --stream-tool-panel-bg: #0f1115;
+  --stream-tool-panel-border: rgba(118, 118, 118, 0.28);
+  --stream-tool-name: #f2f2f2;
+  --stream-tool-subject: #a6a6a6;
+  --stream-tool-meta: #8a8a8a;
+}
+
+html[data-fuc-stream-scheme='campbell-powershell'],
+html.fuc-stream-scheme-campbell-powershell {
+  --hl-comment: #84a8d6;
+  --hl-keyword: #ff9da4;
+  --hl-string: #6ee787;
+  --hl-number: #79c0ff;
+  --hl-func: #61d6d6;
+  --hl-type: #f9f1a5;
+  --hl-attr: #d2a8ff;
+  --hl-deletion: #ff9da4;
+  --hl-addition: #6ee787;
+  --diff-add-bg: rgba(22, 198, 12, 0.18);
+  --diff-del-bg: rgba(231, 72, 86, 0.18);
+  --code-bg: #082448;
+  --code-header-bg: #0b2f61;
+  --code-border: #1c4a86;
+  --stream-surface-bg: #012456;
+  --stream-surface-header-bg: #012456;
+  --stream-surface-border: #1c4a86;
+  --stream-surface-popover-bg: rgba(8, 36, 72, 0.96);
+  --stream-surface-input-bg: #082448;
+  --stream-surface-control-bg: #0b2f61;
+  --stream-fg: #d7e8ff;
+  --stream-fg-strong: #ffffff;
+  --stream-fg-muted: #84a8d6;
+  --stream-link: #79c0ff;
+  --stream-user-bubble-bg: rgba(59, 120, 255, 0.18);
+  --stream-user-bubble-border: rgba(121, 192, 255, 0.42);
+  --stream-user-bubble-text: #ffffff;
+  --stream-blockquote-border: #79c0ff;
+  --stream-blockquote-bg: rgba(121, 192, 255, 0.1);
+  --stream-blockquote-text: #d7e8ff;
+  --stream-table-header-bg: #0b2f61;
+  --stream-table-row-alt-bg: rgba(121, 192, 255, 0.06);
+  --stream-reasoning-fg: #a9c7ee;
+  --stream-reasoning-header-hover: #e8f2ff;
+  --stream-reasoning-icon: #61d6d6;
+  --stream-reasoning-accent: #79c0ff;
+  --stream-caret: #79c0ff;
+  --stream-tool-card-bg: rgba(8, 36, 72, 0.82);
+  --stream-tool-card-border: rgba(121, 192, 255, 0.2);
+  --stream-tool-card-hover-bg: rgba(11, 47, 97, 0.96);
+  --stream-tool-card-hover-border: rgba(121, 192, 255, 0.28);
+  --stream-tool-rail: rgba(121, 192, 255, 0.4);
+  --stream-tool-running-bg: rgba(249, 241, 165, 0.08);
+  --stream-tool-running-rail: #f9f1a5;
+  --stream-tool-done-rail: rgba(97, 214, 214, 0.9);
+  --stream-tool-error-bg: rgba(231, 72, 86, 0.1);
+  --stream-tool-error-rail: rgba(231, 72, 86, 0.84);
+  --stream-tool-panel-bg: #082448;
+  --stream-tool-panel-border: rgba(121, 192, 255, 0.22);
+  --stream-tool-name: #ffffff;
+  --stream-tool-subject: #c7defd;
+  --stream-tool-meta: #9bbde8;
+}
+
+html[data-fuc-stream-scheme='one-half-dark'],
+html.fuc-stream-scheme-one-half-dark {
+  --hl-comment: #5a6374;
+  --hl-keyword: #e06c75;
+  --hl-string: #98c379;
+  --hl-number: #61afef;
+  --hl-func: #56b6c2;
+  --hl-type: #e5c07b;
+  --hl-attr: #c678dd;
+  --hl-deletion: #e06c75;
+  --hl-addition: #98c379;
+  --diff-add-bg: rgba(152, 195, 121, 0.18);
+  --diff-del-bg: rgba(224, 108, 117, 0.18);
+  --code-bg: #23272f;
+  --code-header-bg: #2d323c;
+  --code-border: #3a404d;
+  --stream-surface-bg: #282c34;
+  --stream-surface-header-bg: #282c34;
+  --stream-surface-border: #3a404d;
+  --stream-surface-popover-bg: rgba(45, 50, 60, 0.96);
+  --stream-surface-input-bg: #23272f;
+  --stream-surface-control-bg: #2d323c;
+  --stream-fg: #dcdfe4;
+  --stream-fg-strong: #ffffff;
+  --stream-fg-muted: #8b94a7;
+  --stream-link: #61afef;
+  --stream-user-bubble-bg: rgba(97, 175, 239, 0.14);
+  --stream-user-bubble-border: rgba(97, 175, 239, 0.34);
+  --stream-user-bubble-text: #f5f7fb;
+  --stream-blockquote-border: #61afef;
+  --stream-blockquote-bg: rgba(97, 175, 239, 0.1);
+  --stream-blockquote-text: #dcdfe4;
+  --stream-table-header-bg: #2d323c;
+  --stream-table-row-alt-bg: rgba(90, 99, 116, 0.12);
+  --stream-reasoning-fg: #b2bac8;
+  --stream-reasoning-header-hover: #f2f4f8;
+  --stream-reasoning-icon: #56b6c2;
+  --stream-reasoning-accent: #61afef;
+  --stream-caret: #61afef;
+  --stream-tool-card-bg: rgba(45, 50, 60, 0.78);
+  --stream-tool-card-border: rgba(90, 99, 116, 0.24);
+  --stream-tool-card-hover-bg: rgba(55, 61, 73, 0.96);
+  --stream-tool-card-hover-border: rgba(220, 223, 228, 0.14);
+  --stream-tool-rail: rgba(90, 99, 116, 0.44);
+  --stream-tool-running-bg: rgba(229, 192, 123, 0.1);
+  --stream-tool-running-rail: #e5c07b;
+  --stream-tool-done-rail: rgba(152, 195, 121, 0.86);
+  --stream-tool-error-bg: rgba(224, 108, 117, 0.1);
+  --stream-tool-error-rail: rgba(224, 108, 117, 0.84);
+  --stream-tool-panel-bg: #23272f;
+  --stream-tool-panel-border: rgba(90, 99, 116, 0.3);
+  --stream-tool-name: #f5f7fb;
+  --stream-tool-subject: #b7bfce;
+  --stream-tool-meta: #8b94a7;
+}
+
+html[data-fuc-stream-scheme='solarized-dark'],
+html.fuc-stream-scheme-solarized-dark {
+  --hl-comment: #586e75;
+  --hl-keyword: #dc322f;
+  --hl-string: #859900;
+  --hl-number: #268bd2;
+  --hl-func: #2aa198;
+  --hl-type: #b58900;
+  --hl-attr: #6c71c4;
+  --hl-deletion: #cb4b16;
+  --hl-addition: #859900;
+  --diff-add-bg: rgba(133, 153, 0, 0.18);
+  --diff-del-bg: rgba(220, 50, 47, 0.18);
+  --code-bg: #073642;
+  --code-header-bg: #0d404d;
+  --code-border: #144b57;
+  --stream-surface-bg: #002b36;
+  --stream-surface-header-bg: #002b36;
+  --stream-surface-border: #144b57;
+  --stream-surface-popover-bg: rgba(7, 54, 66, 0.96);
+  --stream-surface-input-bg: #073642;
+  --stream-surface-control-bg: #0d404d;
+  --stream-fg: #839496;
+  --stream-fg-strong: #93a1a1;
+  --stream-fg-muted: #586e75;
+  --stream-link: #268bd2;
+  --stream-user-bubble-bg: rgba(38, 139, 210, 0.16);
+  --stream-user-bubble-border: rgba(38, 139, 210, 0.38);
+  --stream-user-bubble-text: #d6e2e4;
+  --stream-blockquote-border: #268bd2;
+  --stream-blockquote-bg: rgba(38, 139, 210, 0.1);
+  --stream-blockquote-text: #93a1a1;
+  --stream-table-header-bg: #0d404d;
+  --stream-table-row-alt-bg: rgba(88, 110, 117, 0.12);
+  --stream-reasoning-fg: #93a1a1;
+  --stream-reasoning-header-hover: #d6e2e4;
+  --stream-reasoning-icon: #2aa198;
+  --stream-reasoning-accent: #268bd2;
+  --stream-caret: #268bd2;
+  --stream-tool-card-bg: rgba(7, 54, 66, 0.8);
+  --stream-tool-card-border: rgba(88, 110, 117, 0.24);
+  --stream-tool-card-hover-bg: rgba(13, 64, 77, 0.96);
+  --stream-tool-card-hover-border: rgba(131, 148, 150, 0.18);
+  --stream-tool-rail: rgba(88, 110, 117, 0.5);
+  --stream-tool-running-bg: rgba(181, 137, 0, 0.1);
+  --stream-tool-running-rail: #b58900;
+  --stream-tool-done-rail: rgba(42, 161, 152, 0.88);
+  --stream-tool-error-bg: rgba(220, 50, 47, 0.1);
+  --stream-tool-error-rail: rgba(220, 50, 47, 0.84);
+  --stream-tool-panel-bg: #073642;
+  --stream-tool-panel-border: rgba(88, 110, 117, 0.3);
+  --stream-tool-name: #d6e2e4;
+  --stream-tool-subject: #93a1a1;
+  --stream-tool-meta: #657b83;
+}
+
+/* AI return surface. Imported terminal schemes tint the full message pane,
+   while the adaptive "current" scheme stays transparent over the UI theme. */
+.fuc-ai-return-pane,
+.fuc-ai-return-stream {
+  background: var(--stream-surface-bg);
+  color: var(--stream-fg);
+}
+.fuc-ai-return-header {
+  border-color: var(--stream-surface-border);
+  background: var(--stream-surface-header-bg);
+}
+.fuc-ai-return-search {
+  border-color: var(--stream-surface-border);
+  background: var(--stream-surface-popover-bg);
+}
+.fuc-ai-return-search-input {
+  border-color: var(--stream-surface-border);
+  background: var(--stream-surface-input-bg);
+}
+.fuc-ai-return-search-button {
+  border-color: var(--stream-surface-border);
+  background: var(--stream-surface-control-bg);
+}
+.fuc-ai-return-empty {
+  color: var(--stream-fg-muted);
 }
 
 /* Prose blocks. Tight vertical rhythm to suit a chat surface. */
+.ai-stream-text,
+.ai-stream-markdown {
+  color: var(--stream-fg);
+}
+.ai-stream-user-bubble {
+  border: 1px solid var(--stream-user-bubble-border);
+  background: var(--stream-user-bubble-bg);
+  color: var(--stream-user-bubble-text);
+}
 .ai-markdown > :first-child { margin-top: 0; }
 .ai-markdown > :last-child { margin-bottom: 0; }
 .ai-markdown p { margin: 0.5em 0; }
@@ -557,7 +1061,7 @@ pre,
   margin: 1em 0 0.4em;
   font-weight: 600;
   line-height: 1.3;
-  color: var(--fg);
+  color: var(--stream-fg-strong);
 }
 .ai-markdown h1 { font-size: 1.3em; }
 .ai-markdown h2 { font-size: 1.18em; }
@@ -570,20 +1074,46 @@ pre,
 .ai-markdown li { margin: 0.2em 0; }
 .ai-markdown li::marker { color: var(--fg-faint); }
 .ai-markdown li > input[type='checkbox'] { margin-right: 0.4em; }
-.ai-markdown a { color: var(--accent); }
-.ai-markdown strong { color: var(--fg); font-weight: 600; }
+.ai-markdown a { color: var(--stream-link); }
+.ai-file-chip--interactive {
+  color: var(--file-preview-link);
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease;
+}
+.ai-file-chip--interactive .ai-file-chip__label {
+  text-decoration-line: underline;
+  text-decoration-color: var(--file-preview-link-decoration);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  transition: text-decoration-color 120ms ease;
+}
+.ai-file-chip--interactive:hover {
+  border-color: var(--file-preview-link-border);
+  background: var(--file-preview-link-bg);
+  color: var(--file-preview-link-hover);
+}
+.ai-file-chip--interactive:hover .ai-file-chip__label {
+  text-decoration-color: currentColor;
+}
+.ai-file-chip--interactive:focus-visible {
+  outline: 2px solid var(--file-preview-link);
+  outline-offset: 2px;
+}
+.ai-markdown strong { color: var(--stream-fg-strong); font-weight: 600; }
 .ai-markdown em { font-style: italic; }
 .ai-markdown hr {
   margin: 1em 0;
   border: 0;
-  border-top: 1px solid var(--border);
+  border-top: 1px solid var(--stream-surface-border);
 }
 .ai-markdown blockquote {
   margin: 0.6em 0;
   padding: 0.1em 0.9em;
-  border-left: 3px solid var(--accent);
-  background: color-mix(in oklab, var(--accent) 8%, transparent);
-  color: var(--fg-dim);
+  border-left: 3px solid var(--stream-blockquote-border);
+  background: var(--stream-blockquote-bg);
+  color: var(--stream-blockquote-text);
   border-radius: 0 6px 6px 0;
 }
 
@@ -591,18 +1121,18 @@ pre,
 .ai-table { border-collapse: collapse; }
 .ai-table th,
 .ai-table td {
-  border: 1px solid var(--border);
+  border: 1px solid var(--stream-surface-border);
   padding: 0.4em 0.7em;
   text-align: left;
   vertical-align: top;
 }
 .ai-table th {
-  background: var(--code-header-bg);
+  background: var(--stream-table-header-bg);
   font-weight: 600;
-  color: var(--fg);
+  color: var(--stream-fg-strong);
 }
 .ai-table tr:nth-child(even) td {
-  background: color-mix(in oklab, var(--bg) 50%, var(--panel));
+  background: var(--stream-table-row-alt-bg);
 }
 
 /* Fenced code block body. */
@@ -610,7 +1140,7 @@ pre,
 .ai-code__scroll code {
   display: block;
   padding: 0.75rem 0.9rem;
-  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-family: var(--fuc-mono-font-family);
   white-space: pre;
   tab-size: 2;
 }
@@ -644,7 +1174,7 @@ pre,
 }
 
 /* highlight.js token classes → theme vars (no stock hljs stylesheet imported). */
-.hljs { color: var(--fg); background: transparent; }
+.hljs { color: var(--stream-fg-strong); background: transparent; }
 .hljs-comment,
 .hljs-quote { color: var(--hl-comment); font-style: italic; }
 .hljs-keyword,
@@ -680,12 +1210,25 @@ pre,
 .hljs-strong { font-weight: 600; }
 
 /* Streaming reasoning header shimmer. */
+.ai-reasoning__toggle {
+  color: var(--stream-reasoning-fg);
+}
+.ai-reasoning__toggle:hover {
+  color: var(--stream-reasoning-header-hover);
+}
+.ai-reasoning__icon {
+  color: var(--stream-reasoning-icon);
+}
+.ai-reasoning__inner,
+.ai-reasoning__inner .ai-stream-markdown {
+  color: var(--stream-reasoning-fg);
+}
 .ai-reasoning__live {
   background: linear-gradient(
     90deg,
-    var(--fg-faint),
-    color-mix(in oklab, var(--accent) 70%, var(--fg)),
-    var(--fg-faint)
+    var(--stream-reasoning-fg),
+    var(--stream-reasoning-accent),
+    var(--stream-reasoning-fg)
   );
   background-size: 200% 100%;
   -webkit-background-clip: text;
@@ -697,7 +1240,7 @@ pre,
   to { background-position: -200% 0; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .ai-reasoning__live { animation: none; color: var(--fg-faint); }
+  .ai-reasoning__live { animation: none; color: var(--stream-reasoning-fg); }
   .ai-reasoning__body { transition: none; }
 }
 
@@ -707,7 +1250,7 @@ pre,
   width: 0.5em;
   height: 1em;
   vertical-align: text-bottom;
-  background: var(--accent);
+  background: var(--stream-caret);
   animation: ai-caret-blink 1s step-end infinite;
 }
 @keyframes ai-caret-blink {
@@ -758,6 +1301,25 @@ pre,
 .ai-markdown .katex { font-size: 1.02em; }
 
 /* Tool events are low-priority stream telemetry, not content cards. */
+.ai-tool-toggle {
+  color: var(--stream-tool-meta);
+}
+.ai-tool-toggle:hover {
+  color: var(--stream-tool-name);
+}
+.ai-tool-icon {
+  color: var(--stream-tool-meta);
+}
+.ai-tool-name {
+  color: var(--stream-tool-name);
+}
+.ai-tool-subject {
+  color: var(--stream-tool-subject);
+}
+.ai-tool-meta,
+.ai-tool-label {
+  color: var(--stream-tool-meta);
+}
 .ai-tools-group {
   gap: 1px;
   margin: 0.2rem 0;
@@ -765,8 +1327,8 @@ pre,
 .ai-tool-card {
   position: relative;
   overflow: hidden;
-  border: 1px solid transparent;
-  background: color-mix(in oklab, var(--panel-2) 18%, transparent);
+  border: 1px solid var(--stream-tool-card-border);
+  background: var(--stream-tool-card-bg);
   transition: border-color 0.12s, background 0.12s;
 }
 .ai-tool-card::before {
@@ -777,23 +1339,23 @@ pre,
   bottom: 0.35rem;
   width: 1px;
   border-radius: 999px;
-  background: color-mix(in oklab, var(--fg-faint) 38%, transparent);
+  background: var(--stream-tool-rail);
   opacity: 0.55;
 }
 .ai-tool-card:hover,
 .ai-tool-card[data-open='true'] {
-  border-color: color-mix(in oklab, var(--fg-faint) 14%, transparent);
-  background: color-mix(in oklab, var(--panel-2) 28%, transparent);
+  border-color: var(--stream-tool-card-hover-border);
+  background: var(--stream-tool-card-hover-bg);
 }
 .ai-tool-card[data-status='running'] {
-  background: color-mix(in oklab, var(--status-running) 5%, transparent);
+  background: var(--stream-tool-running-bg);
 }
 .ai-tool-card[data-status='running']::before {
   width: 2px;
   background: linear-gradient(
     180deg,
     transparent 0%,
-    color-mix(in oklab, var(--status-running) 76%, var(--accent)) 46%,
+    var(--stream-tool-running-rail) 46%,
     transparent 100%
   );
   background-size: 100% 220%;
@@ -801,22 +1363,22 @@ pre,
   animation: ai-tool-flow 1.15s linear infinite;
 }
 .ai-tool-card[data-status='done']::before {
-  background: color-mix(in oklab, var(--fg-faint) 32%, transparent);
+  background: var(--stream-tool-done-rail);
 }
 .ai-tool-card[data-status='error'] {
-  background: color-mix(in oklab, var(--status-error) 6%, transparent);
+  background: var(--stream-tool-error-bg);
 }
 .ai-tool-card[data-status='error']::before {
   width: 2px;
-  background: color-mix(in oklab, var(--status-error) 70%, transparent);
+  background: var(--stream-tool-error-rail);
   opacity: 0.85;
 }
 .ai-tool-body {
-  border-top: 1px solid color-mix(in oklab, var(--fg-faint) 14%, transparent);
+  border-top: 1px solid var(--stream-tool-card-border);
 }
 .ai-tool-panel {
-  border-color: color-mix(in oklab, var(--fg-faint) 18%, transparent);
-  background: color-mix(in oklab, var(--code-bg) 90%, transparent);
+  border-color: var(--stream-tool-panel-border);
+  background: var(--stream-tool-panel-bg);
 }
 @keyframes ai-tool-flow {
   from { background-position: 0 120%; }

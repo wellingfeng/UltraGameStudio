@@ -3,6 +3,7 @@ import Sidebar from '@/panels/Sidebar';
 import AIDock from '@/panels/AIDock';
 import ScheduledTaskRunner from '@/components/ScheduledTaskRunner';
 import { primeCliRuntime } from '@/lib/cliConfig';
+import { onSingleInstanceWarning } from '@/lib/tauri';
 import { useStore } from '@/store/useStore';
 
 /**
@@ -19,6 +20,21 @@ export default function App() {
     initHistory();
     void primeCliRuntime();
   }, [initHistory]);
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void onSingleInstanceWarning((message) => {
+      window.alert(message || '只能同时运行一个进程');
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-bg text-fg">

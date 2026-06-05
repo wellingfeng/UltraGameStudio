@@ -180,7 +180,7 @@ function MarkdownImpl({
   };
 
   return (
-    <div className="ai-markdown text-sm leading-relaxed text-fg-dim">
+    <div className="ai-markdown ai-stream-markdown text-sm leading-relaxed">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
         rehypePlugins={[

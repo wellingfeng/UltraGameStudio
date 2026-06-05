@@ -50,6 +50,52 @@ export interface ModelCliScanResult {
   error?: string | null;
 }
 
+export type SlashCatalogEntryKind = 'command' | 'skill';
+
+export interface SlashCatalogText {
+  'zh-CN'?: string;
+  'en-US'?: string;
+  [locale: string]: string | undefined;
+}
+
+export interface SlashCatalogEntry {
+  id: string;
+  kind: SlashCatalogEntryKind;
+  name: string;
+  label: SlashCatalogText;
+  detail: SlashCatalogText;
+  insertText: SlashCatalogText;
+  source?: string | null;
+  sourceAdapter?: string | null;
+}
+
+export interface SlashCatalogSnapshot {
+  scannedAtMs: number;
+  ready: boolean;
+  entries: SlashCatalogEntry[];
+  error?: string | null;
+}
+
+export interface UltracodeRunOptions {
+  cwd?: string;
+  adapter?: string;
+  model?: string;
+  provider?: string;
+  concurrency?: number;
+  timeoutSeconds?: number;
+  runId?: string;
+  onProgress?: (text: string) => void;
+}
+
+export interface UltracodeRunResult {
+  exitCode: number;
+  stdout: string;
+  stderr: string;
+  runId: string;
+  runDir?: string | null;
+  resultJson?: unknown;
+}
+
 export interface CliPathValidation {
   path: string;
   normalizedPath: string;
@@ -72,6 +118,13 @@ export interface LocalFilePreview {
   truncated: boolean;
   text?: string | null;
   base64?: string | null;
+}
+
+export interface ClipboardImageSaveRequest {
+  bytesBase64: string;
+  mime: string;
+  fileName?: string | null;
+  cwd?: string | null;
 }
 
 export type LocalModelRuntimeState =
@@ -259,6 +312,7 @@ export async function aiEditViaCli(
 export async function freeProxyEnsure(
   channels: Array<{
     id: string;
+    label?: string;
     transport: string;
     baseUrl: string;
     apiKey: string;
@@ -467,6 +521,22 @@ export async function previewLocalFile(
   });
 }
 
+/** Persist a pasted clipboard image and return the local path inserted in composer. */
+export async function saveClipboardImage(
+  request: ClipboardImageSaveRequest,
+): Promise<string> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  return invoke<string>('save_clipboard_image', {
+    bytesBase64: request.bytesBase64,
+    mime: request.mime,
+    fileName: request.fileName ?? null,
+    cwd: request.cwd ?? null,
+  });
+}
+
 /** Best-effort cancellation for an in-flight local agent CLI invocation. */
 export async function cancelAiCli(runId: string): Promise<void> {
   if (!tauriAvailable()) return;
@@ -494,6 +564,54 @@ export async function runWorkflow(
     cliCommand: cliCommand ?? null,
     shell: runShellPayload(),
   });
+}
+
+/** Execute `/ultracode <task>` through the bundled CLI dynamic harness. */
+export async function runUltracode(
+  task: string,
+  opts: UltracodeRunOptions = {},
+): Promise<UltracodeRunResult> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  __cliSeq += 1;
+  const runId = opts.runId ?? `ultracode_${Date.now()}_${__cliSeq}`;
+
+  let unlisten: UnlistenFn | undefined;
+  if (opts.onProgress) {
+    const listen = await getListen();
+    unlisten = await listen<{ runId: string; text: string }>(
+      'ai-cli-progress',
+      (event) => {
+        if (event.payload?.runId === runId) opts.onProgress!(event.payload.text);
+      },
+    );
+  }
+
+  try {
+    const invoke = await getInvoke();
+    return await invoke<UltracodeRunResult>('run_ultracode', {
+      task,
+      cwd: opts.cwd ?? null,
+      adapter: opts.adapter ?? null,
+      model: opts.model ?? null,
+      provider: opts.provider ?? null,
+      concurrency: opts.concurrency ?? null,
+      timeoutSeconds: opts.timeoutSeconds ?? null,
+      runId,
+    });
+  } finally {
+    unlisten?.();
+  }
+}
+
+/** Read cached slash command / skill catalog. Scan runs in backend startup thread. */
+export async function slashCatalog(): Promise<SlashCatalogSnapshot> {
+  if (!tauriAvailable()) {
+    return { scannedAtMs: 0, ready: true, entries: [] };
+  }
+  const invoke = await getInvoke();
+  return invoke<SlashCatalogSnapshot>('slash_catalog');
 }
 
 /** Scan PATH for supported local model CLIs. Desktop-only. */
@@ -598,6 +716,35 @@ export async function onWorkflowNode(
   const listen = await getListen();
   return listen<WorkflowNodeEvent>('workflow-node', (event) =>
     cb(event.payload),
+  );
+}
+
+/** Subscribe to backend slash catalog refreshes. */
+export async function onSlashCatalogUpdated(
+  cb: (catalog: SlashCatalogSnapshot) => void,
+): Promise<UnlistenFn> {
+  if (!tauriAvailable()) {
+    return () => {};
+  }
+  const listen = await getListen();
+  return listen<SlashCatalogSnapshot>('slash-catalog-updated', (event) =>
+    cb(event.payload),
+  );
+}
+
+/**
+ * Subscribe to the desktop-shell single-instance warning. Fired when the user
+ * tries to launch a second app process and the existing one is reused instead.
+ */
+export async function onSingleInstanceWarning(
+  cb: (message: string) => void,
+): Promise<UnlistenFn> {
+  if (!tauriAvailable()) {
+    return () => {};
+  }
+  const listen = await getListen();
+  return listen<string>('single-instance-warning', (event) =>
+    cb(event.payload || '只能同时运行一个进程'),
   );
 }
 

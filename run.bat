@@ -51,6 +51,10 @@ set "RC=!errorlevel!"
 popd
 if not "!RC!"=="0" goto npm_fail
 :have_deps
+if exist "%EXE%" (
+  powershell -NoProfile -ExecutionPolicy Bypass -File "app\scripts\stop-running-exe.ps1" "%EXE%"
+  if errorlevel 1 goto stop_exe_fail
+)
 echo.
 echo [..] building: npm run package  ^(first build compiles Rust, may take minutes^)
 echo ============================================================
@@ -88,6 +92,9 @@ echo [X] npm install failed.
 goto pause_end
 :build_fail
 echo [X] build failed - see errors above.
+goto pause_end
+:stop_exe_fail
+echo [X] failed to close running exe before rebuild.
 goto pause_end
 :no_exe
 echo [X] exe not found: %EXE%

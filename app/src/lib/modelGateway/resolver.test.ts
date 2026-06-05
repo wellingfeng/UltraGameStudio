@@ -2,7 +2,12 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { IRGraph } from '@/core/ir';
 import { setActiveGatewaySelection } from '@/lib/gatewayConfig';
 import { PROVIDERS_STORAGE } from '@/lib/apiConfig';
-import { FREE_CHANNEL_PROVIDER_PREFIX } from '@/lib/freeChannels';
+import {
+  FREE_CHANNEL_AUTO_ID,
+  FREE_CHANNEL_AUTO_MODEL,
+  FREE_CHANNEL_PROVIDER_PREFIX,
+  setFreeChannelModel,
+} from '@/lib/freeChannels';
 import {
   resolveGatewayRoute,
   nodeGatewayOverride,
@@ -201,6 +206,41 @@ describe('model gateway compatibility', () => {
     expect(route.model).toBe('custom-model');
   });
 
+  it('uses a session model override without rewriting the provider default model', () => {
+    window.localStorage.setItem(
+      PROVIDERS_STORAGE,
+      JSON.stringify([
+        {
+          id: 'relay_provider',
+          kind: 'anthropic',
+          transport: 'cli',
+          name: 'Relay',
+          apiKey: 'sk-relay',
+          baseUrl: 'https://relay.example/v1/',
+          model: 'provider-default-model',
+        },
+      ]),
+    );
+    const workflow = buildWorkflow([]);
+    workflow.meta.gateway = {
+      defaults: {
+        adapter: 'claude-code',
+        modelClass: 'session-only-model',
+        modelOverride: 'session-only-model',
+        providerId: 'relay_provider',
+        channelId: 'default',
+      },
+    };
+
+    const route = resolveGatewayRoute(workflow);
+
+    expect(route.model).toBe('session-only-model');
+    expect(route.env).toMatchObject({ ANTHROPIC_MODEL: 'session-only-model' });
+    expect(JSON.parse(window.localStorage.getItem(PROVIDERS_STORAGE)!)[0].model).toBe(
+      'provider-default-model',
+    );
+  });
+
   it('normalizes known provider bare model ids before exporting CLI env', () => {
     window.localStorage.setItem(
       PROVIDERS_STORAGE,
@@ -285,6 +325,63 @@ describe('model gateway compatibility', () => {
     expect(route.transport).toBe('cli');
     expect(route.baseUrl).toBeUndefined();
     expect(route.env).toBeUndefined();
+  });
+
+  it('treats Free Auto as no fixed model, including legacy tier selections', () => {
+    const workflow = buildWorkflow([]);
+    workflow.meta.gateway = {
+      defaults: {
+        adapter: 'claude-code',
+        modelClass: 'opus',
+        providerId: `${FREE_CHANNEL_PROVIDER_PREFIX}${FREE_CHANNEL_AUTO_ID}`,
+        channelId: 'default',
+      },
+    };
+
+    const route = resolveGatewayRoute(workflow);
+
+    expect(route.providerId).toBe(`${FREE_CHANNEL_PROVIDER_PREFIX}${FREE_CHANNEL_AUTO_ID}`);
+    expect(route.model).toBeUndefined();
+    expect(route.env).toMatchObject({
+      ANTHROPIC_BASE_URL: expect.stringContaining('/ch/auto'),
+    });
+    expect(route.env).not.toHaveProperty('ANTHROPIC_MODEL');
+  });
+
+  it('uses an explicit Free Auto model override when one is selected', () => {
+    const workflow = buildWorkflow([]);
+    workflow.meta.gateway = {
+      defaults: {
+        adapter: 'claude-code',
+        modelClass: FREE_CHANNEL_AUTO_MODEL,
+        modelOverride: 'z-ai/glm-5.1',
+        providerId: `${FREE_CHANNEL_PROVIDER_PREFIX}${FREE_CHANNEL_AUTO_ID}`,
+        channelId: 'default',
+      },
+    };
+
+    const route = resolveGatewayRoute(workflow);
+
+    expect(route.model).toBe('z-ai/glm-5.1');
+    expect(route.env).toMatchObject({ ANTHROPIC_MODEL: 'z-ai/glm-5.1' });
+  });
+
+  it('uses a configured Free Auto model from Settings', () => {
+    setFreeChannelModel(FREE_CHANNEL_AUTO_ID, 'z-ai/glm-4.6');
+    const workflow = buildWorkflow([]);
+    workflow.meta.gateway = {
+      defaults: {
+        adapter: 'claude-code',
+        modelClass: FREE_CHANNEL_AUTO_MODEL,
+        providerId: `${FREE_CHANNEL_PROVIDER_PREFIX}${FREE_CHANNEL_AUTO_ID}`,
+        channelId: 'default',
+      },
+    };
+
+    const route = resolveGatewayRoute(workflow);
+
+    expect(route.model).toBe('z-ai/glm-4.6');
+    expect(route.env).toMatchObject({ ANTHROPIC_MODEL: 'z-ai/glm-4.6' });
   });
 
   it('prefers cli-backed Claude providers over stale browser-direct defaults', () => {

@@ -36,6 +36,10 @@ describe('scanFileRefs', () => {
     expect(hasFileRef('call react.useState here')).toBe(false);
   });
 
+  it('does not match dotted prose abbreviations', () => {
+    expect(hasFileRef('The U.S. build passed at 5 p.m.')).toBe(false);
+  });
+
   it('does not match a CJK clause containing a stray slash', () => {
     expect(hasFileRef('我会先定位左侧工具栏/导入按钮的实现和项目里的补充约定')).toBe(
       false,
@@ -47,6 +51,13 @@ describe('scanFileRefs', () => {
     const parts = scanFileRefs('已定位到 app/src/panels/Sidebar.tsx 文件');
     const ref = parts.find((p) => typeof p !== 'string');
     expect(ref && typeof ref !== 'string' ? ref.basename : '').toBe('Sidebar.tsx');
+  });
+
+  it('finds a unicode filename with a known text extension', () => {
+    const name = 'Moon亮晶分析和渲染整体架构.html';
+    const parts = scanFileRefs(`已另写新 HTML: ${name}`);
+    const ref = parts.find((p) => typeof p !== 'string');
+    expect(ref && typeof ref !== 'string' ? ref.basename : '').toBe(name);
   });
 
   it('reconstructs surrounding text losslessly', () => {

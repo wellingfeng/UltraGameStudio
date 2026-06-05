@@ -163,10 +163,12 @@ describe('toolMeta', () => {
     expect(toolCategory('grep')).toBe('search');
     expect(toolCategory('command_execution')).toBe('exec');
     expect(toolCategory('file_change')).toBe('write');
+    expect(toolCategory('free_proxy')).toBe('web');
     expect(toolCategory('mystery')).toBe('other');
   });
   it('maps to icons', () => {
     expect(toolIconName('Bash')).toBe('SquareTerminal');
+    expect(toolIconName('free_proxy')).toBe('Globe');
     expect(toolIconName('unknown')).toBe('Wrench');
   });
 });

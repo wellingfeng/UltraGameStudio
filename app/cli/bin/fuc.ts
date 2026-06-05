@@ -23,6 +23,7 @@ import { runList, type ListOptions } from '../commands/list';
 import { runConvert, type ConvertOptions } from '../commands/convert';
 import { runDiff, type DiffOptions } from '../commands/diff';
 import { runInfo, type InfoOptions } from '../commands/info';
+import { runUltracode, type UltracodeOptions } from '../commands/ultracode';
 
 declare const __FUC_CLI_VERSION__: string;
 const VERSION = typeof __FUC_CLI_VERSION__ !== 'undefined' ? __FUC_CLI_VERSION__ : '0.1.0';
@@ -35,7 +36,8 @@ program
     'FreeUltraCode CLI — 用自然语言生成 workflow 脚本，并运行它。\n\n' +
       '  fuc gen "<需求>" -o flow.js     用自然语言生成 workflow（零配置，复用本地 claude 登录态）\n' +
       '  fuc gen flow.js "<修改意图>"     修改已有 workflow 脚本\n' +
-      '  fuc run flow.js                 运行 workflow 脚本',
+      '  fuc run flow.js                 运行 workflow 脚本\n' +
+      '  fuc ultracode "<任务>"          即时生成并执行动态 workflow harness',
   )
   .version(VERSION, '--version', 'show version number')
   .option('-c, --config <path>', 'config file path (default ~/.fuc/config.json)')
@@ -111,6 +113,25 @@ program
   .option('--timeout <seconds>', 'per-node timeout seconds')
   .option('--cwd <path>', 'working directory')
   .action((file: string, local: RunCommandOptions) => dispatch(() => runRun(file, withGlobals(local))));
+
+program
+  .command('ultracode <task>')
+  .description('即时生成、即时执行、带任务账本和验收门的动态 workflow harness')
+  .option('-a, --adapter <adapter>', 'adapter override')
+  .option('-m, --model <model>', 'model override (sonnet, opus, haiku, …)')
+  .option('-p, --provider <id>', 'provider id (gateway routing)')
+  .option('-o, --output <path>', 'write final result JSON to a file')
+  .option('--interactive', 'enable terminal interaction')
+  .option('--non-interactive', 'auto-skip interaction requests (default)')
+  .option('--planner-only', 'only generate and persist harness.json, do not execute it')
+  .option('--concurrency <n>', 'concurrency limit')
+  .option('--max-retries <n>', 'max auto-retries per node')
+  .option('--timeout <seconds>', 'per-node timeout seconds')
+  .option('--cwd <path>', 'working directory')
+  .option('--run-id <id>', 'explicit run directory id under .fuc-run/')
+  .action((task: string, local: UltracodeOptions) =>
+    dispatch(() => runUltracode(task, withGlobals(local))),
+  );
 
 // --- Internal commands (hidden from `--help`; kept as reusable steps) ---
 

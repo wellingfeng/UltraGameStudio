@@ -16,7 +16,7 @@ import { freeChannelAutoKeys, freeProxyEnsure, isTauri } from '@/lib/tauri';
  * Storage keys (localStorage):
  *   fuc_free_channel_keys_v1   -> { [id]: apiKey }
  *   fuc_free_channel_models_v1 -> { [id]: modelOverride }
- *   fuc_free_proxy_port_v1     -> number (default 8765)
+ *   fuc_free_proxy_port_v1     -> number (default 8766)
  *   fuc_free_proxy_token_v1    -> per-process local proxy auth token
  *
  * Exports the UI phase relies on:
@@ -30,6 +30,7 @@ import { freeChannelAutoKeys, freeProxyEnsure, isTauri } from '@/lib/tauri';
 export type FreeChannelTransport = 'openai' | 'anthropic' | 'auto';
 
 export const FREE_CHANNEL_AUTO_ID = 'auto';
+export const FREE_CHANNEL_AUTO_MODEL = 'auto';
 
 export interface FreeChannel {
   /** Stable id, e.g. 'groq'. */
@@ -70,7 +71,8 @@ export interface FreeChannelsImportResult {
 
 export const FREE_CHANNEL_PROVIDER_PREFIX = 'freecc:';
 
-const DEFAULT_FREE_PROXY_PORT = 8765;
+const DEFAULT_FREE_PROXY_PORT = 8766;
+const MAX_FREE_PROXY_PORT = 8799;
 
 const KEYS_STORAGE = 'fuc_free_channel_keys_v1';
 const MODELS_STORAGE = 'fuc_free_channel_models_v1';
@@ -539,8 +541,23 @@ export function setFreeChannelKey(id: string, key: string): boolean {
 
 export function getFreeChannelModel(id: string): string {
   const override = (readRecord(MODELS_STORAGE)[id] ?? '').trim();
+  if (id === FREE_CHANNEL_AUTO_ID) {
+    if (override && !isFreeChannelAutoModel(override)) {
+      return normalizeFreeChannelModel(id, override);
+    }
+    return FREE_CHANNEL_AUTO_MODEL;
+  }
   if (override) return normalizeFreeChannelModel(id, override);
   return freeChannelById(id)?.defaultModel ?? '';
+}
+
+export function isFreeChannelAutoModel(model: string | undefined | null): boolean {
+  return model?.trim().toLowerCase() === FREE_CHANNEL_AUTO_MODEL;
+}
+
+export function getFreeChannelRouteModel(id: string, model = getFreeChannelModel(id)): string {
+  if (id === FREE_CHANNEL_AUTO_ID && isFreeChannelAutoModel(model)) return '';
+  return model;
 }
 
 export function getFreeChannelFallbackModels(id: string): string[] {
@@ -601,13 +618,17 @@ function uniqueModels(models: string[]): string[] {
  * settings input can show an empty field with the default as placeholder.
  */
 export function getFreeChannelModelOverride(id: string): string {
-  return (readRecord(MODELS_STORAGE)[id] ?? '').trim();
+  const override = (readRecord(MODELS_STORAGE)[id] ?? '').trim();
+  if (id === FREE_CHANNEL_AUTO_ID && isFreeChannelAutoModel(override)) return '';
+  return override;
 }
 
 export function setFreeChannelModel(id: string, model: string): boolean {
   const next = readRecord(MODELS_STORAGE);
   const trimmed = model.trim();
-  if (trimmed) next[id] = trimmed;
+  if (id === FREE_CHANNEL_AUTO_ID && isFreeChannelAutoModel(trimmed)) {
+    delete next[id];
+  } else if (trimmed) next[id] = trimmed;
   else delete next[id];
   return writeRecord(MODELS_STORAGE, next);
 }
@@ -672,7 +693,15 @@ export function getCachedFreeProxyPort(): number {
     const raw = window.localStorage.getItem(PORT_STORAGE);
     if (!raw) return DEFAULT_FREE_PROXY_PORT;
     const port = Number.parseInt(raw, 10);
-    return Number.isFinite(port) && port > 0 ? port : DEFAULT_FREE_PROXY_PORT;
+    if (
+      Number.isFinite(port) &&
+      port >= DEFAULT_FREE_PROXY_PORT &&
+      port <= MAX_FREE_PROXY_PORT
+    ) {
+      return port;
+    }
+    window.localStorage.removeItem(PORT_STORAGE);
+    return DEFAULT_FREE_PROXY_PORT;
   } catch {
     return DEFAULT_FREE_PROXY_PORT;
   }
@@ -725,9 +754,10 @@ export function freeChannelSelection(
   id: string,
   modelClass?: string,
 ): GatewaySelection {
+  const model = modelClass?.trim();
   return {
     adapter: 'claude-code',
-    modelClass: modelClass || 'sonnet',
+    modelClass: model || (id === FREE_CHANNEL_AUTO_ID ? FREE_CHANNEL_AUTO_MODEL : 'sonnet'),
     providerId: FREE_CHANNEL_PROVIDER_PREFIX + id,
     channelId: 'default',
   };
@@ -758,11 +788,11 @@ export function freeChannelGatewayProviders(): GatewayProvider[] {
   const proxyToken = getCachedFreeProxyToken();
   return FREE_CHANNELS.map((c) => {
     const baseUrl = `http://127.0.0.1:${port}/ch/${c.id}`;
-    const model = getFreeChannelModel(c.id);
+    const model = getFreeChannelRouteModel(c.id);
     return {
       id: FREE_CHANNEL_PROVIDER_PREFIX + c.id,
       kind: 'anthropic',
-      name: 'Free · ' + c.label,
+      name: c.label,
       adapter: 'claude-code',
       channels: [
         {
@@ -790,18 +820,22 @@ export function freeChannelGatewayProviders(): GatewayProvider[] {
  * No-op (returns the cached port) outside the desktop shell.
  */
 export async function ensureFreeProxy(
-  opts: { strict?: boolean } = {},
+  opts: { strict?: boolean; modelOverrides?: Record<string, string | undefined> } = {},
 ): Promise<number> {
   if (!isTauri()) return getCachedFreeProxyPort();
   const channels = FREE_CHANNELS.filter((c) => freeChannelReady(c.id)).map(
-    (c) => ({
-      id: c.id,
-      transport: c.transport,
-      baseUrl: c.upstreamBaseUrl,
-      apiKey: c.local ? '' : getFreeChannelKey(c.id),
-      model: getFreeChannelModel(c.id),
-      fallbackModels: getFreeChannelFallbackModels(c.id),
-    }),
+    (c) => {
+      const model = opts.modelOverrides?.[c.id] ?? getFreeChannelModel(c.id);
+      return {
+        id: c.id,
+        label: c.label,
+        transport: c.transport,
+        baseUrl: c.upstreamBaseUrl,
+        apiKey: c.local ? '' : getFreeChannelKey(c.id),
+        model: getFreeChannelRouteModel(c.id, model),
+        fallbackModels: getFreeChannelFallbackModels(c.id),
+      };
+    },
   );
   try {
     const info = await freeProxyEnsure(channels);

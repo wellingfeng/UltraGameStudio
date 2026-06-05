@@ -362,8 +362,8 @@ function contextMenuFavoriteButton(container: HTMLElement): HTMLButtonElement {
     container.querySelectorAll('button:not([role="tab"])'),
   ).find(
     (item) =>
-      item.textContent?.trim() === '收藏' ||
-      item.textContent?.trim() === '取消收藏',
+      item.textContent?.trim() === '添加到自动化' ||
+      item.textContent?.trim() === '从自动化移除',
   );
   expect(button).toBeInstanceOf(HTMLButtonElement);
   return button as HTMLButtonElement;
@@ -372,7 +372,7 @@ function contextMenuFavoriteButton(container: HTMLElement): HTMLButtonElement {
 function contextMenuScheduleButton(container: HTMLElement): HTMLButtonElement {
   const button = Array.from(
     container.querySelectorAll('button:not([role="tab"])'),
-  ).find((item) => item.textContent?.trim() === '定时执行');
+  ).find((item) => item.textContent?.trim() === '设置定时运行');
   expect(button).toBeInstanceOf(HTMLButtonElement);
   return button as HTMLButtonElement;
 }
@@ -526,7 +526,7 @@ describe('Sidebar workflow rename', () => {
       await openSessionContextMenu(sessionButton(view.container, SESSION.title));
 
       const favoriteButton = contextMenuFavoriteButton(view.container);
-      expect(favoriteButton.textContent).toContain('收藏');
+      expect(favoriteButton.textContent).toContain('添加到自动化');
 
       await clickButton(favoriteButton);
 
@@ -557,7 +557,7 @@ describe('Sidebar workflow rename', () => {
       await openSessionContextMenu(sessionButton(view.container, SESSION.title));
 
       const favoriteButton = contextMenuFavoriteButton(view.container);
-      expect(favoriteButton.textContent).toContain('取消收藏');
+      expect(favoriteButton.textContent).toContain('从自动化移除');
 
       await clickButton(favoriteButton);
 
@@ -588,7 +588,7 @@ describe('Sidebar workflow rename', () => {
       await openSessionContextMenu(sessionButton(view.container, SESSION.title));
       await clickButton(contextMenuScheduleButton(view.container));
 
-      expect(view.container.textContent).toContain('定时执行任务');
+      expect(view.container.textContent).toContain('自动化定时运行');
       const textarea = view.container.querySelector('textarea');
       expect(textarea).toBeInstanceOf(HTMLTextAreaElement);
       await changeTextAreaValue(
@@ -638,7 +638,7 @@ describe('Sidebar workflow rename', () => {
       await openSessionContextMenu(sessionButton(view.container, 'Research chat'));
 
       const favoriteButton = contextMenuFavoriteButton(view.container);
-      expect(favoriteButton.textContent).toContain('收藏');
+      expect(favoriteButton.textContent).toContain('添加到自动化');
 
       await clickButton(favoriteButton);
 
@@ -680,7 +680,7 @@ describe('Sidebar workflow rename', () => {
     const view = await renderSidebar();
 
     try {
-      await clickButton(tabButton(view.container, '收藏夹'));
+      await clickButton(tabButton(view.container, '自动化'));
 
       expect(view.container.textContent).toContain('Favorite Workflow');
       expect(view.container.textContent).not.toContain('Plain Workflow');
@@ -1456,10 +1456,10 @@ describe('Sidebar session search', () => {
     const view = await renderSidebar();
 
     try {
-      await clickButton(tabButton(view.container, '收藏夹'));
+      await clickButton(tabButton(view.container, '自动化'));
 
       expect(queryHistorySearchInput(view.container)).toBeNull();
-      expect(view.container.textContent).toContain('暂无收藏的会话');
+      expect(view.container.textContent).toContain('暂无自动化会话');
     } finally {
       await view.cleanup();
     }
@@ -1880,18 +1880,94 @@ describe('Sidebar session search', () => {
       expect(button).toBeInstanceOf(HTMLButtonElement);
       return button as HTMLButtonElement;
     };
+    const collapseButton = () => {
+      const button = Array.from(view.container.querySelectorAll('button')).find(
+        (item) => item.textContent?.trim() === '收起',
+      );
+      expect(button).toBeInstanceOf(HTMLButtonElement);
+      return button as HTMLButtonElement;
+    };
 
     try {
       expect(visiblePagedSessionButtons()).toHaveLength(5);
       expect(visiblePagedSessionTitles()).toContain('Paged Session 5');
       expect(visiblePagedSessionTitles()).not.toContain('Paged Session 6');
+      expect(view.container.textContent).not.toContain('收起');
 
       await clickButton(loadMoreButton());
 
       expect(visiblePagedSessionButtons()).toHaveLength(10);
       expect(visiblePagedSessionTitles()).toContain('Paged Session 10');
       expect(visiblePagedSessionTitles()).not.toContain('Paged Session 11');
+      expect(view.container.textContent).toContain('收起');
       expect(view.container.textContent).toContain('加载更多');
+
+      await clickButton(collapseButton());
+
+      expect(visiblePagedSessionButtons()).toHaveLength(5);
+      expect(visiblePagedSessionTitles()).toContain('Paged Session 5');
+      expect(visiblePagedSessionTitles()).not.toContain('Paged Session 6');
+      expect(view.container.textContent).not.toContain('收起');
+      expect(view.container.textContent).toContain('加载更多');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('collapses flat fallback history in pages of five', async () => {
+    resetSidebarStore();
+    const manySessions = Array.from({ length: 12 }, (_, index) => ({
+      ...SESSION,
+      id: `s_flat_page_${index}`,
+      title: `Flat Paged Session ${index + 1}`,
+      isWorkflow: false,
+    }));
+    mockState.workspaces = [];
+    mockState.sessionTree = {};
+    mockState.sessions = manySessions;
+    mockState.activeWorkspaceId = null;
+    mockState.activeSessionId = manySessions[0].id;
+
+    const view = await renderSidebar();
+    const visibleFlatSessionButtons = () =>
+      Array.from(view.container.querySelectorAll('button')).filter((button) =>
+        button.textContent?.includes('Flat Paged Session'),
+      );
+    const visibleFlatSessionTitles = () =>
+      Array.from(view.container.querySelectorAll('span'))
+        .map((span) => span.textContent ?? '')
+        .filter((text) => text.startsWith('Flat Paged Session'));
+    const loadMoreButton = () => {
+      const button = Array.from(view.container.querySelectorAll('button')).find(
+        (item) => item.textContent?.trim() === '加载更多',
+      );
+      expect(button).toBeInstanceOf(HTMLButtonElement);
+      return button as HTMLButtonElement;
+    };
+    const collapseButton = () => {
+      const button = Array.from(view.container.querySelectorAll('button')).find(
+        (item) => item.textContent?.trim() === '收起',
+      );
+      expect(button).toBeInstanceOf(HTMLButtonElement);
+      return button as HTMLButtonElement;
+    };
+
+    try {
+      expect(visibleFlatSessionButtons()).toHaveLength(5);
+      expect(visibleFlatSessionTitles()).toContain('Flat Paged Session 5');
+      expect(visibleFlatSessionTitles()).not.toContain('Flat Paged Session 6');
+
+      await clickButton(loadMoreButton());
+
+      expect(visibleFlatSessionButtons()).toHaveLength(10);
+      expect(visibleFlatSessionTitles()).toContain('Flat Paged Session 10');
+      expect(visibleFlatSessionTitles()).not.toContain('Flat Paged Session 11');
+
+      await clickButton(collapseButton());
+
+      expect(visibleFlatSessionButtons()).toHaveLength(5);
+      expect(visibleFlatSessionTitles()).toContain('Flat Paged Session 5');
+      expect(visibleFlatSessionTitles()).not.toContain('Flat Paged Session 6');
     } finally {
       await view.cleanup();
     }

@@ -73,13 +73,13 @@ export default function ReasoningBlock({
         type="button"
         onClick={toggle}
         aria-expanded={open}
-        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs text-fg-faint transition-colors hover:text-fg-dim"
+        className="ai-reasoning__toggle flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-xs transition-colors"
       >
         <ChevronRight
           size={13}
           className={'shrink-0 transition-transform ' + (open ? 'rotate-90' : '')}
         />
-        <Brain size={13} className="shrink-0 text-accent/70" />
+        <Brain size={13} className="ai-reasoning__icon shrink-0" />
         <span className={!done ? 'ai-reasoning__live' : ''}>{header}</span>
       </button>
       <div
@@ -87,7 +87,7 @@ export default function ReasoningBlock({
         style={{ gridTemplateRows: open ? '1fr' : '0fr' }}
       >
         <div className="min-h-0 overflow-hidden">
-          <div className="ai-reasoning__inner break-words border-t border-border-soft px-3 py-2 text-[12px] leading-relaxed text-fg-faint">
+          <div className="ai-reasoning__inner break-words border-t border-border-soft px-3 py-2 text-[12px] leading-relaxed">
             {text ? (
               <Markdown text={text} streaming={streaming} />
             ) : streaming ? (

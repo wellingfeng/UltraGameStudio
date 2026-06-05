@@ -23,6 +23,13 @@ import {
   strictBlueprintRetryAppendix,
 } from '@/core/genPrompt';
 import { applyIntent } from '@/core/intentEngine';
+import { extractToolSentinels } from '@/components/ai/lib/toolEvent';
+import {
+  personalInstructionsBlock,
+  personalInstructionsForSelection,
+  withPersonalInstructionsForSelection,
+  type PersonalInstructionsByModel,
+} from '@/core/personalInstructions';
 import {
   assessConsensusFit,
   defaultConsensusLenses,
@@ -70,14 +77,16 @@ import { ensureFreeProxy, isFreeChannelSelection } from '@/lib/freeChannels';
 import {
   modelClassFromModelId,
   nodeParamsWithGatewayOverride,
+  listGatewayRunOptions,
   normalizeGatewaySelection,
   normalizeGatewayWorkflow as migrateWorkflowGateway,
+  selectionKey,
   systemDefaultGatewaySelection,
   workflowDefaultGatewaySelection,
 } from '@/lib/modelGateway/resolver';
 import { shortId } from '@/lib/id';
 import { translatePromptFields } from '@/lib/promptTranslation';
-import { aiEditViaCli, cancelAiCli, isTauri } from '@/lib/tauri';
+import { aiEditViaCli, cancelAiCli, isTauri, runUltracode } from '@/lib/tauri';
 import {
   applyGatewayOverride,
   completeGatewayText,
@@ -85,6 +94,7 @@ import {
   resolveCliGatewayRoute,
   resolveDirectGatewayRoute,
 } from '@/lib/modelGateway/modelGateway';
+import type { ResolvedGatewayRoute } from '@/lib/modelGateway/types';
 import {
   UNIFIED_SYSTEM,
   SIMPLE_CHAT_SYSTEM,
@@ -139,11 +149,13 @@ import {
 import {
   loadComposer,
   loadLocale,
+  loadPersonalInstructionsByModel,
   loadPromptAutoTranslate,
   loadPromptGroups,
   loadPromptGroupsVersion,
   saveComposer,
   saveLocale,
+  savePersonalInstructionsByModel,
   savePromptAutoTranslate,
   savePromptGroups,
   savePromptGroupsVersion,
@@ -156,7 +168,12 @@ import {
 } from '@/lib/workspaceHistory';
 import {
   applyAppearance,
+  isBuiltinStylePresetId,
+  normalizeAppearanceSettings,
+  streamSchemeForStylePresetId,
   type AppearanceSettings,
+  type FontFamilyId,
+  type StreamSchemeId,
   type StylePresetId,
 } from '@/lib/appearance';
 import { loadAppearance, saveAppearance } from '@/lib/appearanceStorage';
@@ -215,6 +232,8 @@ export type WorkflowSessionKey = {
   sessionId: string | null;
 };
 
+export type BlockedSendTip = 'model-switched-while-chatting';
+
 /**
  * CONTRACT: the single zustand store. App.tsx and panels rely on this exact
  * surface — keep these fields and actions stable.
@@ -233,7 +252,8 @@ export type WorkflowSessionKey = {
  *   selectNode(id), setWorkflow(ir), setAdapter(id), runWorkflow(),
  *   newWorkflow(), newSimpleWorkflow(), newSession(), sendPrompt(text), setComposer(patch),
  *   setComposerDraft(text), appendComposerDraft(text), setWorkspace(path),
- *   setStylePresetId(stylePresetId)
+ *   setStylePresetId(stylePresetId), setStreamSchemeId(streamSchemeId),
+ *   setFontFamilyId(fontFamilyId), setFontSizePx(fontSizePx)
  * Actions (added this milestone — graph editing + run/mode control):
  *   addNode(type, params?) -> id, updateNodeParams(id, patch),
  *   updateNodeLabel(id, label), removeNode(id),
@@ -295,6 +315,8 @@ export interface StoreState {
    * blueprint editing), so consecutive chat messages aren't blocked.
    */
   chattingSessions: WorkflowSessionKey[];
+  /** Short-lived composer tip when a send is rejected by chat concurrency rules. */
+  blockedSendTip: BlockedSendTip | null;
 
   // Session / UI state
   sessions: Session[];
@@ -303,6 +325,8 @@ export interface StoreState {
   promptGroups: PromptGroup[];
   locale: Locale;
   promptAutoTranslate: boolean;
+  personalInstructionsByModel: PersonalInstructionsByModel;
+  personalInstructions: string;
   appearance: AppearanceSettings;
 
   // Composer (AI-input) state — pure UI, never enters the IRGraph.
@@ -350,7 +374,14 @@ export interface StoreState {
   initHistory: () => void;
   setLocale: (locale: Locale) => void;
   setPromptAutoTranslate: (enabled: boolean) => void;
+  setPersonalInstructions: (
+    instructions: string,
+    selection?: GatewaySelection | null,
+  ) => void;
   setStylePresetId: (stylePresetId: StylePresetId) => void;
+  setStreamSchemeId: (streamSchemeId: StreamSchemeId) => void;
+  setFontFamilyId: (fontFamilyId: FontFamilyId) => void;
+  setFontSizePx: (fontSizePx: number) => void;
   selectNode: (id: string | null) => void;
   /** Drill into a composite node's subgraph (pushes onto graphPath). */
   enterComposite: (nodeId: string) => void;
@@ -374,6 +405,7 @@ export interface StoreState {
   importWorkflowToWorkspace: (workspaceId: string, title?: string) => void;
   setAdapter: (adapter: string) => void;
   setGlobalRunSelection: (selection: GatewaySelection) => void;
+  setSessionRunSelection: (selection: GatewaySelection) => void;
   /** Clear the composer model pin so it inherits the Settings-active provider. */
   clearGlobalRunSelection: () => void;
   runWorkflow: () => void;
@@ -407,6 +439,8 @@ export interface StoreState {
     scheduledTask: ScheduledTaskConfig,
   ) => Promise<void>;
   sendPrompt: (text: string) => void;
+  runUltracodePrompt: (task: string) => void;
+  clearBlockedSendTip: () => void;
   /**
    * Submit the user's answer to an interactive node message (the AI-return dock
    * widget). Marks the message answered and unblocks the waiting run node so it
@@ -566,6 +600,24 @@ function composerDraftPatchForSession(
     composerDrafts,
     composerDraft: composerDraftForSession(composerDrafts, sessionKey),
   };
+}
+
+function personalInstructionsSelectionForState(
+  state: Pick<StoreState, 'workflow' | 'composer'>,
+): GatewaySelection {
+  return workflowDefaultGatewaySelection(state.workflow, state.composer.model);
+}
+
+function activePersonalInstructionsForState(
+  state: Pick<
+    StoreState,
+    'personalInstructionsByModel' | 'workflow' | 'composer'
+  >,
+): string {
+  return personalInstructionsForSelection(
+    state.personalInstructionsByModel,
+    personalInstructionsSelectionForState(state),
+  );
 }
 
 function sessionKeyPersistable(sessionKey: WorkflowSessionKey): boolean {
@@ -851,10 +903,6 @@ function untitledSessionTitle(locale: Locale): string {
 
 function isVisibleChatSessionSummary(summary: SessionSummary): boolean {
   return !summary.isWorkflow || summary.simple === true;
-}
-
-function isVisibleChatSessionRecord(record: SessionRecord): boolean {
-  return !record.isWorkflow || record.workflow?.meta?.simple === true;
 }
 
 function visibleChatSessionSummaries(
@@ -2008,7 +2056,6 @@ async function activateHistorySession(
 
   const record = await historyStore.getSession(targetWorkspaceId, sessionId);
   if (!record) return;
-  if (!isVisibleChatSessionRecord(record)) return;
   const session = sessionFromRecord(record);
 
   // If we're switching BACK to the session whose run is still executing, rebuild
@@ -2024,14 +2071,14 @@ async function activateHistorySession(
   // retained snapshot so a finished stream still restores its final messages.
   const aiEditSnapshot = getAiEditViewSource(targetWorkspaceId, session.id);
 
-  const recordIsSimpleChat = record.workflow?.meta?.simple === true;
+  const recordWorkflow = record.workflow
+    ? restoreWorkflowRunSnapshot(record.workflow, record.meta)
+    : null;
   const workflow = liveRun
     ? liveRun.workflow
     : aiEditSnapshot
       ? aiEditSnapshot.workflow
-    : recordIsSimpleChat && record.workflow
-      ? restoreWorkflowRunSnapshot(record.workflow, record.meta)
-      : chatWorkflow(record.title, state.locale);
+      : recordWorkflow ?? chatWorkflow(record.title, state.locale);
   const runProgress = liveRun
     ? {
         runState: liveRun.runState,
@@ -2040,7 +2087,7 @@ async function activateHistorySession(
       }
     : aiEditSnapshot
       ? emptyRunProgress()
-    : recordIsSimpleChat
+    : recordWorkflow
       ? runProgressFromSnapshot(workflow, workflow.meta.run ?? null)
       : emptyRunProgress();
   const canvasViewport = canvasViewportForSession(
@@ -2111,7 +2158,7 @@ async function activateHistorySession(
           ? aiEditSnapshot.messages
           : record.messages,
       ...runProgress,
-      canvasViewport: recordIsSimpleChat ? canvasViewport : null,
+      canvasViewport: recordWorkflow ? canvasViewport : null,
       selectedNodeId: null,
       mode: liveRun ? 'running' : 'design',
     };
@@ -2474,7 +2521,15 @@ function scheduledTaskAlertMessage(
   scheduledTask: ScheduledTaskConfig,
 ): string {
   const text = scheduledTask.reminderText.trim();
-  return text ? `定时任务提醒\n${title}\n\n${text}` : `定时任务提醒\n${title}`;
+  return text ? `自动化运行提醒\n${title}\n\n${text}` : `自动化运行提醒\n${title}`;
+}
+
+function firstReusableChatInput(messages: Message[], workflow?: IRGraph): string {
+  const firstMessageInput =
+    messages.find((message) => message.role === 'user' && message.text.trim())
+      ?.text.trim() ?? '';
+  if (firstMessageInput) return firstMessageInput;
+  return workflow ? startInputsFromWorkflow(workflow)[0]?.trim() ?? '' : '';
 }
 
 async function runScheduledTaskHistorySession(
@@ -2520,7 +2575,10 @@ async function runScheduledTaskHistorySession(
   }
 
   if (current.workflow.meta?.simple === true || target.isWorkflow === false) {
-    current.sendPrompt(normalizedTask.reminderText);
+    const reusableInput = target.favorite
+      ? firstReusableChatInput(current.messages, current.workflow)
+      : '';
+    current.sendPrompt(reusableInput || normalizedTask.reminderText);
     return;
   }
   current.runWorkflow();
@@ -2828,6 +2886,22 @@ const seedWorkflow = migrateWorkflowGateway(
   simpleBlueprint(undefined, seedLocale),
   defaultComposer.model,
 );
+const seedPersonalInstructionsSelection = workflowDefaultGatewaySelection(
+  seedWorkflow,
+  seedComposer.model,
+);
+const seedPersonalInstructionsSelections = [
+  seedPersonalInstructionsSelection,
+  ...listGatewayRunOptions().map((option) => option.selection),
+];
+const seedPersonalInstructionsByModel = loadPersonalInstructionsByModel(
+  seedPersonalInstructionsSelection,
+  seedPersonalInstructionsSelections,
+);
+const seedPersonalInstructions = personalInstructionsForSelection(
+  seedPersonalInstructionsByModel,
+  seedPersonalInstructionsSelection,
+);
 const seedWorkflowState = restoreWorkflowRunSnapshot(seedWorkflow);
 const seedRunProgress = runProgressFromSnapshot(
   seedWorkflowState,
@@ -2881,7 +2955,7 @@ function seedPromptGroups(): PromptGroup[] {
 const seedPromptGroupsValue = seedPromptGroups();
 let historyInitStarted = false;
 
-export const useStore = create<StoreState>((set) => ({
+export const useStore = create<StoreState>((set, get) => ({
   // Seed graph: restored autosave, or a fresh default blueprint.
   workflow: seedWorkflowState,
   selectedNodeId: null,
@@ -2900,6 +2974,7 @@ export const useStore = create<StoreState>((set) => ({
   aiStreaming: false,
   aiEditingSessions: [],
   chattingSessions: [],
+  blockedSendTip: null,
 
   // Seed session-domain state from the sample module so the dev UI renders
   // a populated session history, message stream, and prompt library.
@@ -2912,6 +2987,8 @@ export const useStore = create<StoreState>((set) => ({
   promptGroups: seedPromptGroupsValue,
   locale: seedLocale,
   promptAutoTranslate: seedPromptAutoTranslate,
+  personalInstructionsByModel: seedPersonalInstructionsByModel,
+  personalInstructions: seedPersonalInstructions,
   appearance: seedAppearance,
 
   // Composer settings seeded from the sample option lists, overlaid with any
@@ -2950,9 +3027,67 @@ export const useStore = create<StoreState>((set) => ({
     set({ promptAutoTranslate: enabled });
     savePromptAutoTranslate(enabled);
   },
+  setPersonalInstructions: (instructions, selection) => {
+    set((state) => {
+      const targetSelection = selection
+        ? normalizeGatewaySelection(selection)
+        : personalInstructionsSelectionForState(state);
+      const personalInstructionsByModel = withPersonalInstructionsForSelection(
+        state.personalInstructionsByModel,
+        targetSelection,
+        instructions,
+      );
+      savePersonalInstructionsByModel(personalInstructionsByModel);
+      return {
+        personalInstructionsByModel,
+        personalInstructions: activePersonalInstructionsForState({
+          ...state,
+          personalInstructionsByModel,
+        }),
+      };
+    });
+  },
 
   setStylePresetId: (stylePresetId) => {
-    const appearance: AppearanceSettings = { stylePresetId };
+    const appearance: AppearanceSettings = normalizeAppearanceSettings({
+      ...get().appearance,
+      stylePresetId,
+      streamSchemeId: streamSchemeForStylePresetId(stylePresetId),
+    });
+    set({ appearance });
+    saveAppearance(appearance);
+    applyAppearance(appearance);
+  },
+
+  setStreamSchemeId: (streamSchemeId) => {
+    const current = get().appearance;
+    const appearance: AppearanceSettings = normalizeAppearanceSettings({
+      ...current,
+      stylePresetId: isBuiltinStylePresetId(streamSchemeId)
+        ? streamSchemeId
+        : current.stylePresetId,
+      streamSchemeId,
+    });
+    set({ appearance });
+    saveAppearance(appearance);
+    applyAppearance(appearance);
+  },
+
+  setFontFamilyId: (fontFamilyId) => {
+    const appearance: AppearanceSettings = normalizeAppearanceSettings({
+      ...get().appearance,
+      fontFamilyId,
+    });
+    set({ appearance });
+    saveAppearance(appearance);
+    applyAppearance(appearance);
+  },
+
+  setFontSizePx: (fontSizePx) => {
+    const appearance: AppearanceSettings = normalizeAppearanceSettings({
+      ...get().appearance,
+      fontSizePx,
+    });
     set({ appearance });
     saveAppearance(appearance);
     applyAppearance(appearance);
@@ -3044,12 +3179,17 @@ export const useStore = create<StoreState>((set) => ({
   // Switch the target runtime adapter (Claude Code / Codex / Gemini). The
   // adapter lives in the IR meta so the emitter can target the right runtime.
   setAdapter: (adapter) => {
+    const selection = systemDefaultGatewaySelection(adapter);
     applyWorkflowEdit('user', (state) => ({
       workflow: workflowWithoutRunSnapshot(
         withSessionGatewayDefaults(
           state.workflow,
-          systemDefaultGatewaySelection(adapter),
+          selection,
         ),
+      ),
+      personalInstructions: personalInstructionsForSelection(
+        state.personalInstructionsByModel,
+        selection,
       ),
       ...emptyRunProgress(),
     }));
@@ -3077,7 +3217,48 @@ export const useStore = create<StoreState>((set) => ({
         composerBySession,
         workspaceHistory: state.workspaceHistory,
       });
-      return { workflow, composerBySession, ...emptyRunProgress() };
+      return {
+        workflow,
+        composerBySession,
+        personalInstructions: personalInstructionsForSelection(
+          state.personalInstructionsByModel,
+          normalized,
+        ),
+        ...emptyRunProgress(),
+      };
+    });
+  },
+
+  setSessionRunSelection: (selection) => {
+    set((state) => {
+      if (isWorkflowReadOnly(state)) return state;
+      const normalized = normalizeGatewaySelection(selection);
+      const workflow = workflowWithoutRunSnapshot(
+        withSessionGatewayDefaults(state.workflow, normalized),
+      );
+      const snapshot: SessionComposerSettings = {
+        composer: state.composer,
+        gatewaySelection: normalized,
+      };
+      const composerBySession = rememberSessionComposer(
+        { ...state, workflow },
+        state.composerBySession,
+        snapshot,
+      );
+      saveComposerSoon({
+        composer: state.composer,
+        composerBySession,
+        workspaceHistory: state.workspaceHistory,
+      });
+      return {
+        workflow,
+        composerBySession,
+        personalInstructions: personalInstructionsForSelection(
+          state.personalInstructionsByModel,
+          normalized,
+        ),
+        ...emptyRunProgress(),
+      };
     });
   },
 
@@ -3105,7 +3286,15 @@ export const useStore = create<StoreState>((set) => ({
         composerBySession,
         workspaceHistory: state.workspaceHistory,
       });
-      return { workflow, composerBySession, ...emptyRunProgress() };
+      return {
+        workflow,
+        composerBySession,
+        personalInstructions: personalInstructionsForSelection(
+          state.personalInstructionsByModel,
+          selection,
+        ),
+        ...emptyRunProgress(),
+      };
     });
   },
 
@@ -3195,12 +3384,137 @@ export const useStore = create<StoreState>((set) => ({
   // In all cases the reply is a short Chinese explanation optionally followed by
   // a fenced ```json IRGraph; the JSON is hidden from the stream, parsed, and
   // applied to the blueprint. Pure questions (no fence) leave the graph as-is.
+  runUltracodePrompt: (task) => {
+    const trimmed = task.trim();
+    if (!trimmed) return;
+    const state = useStore.getState();
+    if (state.mode === 'running') return;
+    const sessionKey = activeWorkflowSessionKey(state);
+    if (hasSessionKey(state.chattingSessions, sessionKey)) return;
+    if (state.blockedSendTip) set({ blockedSendTip: null });
+
+    const now = Date.now();
+    const userMsg: Message = {
+      id: shortId('m'),
+      role: 'user',
+      text: `/ultracode ${trimmed}`,
+      createdAt: now,
+    };
+    const assistantId = shortId('m');
+    const assistantMsg: Message = {
+      id: assistantId,
+      role: 'assistant',
+      text: `⟳ /ultracode 正在生成动态 harness 并执行…`,
+      routeLabel: '/ultracode',
+      createdAt: now + 1,
+    };
+    const promptUpdate = applyPromptTitle(state, trimmed, now);
+    const chKey = chatTurnKey(runKey(sessionKey.workspaceId, sessionKey.sessionId), userMsg.id);
+    const ch: AiEditChannel = {
+      key: chKey,
+      sessionKey: runKey(sessionKey.workspaceId, sessionKey.sessionId),
+      workspaceId: sessionKey.workspaceId,
+      sessionId: sessionKey.sessionId,
+      workflow: promptUpdate.workflow,
+      messages: [...state.messages, userMsg, assistantMsg],
+      cliRunIds: new Set<string>(),
+      abortController: new AbortController(),
+      gatewaySelection: workflowDefaultGatewaySelection(
+        promptUpdate.workflow,
+        state.composer.model,
+      ),
+      workflowSession: false,
+      chat: true,
+      ownedMessageIds: new Set<string>([userMsg.id, assistantId]),
+    };
+
+    const replaceAssistant = (text: string, persist = false) => {
+      if (!aiEditRegistered(ch)) return;
+      ch.messages = ch.messages.map((msg) =>
+        msg.id === assistantId ? { ...msg, text, routeLabel: '/ultracode' } : msg,
+      );
+      aiEditCommitMessages(ch, persist);
+    };
+
+    addAiEditChannel(ch);
+    if (aiEditViewActive(ch)) {
+      set({
+        messages: ch.messages,
+        sessions: promptUpdate.sessions,
+        sessionTree: promptUpdate.sessionTree,
+        workflow: ch.workflow,
+      });
+    }
+    updateAiEditSessionSummary(ch);
+    syncAndPersistSessionRunStatus(sessionKey, 'running');
+    if (ch.workspaceId && ch.sessionId) {
+      void historyStore
+        .updateSession(ch.workspaceId, ch.sessionId, {
+          messages: ch.messages,
+          meta: { runStatus: 'running' },
+        })
+        .catch(() => {});
+    }
+
+    void (async () => {
+      const startedAt = Date.now();
+      const runId = makeCliRunId();
+      ch.cliRunIds.add(runId);
+      let live = '';
+      try {
+        const result = await runUltracode(trimmed, {
+          cwd: state.composer.workspace || undefined,
+          adapter: ch.gatewaySelection?.adapter,
+          model: ch.gatewaySelection?.modelClass,
+          concurrency: 3,
+          runId,
+          onProgress: (chunk) => {
+            live = (live + chunk).slice(-5000);
+            replaceAssistant(
+              `⟳ /ultracode 执行中…\n账本 runId: ${runId}\n\n${live.trim()}`,
+              false,
+            );
+          },
+        });
+        if (!aiEditRegistered(ch)) return;
+        replaceAssistant(
+          `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(Date.now() - startedAt)}\n${summarizeUltracodeResult(result)}`,
+          true,
+        );
+        syncAndPersistSessionRunStatus(sessionKey, 'success');
+      } catch (err) {
+        if (!aiEditRegistered(ch)) return;
+        const msg = (err as Error)?.message ?? String(err);
+        replaceAssistant(
+          `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(Date.now() - startedAt)} · 失败\n✗ /ultracode 调用失败: ${msg}`,
+          true,
+        );
+        syncAndPersistSessionRunStatus(sessionKey, 'error');
+      } finally {
+        ch.cliRunIds.delete(runId);
+        removeAiEditChannel(ch);
+      }
+    })();
+  },
+
   sendPrompt: (text) => {
     const trimmed = text.trim();
     if (!trimmed) return;
     const state = useStore.getState();
     if (isWorkflowReadOnly(state)) return;
     const aiEditingSession = activeWorkflowSessionKey(state);
+    const gatewaySelection = workflowDefaultGatewaySelection(
+      state.workflow,
+      state.composer.model,
+    );
+    if (
+      state.workflow.meta?.simple === true &&
+      hasActiveChatForDifferentSelection(aiEditingSession, gatewaySelection)
+    ) {
+      set({ blockedSendTip: 'model-switched-while-chatting' });
+      return;
+    }
+    if (state.blockedSendTip) set({ blockedSendTip: null });
     const capturedStartInputs: string[] = [trimmed];
     // Accumulates how the blueprint was produced (research / candidates /
     // escalation). Each generation phase writes into it; stamped onto the Start
@@ -3219,22 +3533,30 @@ export const useStore = create<StoreState>((set) => ({
       userMsg.createdAt,
     );
     const activeSession = sessionForKey(state, aiEditingSession);
+    const simpleMode = promptUpdate.workflow.meta?.simple === true;
+    const replayFavoriteSimpleChat =
+      simpleMode && activeSession?.favorite === true;
+    const baseMessages = replayFavoriteSimpleChat ? [] : state.messages;
+    const channelWorkflow = replayFavoriteSimpleChat
+      ? setStartUserInputs(promptUpdate.workflow, [])
+      : promptUpdate.workflow;
     const workflowSession =
-      activeSession?.isWorkflow ?? promptUpdate.workflow.meta?.simple !== true;
+      activeSession?.isWorkflow ?? !simpleMode;
     const chSessionKey = runKey(
       aiEditingSession.workspaceId,
       aiEditingSession.sessionId,
     );
-    const chatMode = promptUpdate.workflow.meta?.simple === true;
+    const chatMode = simpleMode;
     const ch: AiEditChannel = {
       key: chatMode ? chatTurnKey(chSessionKey, userMsg.id) : chSessionKey,
       sessionKey: chSessionKey,
       workspaceId: aiEditingSession.workspaceId,
       sessionId: aiEditingSession.sessionId,
-      workflow: promptUpdate.workflow,
-      messages: [...state.messages, userMsg],
+      workflow: channelWorkflow,
+      messages: [...baseMessages, userMsg],
       cliRunIds: new Set<string>(),
       abortController: new AbortController(),
+      gatewaySelection,
       workflowSession,
       ...(chatMode
         ? { chat: true, ownedMessageIds: new Set<string>([userMsg.id]) }
@@ -3255,9 +3577,19 @@ export const useStore = create<StoreState>((set) => ({
         ? promptUpdate.workflow.meta.name
         : null;
     if (ch.workspaceId && ch.sessionId) {
-      void historyStore
-        .appendMessage(ch.workspaceId, ch.sessionId, userMsg)
-        .catch(() => {});
+      if (replayFavoriteSimpleChat) {
+        void historyStore
+          .updateSession(ch.workspaceId, ch.sessionId, {
+            messages: ch.messages,
+            ...(ch.workflowSession ? { workflow: ch.workflow } : {}),
+            meta: emptyRunMeta(),
+          })
+          .catch(() => {});
+      } else {
+        void historyStore
+          .appendMessage(ch.workspaceId, ch.sessionId, userMsg)
+          .catch(() => {});
+      }
     }
 
     const ir = ch.workflow;
@@ -3265,21 +3597,17 @@ export const useStore = create<StoreState>((set) => ({
     // goes straight to the model (no blueprint generation), and each input is
     // appended to the lone start node's userInputs so the node mirrors the
     // conversation. The graph stays a single node.
-    const simpleMode = ir.meta?.simple === true;
-    const gatewaySelection = workflowDefaultGatewaySelection(
-      ir,
-      state.composer.model,
-    );
     const directRoute = resolveDirectGatewayRoute(gatewaySelection);
     const inTauri = isTauri();
     const useApi = !!directRoute;
     const useCli = !useApi && inTauri;
 
-    const pushAssistant = (txt: string) => {
+    const pushAssistant = (txt: string, routeLabel?: string) => {
       const msg: Message = {
         id: shortId('m'),
         role: 'assistant',
         text: txt,
+        ...(routeLabel ? { routeLabel } : {}),
         createdAt: Date.now(),
       };
       ch.ownedMessageIds?.add(msg.id);
@@ -3416,19 +3744,40 @@ export const useStore = create<StoreState>((set) => ({
     // protocol. Normal edit mode goes straight for a blueprint and gets one
     // stricter retry if the model returns prose/markdown without an IRGraph.
     let activeId = '';
-    const newBubble = (initial: string) => {
+    let activeRouteLabel = gatewayRouteHeader(directRoute);
+    const setActiveRouteLabel = (routeLabel: string) => {
+      activeRouteLabel = routeLabel;
+      if (!activeId || !routeLabel) return;
+      ch.messages = ch.messages.map((m) =>
+        m.id === activeId ? { ...m, routeLabel } : m,
+      );
+      aiEditCommitMessages(ch, false);
+    };
+    const newBubble = (initial: string, routeLabel = activeRouteLabel) => {
       const id = shortId('m');
       activeId = id;
       ch.ownedMessageIds?.add(id);
       ch.messages = [
         ...ch.messages,
-        { id, role: 'assistant', text: initial, createdAt: Date.now() },
+        {
+          id,
+          role: 'assistant',
+          text: initial,
+          ...(routeLabel ? { routeLabel } : {}),
+          createdAt: Date.now(),
+        },
       ];
       aiEditCommitMessages(ch, false);
     };
-    const setActive = (txt: string, persist = false) => {
+    const setActive = (txt: string, persist = false, routeLabel = activeRouteLabel) => {
       ch.messages = ch.messages.map((m) =>
-        m.id === activeId ? { ...m, text: txt } : m,
+        m.id === activeId
+          ? {
+              ...m,
+              text: txt,
+              ...(routeLabel ? { routeLabel } : {}),
+            }
+          : m,
       );
       aiEditCommitMessages(ch, persist);
     };
@@ -3441,11 +3790,14 @@ export const useStore = create<StoreState>((set) => ({
         // it is up (latest keys/models) before resolving so the cached port is
         // current. No-op on web.
         if (isFreeChannelSelection(gatewaySelection)) {
-          await ensureFreeProxy({ strict: true });
+          await ensureFreeProxy(freeProxyOptionsForSelection(gatewaySelection));
         }
         return resolveCliGatewayRoute(gatewaySelection);
       })();
-      return aiCliRoutePromise;
+      return aiCliRoutePromise.then((route) => {
+        setActiveRouteLabel(gatewayRouteHeader(route));
+        return route;
+      });
     };
     const aiEditViaCliWithSpeed = async (
       prompt: string,
@@ -3654,10 +4006,18 @@ export const useStore = create<StoreState>((set) => ({
     // yields an empty string, preserving the pre-feature behavior exactly.
     // Language adaptation instruction tells the LLM to generate node content in
     // the current UI locale's language (no-op for zh-CN which is the default).
+    const personalBlock = personalInstructionsBlock(
+      personalInstructionsForSelection(
+        state.personalInstructionsByModel,
+        gatewaySelection,
+      ),
+      gatewaySelection.adapter,
+    );
     const unifiedBase =
       UNIFIED_SYSTEM +
       modelStrategyGuidance(state.composer.modelStrategy) +
-      languageAdaptationPrompt(state.locale);
+      languageAdaptationPrompt(state.locale) +
+      personalBlock;
     const clarifyingSystem =
       `${unifiedBase}\n\n${INTERACTION_PROTOCOL}\n` +
       `（交互澄清模式：用户明确要求你先澄清/确认/反问时，才使用上面的交互块提一个关键问题；用户回答后不要继续追问，必须把回答吸收到 workflow 蓝图，并输出中文说明 + \`\`\`json 蓝图。）`;
@@ -3870,17 +4230,22 @@ export const useStore = create<StoreState>((set) => ({
     // node mirrors the conversation. The graph never grows past one node.
     if (simpleMode) {
       void (async () => {
-        const chatSystem = `${SIMPLE_CHAT_SYSTEM}${languageAdaptationPrompt(state.locale)}`;
+        const chatSystem =
+          `${SIMPLE_CHAT_SYSTEM}${languageAdaptationPrompt(state.locale)}${personalBlock}`;
         // Multi-turn context: the gateway/CLI takes a single string, so fold the
         // prior conversation (text messages only, skipping system notices) into
         // the prompt as a transcript, then the current question. Keeps a bounded
         // tail so very long chats don't blow the context window.
-        const priorMessages = state.messages
-          .filter((m) => m.role !== 'system' && m.text.trim())
+        const priorMessages = baseMessages
+          .filter((m) => m.role !== 'system' && m.text.trim());
         const chatTranscript = (messages: Message[]): string =>
           messages
             .slice(-SIMPLE_CHAT_HISTORY_TURNS)
-            .map((m) => `${m.role === 'user' ? '用户' : '助手'}：${m.text.trim()}`)
+            .map((m) => {
+              const text = transcriptText(m);
+              return text ? `${m.role === 'user' ? '用户' : '助手'}：${text}` : '';
+            })
+            .filter(Boolean)
             .join('\n\n');
         const prior = chatTranscript(priorMessages);
         const chatPrompt = prior.length
@@ -3893,9 +4258,14 @@ export const useStore = create<StoreState>((set) => ({
         try {
           newBubble(withAiTiming('⟳ 生成中…'));
           let answer = '';
+          let routeLine = gatewayRouteLine(directRoute);
           if (useCli) {
             const cli = await resolveAiCliRoute();
-            const nativeSession = chatNativeSessionFor(ch, cli);
+            routeLine = gatewayRouteLine(cli);
+            setActive(withAiTiming(routedBody(routeLine, '⟳ 生成中…')));
+            const nativeSession = replayFavoriteSimpleChat
+              ? null
+              : chatNativeSessionFor(ch, cli);
             const nativeResume = nativeSession?.started === true;
             const coveredMessageCount = Math.min(
               nativeSession?.coveredMessageCount ?? 0,
@@ -3922,25 +4292,29 @@ export const useStore = create<StoreState>((set) => ({
               resume: nativeSession ? nativeResume : undefined,
               onProgress: (chunk) => {
                 live += chunk;
-                setActive(withAiTiming(live.trim() ? live : '⟳ 生成中…'));
+                setActive(withAiTiming(routedBody(routeLine, live)));
               },
             });
             if (nativeSession) nativeSession.started = true;
             if (!answer.trim() && live.trim()) answer = live;
           } else {
             let full = '';
+            setActive(withAiTiming(routedBody(routeLine, '⟳ 生成中…')));
             const returned = await completeDirectWithSpeed({
               system: chatSystem,
               userContent: chatPrompt,
               onDelta: (chunk) => {
                 full += chunk;
-                setActive(withAiTiming(full) || '⟳ 生成中…');
+                setActive(withAiTiming(routedBody(routeLine, full)));
               },
             });
             answer = full || returned;
           }
-          setActive(withAiTiming(answer.trim() || '（模型没有返回内容）'), true);
-          if (useCli) {
+          setActive(
+            withAiTiming(routedBody(routeLine, answer.trim() || '（模型没有返回内容）')),
+            true,
+          );
+          if (useCli && !replayFavoriteSimpleChat) {
             const cli = await resolveAiCliRoute();
             const nativeSession = chatNativeSessionFor(ch, cli);
             if (nativeSession) {
@@ -4141,6 +4515,8 @@ export const useStore = create<StoreState>((set) => ({
       }
     })();
   },
+
+  clearBlockedSendTip: () => set({ blockedSendTip: null }),
 
   // Resolve a node's interaction request with the user's answer. Marks the
   // message answered (so the widget collapses to a summary) and resolves the
@@ -4864,6 +5240,8 @@ interface AiEditChannel {
   messages: Message[];
   cliRunIds: Set<string>;
   abortController: AbortController;
+  /** Gateway/model snapshot captured when this AI turn started. */
+  gatewaySelection?: GatewaySelection;
   /** Whether this channel belongs to a history session that should store IRGraph. */
   workflowSession: boolean;
   /**
@@ -5013,6 +5391,20 @@ function getAiEditChatChannels(
   return getAiEditChannelsForSession(workspaceId, sessionId).filter(
     (ch) => ch.chat,
   );
+}
+
+function hasActiveChatForDifferentSelection(
+  sessionKey: WorkflowSessionKey,
+  selection: GatewaySelection,
+): boolean {
+  const currentKey = selectionKey(normalizeGatewaySelection(selection));
+  return getAiEditChatChannels(
+    sessionKey.workspaceId,
+    sessionKey.sessionId,
+  ).some((ch) => {
+    if (!ch.gatewaySelection) return false;
+    return selectionKey(normalizeGatewaySelection(ch.gatewaySelection)) !== currentKey;
+  });
 }
 
 function getAiEditSnapshotsForSession(
@@ -5508,6 +5900,62 @@ const MAX_INTERACTION_ROUNDS = 6;
  *  multi-turn context (bounded so long chats don't overflow the model). */
 const SIMPLE_CHAT_HISTORY_TURNS = 20;
 
+type RouteDisplay = Pick<
+  ResolvedGatewayRoute,
+  'adapter' | 'modelClass' | 'model' | 'providerName' | 'channelName' | 'label'
+>;
+
+function compactRoutePart(value: unknown): string {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function gatewayRouteLine(route: RouteDisplay | null | undefined): string {
+  if (!route) return '';
+  const provider = compactRoutePart(route.providerName);
+  const channel = compactRoutePart(route.channelName);
+  const model = compactRoutePart(route.model) || compactRoutePart(route.modelClass);
+  const fallback = compactRoutePart(route.label) || compactRoutePart(route.adapter);
+  const routeParts =
+    provider && channel && provider !== channel
+      ? [provider, channel]
+      : [provider || channel || fallback];
+  const routeText = routeParts.filter(Boolean).join(' · ');
+  if (routeText && model) return `⚙ 路由：${routeText} · 模型：${model}`;
+  if (routeText) return `⚙ 路由：${routeText}`;
+  return model ? `⚙ 模型：${model}` : '';
+}
+
+function gatewayRouteHeader(route: RouteDisplay | null | undefined): string {
+  if (!route) return '';
+  const provider = compactRoutePart(route.providerName);
+  const channel = compactRoutePart(route.channelName);
+  const model = compactRoutePart(route.model) || compactRoutePart(route.modelClass);
+  const fallback = compactRoutePart(route.label) || compactRoutePart(route.adapter);
+  const routeParts =
+    provider && channel && provider !== channel
+      ? [provider, channel]
+      : [provider || channel || fallback];
+  const routeText = routeParts.filter(Boolean).join(' · ');
+  return [routeText, model].filter(Boolean).join(' · ');
+}
+
+function routedBody(routeLine: string, body: string): string {
+  const text = body.trim() ? body : '⟳ 生成中…';
+  return routeLine ? `${routeLine}\n${text}` : text;
+}
+
+function transcriptText(message: Message): string {
+  let text =
+    message.role === 'assistant' && message.text.includes('<<FUC_TOOL>>')
+      ? extractToolSentinels(message.text).text
+      : message.text;
+  text = text
+    .replace(/^⏱ [^\n]*(?:\n|$)/, '')
+    .replace(/^⚙ (?:路由|模型)：[^\n]*(?:\n|$)/, '')
+    .trim();
+  return text;
+}
+
 /** How many times to force a blueprint-only retry when the model gives prose. */
 const MAX_BLUEPRINT_RETRIES = 2;
 
@@ -5814,6 +6262,56 @@ function makeCliRunId(): string {
   return `cli_${Date.now()}_${shortId('run')}`;
 }
 
+function summarizeUltracodeResult(result: Awaited<ReturnType<typeof runUltracode>>): string {
+  const json = result.resultJson as
+    | {
+        success?: unknown;
+        runId?: unknown;
+        runDir?: unknown;
+        durationMs?: unknown;
+        failedNodeId?: unknown;
+        artifacts?: {
+          report?: unknown;
+          verdict?: {
+            pass?: unknown;
+            gaps?: unknown;
+          };
+        };
+      }
+    | null
+    | undefined;
+  const runDir =
+    typeof json?.runDir === 'string'
+      ? json.runDir
+      : result.runDir || null;
+  const durationMs =
+    typeof json?.durationMs === 'number' ? json.durationMs : undefined;
+  const verdict = json?.artifacts?.verdict;
+  const pass = typeof verdict?.pass === 'boolean' ? verdict.pass : null;
+  const gaps = Array.isArray(verdict?.gaps) ? verdict.gaps.length : 0;
+  const report =
+    typeof json?.artifacts?.report === 'string'
+      ? json.artifacts.report.trim()
+      : '';
+  const lines = [
+    result.exitCode === 0 && (json?.success !== false)
+      ? '✓ /ultracode 已通过验收门。'
+      : '⚠ /ultracode 已结束，但验收未完全通过。',
+    `runId: ${typeof json?.runId === 'string' ? json.runId : result.runId}`,
+  ];
+  if (runDir) lines.push(`账本: ${runDir}`);
+  if (durationMs !== undefined) {
+    lines.push(`耗时: ${formatDuration(durationMs)}`);
+  }
+  if (pass !== null) lines.push(`验收: ${pass ? 'pass' : 'fail'}`);
+  if (gaps > 0) lines.push(`缺口: ${gaps} 项`);
+  if (report) lines.push(`\n${report}`);
+  if (!report && result.stdout.trim()) {
+    lines.push(`\n${result.stdout.trim().slice(0, 2000)}`);
+  }
+  return lines.join('\n');
+}
+
 async function cancelActiveCliRuns(ch: RunChannel | null): Promise<void> {
   const runIds = ch ? [...ch.cliRunIds] : [];
   await Promise.all(
@@ -5927,6 +6425,19 @@ function buildGuiGateway(ch: RunChannel): RunGateway {
       effectiveConsensusSamples(configured, selection),
     nodeGatewayOverride: (nodeOrParams) => nodeGatewayOverride(nodeOrParams),
     modelClassFromModelId: (model) => modelClassFromModelId(model),
+  };
+}
+
+function freeProxyOptionsForSelection(selection: GatewaySelection): {
+  strict: true;
+  modelOverrides?: Record<string, string>;
+} {
+  const freeChannelId = isFreeChannelSelection(selection);
+  const modelOverride = selection.modelOverride?.trim();
+  if (!freeChannelId || !modelOverride) return { strict: true };
+  return {
+    strict: true,
+    modelOverrides: { [freeChannelId]: modelOverride },
   };
 }
 
@@ -6094,8 +6605,11 @@ function buildGuiCallbacks(
  * injected.
  */
 function buildGuiRunContext(ch: RunChannel, workflow: IRGraph): RuntimeRunContext {
+  const { personalInstructions, personalInstructionsByModel } = useStore.getState();
   return {
     selection: runGlobalGatewaySelection(ch, workflow),
+    personalInstructions,
+    personalInstructionsByModel,
     cwd: ch.config.cwd,
     permission: ch.config.permission,
     concurrency: runConcurrency(),
@@ -6214,7 +6728,7 @@ async function executeViaCliInterpreter(
   // up (and pointed at the latest keys/models) before the gateway route is
   // resolved, so the freshly-cached port is used. No-op on web.
   if (isFreeChannelSelection(launchSelection)) {
-    await ensureFreeProxy({ strict: true });
+    await ensureFreeProxy(freeProxyOptionsForSelection(launchSelection));
     if (!stillRunning(ch)) return;
   }
   if (!resolveDirectGatewayRoute(launchSelection)) {

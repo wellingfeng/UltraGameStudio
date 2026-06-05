@@ -12,7 +12,7 @@
 //! Binds 127.0.0.1 ONLY. Uses tiny_http (blocking server) + ureq (upstream).
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -28,6 +28,8 @@ use tiny_http::{Header, Method, Request, Response, Server};
 #[serde(rename_all = "camelCase")]
 pub struct FreeChannelCfg {
     pub id: String,
+    #[serde(default)]
+    pub label: String,
     /// "openai" | "anthropic" | "auto"
     pub transport: String,
     pub base_url: String,
@@ -61,11 +63,115 @@ const AUTO_CHANNEL_ID: &str = "auto";
 const DEFAULT_RATE_LIMIT_COOLDOWN: Duration = Duration::from_secs(60);
 const DEFAULT_UPSTREAM_COOLDOWN: Duration = Duration::from_secs(30);
 const DEFAULT_AUTH_COOLDOWN: Duration = Duration::from_secs(600);
+const DEFAULT_BILLING_COOLDOWN: Duration = Duration::from_secs(300);
+const FREE_CHANNEL_MAX_TOKENS: u64 = 8192;
+const TOOL_OPEN: &str = "<<FUC_TOOL>>";
+const TOOL_CLOSE: &str = "<<FUC_TOOL_END>>";
+const FREE_PROXY_TOOL_NAME: &str = "free_proxy";
+// Keep the port directly below this range reserved for Lark OAuth callback.
+const FREE_PROXY_PORT_START: u16 = 8766;
+const FREE_PROXY_PORT_END: u16 = 8799;
 
 #[derive(Debug, Clone)]
 struct ChannelCooldown {
     until: Instant,
     reason: String,
+}
+
+impl FreeChannelCfg {
+    fn display_name(&self) -> String {
+        let label = self.label.trim();
+        if label.is_empty() {
+            self.id.clone()
+        } else {
+            label.to_string()
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FreeProxyRouteLog {
+    id: String,
+    channel: String,
+    model: String,
+    status: &'static str,
+    detail: Option<String>,
+}
+
+fn free_proxy_route_log(
+    id: String,
+    channel: String,
+    model: String,
+    status: &'static str,
+    detail: Option<String>,
+) -> FreeProxyRouteLog {
+    FreeProxyRouteLog {
+        id,
+        channel,
+        model,
+        status,
+        detail,
+    }
+}
+
+fn push_free_proxy_route_log(
+    logs: &mut Vec<FreeProxyRouteLog>,
+    id: Option<String>,
+    cfg: &FreeChannelCfg,
+    model: &str,
+    status: &'static str,
+    detail: Option<String>,
+) -> String {
+    let id = id.unwrap_or_else(|| format!("free-proxy-route-{}", logs.len()));
+    logs.push(free_proxy_route_log(
+        id.clone(),
+        cfg.display_name(),
+        model.to_string(),
+        status,
+        detail,
+    ));
+    id
+}
+
+fn free_proxy_log_subject(log: &FreeProxyRouteLog) -> String {
+    let target = if log.model.trim().is_empty() {
+        log.channel.clone()
+    } else {
+        format!("{} · {}", log.channel, log.model)
+    };
+    match log.status {
+        "running" => format!("尝试使用 {target}"),
+        "done" => format!("尝试使用 {target}（成功）"),
+        "error" => format!("尝试使用 {target}（失败，切换）"),
+        _ => target,
+    }
+}
+
+fn encode_free_proxy_tool_patch(log: &FreeProxyRouteLog) -> String {
+    let mut patch = json!({
+        "id": log.id,
+        "name": FREE_PROXY_TOOL_NAME,
+        "status": log.status,
+        "subject": free_proxy_log_subject(log),
+    });
+    if let Some(detail) = log.detail.as_deref() {
+        if let Some(obj) = patch.as_object_mut() {
+            obj.insert("result".to_string(), Value::String(brief_detail(detail)));
+        }
+    }
+    format!("\n{TOOL_OPEN}{}{TOOL_CLOSE}\n", patch)
+}
+
+fn encode_free_proxy_logs(logs: &[FreeProxyRouteLog]) -> Option<String> {
+    if logs.is_empty() {
+        return None;
+    }
+    Some(
+        logs.iter()
+            .map(encode_free_proxy_tool_patch)
+            .collect::<Vec<_>>()
+            .join(""),
+    )
 }
 
 fn state_lock() -> &'static Mutex<Option<ProxyState>> {
@@ -152,7 +258,7 @@ pub fn free_proxy_stop() -> Result<(), String> {
     Ok(())
 }
 
-/// Bind 127.0.0.1 on the first free port in 8765..=8799 and spawn the accept loop.
+/// Bind 127.0.0.1 on the first free port in 8766..=8799 and spawn the accept loop.
 /// Returns the chosen port. Idempotent guard via SERVER_STATE.
 fn start_server() -> Result<FreeProxyInfo, String> {
     let mut guard = state_lock().lock().map_err(|_| "state poisoned")?;
@@ -167,7 +273,7 @@ fn start_server() -> Result<FreeProxyInfo, String> {
     }
 
     let mut bound: Option<(Server, u16)> = None;
-    for port in 8765u16..=8799u16 {
+    for port in FREE_PROXY_PORT_START..=FREE_PROXY_PORT_END {
         match Server::http(("127.0.0.1", port)) {
             Ok(server) => {
                 bound = Some((server, port));
@@ -177,8 +283,11 @@ fn start_server() -> Result<FreeProxyInfo, String> {
         }
     }
 
-    let (server, port) = bound
-        .ok_or_else(|| "free proxy: no free port in 8765..8799 to bind on 127.0.0.1".to_string())?;
+    let (server, port) = bound.ok_or_else(|| {
+        format!(
+            "free proxy: no free port in {FREE_PROXY_PORT_START}..{FREE_PROXY_PORT_END} to bind on 127.0.0.1"
+        )
+    })?;
     let token = generate_proxy_token()?;
 
     std::thread::Builder::new()
@@ -266,8 +375,9 @@ fn anthropic_error_json(message: &str) -> Value {
 fn respond_json_error(request: Request, status: u16, message: &str) {
     let body = anthropic_error_json(message).to_string();
     let mut response = Response::from_string(body).with_status_code(status);
-    let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-    response.add_header(ct);
+    if let Ok(ct) = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]) {
+        response.add_header(ct);
+    }
     let _ = request.respond(response);
 }
 
@@ -404,8 +514,9 @@ fn parse_channel_route(path: &str) -> Option<(String, ProxyEndpoint)> {
 fn respond_json(request: Request, status: u16, value: &Value) {
     let body = value.to_string();
     let mut response = Response::from_string(body).with_status_code(status);
-    let ct = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]).unwrap();
-    response.add_header(ct);
+    if let Ok(ct) = Header::from_bytes(&b"Content-Type"[..], &b"application/json"[..]) {
+        response.add_header(ct);
+    }
     let _ = request.respond(response);
 }
 
@@ -703,6 +814,12 @@ fn with_json_model(body: &Value, model: &str) -> Value {
             obj.insert("model".to_string(), Value::String(model.to_string()));
         }
     }
+    if let Some(requested) = next.get("max_tokens").and_then(|v| v.as_u64()) {
+        let capped = requested.min(FREE_CHANNEL_MAX_TOKENS);
+        if let Some(obj) = next.as_object_mut() {
+            obj.insert("max_tokens".to_string(), json!(capped));
+        }
+    }
     next
 }
 
@@ -713,6 +830,15 @@ struct ProxyAttemptError {
     detail: String,
     raw_body: bool,
     retry_after: Option<String>,
+}
+
+type UpstreamReader = Box<dyn Read + Send + Sync + 'static>;
+
+struct PrefetchedSseStream {
+    status: u16,
+    content_type: String,
+    prefix: Vec<u8>,
+    reader: BufReader<UpstreamReader>,
 }
 
 #[derive(Debug)]
@@ -749,10 +875,30 @@ fn retry_after_duration(value: Option<&str>) -> Option<Duration> {
     Some(Duration::from_secs(seconds.clamp(1, 3600)))
 }
 
+fn looks_like_billing_error(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("payment method")
+        || lower.contains("no payment method")
+        || lower.contains("payment required")
+        || lower.contains("insufficient credit")
+        || lower.contains("insufficient credits")
+        || lower.contains("credit balance")
+        || lower.contains("insufficient balance")
+        || lower.contains("out of credit")
+        || lower.contains("recharge")
+        || lower.contains("resource package")
+}
+
 fn cooldown_for_attempt_error(err: &ProxyAttemptError) -> Option<Duration> {
     if err.status == 429 {
         return retry_after_duration(err.retry_after.as_deref())
             .or(Some(DEFAULT_RATE_LIMIT_COOLDOWN));
+    }
+    if err.status == 402 {
+        return Some(DEFAULT_BILLING_COOLDOWN);
+    }
+    if looks_like_billing_error(&err.detail) {
+        return Some(DEFAULT_BILLING_COOLDOWN);
     }
     if matches!(err.status, 401 | 403) {
         return Some(DEFAULT_AUTH_COOLDOWN);
@@ -894,8 +1040,9 @@ fn handle_anthropic_passthrough(
     anthropic_body: Value,
     anthropic_beta: Option<String>,
 ) {
-    match try_anthropic_passthrough(cfg, &anthropic_body, anthropic_beta.as_deref()) {
-        Ok(response) => stream_passthrough(request, response),
+    let mut logs = Vec::new();
+    match try_anthropic_passthrough(cfg, &anthropic_body, anthropic_beta.as_deref(), &mut logs) {
+        Ok(response) => stream_passthrough(request, response, encode_free_proxy_logs(&logs)),
         Err(err) => respond_attempt_error(request, err),
     }
 }
@@ -904,7 +1051,8 @@ fn try_anthropic_passthrough(
     cfg: &FreeChannelCfg,
     anthropic_body: &Value,
     anthropic_beta: Option<&str>,
-) -> Result<ureq::Response, ProxyAttemptError> {
+    logs: &mut Vec<FreeProxyRouteLog>,
+) -> Result<PrefetchedSseStream, ProxyAttemptError> {
     let upstream_url = format!("{}/v1/messages", trim_base(&cfg.base_url));
     let requested_model = anthropic_body
         .get("model")
@@ -921,6 +1069,7 @@ fn try_anthropic_passthrough(
     let mut tried_models: Vec<String> = Vec::new();
 
     for model in candidates.iter() {
+        let log_id = push_free_proxy_route_log(logs, None, cfg, model, "running", None);
         tried_models.push(model.clone());
         let body = with_json_model(&anthropic_body, model);
         let body_string = body.to_string();
@@ -942,9 +1091,24 @@ fn try_anthropic_passthrough(
 
         match req.send_string(&body_string) {
             Ok(response) => {
+                let stream = match prefetch_anthropic_stream(response) {
+                    Ok(stream) => stream,
+                    Err(err) => {
+                        push_free_proxy_route_log(
+                            logs,
+                            Some(log_id),
+                            cfg,
+                            model,
+                            "error",
+                            Some(format!("HTTP {}: {}", err.status, err.detail)),
+                        );
+                        return Err(err);
+                    }
+                };
                 remember_model_success(&cache_key, model);
                 clear_channel_cooldown(&cfg.id);
-                return Ok(response);
+                push_free_proxy_route_log(logs, Some(log_id), cfg, model, "done", None);
+                return Ok(stream);
             }
             Err(ureq::Error::Status(code, response)) => {
                 let retry_after = response.header("retry-after").map(|v| v.to_string());
@@ -960,21 +1124,32 @@ fn try_anthropic_passthrough(
                 let detail = response
                     .into_string()
                     .unwrap_or_else(|_| "<no body>".to_string());
+                push_free_proxy_route_log(
+                    logs,
+                    Some(log_id),
+                    cfg,
+                    model,
+                    "error",
+                    Some(format!("HTTP {code}: {detail}")),
+                );
                 if looks_like_model_error(code, &detail) {
-                    last_error = Some((code, ct, detail));
-                    if model != candidates.last().unwrap() {
+                    last_error = Some((code, ct.clone(), detail.clone()));
+                    let is_last_candidate =
+                        candidates.last().map(|last| model == last).unwrap_or(true);
+                    if !is_last_candidate {
                         continue;
                     }
-                    let (last_code, _, last_detail) = last_error.as_ref().unwrap();
-                    return Err(json_attempt_error(
-                        422,
-                        model_candidates_failed_message(
-                            &cfg.id,
-                            *last_code,
-                            last_detail,
-                            &tried_models,
-                        ),
-                    ));
+                    if let Some((last_code, _, last_detail)) = last_error.as_ref() {
+                        return Err(json_attempt_error(
+                            422,
+                            model_candidates_failed_message(
+                                &cfg.id,
+                                *last_code,
+                                last_detail,
+                                &tried_models,
+                            ),
+                        ));
+                    }
                 }
                 return Err(ProxyAttemptError {
                     status: code,
@@ -985,6 +1160,14 @@ fn try_anthropic_passthrough(
                 });
             }
             Err(e) => {
+                push_free_proxy_route_log(
+                    logs,
+                    Some(log_id),
+                    cfg,
+                    model,
+                    "error",
+                    Some(format!("request failed: {e}")),
+                );
                 return Err(json_attempt_error(
                     502,
                     format!("free proxy: upstream request failed: {e}"),
@@ -1024,27 +1207,39 @@ fn respond_upstream_status(request: Request, code: u16, content_type: &str, body
     let _ = request.respond(out);
 }
 
-/// Stream an upstream ureq response back to the client unchanged.
+/// Stream an upstream SSE response back to the client unchanged.
 ///
 /// We write the HTTP response head + body manually onto the raw socket
 /// (`Request::into_writer`) so SSE streams flush live, byte-for-byte.
-fn stream_passthrough(request: Request, response: ureq::Response) {
-    let status = response.status();
-    let content_type = response
-        .header("content-type")
-        .unwrap_or("text/event-stream")
-        .to_string();
-
-    let mut reader = response.into_reader();
+fn stream_passthrough(request: Request, stream: PrefetchedSseStream, log_text: Option<String>) {
+    let status = stream.status;
+    let content_type = stream.content_type;
+    let mut raw_reader = Cursor::new(stream.prefix).chain(stream.reader);
     let mut writer = request.into_writer();
 
     if write_stream_head(&mut writer, status, &content_type).is_err() {
         return;
     }
 
+    if let Some(log_text) = log_text.filter(|text| !text.trim().is_empty()) {
+        let reader = BufReader::new(raw_reader);
+        let mut sink = |event: &str, data: &Value| -> bool {
+            let s = sse_event(event, data);
+            if write_chunk(&mut writer, s.as_bytes()).is_err() {
+                return false;
+            }
+            let _ = writer.flush();
+            true
+        };
+        run_anthropic_passthrough_with_log_text(reader, &log_text, &mut sink);
+        let _ = writer.write_all(b"0\r\n\r\n");
+        let _ = writer.flush();
+        return;
+    }
+
     let mut buf = [0u8; 8192];
     loop {
-        match reader.read(&mut buf) {
+        match raw_reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
                 if write_chunk(&mut writer, &buf[..n]).is_err() {
@@ -1108,9 +1303,22 @@ fn handle_auto_route(
         return;
     }
 
+    let model_override = auto_route_model_override(&cfg.model);
     let mut failures: Vec<AutoFailure> = Vec::new();
-    for candidate in candidates {
+    let mut logs: Vec<FreeProxyRouteLog> = Vec::new();
+    for mut candidate in candidates {
+        if let Some(model) = model_override.as_deref() {
+            candidate.model = model.to_string();
+        }
         if let Some((seconds, reason)) = channel_cooldown_remaining(&candidate.id) {
+            push_free_proxy_route_log(
+                &mut logs,
+                None,
+                &candidate,
+                &candidate.model,
+                "error",
+                Some(format!("cooling down for {seconds}s after {reason}")),
+            );
             failures.push(AutoFailure {
                 channel_id: candidate.id.clone(),
                 status: 429,
@@ -1124,9 +1332,10 @@ fn handle_auto_route(
                 &candidate,
                 &anthropic_body,
                 anthropic_beta.as_deref(),
+                &mut logs,
             ) {
                 Ok(response) => {
-                    stream_passthrough(request, response);
+                    stream_passthrough(request, response, encode_free_proxy_logs(&logs));
                     return;
                 }
                 Err(err) => {
@@ -1138,9 +1347,9 @@ fn handle_auto_route(
                     });
                 }
             },
-            "openai" => match try_openai_translate(&candidate, &anthropic_body) {
-                Ok((response, echo_model)) => {
-                    translate_openai_stream(request, response, &echo_model);
+            "openai" => match try_openai_translate(&candidate, &anthropic_body, &mut logs) {
+                Ok(response) => {
+                    translate_openai_response(request, response, encode_free_proxy_logs(&logs));
                     return;
                 }
                 Err(err) => {
@@ -1168,21 +1377,42 @@ fn handle_auto_route(
     respond_json_error(request, status, &auto_failure_message(&cfg.id, &failures));
 }
 
+fn auto_route_model_override(model: &str) -> Option<String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI translation
 // ---------------------------------------------------------------------------
 
 fn handle_openai_translate(request: Request, cfg: &FreeChannelCfg, anthropic_body: Value) {
-    match try_openai_translate(cfg, &anthropic_body) {
-        Ok((response, echo_model)) => translate_openai_stream(request, response, &echo_model),
+    let mut logs = Vec::new();
+    match try_openai_translate(cfg, &anthropic_body, &mut logs) {
+        Ok(response) => translate_openai_response(request, response, encode_free_proxy_logs(&logs)),
         Err(err) => respond_attempt_error(request, err),
     }
+}
+
+enum OpenAiUpstreamResponse {
+    Stream {
+        stream: PrefetchedSseStream,
+        echo_model: String,
+    },
+    Json {
+        body: Value,
+        echo_model: String,
+    },
 }
 
 fn try_openai_translate(
     cfg: &FreeChannelCfg,
     anthropic_body: &Value,
-) -> Result<(ureq::Response, String), ProxyAttemptError> {
+    logs: &mut Vec<FreeProxyRouteLog>,
+) -> Result<OpenAiUpstreamResponse, ProxyAttemptError> {
     // The model the CLI requested. We echo this back in message_start so the
     // response model matches the request (Anthropic contract).
     let requested_model = anthropic_body
@@ -1209,6 +1439,7 @@ fn try_openai_translate(
     let mut tried_models: Vec<String> = Vec::new();
 
     for model in candidates.iter() {
+        let log_id = push_free_proxy_route_log(logs, None, cfg, model, "running", None);
         tried_models.push(model.clone());
         let openai_body = anthropic_to_openai_body(anthropic_body, model);
         let mut req = ureq::post(&upstream_url)
@@ -1226,35 +1457,129 @@ fn try_openai_translate(
 
         match resp {
             Ok(response) => {
-                remember_model_success(&cache_key, model);
-                clear_channel_cooldown(&cfg.id);
                 let echo_model = if model == &upstream_model {
                     requested_echo_model.clone()
                 } else {
                     model.clone()
                 };
-                return Ok((response, echo_model));
+                let content_type = response.header("content-type").unwrap_or("").to_string();
+                if is_event_stream_content_type(&content_type) || content_type.trim().is_empty() {
+                    let stream = match prefetch_openai_stream(response) {
+                        Ok(stream) => stream,
+                        Err(err) => {
+                            push_free_proxy_route_log(
+                                logs,
+                                Some(log_id),
+                                cfg,
+                                model,
+                                "error",
+                                Some(format!("HTTP {}: {}", err.status, err.detail)),
+                            );
+                            return Err(err);
+                        }
+                    };
+                    remember_model_success(&cache_key, model);
+                    clear_channel_cooldown(&cfg.id);
+                    push_free_proxy_route_log(logs, Some(log_id), cfg, model, "done", None);
+                    return Ok(OpenAiUpstreamResponse::Stream { stream, echo_model });
+                }
+                if is_json_content_type(&content_type) {
+                    let detail = response
+                        .into_string()
+                        .unwrap_or_else(|_| "<no body>".to_string());
+                    let body: Value = match serde_json::from_str(&detail) {
+                        Ok(body) => body,
+                        Err(e) => {
+                            let err = json_attempt_error(
+                                502,
+                                format!(
+                                    "free proxy: upstream 200 returned invalid JSON ({content_type}): {e}"
+                                ),
+                            );
+                            push_free_proxy_route_log(
+                                logs,
+                                Some(log_id),
+                                cfg,
+                                model,
+                                "error",
+                                Some(format!("HTTP {}: {}", err.status, err.detail)),
+                            );
+                            return Err(err);
+                        }
+                    };
+                    if let Err(message) = validate_openai_json_body(&body) {
+                        let err = json_attempt_error(
+                            502,
+                            format!(
+                                "free proxy: upstream 200 returned unusable JSON ({content_type}): {message}"
+                            ),
+                        );
+                        push_free_proxy_route_log(
+                            logs,
+                            Some(log_id),
+                            cfg,
+                            model,
+                            "error",
+                            Some(format!("HTTP {}: {}", err.status, err.detail)),
+                        );
+                        return Err(err);
+                    }
+                    remember_model_success(&cache_key, model);
+                    clear_channel_cooldown(&cfg.id);
+                    push_free_proxy_route_log(logs, Some(log_id), cfg, model, "done", None);
+                    return Ok(OpenAiUpstreamResponse::Json { body, echo_model });
+                }
+                let detail = response
+                    .into_string()
+                    .unwrap_or_else(|_| "<no body>".to_string());
+                push_free_proxy_route_log(
+                    logs,
+                    Some(log_id),
+                    cfg,
+                    model,
+                    "error",
+                    Some(format!("HTTP 502: {detail}")),
+                );
+                return Err(json_attempt_error(
+                    502,
+                    format!(
+                        "free proxy: upstream 200 returned non-SSE content-type '{}': {}",
+                        content_type,
+                        brief_detail(&detail)
+                    ),
+                ));
             }
             Err(ureq::Error::Status(code, response)) => {
                 let retry_after = response.header("retry-after").map(|v| v.to_string());
                 let detail = response
                     .into_string()
                     .unwrap_or_else(|_| "<no body>".to_string());
+                push_free_proxy_route_log(
+                    logs,
+                    Some(log_id),
+                    cfg,
+                    model,
+                    "error",
+                    Some(format!("HTTP {code}: {detail}")),
+                );
                 if looks_like_model_error(code, &detail) {
-                    last_error = Some((code, detail));
-                    if model != candidates.last().unwrap() {
+                    last_error = Some((code, detail.clone()));
+                    let is_last_candidate =
+                        candidates.last().map(|last| model == last).unwrap_or(true);
+                    if !is_last_candidate {
                         continue;
                     }
-                    let (last_code, last_detail) = last_error.as_ref().unwrap();
-                    return Err(json_attempt_error(
-                        422,
-                        model_candidates_failed_message(
-                            &cfg.id,
-                            *last_code,
-                            last_detail,
-                            &tried_models,
-                        ),
-                    ));
+                    if let Some((last_code, last_detail)) = last_error.as_ref() {
+                        return Err(json_attempt_error(
+                            422,
+                            model_candidates_failed_message(
+                                &cfg.id,
+                                *last_code,
+                                last_detail,
+                                &tried_models,
+                            ),
+                        ));
+                    }
                 }
                 return Err(ProxyAttemptError {
                     status: code,
@@ -1265,6 +1590,14 @@ fn try_openai_translate(
                 });
             }
             Err(e) => {
+                push_free_proxy_route_log(
+                    logs,
+                    Some(log_id),
+                    cfg,
+                    model,
+                    "error",
+                    Some(format!("request failed: {e}")),
+                );
                 return Err(json_attempt_error(
                     502,
                     format!("free proxy: upstream request failed: {e}"),
@@ -1293,6 +1626,328 @@ fn try_openai_translate(
     }
 }
 
+fn is_event_stream_content_type(content_type: &str) -> bool {
+    content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .eq_ignore_ascii_case("text/event-stream")
+}
+
+fn is_json_content_type(content_type: &str) -> bool {
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    media_type == "application/json" || media_type.ends_with("+json")
+}
+
+fn prefetch_openai_stream(
+    response: ureq::Response,
+) -> Result<PrefetchedSseStream, ProxyAttemptError> {
+    let status = response.status();
+    let raw_content_type = response.header("content-type").unwrap_or("").to_string();
+    let content_type = if raw_content_type.trim().is_empty() {
+        "text/event-stream".to_string()
+    } else {
+        raw_content_type
+    };
+    let mut reader = BufReader::new(response.into_reader());
+    let mut prefix = Vec::new();
+    preflight_openai_stream_reader(&mut reader, &mut prefix)?;
+    Ok(PrefetchedSseStream {
+        status,
+        content_type,
+        prefix,
+        reader,
+    })
+}
+
+fn prefetch_anthropic_stream(
+    response: ureq::Response,
+) -> Result<PrefetchedSseStream, ProxyAttemptError> {
+    let status = response.status();
+    let raw_content_type = response.header("content-type").unwrap_or("").to_string();
+    if !raw_content_type.trim().is_empty() && !is_event_stream_content_type(&raw_content_type) {
+        let detail = response
+            .into_string()
+            .unwrap_or_else(|_| "<no body>".to_string());
+        return Err(json_attempt_error(
+            502,
+            format!(
+                "free proxy: upstream 200 returned non-SSE content-type '{}': {}",
+                raw_content_type,
+                brief_detail(&detail)
+            ),
+        ));
+    }
+    let content_type = if raw_content_type.trim().is_empty() {
+        "text/event-stream".to_string()
+    } else {
+        raw_content_type
+    };
+    let mut reader = BufReader::new(response.into_reader());
+    let mut prefix = Vec::new();
+    preflight_anthropic_stream_reader(&mut reader, &mut prefix)?;
+    Ok(PrefetchedSseStream {
+        status,
+        content_type,
+        prefix,
+        reader,
+    })
+}
+
+fn preflight_openai_stream_reader<R: Read>(
+    reader: &mut BufReader<R>,
+    prefix: &mut Vec<u8>,
+) -> Result<(), ProxyAttemptError> {
+    let mut saw_data = false;
+    let mut saw_choices = false;
+
+    loop {
+        let mut line_bytes = Vec::new();
+        let n = reader.read_until(b'\n', &mut line_bytes).map_err(|e| {
+            json_attempt_error(502, format!("free proxy: upstream SSE read failed: {e}"))
+        })?;
+        if n == 0 {
+            break;
+        }
+        prefix.extend_from_slice(&line_bytes);
+        let line = String::from_utf8_lossy(&line_bytes);
+        let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
+        if line.is_empty() {
+            continue;
+        }
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        saw_data = true;
+        if data == "[DONE]" {
+            return Err(json_attempt_error(
+                502,
+                "free proxy: upstream 200 SSE ended before first assistant content/tool"
+                    .to_string(),
+            ));
+        }
+        let chunk: Value = serde_json::from_str(data).map_err(|e| {
+            json_attempt_error(
+                502,
+                format!("free proxy: upstream 200 SSE returned invalid JSON chunk: {e}"),
+            )
+        })?;
+        if let Some(error) = chunk.get("error") {
+            return Err(json_attempt_error(
+                502,
+                format!(
+                    "free proxy: upstream 200 SSE returned error: {}",
+                    brief_detail(&error.to_string())
+                ),
+            ));
+        }
+        if openai_stream_chunk_has_choices(&chunk) {
+            saw_choices = true;
+        }
+        if openai_stream_chunk_has_assistant_output(&chunk) {
+            return Ok(());
+        }
+    }
+
+    let detail = if !saw_data {
+        "empty stream (no data events)"
+    } else if !saw_choices {
+        "missing choices[]"
+    } else {
+        "no assistant content/tool"
+    };
+    Err(json_attempt_error(
+        502,
+        format!("free proxy: upstream 200 SSE returned unusable stream: {detail}"),
+    ))
+}
+
+fn preflight_anthropic_stream_reader<R: Read>(
+    reader: &mut BufReader<R>,
+    prefix: &mut Vec<u8>,
+) -> Result<(), ProxyAttemptError> {
+    let mut saw_data = false;
+
+    loop {
+        let mut line_bytes = Vec::new();
+        let n = reader.read_until(b'\n', &mut line_bytes).map_err(|e| {
+            json_attempt_error(502, format!("free proxy: upstream SSE read failed: {e}"))
+        })?;
+        if n == 0 {
+            break;
+        }
+        prefix.extend_from_slice(&line_bytes);
+        let line = String::from_utf8_lossy(&line_bytes);
+        let line = line.trim_end_matches(|c| c == '\r' || c == '\n');
+        if line.is_empty() {
+            continue;
+        }
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        saw_data = true;
+        let event: Value = serde_json::from_str(data).map_err(|e| {
+            json_attempt_error(
+                502,
+                format!("free proxy: upstream 200 SSE returned invalid JSON chunk: {e}"),
+            )
+        })?;
+        if event.get("type").and_then(|v| v.as_str()) == Some("error") {
+            return Err(json_attempt_error(
+                502,
+                format!(
+                    "free proxy: upstream 200 SSE returned error: {}",
+                    brief_detail(&event.to_string())
+                ),
+            ));
+        }
+        if anthropic_stream_event_has_assistant_output(&event) {
+            return Ok(());
+        }
+        if event.get("type").and_then(|v| v.as_str()) == Some("message_stop") {
+            return Err(json_attempt_error(
+                502,
+                "free proxy: upstream 200 SSE ended before first assistant content/tool"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let detail = if saw_data {
+        "no assistant content/tool"
+    } else {
+        "empty stream (no data events)"
+    };
+    Err(json_attempt_error(
+        502,
+        format!("free proxy: upstream 200 SSE returned unusable stream: {detail}"),
+    ))
+}
+
+fn openai_stream_chunk_has_choices(chunk: &Value) -> bool {
+    chunk
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .map(|choices| !choices.is_empty())
+        .unwrap_or(false)
+}
+
+fn openai_stream_chunk_has_assistant_output(chunk: &Value) -> bool {
+    let Some(choice) = chunk
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|choices| choices.first())
+    else {
+        return false;
+    };
+    let Some(delta) = choice.get("delta") else {
+        return false;
+    };
+    if delta
+        .get("content")
+        .and_then(|content| content.as_str())
+        .map(|text| !text.is_empty())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    delta
+        .get("tool_calls")
+        .and_then(|calls| calls.as_array())
+        .map(|calls| calls.iter().any(openai_tool_call_has_name))
+        .unwrap_or(false)
+}
+
+fn openai_tool_call_has_name(tool_call: &Value) -> bool {
+    tool_call
+        .get("function")
+        .and_then(|func| func.get("name"))
+        .and_then(|name| name.as_str())
+        .map(|name| !name.is_empty())
+        .unwrap_or(false)
+}
+
+fn openai_message_has_assistant_output(message: &Value) -> bool {
+    if message
+        .get("content")
+        .and_then(openai_message_content_text)
+        .map(|text| !text.is_empty())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    message
+        .get("tool_calls")
+        .and_then(|calls| calls.as_array())
+        .map(|calls| calls.iter().any(openai_tool_call_has_name))
+        .unwrap_or(false)
+}
+
+fn anthropic_stream_event_has_assistant_output(event: &Value) -> bool {
+    match event.get("type").and_then(|value| value.as_str()) {
+        Some("content_block_start") => event
+            .get("content_block")
+            .and_then(|block| block.get("type"))
+            .and_then(|kind| kind.as_str())
+            .map(|kind| kind == "tool_use" || kind == "server_tool_use")
+            .unwrap_or(false),
+        Some("content_block_delta") => {
+            let Some(delta) = event.get("delta") else {
+                return false;
+            };
+            let kind = delta.get("type").and_then(|value| value.as_str());
+            match kind {
+                Some("text_delta") => delta
+                    .get("text")
+                    .and_then(|text| text.as_str())
+                    .map(|text| !text.is_empty())
+                    .unwrap_or(false),
+                Some("input_json_delta") => delta
+                    .get("partial_json")
+                    .and_then(|text| text.as_str())
+                    .map(|text| !text.is_empty())
+                    .unwrap_or(false),
+                Some("thinking_delta") => delta
+                    .get("thinking")
+                    .and_then(|text| text.as_str())
+                    .map(|text| !text.is_empty())
+                    .unwrap_or(false),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
+fn validate_openai_json_body(body: &Value) -> Result<(), String> {
+    if let Some(error) = body.get("error") {
+        return Err(brief_detail(&error.to_string()));
+    }
+    let choice = body
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|choices| choices.first());
+    if choice.is_none() {
+        return Err("missing choices[]".to_string());
+    }
+    let message = choice.and_then(|choice| choice.get("message"));
+    let Some(message) = message else {
+        return Err("missing choices[0].message".to_string());
+    };
+    if !openai_message_has_assistant_output(message) {
+        return Err("missing assistant content/tool".to_string());
+    }
+    Ok(())
+}
+
 /// Convert an Anthropic Messages body to an OpenAI chat/completions body.
 fn anthropic_to_openai_body(anthropic: &Value, model: &str) -> Value {
     let mut messages: Vec<Value> = Vec::new();
@@ -1316,13 +1971,18 @@ fn anthropic_to_openai_body(anthropic: &Value, model: &str) -> Value {
         "messages": messages,
         "stream": true,
     });
-    let obj = body.as_object_mut().unwrap();
+    let Some(obj) = body.as_object_mut() else {
+        return body;
+    };
 
     let max_tokens = anthropic
         .get("max_tokens")
         .and_then(|v| v.as_u64())
         .unwrap_or(4096);
-    obj.insert("max_tokens".to_string(), json!(max_tokens));
+    obj.insert(
+        "max_tokens".to_string(),
+        json!(max_tokens.min(FREE_CHANNEL_MAX_TOKENS)),
+    );
 
     if let Some(t) = anthropic.get("temperature") {
         if !t.is_null() {
@@ -1334,10 +1994,12 @@ fn anthropic_to_openai_body(anthropic: &Value, model: &str) -> Value {
             obj.insert("top_p".to_string(), p.clone());
         }
     }
-    if let Some(stop) = anthropic.get("stop_sequences") {
-        if stop.is_array() && !stop.as_array().unwrap().is_empty() {
-            obj.insert("stop".to_string(), stop.clone());
-        }
+    if let Some(stop) = anthropic
+        .get("stop_sequences")
+        .and_then(|stop| stop.as_array())
+        .filter(|stop| !stop.is_empty())
+    {
+        obj.insert("stop".to_string(), Value::Array(stop.clone()));
     }
 
     // tools.
@@ -1578,6 +2240,119 @@ fn sse_event(event_type: &str, data: &Value) -> String {
     format!("event: {}\ndata: {}\n\n", event_type, data)
 }
 
+fn emit_anthropic_text_block(
+    index: usize,
+    text: &str,
+    sink: &mut dyn FnMut(&str, &Value) -> bool,
+) -> bool {
+    sink(
+        "content_block_start",
+        &json!({
+            "type": "content_block_start",
+            "index": index,
+            "content_block": { "type": "text", "text": "" }
+        }),
+    ) && sink(
+        "content_block_delta",
+        &json!({
+            "type": "content_block_delta",
+            "index": index,
+            "delta": { "type": "text_delta", "text": text }
+        }),
+    ) && sink(
+        "content_block_stop",
+        &json!({ "type": "content_block_stop", "index": index }),
+    )
+}
+
+fn shift_anthropic_content_index(mut data: Value) -> Value {
+    if let Some(obj) = data.as_object_mut() {
+        if let Some(index) = obj.get("index").and_then(|value| value.as_u64()) {
+            obj.insert("index".to_string(), json!(index + 1));
+        }
+    }
+    data
+}
+
+fn flush_anthropic_sse_block(
+    event_type: &str,
+    data_lines: &[String],
+    inserted_log: &mut bool,
+    log_text: &str,
+    sink: &mut dyn FnMut(&str, &Value) -> bool,
+) -> bool {
+    if data_lines.is_empty() {
+        return true;
+    }
+    let data_text = data_lines.join("\n");
+    let data: Value = match serde_json::from_str(&data_text) {
+        Ok(value) => value,
+        Err(_) => return true,
+    };
+    let output_event = if event_type == "message" {
+        data.get("type")
+            .and_then(|value| value.as_str())
+            .unwrap_or(event_type)
+    } else {
+        event_type
+    }
+    .to_string();
+    if output_event == "message_start" && !*inserted_log {
+        if !sink(&output_event, &data) {
+            return false;
+        }
+        *inserted_log = true;
+        return emit_anthropic_text_block(0, log_text, sink);
+    }
+
+    let shifted = if *inserted_log && output_event.starts_with("content_block_") {
+        shift_anthropic_content_index(data)
+    } else {
+        data
+    };
+    sink(&output_event, &shifted)
+}
+
+fn run_anthropic_passthrough_with_log_text<R: BufRead>(
+    reader: R,
+    log_text: &str,
+    sink: &mut dyn FnMut(&str, &Value) -> bool,
+) {
+    let mut event_type = String::from("message");
+    let mut data_lines: Vec<String> = Vec::new();
+    let mut inserted_log = false;
+
+    for line in reader.lines() {
+        let line = match line {
+            Ok(line) => line,
+            Err(_) => break,
+        };
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() {
+            if !flush_anthropic_sse_block(
+                &event_type,
+                &data_lines,
+                &mut inserted_log,
+                log_text,
+                sink,
+            ) {
+                return;
+            }
+            event_type.clear();
+            event_type.push_str("message");
+            data_lines.clear();
+            continue;
+        }
+        if let Some(value) = line.strip_prefix("event:") {
+            event_type = value.trim().to_string();
+        } else if let Some(value) = line.strip_prefix("data:") {
+            data_lines.push(value.trim().to_string());
+        }
+    }
+
+    let _ = flush_anthropic_sse_block(&event_type, &data_lines, &mut inserted_log, log_text, sink);
+}
+
 fn map_finish_reason(reason: Option<&str>) -> &'static str {
     match reason {
         Some("stop") => "end_turn",
@@ -1602,13 +2377,33 @@ struct ToolAccum {
     pending_args: String,
 }
 
-fn translate_openai_stream(request: Request, response: ureq::Response, echo_model: &str) {
+fn translate_openai_response(
+    request: Request,
+    response: OpenAiUpstreamResponse,
+    log_text: Option<String>,
+) {
+    match response {
+        OpenAiUpstreamResponse::Stream { stream, echo_model } => {
+            translate_openai_stream(request, stream, &echo_model, log_text.as_deref())
+        }
+        OpenAiUpstreamResponse::Json { body, echo_model } => {
+            translate_openai_json(request, &body, &echo_model, log_text.as_deref())
+        }
+    }
+}
+
+fn translate_openai_stream(
+    request: Request,
+    stream: PrefetchedSseStream,
+    echo_model: &str,
+    log_text: Option<&str>,
+) {
     let mut writer = request.into_writer();
     if write_stream_head(&mut writer, 200, "text/event-stream").is_err() {
         return;
     }
     let message_id = next_message_id();
-    let reader = BufReader::new(response.into_reader());
+    let reader = BufReader::new(Cursor::new(stream.prefix).chain(stream.reader));
 
     // Sink: write each Anthropic SSE event as one chunked-transfer chunk.
     let mut sink = |event: &str, data: &Value| -> bool {
@@ -1619,9 +2414,29 @@ fn translate_openai_stream(request: Request, response: ureq::Response, echo_mode
         let _ = writer.flush();
         true
     };
-    run_openai_translation(reader, echo_model, &message_id, &mut sink);
+    run_openai_translation(reader, echo_model, &message_id, log_text, &mut sink);
 
     // Terminate the chunked body.
+    let _ = writer.write_all(b"0\r\n\r\n");
+    let _ = writer.flush();
+}
+
+fn translate_openai_json(request: Request, body: &Value, echo_model: &str, log_text: Option<&str>) {
+    let mut writer = request.into_writer();
+    if write_stream_head(&mut writer, 200, "text/event-stream").is_err() {
+        return;
+    }
+    let message_id = next_message_id();
+    let mut sink = |event: &str, data: &Value| -> bool {
+        let s = sse_event(event, data);
+        if write_chunk(&mut writer, s.as_bytes()).is_err() {
+            return false;
+        }
+        let _ = writer.flush();
+        true
+    };
+    run_openai_json_translation(body, echo_model, &message_id, log_text, &mut sink);
+
     let _ = writer.write_all(b"0\r\n\r\n");
     let _ = writer.flush();
 }
@@ -1633,6 +2448,7 @@ fn run_openai_translation<R: BufRead>(
     reader: R,
     echo_model: &str,
     message_id: &str,
+    log_text: Option<&str>,
     sink: &mut dyn FnMut(&str, &Value) -> bool,
 ) {
     macro_rules! emit {
@@ -1668,6 +2484,12 @@ fn run_openai_translation<R: BufRead>(
 
     // Block state.
     let mut next_index: usize = 0;
+    if let Some(log_text) = log_text.filter(|text| !text.trim().is_empty()) {
+        if !emit_anthropic_text_block(next_index, log_text, sink) {
+            return;
+        }
+        next_index += 1;
+    }
     let mut text_open = false;
     let mut text_index: usize = 0;
     let mut tool_blocks: HashMap<i64, ToolAccum> = HashMap::new();
@@ -1884,6 +2706,191 @@ fn run_openai_translation<R: BufRead>(
     emit!("message_stop", json!({ "type": "message_stop" }));
 }
 
+fn run_openai_json_translation(
+    body: &Value,
+    echo_model: &str,
+    message_id: &str,
+    log_text: Option<&str>,
+    sink: &mut dyn FnMut(&str, &Value) -> bool,
+) {
+    macro_rules! emit {
+        ($event:expr, $data:expr) => {{
+            if !sink($event, &$data) {
+                return;
+            }
+        }};
+    }
+
+    emit!(
+        "message_start",
+        json!({
+            "type": "message_start",
+            "message": {
+                "id": message_id,
+                "type": "message",
+                "role": "assistant",
+                "model": echo_model,
+                "content": [],
+                "stop_reason": null,
+                "stop_sequence": null,
+                "usage": {
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_creation_input_tokens": 0,
+                    "cache_read_input_tokens": 0
+                }
+            }
+        })
+    );
+
+    let choice = body
+        .get("choices")
+        .and_then(|c| c.as_array())
+        .and_then(|a| a.first());
+    let finish_reason = choice
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(|f| f.as_str());
+    let message = choice.and_then(|c| c.get("message"));
+    let mut next_index: usize = 0;
+    if let Some(log_text) = log_text.filter(|text| !text.trim().is_empty()) {
+        if !emit_anthropic_text_block(next_index, log_text, sink) {
+            return;
+        }
+        next_index += 1;
+    }
+    let mut text_char_count: usize = 0;
+    let mut tool_count: usize = 0;
+
+    if let Some(text) = message
+        .and_then(|m| m.get("content"))
+        .and_then(openai_message_content_text)
+        .filter(|text| !text.is_empty())
+    {
+        let index = next_index;
+        next_index += 1;
+        text_char_count += text.chars().count();
+        emit!(
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": index,
+                "content_block": { "type": "text", "text": "" }
+            })
+        );
+        emit!(
+            "content_block_delta",
+            json!({
+                "type": "content_block_delta",
+                "index": index,
+                "delta": { "type": "text_delta", "text": text }
+            })
+        );
+        emit!(
+            "content_block_stop",
+            json!({ "type": "content_block_stop", "index": index })
+        );
+    }
+
+    if let Some(tool_calls) = message
+        .and_then(|m| m.get("tool_calls"))
+        .and_then(|t| t.as_array())
+    {
+        for (idx, tc) in tool_calls.iter().enumerate() {
+            let func = tc.get("function");
+            let name = func
+                .and_then(|f| f.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            if name.is_empty() {
+                continue;
+            }
+            let index = next_index;
+            next_index += 1;
+            tool_count += 1;
+            let id = tc
+                .get("id")
+                .and_then(|i| i.as_str())
+                .filter(|i| !i.is_empty())
+                .map(ToString::to_string)
+                .unwrap_or_else(|| format!("tool_{idx}"));
+            let args = func
+                .and_then(|f| f.get("arguments"))
+                .and_then(|a| a.as_str())
+                .unwrap_or("");
+            emit!(
+                "content_block_start",
+                json!({
+                    "type": "content_block_start",
+                    "index": index,
+                    "content_block": {
+                        "type": "tool_use",
+                        "id": id,
+                        "name": name,
+                        "input": {}
+                    }
+                })
+            );
+            if !args.is_empty() {
+                emit!(
+                    "content_block_delta",
+                    json!({
+                        "type": "content_block_delta",
+                        "index": index,
+                        "delta": { "type": "input_json_delta", "partial_json": args }
+                    })
+                );
+            }
+            emit!(
+                "content_block_stop",
+                json!({ "type": "content_block_stop", "index": index })
+            );
+        }
+    }
+
+    let output_tokens = body
+        .pointer("/usage/completion_tokens")
+        .and_then(|v| v.as_u64())
+        .filter(|v| *v > 0)
+        .unwrap_or_else(|| (text_char_count / 4) as u64 + (tool_count as u64 * 8));
+    let stop_reason = if tool_count > 0 && finish_reason.is_none() {
+        "tool_use"
+    } else {
+        map_finish_reason(finish_reason)
+    };
+    emit!(
+        "message_delta",
+        json!({
+            "type": "message_delta",
+            "delta": { "stop_reason": stop_reason, "stop_sequence": null },
+            "usage": {
+                "output_tokens": output_tokens,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0
+            }
+        })
+    );
+    emit!("message_stop", json!({ "type": "message_stop" }));
+}
+
+fn openai_message_content_text(content: &Value) -> Option<String> {
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    let arr = content.as_array()?;
+    let text = arr
+        .iter()
+        .filter_map(|part| {
+            if part.get("type").and_then(|t| t.as_str()) == Some("text") {
+                part.get("text").and_then(|t| t.as_str())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(text)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1895,13 +2902,51 @@ mod tests {
     /// Run the translator over a literal OpenAI SSE string and collect the
     /// emitted Anthropic events.
     fn collect(sse: &str, echo_model: &str) -> Vec<(String, Value)> {
+        collect_with_log(sse, echo_model, None)
+    }
+
+    fn collect_with_log(
+        sse: &str,
+        echo_model: &str,
+        log_text: Option<&str>,
+    ) -> Vec<(String, Value)> {
         let mut events: Vec<(String, Value)> = Vec::new();
         let mut sink = |event: &str, data: &Value| -> bool {
             events.push((event.to_string(), data.clone()));
             true
         };
-        run_openai_translation(sse.as_bytes(), echo_model, "msg_test", &mut sink);
+        run_openai_translation(sse.as_bytes(), echo_model, "msg_test", log_text, &mut sink);
         events
+    }
+
+    fn collect_json(body: &Value, echo_model: &str) -> Vec<(String, Value)> {
+        collect_json_with_log(body, echo_model, None)
+    }
+
+    fn collect_json_with_log(
+        body: &Value,
+        echo_model: &str,
+        log_text: Option<&str>,
+    ) -> Vec<(String, Value)> {
+        let mut events: Vec<(String, Value)> = Vec::new();
+        let mut sink = |event: &str, data: &Value| -> bool {
+            events.push((event.to_string(), data.clone()));
+            true
+        };
+        run_openai_json_translation(body, echo_model, "msg_test", log_text, &mut sink);
+        events
+    }
+
+    fn preflight_openai(sse: &str) -> Result<Vec<u8>, ProxyAttemptError> {
+        let mut reader = BufReader::new(sse.as_bytes());
+        let mut prefix = Vec::new();
+        preflight_openai_stream_reader(&mut reader, &mut prefix).map(|_| prefix)
+    }
+
+    fn preflight_anthropic(sse: &str) -> Result<Vec<u8>, ProxyAttemptError> {
+        let mut reader = BufReader::new(sse.as_bytes());
+        let mut prefix = Vec::new();
+        preflight_anthropic_stream_reader(&mut reader, &mut prefix).map(|_| prefix)
     }
 
     fn first<'a>(events: &'a [(String, Value)], kind: &str) -> &'a Value {
@@ -1910,6 +2955,97 @@ mod tests {
             .find(|(k, _)| k == kind)
             .unwrap_or_else(|| panic!("no event of kind {kind}"))
             .1
+    }
+
+    #[test]
+    fn free_proxy_port_range_skips_lark_oauth_callback_port() {
+        assert_eq!(FREE_PROXY_PORT_START, 8766);
+        assert!(FREE_PROXY_PORT_START <= FREE_PROXY_PORT_END);
+    }
+
+    #[test]
+    fn free_proxy_logs_encode_tool_sentinels() {
+        let logs = vec![
+            free_proxy_route_log(
+                "attempt-1".to_string(),
+                "OpenRouter".to_string(),
+                "z-ai/glm-4.6".to_string(),
+                "running",
+                None,
+            ),
+            free_proxy_route_log(
+                "attempt-1".to_string(),
+                "OpenRouter".to_string(),
+                "z-ai/glm-4.6".to_string(),
+                "error",
+                Some("HTTP 402: insufficient balance".to_string()),
+            ),
+        ];
+        let encoded = encode_free_proxy_logs(&logs).unwrap();
+
+        assert!(encoded.contains(TOOL_OPEN));
+        assert!(encoded.contains("\"name\":\"free_proxy\""));
+        assert!(encoded.contains("尝试使用 OpenRouter"));
+        assert!(encoded.contains("失败，切换"));
+    }
+
+    #[test]
+    fn openai_translation_injects_free_proxy_log_block() {
+        let sse =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\
+                   data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\
+                   data: [DONE]\n";
+        let log_text = encode_free_proxy_logs(&[free_proxy_route_log(
+            "attempt-1".to_string(),
+            "LLM7".to_string(),
+            "codestral-latest".to_string(),
+            "done",
+            None,
+        )])
+        .unwrap();
+        let events = collect_with_log(sse, "claude-x", Some(&log_text));
+        let deltas: Vec<&Value> = events
+            .iter()
+            .filter(|(kind, _)| kind == "content_block_delta")
+            .map(|(_, value)| value)
+            .collect();
+
+        assert!(deltas[0]["delta"]["text"]
+            .as_str()
+            .unwrap()
+            .contains(TOOL_OPEN));
+        assert_eq!(deltas[0]["index"], 0);
+        assert_eq!(deltas[1]["delta"]["text"], "Hello");
+        assert_eq!(deltas[1]["index"], 1);
+    }
+
+    #[test]
+    fn anthropic_passthrough_injects_log_and_shifts_content_indices() {
+        let sse = "event: message_start\n\
+                   data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n\
+                   event: content_block_start\n\
+                   data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
+                   event: content_block_delta\n\
+                   data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n\
+                   event: content_block_stop\n\
+                   data: {\"type\":\"content_block_stop\",\"index\":0}\n\n";
+        let mut events: Vec<(String, Value)> = Vec::new();
+        let mut sink = |event: &str, data: &Value| -> bool {
+            events.push((event.to_string(), data.clone()));
+            true
+        };
+
+        run_anthropic_passthrough_with_log_text(sse.as_bytes(), "LOG", &mut sink);
+
+        let deltas: Vec<&Value> = events
+            .iter()
+            .filter(|(kind, _)| kind == "content_block_delta")
+            .map(|(_, value)| value)
+            .collect();
+        assert_eq!(deltas[0]["delta"]["text"], "LOG");
+        assert_eq!(deltas[0]["index"], 0);
+        assert_eq!(deltas[1]["delta"]["text"], "Hello");
+        assert_eq!(deltas[1]["index"], 1);
     }
 
     #[test]
@@ -1937,6 +3073,80 @@ mod tests {
         assert_eq!(map_finish_reason(Some("length")), "max_tokens");
         assert_eq!(map_finish_reason(Some("tool_calls")), "tool_use");
         assert_eq!(map_finish_reason(None), "end_turn");
+    }
+
+    #[test]
+    fn openai_json_validation_rejects_200_error_shapes() {
+        assert!(validate_openai_json_body(&json!({
+            "choices": [{ "message": { "content": "ok" } }]
+        }))
+        .is_ok());
+        assert!(
+            validate_openai_json_body(&json!({ "error": { "message": "bad key" } }))
+                .unwrap_err()
+                .contains("bad key")
+        );
+        assert_eq!(
+            validate_openai_json_body(&json!({ "message": "not openai" })).unwrap_err(),
+            "missing choices[]"
+        );
+        assert_eq!(
+            validate_openai_json_body(&json!({
+                "choices": [{ "message": { "content": "" } }]
+            }))
+            .unwrap_err(),
+            "missing assistant content/tool"
+        );
+    }
+
+    #[test]
+    fn openai_stream_preflight_rejects_200_done_without_output() {
+        let err = preflight_openai("data: [DONE]\n").unwrap_err();
+        assert_eq!(err.status, 502);
+        assert!(err.detail.contains("before first assistant content/tool"));
+    }
+
+    #[test]
+    fn openai_stream_preflight_rejects_200_role_only_stream() {
+        let sse =
+            "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\
+                   data: [DONE]\n";
+        let err = preflight_openai(sse).unwrap_err();
+        assert_eq!(err.status, 502);
+        assert!(err.detail.contains("before first assistant content/tool"));
+    }
+
+    #[test]
+    fn openai_stream_preflight_accepts_delayed_text_output() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\
+                   data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"finish_reason\":null}]}\n\
+                   data: [DONE]\n";
+        let prefix = preflight_openai(sse).unwrap();
+        let prefix = String::from_utf8(prefix).unwrap();
+        assert!(prefix.contains("\"role\":\"assistant\""));
+        assert!(prefix.contains("\"content\":\"Hello\""));
+    }
+
+    #[test]
+    fn anthropic_stream_preflight_rejects_200_without_output() {
+        let sse = "event: message_start\n\
+                   data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\
+                   event: message_stop\n\
+                   data: {\"type\":\"message_stop\"}\n";
+        let err = preflight_anthropic(sse).unwrap_err();
+        assert_eq!(err.status, 502);
+        assert!(err.detail.contains("before first assistant content/tool"));
+    }
+
+    #[test]
+    fn anthropic_stream_preflight_accepts_text_delta() {
+        let sse = "event: message_start\n\
+                   data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\
+                   event: content_block_delta\n\
+                   data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n";
+        let prefix = preflight_anthropic(sse).unwrap();
+        let prefix = String::from_utf8(prefix).unwrap();
+        assert!(prefix.contains("\"text\":\"Hello\""));
     }
 
     #[test]
@@ -2108,7 +3318,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_cooldown_classifies_rate_limit_and_auth_errors() {
+    fn auto_cooldown_classifies_rate_limit_auth_and_billing_errors() {
         let limited = ProxyAttemptError {
             status: 429,
             content_type: "application/json".to_string(),
@@ -2133,6 +3343,30 @@ mod tests {
             Some(DEFAULT_AUTH_COOLDOWN)
         );
 
+        let billing = ProxyAttemptError {
+            status: 402,
+            content_type: "application/json".to_string(),
+            detail: "No payment method. Add a payment method here.".to_string(),
+            raw_body: false,
+            retry_after: None,
+        };
+        assert_eq!(
+            cooldown_for_attempt_error(&billing),
+            Some(Duration::from_secs(300))
+        );
+
+        let balance = ProxyAttemptError {
+            status: 500,
+            content_type: "application/json".to_string(),
+            detail: "insufficient balance, please recharge".to_string(),
+            raw_body: false,
+            retry_after: None,
+        };
+        assert_eq!(
+            cooldown_for_attempt_error(&balance),
+            Some(Duration::from_secs(300))
+        );
+
         let model = ProxyAttemptError {
             status: 422,
             content_type: "application/json".to_string(),
@@ -2144,11 +3378,28 @@ mod tests {
     }
 
     #[test]
+    fn auto_route_model_override_only_uses_explicit_models() {
+        assert_eq!(auto_route_model_override(""), None);
+        assert_eq!(auto_route_model_override(" auto "), None);
+        assert_eq!(
+            auto_route_model_override("z-ai/glm-5.1"),
+            Some("z-ai/glm-5.1".to_string())
+        );
+    }
+
+    #[test]
     fn with_json_model_overrides_body_model() {
         let body = json!({ "model": "bad", "messages": [] });
         let out = with_json_model(&body, "good");
         assert_eq!(out["model"], "good");
         assert_eq!(body["model"], "bad");
+    }
+
+    #[test]
+    fn with_json_model_caps_large_max_tokens() {
+        let body = json!({ "model": "bad", "messages": [], "max_tokens": 32000 });
+        let out = with_json_model(&body, "good");
+        assert_eq!(out["max_tokens"], 8192);
     }
 
     #[test]
@@ -2172,6 +3423,16 @@ mod tests {
         assert_eq!(out["tools"][0]["type"], "function");
         assert_eq!(out["tools"][0]["function"]["name"], "foo");
         assert_eq!(out["tool_choice"], "auto");
+    }
+
+    #[test]
+    fn anthropic_body_caps_large_max_tokens() {
+        let body = json!({
+            "messages": [{ "role": "user", "content": "Hi" }],
+            "max_tokens": 32000
+        });
+        let out = anthropic_to_openai_body(&body, "gpt-x");
+        assert_eq!(out["max_tokens"], 8192);
     }
 
     #[test]
@@ -2202,6 +3463,69 @@ mod tests {
         assert_eq!(
             first(&events, "message_delta")["delta"]["stop_reason"],
             "end_turn"
+        );
+    }
+
+    #[test]
+    fn non_streaming_json_translates_to_anthropic_events() {
+        let body = json!({
+            "choices": [{
+                "message": { "role": "assistant", "content": "Hello JSON" },
+                "finish_reason": "stop"
+            }],
+            "usage": { "completion_tokens": 7 }
+        });
+        let events = collect_json(&body, "claude-x");
+        let kinds: Vec<&str> = events.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "message_start",
+                "content_block_start",
+                "content_block_delta",
+                "content_block_stop",
+                "message_delta",
+                "message_stop",
+            ]
+        );
+        assert_eq!(
+            first(&events, "content_block_delta")["delta"]["text"],
+            "Hello JSON"
+        );
+        assert_eq!(first(&events, "message_delta")["usage"]["output_tokens"], 7);
+    }
+
+    #[test]
+    fn non_streaming_json_tool_calls_translate_to_anthropic_events() {
+        let body = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_json",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": "{\"path\":\"a.txt\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let events = collect_json(&body, "claude-x");
+        let start = first(&events, "content_block_start");
+        assert_eq!(start["content_block"]["type"], "tool_use");
+        assert_eq!(start["content_block"]["name"], "read_file");
+        assert_eq!(start["content_block"]["id"], "call_json");
+        assert_eq!(
+            first(&events, "content_block_delta")["delta"]["partial_json"],
+            "{\"path\":\"a.txt\"}"
+        );
+        assert_eq!(
+            first(&events, "message_delta")["delta"]["stop_reason"],
+            "tool_use"
         );
     }
 

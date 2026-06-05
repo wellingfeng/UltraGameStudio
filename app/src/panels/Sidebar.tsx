@@ -574,8 +574,25 @@ export default function Sidebar() {
     }));
   }, []);
 
+  const collapseWorkspace = useCallback((workspaceId: string) => {
+    setWorkspaceLimits((prev) => ({
+      ...prev,
+      [workspaceId]: Math.max(
+        WORKFLOW_HISTORY_PAGE_SIZE,
+        (prev[workspaceId] ?? WORKFLOW_HISTORY_PAGE_SIZE) -
+          WORKFLOW_HISTORY_PAGE_SIZE,
+      ),
+    }));
+  }, []);
+
   const loadMoreFlat = useCallback(() => {
     setFlatLimit((prev) => prev + WORKFLOW_HISTORY_PAGE_SIZE);
+  }, []);
+
+  const collapseFlat = useCallback(() => {
+    setFlatLimit((prev) =>
+      Math.max(WORKFLOW_HISTORY_PAGE_SIZE, prev - WORKFLOW_HISTORY_PAGE_SIZE),
+    );
   }, []);
 
   const normalizedQuery = searchQuery.trim().toLowerCase();
@@ -739,6 +756,13 @@ export default function Sidebar() {
     max: 480,
     edge: 'right',
   });
+  const showFlatCollapse =
+    !isSearching &&
+    flatLimit > WORKFLOW_HISTORY_PAGE_SIZE &&
+    Math.min(flatLimit, filteredFlatSessions.length) >
+      WORKFLOW_HISTORY_PAGE_SIZE;
+  const showFlatLoadMore =
+    !isSearching && filteredFlatSessions.length > flatLimit;
 
   return (
     <aside
@@ -894,13 +918,18 @@ export default function Sidebar() {
             <ul className="flex flex-col gap-2">
               {filteredWorkspaces.map(({ workspace, sessions: list, tabSessions }) => {
                 const fullList = tabSessions;
+                const currentLimit =
+                  workspaceLimits[workspace.id] ?? WORKFLOW_HISTORY_PAGE_SIZE;
                 const visibleList = isSearching
                   ? list
-                  : list.slice(
-                      0,
-                      workspaceLimits[workspace.id] ??
-                        WORKFLOW_HISTORY_PAGE_SIZE,
-                    );
+                  : list.slice(0, currentLimit);
+                const showWorkspaceCollapse =
+                  !isSearching &&
+                  currentLimit > WORKFLOW_HISTORY_PAGE_SIZE &&
+                  Math.min(currentLimit, list.length) >
+                    WORKFLOW_HISTORY_PAGE_SIZE;
+                const showWorkspaceLoadMore =
+                  !isSearching && fullList.length > currentLimit;
                 const workspaceActive = workspace.id === activeWorkspaceId;
                 return (
                   <li key={workspace.id} className="flex flex-col gap-1">
@@ -1106,18 +1135,27 @@ export default function Sidebar() {
                             </li>
                           );
                         })}
-                        {!isSearching &&
-                          fullList.length >
-                            (workspaceLimits[workspace.id] ??
-                              WORKFLOW_HISTORY_PAGE_SIZE) && (
-                            <li className="px-2 py-1">
-                              <button
-                                type="button"
-                                onClick={() => loadMoreWorkspace(workspace.id)}
-                                className="w-full rounded-md px-2 py-1.5 text-left text-sm text-fg-dim transition-colors hover:bg-border-soft hover:text-fg"
-                              >
-                                {t(locale, 'sidebar.loadMore')}
-                              </button>
+                        {(showWorkspaceCollapse ||
+                          showWorkspaceLoadMore) && (
+                            <li className="flex gap-1 px-2 py-1">
+                              {showWorkspaceCollapse && (
+                                <button
+                                  type="button"
+                                  onClick={() => collapseWorkspace(workspace.id)}
+                                  className="flex-1 rounded-md px-2 py-1.5 text-center text-sm text-fg-dim transition-colors hover:bg-border-soft hover:text-fg"
+                                >
+                                  {t(locale, 'sidebar.collapse')}
+                                </button>
+                              )}
+                              {showWorkspaceLoadMore && (
+                                <button
+                                  type="button"
+                                  onClick={() => loadMoreWorkspace(workspace.id)}
+                                  className="flex-1 rounded-md px-2 py-1.5 text-center text-sm text-fg-dim transition-colors hover:bg-border-soft hover:text-fg"
+                                >
+                                  {t(locale, 'sidebar.loadMore')}
+                                </button>
+                              )}
                             </li>
                           )}
                       </ul>
@@ -1276,15 +1314,26 @@ export default function Sidebar() {
                     </li>
                   );
                 })}
-              {!isSearching && sessions.length > flatLimit && (
-                <li className="px-2 py-1">
-                  <button
-                    type="button"
-                    onClick={loadMoreFlat}
-                    className="w-full rounded-md px-2 py-1.5 text-left text-sm text-fg-dim transition-colors hover:bg-border-soft hover:text-fg"
-                  >
-                    {t(locale, 'sidebar.loadMore')}
-                  </button>
+              {(showFlatCollapse || showFlatLoadMore) && (
+                <li className="flex gap-1 px-2 py-1">
+                  {showFlatCollapse && (
+                    <button
+                      type="button"
+                      onClick={collapseFlat}
+                      className="flex-1 rounded-md px-2 py-1.5 text-center text-sm text-fg-dim transition-colors hover:bg-border-soft hover:text-fg"
+                    >
+                      {t(locale, 'sidebar.collapse')}
+                    </button>
+                  )}
+                  {showFlatLoadMore && (
+                    <button
+                      type="button"
+                      onClick={loadMoreFlat}
+                      className="flex-1 rounded-md px-2 py-1.5 text-center text-sm text-fg-dim transition-colors hover:bg-border-soft hover:text-fg"
+                    >
+                      {t(locale, 'sidebar.loadMore')}
+                    </button>
+                  )}
                 </li>
               )}
             </ul>

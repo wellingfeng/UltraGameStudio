@@ -1,115 +1,98 @@
 <svg width="640" height="220" viewBox="0 0 640 220" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
-  <title id="title">FreeUltraCode animated workflow mark</title>
-  <desc id="desc">Animated nodes flow through a portable intermediate representation.</desc>
+  <title id="title">FreeUltraCode app mark</title>
+  <desc id="desc">A muted organic app mark with code brackets and local model channel chips.</desc>
   <style>
-    .track {
-      stroke-dasharray: 10 12;
-      animation: dash 2.8s linear infinite;
+    .cursor {
+      animation: blink 1.2s steps(2, start) infinite;
     }
 
-    .pulse-a {
-      animation: pulse 2.4s ease-in-out infinite;
-      transform-origin: center;
-    }
-
-    .pulse-b {
-      animation: pulse 2.4s ease-in-out .45s infinite;
-      transform-origin: center;
-    }
-
-    .pulse-c {
-      animation: pulse 2.4s ease-in-out .9s infinite;
-      transform-origin: center;
-    }
-
-    .spark {
-      animation: spark 3.2s ease-in-out infinite;
-      transform-origin: center;
-    }
-
-    @keyframes dash {
-      to {
-        stroke-dashoffset: -44;
-      }
-    }
-
-    @keyframes pulse {
-      0%, 100% {
-        opacity: .72;
-        transform: scale(1);
-      }
-      50% {
+    @keyframes blink {
+      0%, 44% {
         opacity: 1;
-        transform: scale(1.08);
       }
-    }
-
-    @keyframes spark {
-      0%, 100% {
-        opacity: .45;
-        transform: translateY(0);
-      }
-      45% {
-        opacity: 1;
-        transform: translateY(-6px);
+      45%, 100% {
+        opacity: .28;
       }
     }
   </style>
   <defs>
-    <linearGradient id="bg" x1="72" y1="16" x2="568" y2="204" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#111827"/>
-      <stop offset=".48" stop-color="#1F2937"/>
-      <stop offset="1" stop-color="#0F766E"/>
+    <linearGradient id="markShell" x1="44" y1="28" x2="604" y2="195" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1B2129"/>
+      <stop offset=".48" stop-color="#17201F"/>
+      <stop offset="1" stop-color="#11161C"/>
     </linearGradient>
-    <linearGradient id="flow" x1="118" y1="60" x2="522" y2="158" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#38BDF8"/>
-      <stop offset=".5" stop-color="#A78BFA"/>
-      <stop offset="1" stop-color="#34D399"/>
+    <linearGradient id="markRim" x1="62" y1="30" x2="588" y2="194" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#93A39B"/>
+      <stop offset=".58" stop-color="#6F8380"/>
+      <stop offset="1" stop-color="#A0916B"/>
     </linearGradient>
-    <filter id="glow" x="42" y="-8" width="556" height="244" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-      <feFlood flood-opacity="0" result="BackgroundImageFix"/>
-      <feBlend mode="normal" in="SourceGraphic" in2="BackgroundImageFix" result="shape"/>
-      <feGaussianBlur stdDeviation="12" result="effect1_foregroundBlur_1_1"/>
+    <linearGradient id="iconStone" x1="66" y1="52" x2="444" y2="462" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#1B2129"/>
+      <stop offset=".48" stop-color="#17201F"/>
+      <stop offset="1" stop-color="#11161C"/>
+    </linearGradient>
+    <linearGradient id="iconPanel" x1="126" y1="128" x2="393" y2="389" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#101820"/>
+      <stop offset=".58" stop-color="#0E151B"/>
+      <stop offset="1" stop-color="#121817"/>
+    </linearGradient>
+    <linearGradient id="iconCode" x1="148" y1="185" x2="364" y2="323" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#93A6AD"/>
+      <stop offset=".5" stop-color="#B8C0B7"/>
+      <stop offset="1" stop-color="#82988F"/>
+    </linearGradient>
+    <linearGradient id="iconNeedle" x1="228" y1="342" x2="282" y2="176" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#9B8451"/>
+      <stop offset="1" stop-color="#D0BF88"/>
+    </linearGradient>
+    <filter id="markShadow" x="12" y="-14" width="616" height="262" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#020617" flood-opacity=".38"/>
+    </filter>
+    <filter id="iconShadow" x="-24%" y="-24%" width="148%" height="148%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#030712" flood-opacity=".42"/>
     </filter>
   </defs>
 
-  <rect x="74" y="18" width="492" height="184" rx="34" fill="url(#bg)"/>
-  <rect x="75.5" y="19.5" width="489" height="181" rx="32.5" stroke="url(#flow)" stroke-opacity=".72" stroke-width="3"/>
-  <g filter="url(#glow)" opacity=".55">
-    <path d="M148 74H238C262 74 265 110 288 110H352C376 110 382 74 406 74H500" stroke="url(#flow)" stroke-width="8" stroke-linecap="round"/>
-    <path d="M148 146H238C262 146 265 110 288 110H352C376 110 382 146 406 146H500" stroke="url(#flow)" stroke-width="8" stroke-linecap="round"/>
-  </g>
-  <path class="track" d="M148 74H238C262 74 265 110 288 110H352C376 110 382 74 406 74H500" stroke="url(#flow)" stroke-width="4" stroke-linecap="round"/>
-  <path class="track" d="M148 146H238C262 146 265 110 288 110H352C376 110 382 146 406 146H500" stroke="url(#flow)" stroke-width="4" stroke-linecap="round"/>
-
-  <g class="pulse-a">
-    <rect x="112" y="50" width="76" height="48" rx="16" fill="#0EA5E9"/>
-    <rect x="112.75" y="50.75" width="74.5" height="46.5" rx="15.25" stroke="white" stroke-opacity=".45" stroke-width="1.5"/>
-    <circle cx="150" cy="74" r="10" fill="white" fill-opacity=".9"/>
-  </g>
-  <g class="pulse-b">
-    <rect x="272" y="76" width="96" height="68" rx="20" fill="#7C3AED"/>
-    <rect x="273" y="77" width="94" height="66" rx="19" stroke="white" stroke-opacity=".45" stroke-width="2"/>
-    <text x="320" y="118" text-anchor="middle" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="25" font-weight="800" fill="white">IR</text>
-  </g>
-  <g class="pulse-c">
-    <rect x="452" y="50" width="76" height="48" rx="16" fill="#10B981"/>
-    <rect x="452.75" y="50.75" width="74.5" height="46.5" rx="15.25" stroke="white" stroke-opacity=".45" stroke-width="1.5"/>
-    <path d="M476 74L491 86L507 62" stroke="white" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
-  </g>
-  <g class="pulse-c">
-    <rect x="452" y="122" width="76" height="48" rx="16" fill="#F59E0B"/>
-    <rect x="452.75" y="122.75" width="74.5" height="46.5" rx="15.25" stroke="white" stroke-opacity=".45" stroke-width="1.5"/>
-    <path d="M480 146H506M493 133V159" stroke="white" stroke-width="6" stroke-linecap="round"/>
-  </g>
-  <g class="pulse-a">
-    <rect x="112" y="122" width="76" height="48" rx="16" fill="#334155"/>
-    <rect x="112.75" y="122.75" width="74.5" height="46.5" rx="15.25" stroke="white" stroke-opacity=".45" stroke-width="1.5"/>
-    <path d="M138 146H162" stroke="white" stroke-width="6" stroke-linecap="round"/>
+  <g filter="url(#markShadow)">
+    <path d="M58 43 C111 8 183 33 249 25 C327 15 398 20 463 45 C535 72 594 53 610 103 C629 163 571 188 503 191 C426 194 351 207 271 192 C208 181 151 212 92 188 C32 163 20 83 58 43 Z" fill="url(#markShell)"/>
+    <path d="M58 43 C111 8 183 33 249 25 C327 15 398 20 463 45 C535 72 594 53 610 103 C629 163 571 188 503 191 C426 194 351 207 271 192 C208 181 151 212 92 188 C32 163 20 83 58 43 Z" stroke="url(#markRim)" stroke-opacity=".72" stroke-width="3"/>
+    <path d="M79 163 C145 126 188 180 249 146 C321 106 387 130 456 89 C493 67 527 59 557 73" stroke="#7E9189" stroke-opacity=".16" stroke-width="20" stroke-linecap="round"/>
+    <path d="M95 58 C174 34 239 59 289 91 C359 136 443 97 545 50" stroke="#A39165" stroke-opacity=".12" stroke-width="16" stroke-linecap="round"/>
   </g>
 
-  <circle class="spark" cx="228" cy="56" r="5" fill="#38BDF8"/>
-  <circle class="spark" cx="396" cy="164" r="5" fill="#34D399"/>
-  <circle class="spark" cx="390" cy="50" r="4" fill="#A78BFA"/>
-  <text x="320" y="190" text-anchor="middle" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="15" font-weight="700" letter-spacing="3" fill="#E5E7EB" fill-opacity=".82">FREEULTRACODE</text>
+  <g transform="translate(58 38) scale(.29)">
+    <path d="M257 34 C317 42 357 20 406 55 C457 91 458 146 470 202 C484 265 501 316 462 373 C424 429 364 418 313 458 C256 502 207 462 147 463 C85 464 62 419 42 368 C19 309 48 270 38 207 C27 138 65 101 116 75 C170 48 201 27 257 34 Z" fill="url(#iconStone)"/>
+    <path d="M257 34 C317 42 357 20 406 55 C457 91 458 146 470 202 C484 265 501 316 462 373 C424 429 364 418 313 458 C256 502 207 462 147 463 C85 464 62 419 42 368 C19 309 48 270 38 207 C27 138 65 101 116 75 C170 48 201 27 257 34 Z" stroke="url(#markRim)" stroke-width="5" stroke-opacity=".9"/>
+    <g filter="url(#iconShadow)">
+      <path d="M132 132 C168 115 227 126 276 119 C334 111 385 124 409 164 C434 206 413 255 419 304 C426 356 388 390 334 392 C284 395 236 382 187 392 C138 402 105 371 98 323 C91 276 113 241 102 198 C94 165 108 144 132 132 Z" fill="url(#iconPanel)"/>
+      <path d="M132 132 C168 115 227 126 276 119 C334 111 385 124 409 164 C434 206 413 255 419 304 C426 356 388 390 334 392 C284 395 236 382 187 392 C138 402 105 371 98 323 C91 276 113 241 102 198 C94 165 108 144 132 132 Z" stroke="url(#markRim)" stroke-width="5" stroke-opacity=".82"/>
+      <path d="M131 164 C170 155 226 163 266 159 C309 155 350 154 388 164" stroke="#C7CEC9" stroke-opacity=".14" stroke-width="29" stroke-linecap="round"/>
+      <circle cx="143" cy="163" r="7" fill="#8DA0A6"/>
+      <circle cx="168" cy="163" r="7" fill="#91A39B"/>
+      <circle cx="193" cy="163" r="7" fill="#B9AC77"/>
+      <path d="M203 194 L151 254 L203 316" stroke="url(#iconCode)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M309 194 L361 254 L309 316" stroke="url(#iconCode)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M278 177 L235 337" stroke="url(#iconNeedle)" stroke-width="28" stroke-linecap="round"/>
+      <path d="M207 367 C226 364 248 365 274 366" stroke="#B8C88F" stroke-width="18" stroke-linecap="round"/>
+    </g>
+    <circle cx="256" cy="256" r="17" fill="#D4D8CF"/>
+    <circle cx="256" cy="256" r="8" fill="#7E949D"/>
+  </g>
+
+  <text x="245" y="92" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="44" font-weight="800" fill="#F4F7F3">FreeUltraCode</text>
+  <text x="247" y="123" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="17" font-weight="600" fill="#B9C2BC">Coding agents across free and local model channels</text>
+
+  <g font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#EEF1EC">
+    <rect x="247" y="145" width="72" height="28" rx="14" fill="#52665F"/>
+    <circle cx="265" cy="159" r="5" fill="#C6CEC7"/>
+    <text x="278" y="164">FREE</text>
+    <rect x="331" y="145" width="86" height="28" rx="14" fill="#566871"/>
+    <circle cx="350" cy="159" r="5" fill="#C5CFD3"/>
+    <text x="363" y="164">CODE</text>
+    <rect x="429" y="145" width="78" height="28" rx="14" fill="#6E684F"/>
+    <circle cx="448" cy="159" r="5" fill="#D1C18C"/>
+    <text x="461" y="164">LOCAL</text>
+    <rect class="cursor" x="520" y="145" width="44" height="28" rx="14" fill="#5B655E"/>
+    <circle cx="542" cy="159" r="5" fill="#C8D0CB"/>
+  </g>
 </svg>

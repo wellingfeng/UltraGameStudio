@@ -1,0 +1,341 @@
+import { act } from 'react';
+import { createRoot, type Root } from 'react-dom/client';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import AIDock from './AIDock';
+import { defaultBlueprint } from '@/core/defaultBlueprint';
+import { defaultComposer, samplePromptGroups } from '@/store/sampleSessions';
+import { useStore } from '@/store/useStore';
+
+const slashCatalogMock = vi.hoisted(() => ({
+  entries: [
+    {
+      id: 'command:app:/review',
+      kind: 'command',
+      name: '/review',
+      label: { 'zh-CN': '审查', 'en-US': 'Review' },
+      detail: {
+        'zh-CN': '按代码审查视角找风险',
+        'en-US': 'Review for bugs and risks',
+      },
+      insertText: {
+        'zh-CN':
+          '按代码审查视角检查：优先列出 bug、回归风险和缺失测试，给出文件/位置和修复建议。',
+        'en-US':
+          'Review this as code: list bugs, regression risks, and missing tests first, with file/location references and fixes.',
+      },
+      source: 'app',
+      sourceAdapter: 'app',
+    },
+    {
+      id: 'command:claude-code:/status',
+      kind: 'command',
+      name: '/status',
+      label: { 'zh-CN': 'Claude 状态', 'en-US': 'Claude Status' },
+      detail: { 'zh-CN': 'Claude Code 状态', 'en-US': 'Claude Code status' },
+      insertText: {
+        'zh-CN': '按 Claude Code CLI 的 `/status` slash command 语义处理当前请求。',
+        'en-US':
+          'Use the `/status` slash-command semantics from Claude Code CLI for this request.',
+      },
+      source: 'claude-code',
+      sourceAdapter: 'claude-code',
+    },
+    {
+      id: 'command:codex:/status',
+      kind: 'command',
+      name: '/status',
+      label: { 'zh-CN': 'Codex 状态', 'en-US': 'Codex Status' },
+      detail: { 'zh-CN': 'Codex 状态', 'en-US': 'Codex status' },
+      insertText: {
+        'zh-CN': '按 Codex CLI 的 `/status` slash command 语义处理当前请求。',
+        'en-US':
+          'Use the `/status` slash-command semantics from Codex CLI for this request.',
+      },
+      source: 'codex',
+      sourceAdapter: 'codex',
+    },
+    {
+      id: 'command:gemini:/status',
+      kind: 'command',
+      name: '/status',
+      label: { 'zh-CN': 'Gemini 状态', 'en-US': 'Gemini Status' },
+      detail: { 'zh-CN': 'Gemini 状态', 'en-US': 'Gemini status' },
+      insertText: {
+        'zh-CN': '按 Gemini CLI 的 `/status` slash command 语义处理当前请求。',
+        'en-US':
+          'Use the `/status` slash-command semantics from Gemini CLI for this request.',
+      },
+      source: 'gemini',
+      sourceAdapter: 'gemini',
+    },
+    {
+      id: 'skill:ultracode',
+      kind: 'skill',
+      name: '/ultracode',
+      label: { 'zh-CN': 'Ultracode', 'en-US': 'Ultracode' },
+      detail: {
+        'zh-CN': '动态 harness 入口',
+        'en-US': 'Dynamic harness entrypoint',
+      },
+      insertText: {
+        'zh-CN':
+          '请按 /ultracode skill 的工作流处理当前请求。Skill 摘要：Dynamic workflow entrypoint',
+        'en-US':
+          'Use the /ultracode skill workflow for this request. Skill summary: Dynamic workflow entrypoint',
+      },
+      source: '.claude/skills/ultracode/SKILL.md',
+      sourceAdapter: 'claude-code',
+    },
+  ],
+}));
+
+vi.mock('@/lib/tauri', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/tauri')>();
+  return {
+    ...actual,
+    tauriAvailable: () => true,
+    slashCatalog: async () => ({
+      scannedAtMs: 1,
+      ready: true,
+      entries: slashCatalogMock.entries,
+    }),
+    onSlashCatalogUpdated: async () => () => {},
+  };
+});
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
+  true;
+
+function resetStore(adapter: 'claude-code' | 'codex' | 'gemini' = 'claude-code'): void {
+  const workflow = defaultBlueprint('Slash suggestions');
+  useStore.setState({
+    mode: 'design',
+    workflow: {
+      ...workflow,
+      meta: {
+        ...workflow.meta,
+        adapter,
+        gateway: {
+          ...(workflow.meta.gateway ?? {}),
+          defaults: {
+            adapter,
+            modelClass: 'default',
+            systemDefault: true,
+          },
+        },
+      },
+    },
+    selectedNodeId: null,
+    aiStreaming: false,
+    aiEditingSessions: [],
+    chattingSessions: [],
+    locale: 'zh-CN',
+    promptGroups: samplePromptGroups,
+    composer: defaultComposer,
+    composerDraft: '',
+    composerDrafts: {},
+    composerFocusVersion: 0,
+    messages: [],
+    activeWorkspaceId: null,
+    activeSessionId: 's_slash',
+    workspaceHistory: [],
+    runningSessionProgress: {},
+  });
+}
+
+async function renderDock(): Promise<{
+  container: HTMLDivElement;
+  cleanup: () => Promise<void>;
+}> {
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root: Root = createRoot(container);
+
+  await act(async () => {
+    root.render(<AIDock />);
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+
+  return {
+    container,
+    cleanup: async () => {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    },
+  };
+}
+
+function textarea(container: HTMLElement): HTMLTextAreaElement {
+  const input = container.querySelector('textarea');
+  if (!input) throw new Error('Missing AI input textarea');
+  return input;
+}
+
+function typeTextarea(input: HTMLTextAreaElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(
+    window.HTMLTextAreaElement.prototype,
+    'value',
+  )?.set;
+  if (setter) setter.call(input, value);
+  else input.value = value;
+  input.setSelectionRange(value.length, value.length);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
+afterEach(() => {
+  window.localStorage.clear();
+  document.body.innerHTML = '';
+});
+
+describe('AIDock slash suggestions', () => {
+  it('shows command suggestions after slash and inserts model-agnostic text', async () => {
+    resetStore();
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '/rev');
+      });
+
+      const review = Array.from(
+        view.container.querySelectorAll('[role="option"]'),
+      ).find((option) => option.textContent?.includes('/review'));
+      expect(review).toBeInstanceOf(HTMLElement);
+      expect(
+        view.container
+          .querySelector('[role="listbox"]')
+          ?.closest('.fuc-ai-input-card'),
+      ).toBeNull();
+
+      await act(async () => {
+        review?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+
+      expect(input.value).toContain('按代码审查视角检查');
+      expect(input.value).not.toContain('/rev');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('scopes CLI slash commands to the selected adapter', async () => {
+    resetStore('codex');
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '/sta');
+      });
+
+      const menuText =
+        view.container.querySelector('[role="listbox"]')?.textContent ?? '';
+      expect(menuText).toContain('Codex 状态');
+      expect(menuText).not.toContain('Claude 状态');
+      expect(menuText).not.toContain('Gemini 状态');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('uses high-contrast styling for the active slash suggestion', async () => {
+    resetStore();
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '/');
+      });
+
+      const options = () =>
+        Array.from(view.container.querySelectorAll<HTMLElement>('[role="option"]'));
+      const activeOption = () =>
+        options().find((option) => option.getAttribute('aria-selected') === 'true');
+
+      expect(options().length).toBeGreaterThan(1);
+      expect(activeOption()?.className).toContain('border-l-accent');
+      expect(activeOption()?.className).toContain('bg-accent/20');
+      expect(activeOption()?.className).toContain('ring-accent/40');
+      expect(activeOption()?.querySelector('span')?.className).toContain(
+        'bg-accent',
+      );
+
+      await act(async () => {
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+        );
+      });
+
+      expect(options()[0]?.className).toContain('border-l-transparent');
+      expect(activeOption()).toBe(options()[1]);
+      expect(activeOption()?.className).toContain('border-l-accent');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('keeps /ultracode as a literal command when selected', async () => {
+    resetStore();
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '/ult');
+      });
+
+      const ultracode = Array.from(
+        view.container.querySelectorAll('[role="option"]'),
+      ).find((option) => option.textContent?.includes('/ultracode'));
+      expect(ultracode).toBeInstanceOf(HTMLElement);
+
+      await act(async () => {
+        ultracode?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+
+      expect(input.value).toBe('/ultracode ');
+      expect(input.value).not.toContain('请按 /ultracode skill');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('routes submitted /ultracode commands to the dynamic entrypoint', async () => {
+    resetStore();
+    const sendPrompt = vi.fn();
+    const runUltracodePrompt = vi.fn();
+    useStore.setState({ sendPrompt, runUltracodePrompt });
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '/ultracode 完成 100 题');
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Enter',
+            ctrlKey: true,
+            bubbles: true,
+          }),
+        );
+      });
+
+      expect(runUltracodePrompt).toHaveBeenCalledWith('完成 100 题');
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(input.value).toBe('');
+    } finally {
+      await view.cleanup();
+    }
+  });
+});

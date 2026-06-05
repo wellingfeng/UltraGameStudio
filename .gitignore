@@ -15,6 +15,11 @@ app/*.tsbuildinfo
 memory/
 app/.gstack/
 app/src-tauri/.gstack/
+.fuc-run/
+
+# Local scratch / test outputs / screenshots
+/test100/
+/images/
 
 # Published docs and notes
 /docs/
@@ -27,6 +32,8 @@ app/src-tauri/.gstack/
 .env
 .env.*
 !.env.example
+free-channels.private.json
+app/free-channels.private.json
 
 # Logs
 *.log

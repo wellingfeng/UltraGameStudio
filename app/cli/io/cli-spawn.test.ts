@@ -155,7 +155,7 @@ describe('spawnCliAgent (claude stream-json)', () => {
       permission: 'full',
       env: {
         ANTHROPIC_API_KEY: 'freecc',
-        ANTHROPIC_BASE_URL: 'http://127.0.0.1:8765/ch/open_router',
+        ANTHROPIC_BASE_URL: 'http://127.0.0.1:8766/ch/open_router',
         ANTHROPIC_MODEL: 'z-ai/glm-4.6',
       },
     });

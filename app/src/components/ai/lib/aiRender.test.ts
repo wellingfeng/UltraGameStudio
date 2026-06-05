@@ -129,6 +129,31 @@ describe('parseFileRef', () => {
     expect(parseFileRef('vite.config.ts')?.basename).toBe('vite.config.ts');
   });
 
+  it('accepts broader text/code/image extensions', () => {
+    for (const name of [
+      'schema.prisma',
+      'main.tf',
+      'shader.wgsl',
+      'notes.adoc',
+      'README.markdown',
+      'report.qmd',
+      'diagram.mmd',
+      'workflow.drawio',
+      'data.ndjson',
+      'component.vue',
+      'icon.avif',
+      'favicon.ico',
+    ]) {
+      expect(parseFileRef(name)?.basename).toBe(name);
+    }
+  });
+
+  it('accepts known extensionless config filenames', () => {
+    for (const name of ['Dockerfile', 'Makefile', '.env.local', '.gitignore']) {
+      expect(parseFileRef(name)?.basename).toBe(name);
+    }
+  });
+
   it('rejects an empty basename like a bare separator', () => {
     expect(parseFileRef('/')).toBeNull();
     expect(parseFileRef('//')).toBeNull();
@@ -145,6 +170,13 @@ describe('parseFileRef', () => {
       basename: 'main.rs',
       startLine: 12,
     });
+  });
+
+  it('accepts explicit refs with spaces when requested', () => {
+    expect(parseFileRef('Moon render report.html')).toBeNull();
+    expect(
+      parseFileRef('Moon render report.html', { allowSpaces: true })?.basename,
+    ).toBe('Moon render report.html');
   });
 
   it('accepts relative path with separator and no extension', () => {

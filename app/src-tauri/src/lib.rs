@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Emitter;
@@ -26,6 +26,12 @@ const TRAY_MENU_SHOW_ID: &str = "tray-show-main";
 const TRAY_MENU_GITHUB_ID: &str = "tray-open-github";
 const TRAY_MENU_QUIT_ID: &str = "tray-quit";
 const GITHUB_REPOSITORY_URL: &str = "https://github.com/wellingfeng/FreeUltraCode";
+const SINGLE_INSTANCE_WARNING_EVENT: &str = "single-instance-warning";
+const SINGLE_INSTANCE_WARNING_MESSAGE: &str = "只能同时运行一个进程";
+const SLASH_CATALOG_UPDATED_EVENT: &str = "slash-catalog-updated";
+const MAX_SLASH_ENTRIES: usize = 800;
+const MAX_COMMAND_SCAN_DEPTH: usize = 4;
+const MAX_SKILL_SCAN_DEPTH: usize = 8;
 
 fn show_main_window<R: Runtime>(app: &AppHandle<R>) {
     if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
@@ -196,6 +202,17 @@ struct RemoteModelListResult {
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+struct UltracodeRunResult {
+    exit_code: i32,
+    stdout: String,
+    stderr: String,
+    run_id: String,
+    run_dir: Option<String>,
+    result_json: Option<serde_json::Value>,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 struct LocalFilePreview {
     path: String,
     file_name: String,
@@ -205,6 +222,1254 @@ struct LocalFilePreview {
     truncated: bool,
     text: Option<String>,
     base64: Option<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SlashCatalogEntry {
+    id: String,
+    kind: String,
+    name: String,
+    label: HashMap<String, String>,
+    detail: HashMap<String, String>,
+    insert_text: HashMap<String, String>,
+    source: Option<String>,
+    source_adapter: Option<String>,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SlashCatalogSnapshot {
+    scanned_at_ms: u64,
+    ready: bool,
+    entries: Vec<SlashCatalogEntry>,
+    error: Option<String>,
+}
+
+fn localized_text(zh_cn: &str, en_us: &str) -> HashMap<String, String> {
+    HashMap::from([
+        ("zh-CN".to_string(), zh_cn.to_string()),
+        ("en-US".to_string(), en_us.to_string()),
+    ])
+}
+
+fn same_localized_text(value: &str) -> HashMap<String, String> {
+    localized_text(value, value)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or(0)
+}
+
+fn app_slash_command_entry(
+    name: &str,
+    zh_label: &str,
+    en_label: &str,
+    zh_detail: &str,
+    en_detail: &str,
+    zh_insert: &str,
+    en_insert: &str,
+) -> SlashCatalogEntry {
+    SlashCatalogEntry {
+        id: format!("command:app:{name}"),
+        kind: "command".to_string(),
+        name: name.to_string(),
+        label: localized_text(zh_label, en_label),
+        detail: localized_text(zh_detail, en_detail),
+        insert_text: localized_text(zh_insert, en_insert),
+        source: Some("app".to_string()),
+        source_adapter: Some("app".to_string()),
+    }
+}
+
+fn cli_slash_command_entry(
+    source: &str,
+    source_zh: &str,
+    source_en: &str,
+    name: &str,
+    zh_label: &str,
+    en_label: &str,
+    zh_detail: &str,
+    en_detail: &str,
+) -> SlashCatalogEntry {
+    SlashCatalogEntry {
+        id: format!("command:{source}:{name}"),
+        kind: "command".to_string(),
+        name: name.to_string(),
+        label: localized_text(
+            &format!("{source_zh} {zh_label}"),
+            &format!("{source_en} {en_label}"),
+        ),
+        detail: localized_text(zh_detail, en_detail),
+        insert_text: localized_text(
+            &format!("按 {source_zh} CLI 的 `{name}` slash command 语义处理当前请求。{zh_detail}"),
+            &format!("Use the `{name}` slash-command semantics from {source_en} CLI for this request. {en_detail}"),
+        ),
+        source: Some(source.to_string()),
+        source_adapter: Some(source.to_string()),
+    }
+}
+
+fn extend_cli_slash_commands(
+    entries: &mut Vec<SlashCatalogEntry>,
+    source: &str,
+    source_zh: &str,
+    source_en: &str,
+    commands: &[(&str, &str, &str, &str, &str)],
+) {
+    for (name, zh_label, en_label, zh_detail, en_detail) in commands {
+        entries.push(cli_slash_command_entry(
+            source, source_zh, source_en, name, zh_label, en_label, zh_detail, en_detail,
+        ));
+    }
+}
+
+fn slash_command_entries() -> Vec<SlashCatalogEntry> {
+    let mut entries = vec![
+        app_slash_command_entry(
+            "/help",
+            "帮助",
+            "Help",
+            "列出当前可用 command / skill",
+            "List available commands and skills",
+            "列出当前可用的 slash command 和 Skill，按用途分组，并给出每个条目的触发词和适用场景。",
+            "List the available slash commands and skills, grouped by use case, with each trigger and when to use it.",
+        ),
+        app_slash_command_entry(
+            "/plan",
+            "计划",
+            "Plan",
+            "先拆步骤，再执行",
+            "Break down steps before acting",
+            "先给出简短执行计划，再按计划完成任务；只保留必要步骤和风险点。",
+            "Start with a short execution plan, then complete the task; keep only necessary steps and risks.",
+        ),
+        app_slash_command_entry(
+            "/diagnose",
+            "诊断",
+            "Diagnose",
+            "复现 -> 根因 -> 修复 -> 验证",
+            "Reproduce -> root cause -> fix -> verify",
+            "诊断这个问题：先复现或定位触发条件，再找根因，最后给出修复和验证结果。",
+            "Diagnose this: reproduce or identify the trigger, find the root cause, then provide the fix and verification.",
+        ),
+        app_slash_command_entry(
+            "/review",
+            "审查",
+            "Review",
+            "按代码审查视角找风险",
+            "Review for bugs and risks",
+            "按代码审查视角检查：优先列出 bug、回归风险和缺失测试，给出文件/位置和修复建议。",
+            "Review this as code: list bugs, regression risks, and missing tests first, with file/location references and fixes.",
+        ),
+        app_slash_command_entry(
+            "/explain",
+            "解释",
+            "Explain",
+            "解释执行路径和关键依赖",
+            "Explain flow and dependencies",
+            "解释这段内容的执行路径、关键依赖和容易误解的点，结论先行。",
+            "Explain the execution flow, key dependencies, and easy-to-misread parts. Start with the conclusion.",
+        ),
+        app_slash_command_entry(
+            "/test",
+            "测试",
+            "Test",
+            "补充或运行相关测试",
+            "Add or run relevant tests",
+            "为当前任务补充或运行最相关的测试；若失败，说明失败点、可能根因和下一步。",
+            "Add or run the most relevant tests for this task; if they fail, report the failure, likely cause, and next step.",
+        ),
+    ];
+
+    extend_cli_slash_commands(
+        &mut entries,
+        "claude-code",
+        "Claude Code",
+        "Claude Code",
+        &[
+            (
+                "/add-dir",
+                "追加目录",
+                "Add Directory",
+                "把额外目录加入当前工作上下文",
+                "Add extra directories to the active workspace context",
+            ),
+            (
+                "/agents",
+                "代理",
+                "Agents",
+                "查看或管理后台 agents",
+                "View or manage background agents",
+            ),
+            (
+                "/bug",
+                "反馈问题",
+                "Report Bug",
+                "整理并报告 CLI 或会话问题",
+                "Prepare a CLI or session bug report",
+            ),
+            (
+                "/clear",
+                "清空上下文",
+                "Clear",
+                "清空当前对话上下文，重新开始",
+                "Clear the current conversation context and start fresh",
+            ),
+            (
+                "/compact",
+                "压缩上下文",
+                "Compact",
+                "压缩当前长上下文，保留关键信息",
+                "Compact a long context while preserving key facts",
+            ),
+            (
+                "/config",
+                "配置",
+                "Config",
+                "查看或调整 CLI 配置",
+                "Inspect or adjust CLI settings",
+            ),
+            (
+                "/cost",
+                "费用",
+                "Cost",
+                "查看当前会话 token 和费用信息",
+                "Show token and cost information for the session",
+            ),
+            (
+                "/doctor",
+                "诊断安装",
+                "Doctor",
+                "检查 CLI 安装、认证和环境健康状态",
+                "Check CLI installation, auth, and environment health",
+            ),
+            (
+                "/export",
+                "导出",
+                "Export",
+                "导出当前会话内容",
+                "Export the current session content",
+            ),
+            (
+                "/help",
+                "帮助",
+                "Help",
+                "显示可用 slash command",
+                "Show available slash commands",
+            ),
+            (
+                "/ide",
+                "IDE",
+                "IDE",
+                "连接或管理 IDE 集成",
+                "Connect or manage IDE integration",
+            ),
+            (
+                "/init",
+                "初始化记忆",
+                "Init Memory",
+                "为当前项目生成或更新 CLAUDE.md",
+                "Create or update CLAUDE.md for the current project",
+            ),
+            (
+                "/login",
+                "登录",
+                "Login",
+                "处理 CLI 登录认证",
+                "Handle CLI login and authentication",
+            ),
+            (
+                "/logout",
+                "登出",
+                "Logout",
+                "移除或切换 CLI 登录态",
+                "Remove or switch CLI authentication state",
+            ),
+            (
+                "/mcp",
+                "MCP",
+                "MCP",
+                "查看或管理 MCP server",
+                "Inspect or manage MCP servers",
+            ),
+            (
+                "/memory",
+                "记忆",
+                "Memory",
+                "查看或编辑项目/用户记忆",
+                "Inspect or edit project/user memory",
+            ),
+            (
+                "/model",
+                "模型",
+                "Model",
+                "查看或切换当前模型",
+                "Inspect or switch the active model",
+            ),
+            (
+                "/permissions",
+                "权限",
+                "Permissions",
+                "查看或调整工具权限",
+                "Inspect or adjust tool permissions",
+            ),
+            (
+                "/plugin",
+                "插件",
+                "Plugin",
+                "查看或管理 Claude Code 插件",
+                "Inspect or manage Claude Code plugins",
+            ),
+            (
+                "/pr-comments",
+                "PR 评论",
+                "PR Comments",
+                "查看或处理 PR 评论",
+                "View or handle pull-request comments",
+            ),
+            (
+                "/release-notes",
+                "发布说明",
+                "Release Notes",
+                "查看 CLI 发布说明",
+                "Show CLI release notes",
+            ),
+            (
+                "/resume",
+                "恢复会话",
+                "Resume",
+                "恢复历史会话",
+                "Resume a previous session",
+            ),
+            (
+                "/status",
+                "状态",
+                "Status",
+                "查看当前会话、模型、目录和权限状态",
+                "Show current session, model, directory, and permission status",
+            ),
+            (
+                "/terminal-setup",
+                "终端配置",
+                "Terminal Setup",
+                "配置终端集成和快捷键",
+                "Configure terminal integration and key bindings",
+            ),
+            (
+                "/vim",
+                "Vim 模式",
+                "Vim Mode",
+                "切换 Vim 编辑模式",
+                "Toggle Vim editing mode",
+            ),
+        ],
+    );
+
+    extend_cli_slash_commands(
+        &mut entries,
+        "codex",
+        "Codex",
+        "Codex",
+        &[
+            (
+                "/approvals",
+                "审批",
+                "Approvals",
+                "查看或调整命令审批策略",
+                "Inspect or adjust command approval policy",
+            ),
+            (
+                "/clear",
+                "清空上下文",
+                "Clear",
+                "清空当前对话上下文，重新开始",
+                "Clear the current conversation context and start fresh",
+            ),
+            (
+                "/compact",
+                "压缩上下文",
+                "Compact",
+                "压缩当前长上下文，保留关键信息",
+                "Compact a long context while preserving key facts",
+            ),
+            (
+                "/diff",
+                "差异",
+                "Diff",
+                "查看当前工作区改动差异",
+                "Show current workspace changes",
+            ),
+            (
+                "/help",
+                "帮助",
+                "Help",
+                "显示可用 slash command",
+                "Show available slash commands",
+            ),
+            (
+                "/init",
+                "初始化说明",
+                "Init Instructions",
+                "为当前项目生成或更新 AGENTS.md",
+                "Create or update AGENTS.md for the current project",
+            ),
+            (
+                "/login",
+                "登录",
+                "Login",
+                "处理 CLI 登录认证",
+                "Handle CLI login and authentication",
+            ),
+            (
+                "/logout",
+                "登出",
+                "Logout",
+                "移除或切换 CLI 登录态",
+                "Remove or switch CLI authentication state",
+            ),
+            (
+                "/mcp",
+                "MCP",
+                "MCP",
+                "查看或管理 MCP server",
+                "Inspect or manage MCP servers",
+            ),
+            (
+                "/model",
+                "模型",
+                "Model",
+                "查看或切换当前模型",
+                "Inspect or switch the active model",
+            ),
+            (
+                "/new",
+                "新会话",
+                "New Session",
+                "开启一个新会话",
+                "Start a new session",
+            ),
+            (
+                "/prompts",
+                "提示词",
+                "Prompts",
+                "查看或选择保存的提示词",
+                "View or select saved prompts",
+            ),
+            (
+                "/quit",
+                "退出",
+                "Quit",
+                "结束当前交互会话",
+                "End the current interactive session",
+            ),
+            (
+                "/review",
+                "审查",
+                "Review",
+                "按代码审查视角找风险",
+                "Review for code risks",
+            ),
+            (
+                "/status",
+                "状态",
+                "Status",
+                "查看当前会话、模型、目录和权限状态",
+                "Show current session, model, directory, and permission status",
+            ),
+            (
+                "/undo",
+                "撤销",
+                "Undo",
+                "撤销上一轮自动改动或回复",
+                "Undo the last automated change or turn",
+            ),
+        ],
+    );
+
+    extend_cli_slash_commands(
+        &mut entries,
+        "gemini",
+        "Gemini",
+        "Gemini",
+        &[
+            (
+                "/auth",
+                "认证",
+                "Auth",
+                "查看或处理认证状态",
+                "Inspect or handle authentication state",
+            ),
+            (
+                "/bug",
+                "反馈问题",
+                "Report Bug",
+                "整理并报告 CLI 或会话问题",
+                "Prepare a CLI or session bug report",
+            ),
+            (
+                "/chat",
+                "聊天",
+                "Chat",
+                "管理或恢复聊天会话",
+                "Manage or resume chat sessions",
+            ),
+            (
+                "/clear",
+                "清空上下文",
+                "Clear",
+                "清空当前对话上下文，重新开始",
+                "Clear the current conversation context and start fresh",
+            ),
+            (
+                "/compress",
+                "压缩上下文",
+                "Compress",
+                "压缩当前长上下文，保留关键信息",
+                "Compress a long context while preserving key facts",
+            ),
+            (
+                "/docs",
+                "文档",
+                "Docs",
+                "打开或查询 CLI 文档入口",
+                "Open or query CLI documentation",
+            ),
+            (
+                "/editor",
+                "编辑器",
+                "Editor",
+                "配置外部编辑器集成",
+                "Configure external editor integration",
+            ),
+            (
+                "/extensions",
+                "扩展",
+                "Extensions",
+                "查看或管理 Gemini CLI extensions",
+                "Inspect or manage Gemini CLI extensions",
+            ),
+            (
+                "/help",
+                "帮助",
+                "Help",
+                "显示可用 slash command",
+                "Show available slash commands",
+            ),
+            (
+                "/init",
+                "初始化说明",
+                "Init Instructions",
+                "为当前项目生成或更新 GEMINI.md",
+                "Create or update GEMINI.md for the current project",
+            ),
+            (
+                "/memory",
+                "记忆",
+                "Memory",
+                "查看或编辑项目/用户记忆",
+                "Inspect or edit project/user memory",
+            ),
+            (
+                "/mcp",
+                "MCP",
+                "MCP",
+                "查看或管理 MCP server",
+                "Inspect or manage MCP servers",
+            ),
+            (
+                "/model",
+                "模型",
+                "Model",
+                "查看或切换当前模型",
+                "Inspect or switch the active model",
+            ),
+            (
+                "/quit",
+                "退出",
+                "Quit",
+                "结束当前交互会话",
+                "End the current interactive session",
+            ),
+            (
+                "/restore",
+                "恢复",
+                "Restore",
+                "恢复历史会话或检查点",
+                "Restore a previous session or checkpoint",
+            ),
+            (
+                "/stats",
+                "统计",
+                "Stats",
+                "查看当前会话统计信息",
+                "Show current session statistics",
+            ),
+            (
+                "/theme",
+                "主题",
+                "Theme",
+                "查看或切换终端主题",
+                "Inspect or switch terminal theme",
+            ),
+            (
+                "/tools",
+                "工具",
+                "Tools",
+                "查看当前可用工具",
+                "Show currently available tools",
+            ),
+        ],
+    );
+
+    entries
+}
+
+fn initial_slash_catalog_snapshot() -> SlashCatalogSnapshot {
+    SlashCatalogSnapshot {
+        scanned_at_ms: now_ms(),
+        ready: false,
+        entries: slash_command_entries(),
+        error: None,
+    }
+}
+
+fn slash_catalog_cache() -> &'static Mutex<SlashCatalogSnapshot> {
+    static CACHE: OnceLock<Mutex<SlashCatalogSnapshot>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(initial_slash_catalog_snapshot()))
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))
+        .map(PathBuf::from)
+}
+
+fn push_skill_root(out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: PathBuf) {
+    let canonical = match std::fs::canonicalize(&path) {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    if !canonical.is_dir() || !seen.insert(canonical.clone()) {
+        return;
+    }
+    out.push(canonical);
+}
+
+fn skill_root_candidates() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Ok(path) = std::env::var("CODEX_HOME") {
+        push_skill_root(&mut out, &mut seen, PathBuf::from(path).join("skills"));
+    }
+    if let Ok(path) = std::env::var("AGENTS_HOME") {
+        push_skill_root(&mut out, &mut seen, PathBuf::from(path).join("skills"));
+    }
+    if let Ok(path) = std::env::var("CLAUDE_CONFIG_DIR") {
+        push_skill_root(&mut out, &mut seen, PathBuf::from(path).join("skills"));
+    }
+
+    if let Some(home) = user_home_dir() {
+        for rel in [
+            [".codex", "skills"],
+            [".agents", "skills"],
+            [".claude", "skills"],
+            [".gemini", "skills"],
+            [".codex", "plugins"],
+            [".agents", "plugins"],
+            [".claude", "plugins"],
+            [".gemini", "extensions"],
+        ] {
+            push_skill_root(&mut out, &mut seen, home.join(rel[0]).join(rel[1]));
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        for base in [Some(cwd.as_path()), cwd.parent()].into_iter().flatten() {
+            for rel in [
+                [".codex", "skills"],
+                [".agents", "skills"],
+                [".claude", "skills"],
+                [".gemini", "skills"],
+                [".codex", "plugins"],
+                [".agents", "plugins"],
+                [".claude", "plugins"],
+                [".gemini", "extensions"],
+            ] {
+                push_skill_root(&mut out, &mut seen, base.join(rel[0]).join(rel[1]));
+            }
+        }
+    }
+
+    out
+}
+
+fn push_command_root(
+    out: &mut Vec<(String, PathBuf)>,
+    seen: &mut HashSet<PathBuf>,
+    source: &str,
+    path: PathBuf,
+) {
+    let canonical = match std::fs::canonicalize(&path) {
+        Ok(path) => path,
+        Err(_) => return,
+    };
+    if !canonical.is_dir() || !seen.insert(canonical.clone()) {
+        return;
+    }
+    out.push((source.to_string(), canonical));
+}
+
+fn command_root_candidates() -> Vec<(String, PathBuf)> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+
+    if let Ok(path) = std::env::var("CLAUDE_CONFIG_DIR") {
+        push_command_root(
+            &mut out,
+            &mut seen,
+            "claude-code",
+            PathBuf::from(path).join("commands"),
+        );
+    }
+    if let Ok(path) = std::env::var("CODEX_HOME") {
+        push_command_root(
+            &mut out,
+            &mut seen,
+            "codex",
+            PathBuf::from(path).join("commands"),
+        );
+    }
+    if let Ok(path) = std::env::var("AGENTS_HOME") {
+        push_command_root(
+            &mut out,
+            &mut seen,
+            "agent",
+            PathBuf::from(path).join("commands"),
+        );
+    }
+
+    if let Some(home) = user_home_dir() {
+        for (source, rel) in [
+            ("claude-code", [".claude", "commands"]),
+            ("codex", [".codex", "commands"]),
+            ("gemini", [".gemini", "commands"]),
+            ("agent", [".agents", "commands"]),
+        ] {
+            push_command_root(&mut out, &mut seen, source, home.join(rel[0]).join(rel[1]));
+        }
+    }
+
+    if let Ok(cwd) = std::env::current_dir() {
+        for base in [Some(cwd.as_path()), cwd.parent()].into_iter().flatten() {
+            for (source, rel) in [
+                ("claude-code", [".claude", "commands"]),
+                ("codex", [".codex", "commands"]),
+                ("gemini", [".gemini", "commands"]),
+                ("agent", [".agents", "commands"]),
+            ] {
+                push_command_root(&mut out, &mut seen, source, base.join(rel[0]).join(rel[1]));
+            }
+        }
+    }
+
+    out
+}
+
+fn clean_frontmatter_value(value: &str) -> String {
+    value
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'')
+        .trim()
+        .to_string()
+}
+
+fn parse_skill_frontmatter(text: &str, fallback_name: &str) -> (String, String) {
+    let normalized = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut name = String::new();
+    let mut description = String::new();
+
+    let mut lines = normalized.lines();
+    if matches!(lines.next().map(str::trim), Some("---")) {
+        let mut yaml = Vec::new();
+        for line in lines {
+            if line.trim() == "---" {
+                break;
+            }
+            yaml.push(line);
+        }
+
+        let mut i = 0;
+        while i < yaml.len() {
+            let line = yaml[i];
+            let trimmed = line.trim();
+            if let Some(rest) = trimmed.strip_prefix("name:") {
+                name = clean_frontmatter_value(rest);
+            } else if let Some(rest) = trimmed.strip_prefix("description:") {
+                let rest = clean_frontmatter_value(rest);
+                if matches!(rest.as_str(), ">" | "|" | ">-" | "|-") {
+                    let mut parts = Vec::new();
+                    i += 1;
+                    while i < yaml.len() {
+                        let next = yaml[i];
+                        if !next.starts_with(' ')
+                            && !next.starts_with('\t')
+                            && !next.trim().is_empty()
+                        {
+                            i -= 1;
+                            break;
+                        }
+                        let part = next.trim();
+                        if !part.is_empty() {
+                            parts.push(part);
+                        }
+                        i += 1;
+                    }
+                    description = parts.join(" ");
+                } else {
+                    description = rest;
+                }
+            }
+            i += 1;
+        }
+    }
+
+    if name.trim().is_empty() {
+        name = fallback_name.to_string();
+    }
+
+    (name.trim().to_string(), description.trim().to_string())
+}
+
+fn slash_token(input: &str, fallback: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    let raw = input.trim().trim_start_matches('/');
+    let fallback = fallback.trim().trim_start_matches('/');
+    for ch in raw
+        .chars()
+        .chain(std::iter::once(' '))
+        .chain(fallback.chars())
+    {
+        let next = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if ch.is_alphanumeric() {
+            Some(ch)
+        } else if matches!(ch, '_' | '-') {
+            Some(ch)
+        } else if ch.is_whitespace() || matches!(ch, '.' | '/') {
+            Some('-')
+        } else {
+            None
+        };
+        match next {
+            Some('-') if !out.is_empty() && !last_dash => {
+                out.push('-');
+                last_dash = true;
+            }
+            Some('-') => {}
+            Some(c) => {
+                out.push(c);
+                last_dash = false;
+            }
+            None => {}
+        }
+        if !out.trim_matches('-').is_empty() && ch == ' ' {
+            break;
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "skill".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn slash_path_token(input: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in input.trim().trim_start_matches('/').chars() {
+        let next = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if ch.is_alphanumeric() {
+            Some(ch)
+        } else if matches!(ch, '_' | '-') {
+            Some(ch)
+        } else if ch.is_whitespace() || matches!(ch, '.' | '/') {
+            Some('-')
+        } else {
+            None
+        };
+        match next {
+            Some('-') if !out.is_empty() && !last_dash => {
+                out.push('-');
+                last_dash = true;
+            }
+            Some('-') => {}
+            Some(c) => {
+                out.push(c);
+                last_dash = false;
+            }
+            None => {}
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (index, ch) in value.chars().enumerate() {
+        if index >= max_chars {
+            out.push('…');
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn markdown_summary(text: &str) -> String {
+    let normalized = text.strip_prefix('\u{feff}').unwrap_or(text);
+    let mut first = true;
+    let mut in_frontmatter = false;
+
+    for line in normalized.lines() {
+        let trimmed = line.trim();
+        if first && trimmed == "---" {
+            in_frontmatter = true;
+            first = false;
+            continue;
+        }
+        first = false;
+        if in_frontmatter {
+            if trimmed == "---" {
+                in_frontmatter = false;
+            }
+            continue;
+        }
+        if trimmed.is_empty() || trimmed.starts_with("<!--") {
+            continue;
+        }
+        let summary = trimmed
+            .trim_start_matches('#')
+            .trim()
+            .trim_start_matches('>')
+            .trim()
+            .trim_matches('`')
+            .trim();
+        if !summary.is_empty() {
+            return truncate_chars(summary, 180);
+        }
+    }
+
+    String::new()
+}
+
+fn command_source_label(source: &str) -> (&'static str, &'static str) {
+    match source {
+        "claude-code" => ("Claude Code", "Claude Code"),
+        "codex" => ("Codex", "Codex"),
+        "gemini" => ("Gemini", "Gemini"),
+        "agent" => ("Agent", "Agent"),
+        _ => ("CLI", "CLI"),
+    }
+}
+
+fn source_adapter_from_path(path: &Path) -> Option<&'static str> {
+    for component in path.components() {
+        let name = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        match name.as_str() {
+            ".claude" => return Some("claude-code"),
+            ".codex" => return Some("codex"),
+            ".gemini" => return Some("gemini"),
+            ".agents" => return Some("agent"),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn command_name_from_file(root: &Path, path: &Path) -> Option<String> {
+    let mut rel = path.strip_prefix(root).ok()?.to_path_buf();
+    rel.set_extension("");
+
+    let mut parts = Vec::new();
+    for component in rel.components() {
+        let token = slash_path_token(&component.as_os_str().to_string_lossy());
+        if !token.is_empty() {
+            parts.push(token);
+        }
+    }
+
+    if parts.is_empty() {
+        None
+    } else {
+        Some(format!("/{}", parts.join(":")))
+    }
+}
+
+fn command_entry_from_file(source: &str, root: &Path, path: &Path) -> Option<SlashCatalogEntry> {
+    let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
+    if ext != "md" && ext != "mdx" {
+        return None;
+    }
+
+    let text = std::fs::read_to_string(path).ok()?;
+    let fallback_name = path.file_stem()?.to_string_lossy().to_string();
+    let (frontmatter_name, description) = parse_skill_frontmatter(&text, &fallback_name);
+    let slash_name = command_name_from_file(root, path)?;
+    let summary = if !description.trim().is_empty() {
+        description
+    } else {
+        markdown_summary(&text)
+    };
+    let detail = if summary.trim().is_empty() {
+        path.to_string_lossy().to_string()
+    } else {
+        summary
+    };
+    let (source_zh, source_en) = command_source_label(source);
+    let label = if frontmatter_name.trim().is_empty() {
+        fallback_name
+    } else {
+        frontmatter_name
+    };
+    let zh_insert = format!(
+        "按 {source_zh} 自定义 slash command `{slash_name}` 的说明处理当前请求。命令说明：{detail}"
+    );
+    let en_insert = format!(
+        "Use the custom `{slash_name}` slash-command instructions from {source_en} CLI for this request. Command summary: {detail}"
+    );
+
+    Some(SlashCatalogEntry {
+        id: format!("command:{source}:{slash_name}:{}", path.to_string_lossy()),
+        kind: "command".to_string(),
+        name: slash_name,
+        label: localized_text(
+            &format!("{source_zh} {label}"),
+            &format!("{source_en} {label}"),
+        ),
+        detail: same_localized_text(&detail),
+        insert_text: localized_text(&zh_insert, &en_insert),
+        source: Some(path.to_string_lossy().to_string()),
+        source_adapter: Some(source.to_string()),
+    })
+}
+
+fn slash_entry_key(entry: &SlashCatalogEntry) -> String {
+    format!(
+        "{}|{}|{}",
+        entry.kind,
+        entry.source.as_deref().unwrap_or_default(),
+        entry.name
+    )
+    .to_lowercase()
+}
+
+fn skill_entry_from_file(path: &Path) -> Option<SlashCatalogEntry> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let dir = path.parent()?;
+    let fallback = dir.file_name()?.to_string_lossy().to_string();
+    let (name, description) = parse_skill_frontmatter(&text, &fallback);
+    let token = slash_token(&name, &fallback);
+    let slash_name = format!("/{token}");
+    let detail = if description.trim().is_empty() {
+        dir.to_string_lossy().to_string()
+    } else {
+        description.clone()
+    };
+    let zh_insert = if description.trim().is_empty() {
+        format!("请按 {slash_name} skill 的工作流处理当前请求。")
+    } else {
+        format!("请按 {slash_name} skill 的工作流处理当前请求。Skill 摘要：{description}")
+    };
+    let en_insert = if description.trim().is_empty() {
+        format!("Use the {slash_name} skill workflow for this request.")
+    } else {
+        format!(
+            "Use the {slash_name} skill workflow for this request. Skill summary: {description}"
+        )
+    };
+
+    Some(SlashCatalogEntry {
+        id: format!("skill:{token}"),
+        kind: "skill".to_string(),
+        name: slash_name,
+        label: same_localized_text(&name),
+        detail: same_localized_text(&detail),
+        insert_text: localized_text(&zh_insert, &en_insert),
+        source: Some(dir.to_string_lossy().to_string()),
+        source_adapter: source_adapter_from_path(dir).map(str::to_string),
+    })
+}
+
+fn skip_skill_scan_dir(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    matches!(
+        name,
+        ".git"
+            | ".next"
+            | "build"
+            | "coverage"
+            | "dist"
+            | "node_modules"
+            | "target"
+            | "tests"
+            | "tmp"
+    )
+}
+
+fn scan_command_dir(
+    source: &str,
+    root: &Path,
+    dir: &Path,
+    depth: usize,
+    entries: &mut Vec<SlashCatalogEntry>,
+    seen_keys: &mut HashSet<String>,
+) {
+    if entries.len() >= MAX_SLASH_ENTRIES || depth > MAX_COMMAND_SCAN_DEPTH {
+        return;
+    }
+    if depth > 0 && skip_skill_scan_dir(dir) {
+        return;
+    }
+
+    let mut children: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(read_dir) => read_dir.flatten().map(|entry| entry.path()).collect(),
+        Err(_) => return,
+    };
+    children.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+
+    for child in children {
+        if entries.len() >= MAX_SLASH_ENTRIES {
+            break;
+        }
+        if child.is_file() {
+            if let Some(entry) = command_entry_from_file(source, root, &child) {
+                let key = slash_entry_key(&entry);
+                if seen_keys.insert(key) {
+                    entries.push(entry);
+                }
+            }
+        } else if child.is_dir() {
+            scan_command_dir(source, root, &child, depth + 1, entries, seen_keys);
+        }
+    }
+}
+
+fn scan_skill_dir(
+    dir: &Path,
+    depth: usize,
+    entries: &mut Vec<SlashCatalogEntry>,
+    seen_keys: &mut HashSet<String>,
+) {
+    if entries.len() >= MAX_SLASH_ENTRIES {
+        return;
+    }
+
+    let skill_file = dir.join("SKILL.md");
+    if skill_file.is_file() {
+        if let Some(entry) = skill_entry_from_file(&skill_file) {
+            let key = slash_entry_key(&entry);
+            if seen_keys.insert(key) {
+                entries.push(entry);
+            }
+        }
+        return;
+    }
+
+    if depth >= MAX_SKILL_SCAN_DEPTH || skip_skill_scan_dir(dir) {
+        return;
+    }
+
+    let mut children: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(read_dir) => read_dir
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect(),
+        Err(_) => return,
+    };
+    children.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
+    for child in children {
+        scan_skill_dir(&child, depth + 1, entries, seen_keys);
+        if entries.len() >= MAX_SLASH_ENTRIES {
+            break;
+        }
+    }
+}
+
+fn scan_slash_catalog_blocking() -> SlashCatalogSnapshot {
+    let mut entries = slash_command_entries();
+    let mut seen_keys: HashSet<String> = entries.iter().map(slash_entry_key).collect();
+
+    for (source, root) in command_root_candidates() {
+        scan_command_dir(&source, &root, &root, 0, &mut entries, &mut seen_keys);
+    }
+
+    for root in skill_root_candidates() {
+        scan_skill_dir(&root, 0, &mut entries, &mut seen_keys);
+    }
+
+    SlashCatalogSnapshot {
+        scanned_at_ms: now_ms(),
+        ready: true,
+        entries,
+        error: None,
+    }
+}
+
+fn set_slash_catalog_snapshot(snapshot: SlashCatalogSnapshot) {
+    if let Ok(mut cache) = slash_catalog_cache().lock() {
+        *cache = snapshot;
+    }
+}
+
+fn get_slash_catalog_snapshot() -> SlashCatalogSnapshot {
+    slash_catalog_cache()
+        .lock()
+        .map(|cache| cache.clone())
+        .unwrap_or_else(|_| SlashCatalogSnapshot {
+            scanned_at_ms: now_ms(),
+            ready: false,
+            entries: slash_command_entries(),
+            error: Some("slash catalog cache lock failed".to_string()),
+        })
+}
+
+fn start_slash_catalog_scan(app: AppHandle) {
+    let _ = slash_catalog_cache();
+    let spawn_result = std::thread::Builder::new()
+        .name("slash-catalog-scan".to_string())
+        .spawn(move || {
+            let snapshot = scan_slash_catalog_blocking();
+            set_slash_catalog_snapshot(snapshot.clone());
+            let _ = app.emit(SLASH_CATALOG_UPDATED_EVENT, snapshot);
+        });
+
+    if let Err(err) = spawn_result {
+        let snapshot = SlashCatalogSnapshot {
+            scanned_at_ms: now_ms(),
+            ready: true,
+            entries: slash_command_entries(),
+            error: Some(format!("slash catalog scan thread failed: {err}")),
+        };
+        set_slash_catalog_snapshot(snapshot);
+    }
+}
+
+#[tauri::command]
+fn slash_catalog() -> SlashCatalogSnapshot {
+    get_slash_catalog_snapshot()
 }
 
 fn known_free_channel_ids() -> HashSet<&'static str> {
@@ -587,6 +1852,8 @@ async fn open_external(url: String) -> Result<(), String> {
 
 const PREVIEW_TEXT_LIMIT: u64 = 1_500_000;
 const PREVIEW_IMAGE_LIMIT: u64 = 12 * 1024 * 1024;
+const PREVIEW_BASENAME_SEARCH_LIMIT: usize = 20_000;
+const CLIPBOARD_IMAGE_LIMIT: usize = 32 * 1024 * 1024;
 
 fn preview_path(path: &str, cwd: Option<&str>) -> Result<PathBuf, String> {
     let trimmed = path.trim();
@@ -594,23 +1861,133 @@ fn preview_path(path: &str, cwd: Option<&str>) -> Result<PathBuf, String> {
         return Err("路径为空。".to_string());
     }
     let raw = PathBuf::from(trimmed);
-    if raw.is_absolute() || cwd.unwrap_or("").trim().is_empty() {
+    if raw.is_absolute() {
         return Ok(raw);
     }
-    Ok(PathBuf::from(cwd.unwrap()).join(raw))
+    let Some(cwd) = cwd.map(str::trim).filter(|cwd| !cwd.is_empty()) else {
+        return Ok(raw);
+    };
+    Ok(PathBuf::from(cwd).join(raw))
 }
 
 fn image_mime_for_path(path: &std::path::Path) -> Option<&'static str> {
     let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
     match ext.as_str() {
         "png" => Some("image/png"),
-        "jpg" | "jpeg" => Some("image/jpeg"),
+        "apng" => Some("image/apng"),
+        "jpg" | "jpeg" | "jpe" | "jfif" | "pjpeg" | "pjp" => Some("image/jpeg"),
         "gif" => Some("image/gif"),
         "webp" => Some("image/webp"),
-        "bmp" => Some("image/bmp"),
+        "bmp" | "dib" => Some("image/bmp"),
+        "ico" | "cur" => Some("image/x-icon"),
         "svg" => Some("image/svg+xml"),
+        "avif" => Some("image/avif"),
         _ => None,
     }
+}
+
+fn text_mime_for_path(path: &std::path::Path) -> &'static str {
+    let Some(ext) = path
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+    else {
+        return "text/plain";
+    };
+    match ext.as_str() {
+        "html" | "htm" | "xhtml" | "xht" | "shtml" | "hta" => "text/html",
+        "md" | "mdx" | "markdown" | "mkd" | "mkdn" | "mdown" | "mdwn" | "mdtxt" | "mdtext"
+        | "rmd" | "qmd" => "text/markdown",
+        "css" | "scss" | "sass" | "less" => "text/css",
+        "csv" => "text/csv",
+        "tsv" => "text/tab-separated-values",
+        "json" | "jsonc" | "json5" | "ndjson" | "jsonl" | "geojson" | "topojson"
+        | "webmanifest" | "ipynb" | "har" => "application/json",
+        "xml" | "xsd" | "xsl" | "xslt" | "rss" | "atom" | "wsdl" | "drawio" | "dio" => {
+            "application/xml"
+        }
+        "js" | "mjs" | "cjs" => "text/javascript",
+        "ts" | "tsx" | "mts" | "cts" => "text/typescript",
+        _ => "text/plain",
+    }
+}
+
+fn skip_preview_search_dir(path: &Path) -> bool {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_default();
+    matches!(
+        name,
+        ".git"
+            | ".hg"
+            | ".svn"
+            | ".next"
+            | ".nuxt"
+            | ".turbo"
+            | ".vite"
+            | "build"
+            | "coverage"
+            | "dist"
+            | "node_modules"
+            | "out"
+            | "target"
+            | "__pycache__"
+    )
+}
+
+fn preview_bare_name_fallback(path: &str, cwd: Option<&str>) -> Option<PathBuf> {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed.contains('/') || trimmed.contains('\\') {
+        return None;
+    }
+
+    let cwd = cwd?.trim();
+    if cwd.is_empty() {
+        return None;
+    }
+
+    let root = PathBuf::from(cwd);
+    if !root.is_dir() {
+        return None;
+    }
+
+    let mut stack = vec![root];
+    let mut seen = 0_usize;
+    let mut found: Option<PathBuf> = None;
+    while let Some(dir) = stack.pop() {
+        seen += 1;
+        if seen > PREVIEW_BASENAME_SEARCH_LIMIT {
+            break;
+        }
+
+        let read_dir = match std::fs::read_dir(&dir) {
+            Ok(read_dir) => read_dir,
+            Err(_) => continue,
+        };
+
+        for entry in read_dir.flatten() {
+            let entry_path = entry.path();
+            if entry_path.is_dir() {
+                if !skip_preview_search_dir(&entry_path) {
+                    stack.push(entry_path);
+                }
+                continue;
+            }
+
+            let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+            if name != trimmed {
+                continue;
+            }
+            if found.is_some() {
+                return None;
+            }
+            found = Some(entry_path);
+        }
+    }
+
+    found
 }
 
 fn probably_binary(bytes: &[u8]) -> bool {
@@ -628,6 +2005,10 @@ fn probably_binary(bytes: &[u8]) -> bool {
     control * 100 > sample.len() * 10
 }
 
+fn has_utf16_bom(bytes: &[u8]) -> bool {
+    bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff])
+}
+
 fn decode_preview_text(bytes: Vec<u8>) -> Option<String> {
     if bytes.starts_with(&[0xff, 0xfe]) {
         let units: Vec<u16> = bytes[2..]
@@ -643,9 +2024,21 @@ fn decode_preview_text(bytes: Vec<u8>) -> Option<String> {
             .collect();
         return String::from_utf16(&units).ok();
     }
-    String::from_utf8(bytes)
-        .ok()
-        .map(|text| text.trim_start_matches('\u{feff}').to_string())
+    match String::from_utf8(bytes) {
+        Ok(text) => Some(text.trim_start_matches('\u{feff}').to_string()),
+        Err(err) => {
+            let bytes = err.into_bytes();
+            if probably_binary(&bytes) {
+                None
+            } else {
+                Some(
+                    String::from_utf8_lossy(&bytes)
+                        .trim_start_matches('\u{feff}')
+                        .to_string(),
+                )
+            }
+        }
+    }
 }
 
 fn preview_local_file_blocking(
@@ -653,6 +2046,11 @@ fn preview_local_file_blocking(
     cwd: Option<String>,
 ) -> Result<LocalFilePreview, String> {
     let resolved = preview_path(&path, cwd.as_deref())?;
+    let resolved = if resolved.exists() {
+        resolved
+    } else {
+        preview_bare_name_fallback(&path, cwd.as_deref()).unwrap_or(resolved)
+    };
     let metadata = std::fs::metadata(&resolved).map_err(|e| format!("读取文件信息失败：{e}"))?;
     if !metadata.is_file() {
         return Err("目标不是文件。".to_string());
@@ -704,7 +2102,7 @@ fn preview_local_file_blocking(
         bytes.truncate(PREVIEW_TEXT_LIMIT as usize);
     }
 
-    if probably_binary(&bytes) {
+    if !has_utf16_bom(&bytes) && probably_binary(&bytes) {
         return Ok(LocalFilePreview {
             path,
             file_name,
@@ -734,7 +2132,7 @@ fn preview_local_file_blocking(
         path,
         file_name,
         kind: "text".to_string(),
-        mime: Some("text/plain".to_string()),
+        mime: Some(text_mime_for_path(&resolved).to_string()),
         size_bytes,
         truncated,
         text: Some(text),
@@ -747,6 +2145,136 @@ async fn preview_local_file(path: String, cwd: Option<String>) -> Result<LocalFi
     tauri::async_runtime::spawn_blocking(move || preview_local_file_blocking(path, cwd))
         .await
         .map_err(|e| format!("文件预览任务失败: {e}"))?
+}
+
+fn clipboard_image_extension(mime: &str, file_name: Option<&str>) -> Result<&'static str, String> {
+    let mime = mime
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+
+    match mime.as_str() {
+        "image/png" | "image/apng" => return Ok("png"),
+        "image/jpeg" | "image/jpg" | "image/pjpeg" => return Ok("jpg"),
+        "image/webp" => return Ok("webp"),
+        "image/gif" => return Ok("gif"),
+        "image/bmp" | "image/x-ms-bmp" => return Ok("bmp"),
+        "image/avif" => return Ok("avif"),
+        _ => {}
+    }
+
+    let ext = file_name
+        .and_then(|name| Path::new(name).extension())
+        .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    match ext.as_str() {
+        "png" | "apng" => Ok("png"),
+        "jpg" | "jpeg" | "jpe" | "jfif" | "pjpeg" | "pjp" => Ok("jpg"),
+        "webp" => Ok("webp"),
+        "gif" => Ok("gif"),
+        "bmp" | "dib" => Ok("bmp"),
+        "avif" => Ok("avif"),
+        _ => Err("仅支持 PNG/JPEG/WebP/GIF/BMP/AVIF 图片粘贴。".to_string()),
+    }
+}
+
+fn clipboard_image_dir(cwd: Option<&str>) -> PathBuf {
+    let cwd = cwd.unwrap_or_default().trim();
+    if !cwd.is_empty() {
+        let root = PathBuf::from(cwd);
+        if root.is_dir() {
+            return root.join(".omc").join("clipboard-images");
+        }
+    }
+    std::env::temp_dir()
+        .join("freeultracode")
+        .join("clipboard-images")
+}
+
+fn random_hex_u64() -> String {
+    let mut bytes = [0_u8; 8];
+    if getrandom::getrandom(&mut bytes).is_ok() {
+        return format!("{:016x}", u64::from_le_bytes(bytes));
+    }
+    format!(
+        "{:x}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    )
+}
+
+fn write_unique_clipboard_image(dir: &Path, ext: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建图片目录失败：{e}"))?;
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+
+    for attempt in 0..16 {
+        let path = dir.join(format!(
+            "pasted-{millis}-{}-{attempt}.{ext}",
+            random_hex_u64()
+        ));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(bytes)
+                    .map_err(|e| format!("写入粘贴图片失败：{e}"))?;
+                return Ok(path);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("创建粘贴图片失败：{err}")),
+        }
+    }
+
+    Err("创建粘贴图片失败：文件名冲突。".to_string())
+}
+
+fn save_clipboard_image_blocking(
+    bytes_base64: String,
+    mime: String,
+    file_name: Option<String>,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    use base64::Engine;
+
+    let ext = clipboard_image_extension(&mime, file_name.as_deref())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(bytes_base64.trim())
+        .map_err(|e| format!("解析粘贴图片失败：{e}"))?;
+
+    if bytes.is_empty() {
+        return Err("粘贴图片为空。".to_string());
+    }
+    if bytes.len() > CLIPBOARD_IMAGE_LIMIT {
+        return Err("粘贴图片过大，最大支持 32MB。".to_string());
+    }
+
+    let dir = clipboard_image_dir(cwd.as_deref());
+    let path = write_unique_clipboard_image(&dir, ext, &bytes)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn save_clipboard_image(
+    bytes_base64: String,
+    mime: String,
+    file_name: Option<String>,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_clipboard_image_blocking(bytes_base64, mime, file_name, cwd)
+    })
+    .await
+    .map_err(|e| format!("保存粘贴图片任务失败: {e}"))?
 }
 
 fn fallback_local_model_hardware() -> LocalModelHardware {
@@ -1284,6 +2812,251 @@ async fn run_workflow(
     })
     .await
     .map_err(|e| format!("运行任务调度失败: {e}"))?
+}
+
+fn fuc_cli_candidates(cwd: Option<&str>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(dir) = cwd.map(str::trim).filter(|dir| !dir.is_empty()) {
+        let root = PathBuf::from(dir);
+        out.push(root.join("app").join("cli").join("dist").join("fuc.mjs"));
+        out.push(root.join("cli").join("dist").join("fuc.mjs"));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        out.push(cwd.join("app").join("cli").join("dist").join("fuc.mjs"));
+        out.push(cwd.join("cli").join("dist").join("fuc.mjs"));
+        if let Some(parent) = cwd.parent() {
+            out.push(parent.join("app").join("cli").join("dist").join("fuc.mjs"));
+            out.push(parent.join("cli").join("dist").join("fuc.mjs"));
+        }
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            out.push(dir.join("fuc.mjs"));
+            out.push(dir.join("cli").join("dist").join("fuc.mjs"));
+            out.push(
+                dir.join("..")
+                    .join("..")
+                    .join("app")
+                    .join("cli")
+                    .join("dist")
+                    .join("fuc.mjs"),
+            );
+        }
+    }
+    out
+}
+
+fn locate_fuc_cli(cwd: Option<&str>) -> Result<PathBuf, String> {
+    let candidates = fuc_cli_candidates(cwd);
+    for path in &candidates {
+        if path.is_file() {
+            return std::fs::canonicalize(path)
+                .map_err(|e| format!("无法解析 fuc CLI 路径 {}: {e}", path.display()));
+        }
+    }
+    let searched = candidates
+        .iter()
+        .map(|path| format!("  - {}", path.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Err(format!(
+        "未找到 app/cli/dist/fuc.mjs。请先在 app/ 下运行 npm run cli:build。\n已搜索:\n{searched}"
+    ))
+}
+
+fn default_ultracode_workdir(cli_path: &Path) -> PathBuf {
+    let mut current = cli_path.parent();
+    while let Some(dir) = current {
+        if dir.file_name().and_then(|name| name.to_str()) == Some("app") {
+            if let Some(root) = dir.parent() {
+                return root.to_path_buf();
+            }
+            return dir.to_path_buf();
+        }
+        current = dir.parent();
+    }
+    cli_path
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+fn emit_ultracode_progress(app: &tauri::AppHandle, run_id: &str, stream: &str, text: &str) {
+    if text.trim().is_empty() {
+        return;
+    }
+    let prefix = if stream == "stderr" { "stderr" } else { "stdout" };
+    let _ = app.emit(
+        "ai-cli-progress",
+        serde_json::json!({
+            "runId": run_id,
+            "text": format!("\n[{prefix}] {text}")
+        }),
+    );
+}
+
+#[tauri::command]
+async fn run_ultracode(
+    task: String,
+    cwd: Option<String>,
+    adapter: Option<String>,
+    model: Option<String>,
+    provider: Option<String>,
+    concurrency: Option<u32>,
+    timeout_seconds: Option<u64>,
+    run_id: String,
+    app: tauri::AppHandle,
+) -> Result<UltracodeRunResult, String> {
+    tauri::async_runtime::spawn_blocking(move || -> Result<UltracodeRunResult, String> {
+        let task = task.trim().to_string();
+        if task.is_empty() {
+            return Err("请提供任务：/ultracode <任务>".to_string());
+        }
+
+        let cwd_trimmed = cwd.as_deref().map(str::trim).filter(|dir| !dir.is_empty());
+        let cli_path = locate_fuc_cli(cwd_trimmed)?;
+        let workdir = cwd_trimmed
+            .map(PathBuf::from)
+            .filter(|path| path.is_dir())
+            .unwrap_or_else(|| default_ultracode_workdir(&cli_path));
+
+        let mut args = vec![
+            cli_path.to_string_lossy().to_string(),
+            "--json".to_string(),
+            "ultracode".to_string(),
+            task,
+            "--cwd".to_string(),
+            workdir.to_string_lossy().to_string(),
+        ];
+        if let Some(value) = adapter.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+            args.push("--adapter".to_string());
+            args.push(value);
+        }
+        if let Some(value) = model.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+            args.push("--model".to_string());
+            args.push(value);
+        }
+        if let Some(value) = provider.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+            args.push("--provider".to_string());
+            args.push(value);
+        }
+        if let Some(value) = concurrency.filter(|value| *value > 0) {
+            args.push("--concurrency".to_string());
+            args.push(value.to_string());
+        }
+        if let Some(value) = timeout_seconds.filter(|value| *value >= 30) {
+            args.push("--timeout".to_string());
+            args.push(value.to_string());
+        }
+
+        let mut cmd = Command::new("node");
+        hide_console(&mut cmd);
+        cmd.args(&args)
+            .current_dir(&workdir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| format!("无法启动 node 执行 /ultracode：请确认 Node.js 已安装并在 PATH 中。({e})"))?;
+        register_ai_cli(&run_id, child.id());
+
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+        let app_stdout = app.clone();
+        let run_stdout = run_id.clone();
+        let stdout_handle = std::thread::spawn(move || -> String {
+            let Some(stdout) = stdout else {
+                return String::new();
+            };
+            let reader = std::io::BufReader::new(stdout);
+            let mut out = String::new();
+            for line in reader.lines() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(_) => break,
+                };
+                out.push_str(&line);
+                out.push('\n');
+                emit_ultracode_progress(&app_stdout, &run_stdout, "stdout", &line);
+            }
+            out
+        });
+        let app_stderr = app.clone();
+        let run_stderr = run_id.clone();
+        let stderr_handle = std::thread::spawn(move || -> String {
+            let Some(stderr) = stderr else {
+                return String::new();
+            };
+            let reader = std::io::BufReader::new(stderr);
+            let mut out = String::new();
+            for line in reader.lines() {
+                let line = match line {
+                    Ok(line) => line,
+                    Err(_) => break,
+                };
+                out.push_str(&line);
+                out.push('\n');
+                emit_ultracode_progress(&app_stderr, &run_stderr, "stderr", &line);
+            }
+            out
+        });
+
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => {
+                    if take_ai_cli_cancelled(&run_id) {
+                        terminate_child_tree(&mut child);
+                        unregister_ai_cli(&run_id);
+                        return Err("CLI \"ultracode\" 已由用户中断。".to_string());
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => {
+                    terminate_child_tree(&mut child);
+                    unregister_ai_cli(&run_id);
+                    return Err(format!("等待 /ultracode 进程失败: {e}"));
+                }
+            }
+        };
+
+        let stdout = stdout_handle.join().unwrap_or_default();
+        let stderr = stderr_handle.join().unwrap_or_default();
+        let cancelled = take_ai_cli_cancelled(&run_id);
+        unregister_ai_cli(&run_id);
+        if cancelled {
+            return Err("CLI \"ultracode\" 已由用户中断。".to_string());
+        }
+
+        let result_json = serde_json::from_str::<serde_json::Value>(stdout.trim()).ok();
+        let run_dir = result_json
+            .as_ref()
+            .and_then(|value| value.get("runDir"))
+            .and_then(|value| value.as_str())
+            .map(|value| value.to_string());
+        let exit_code = status.code().unwrap_or(-1);
+        let result = UltracodeRunResult {
+            exit_code,
+            stdout,
+            stderr,
+            run_id,
+            run_dir,
+            result_json,
+        };
+        if status.success() {
+            Ok(result)
+        } else {
+            Err(format!(
+                "/ultracode 退出码 {exit_code}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+                result.stdout.trim_end(),
+                result.stderr.trim_end()
+            ))
+        }
+    })
+    .await
+    .map_err(|e| format!("/ultracode 任务调度失败: {e}"))?
 }
 
 /// System prompt steering the model to emit a pure IRGraph JSON object that maps
@@ -1963,6 +3736,21 @@ fn codex_last_message_ready(path: &std::path::Path) -> bool {
         .unwrap_or(false)
 }
 
+fn codex_sidecar_output(path: &std::path::Path) -> Option<String> {
+    let text = std::fs::read_to_string(path).ok()?;
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn remove_codex_sidecar(path: &Option<PathBuf>) {
+    if let Some(path) = path.as_ref() {
+        let _ = std::fs::remove_file(path);
+    }
+}
+
 /// The UI currently exposes Claude model tiers (`haiku` / `sonnet` / `opus`).
 /// Passing those through to Codex would fail, so only forward explicit non-
 #[tauri::command]
@@ -2225,6 +4013,8 @@ async fn ai_cli(
         let progress_model_hint2 = progress_model_hint.clone();
         let codex_turn_status = Arc::new(Mutex::new(None::<String>));
         let codex_turn_status_reader = Arc::clone(&codex_turn_status);
+        let codex_streamed_output = Arc::new(Mutex::new(String::new()));
+        let codex_streamed_output_reader = Arc::clone(&codex_streamed_output);
         let stdout_activity = Arc::clone(&last_activity);
         let partial_streaming = partial_enabled();
         let out_handle = std::thread::spawn(move || -> String {
@@ -2261,6 +4051,9 @@ async fn ai_cli(
                         if let Some(item) = codex_completed_item(&v) {
                             if let Some(line) = codex_progress_line(item) {
                                 acc.push_str(&line);
+                                if let Ok(mut current) = codex_streamed_output_reader.lock() {
+                                    current.push_str(&line);
+                                }
                                 emit_progress(&app2, &run2, &line);
                             }
                         }
@@ -2560,10 +4353,55 @@ async fn ai_cli(
         };
 
         let _ = stdin_handle.join();
+        if is_codex {
+            let streamed_fallback = codex_streamed_output
+                .lock()
+                .map(|current| current.clone())
+                .unwrap_or_default();
+            let terminal_output = codex_last_message_path
+                .as_ref()
+                .and_then(|path| codex_sidecar_output(path))
+                .unwrap_or(streamed_fallback);
+            match &wait_result {
+                Ok(WaitOutcome::CodexTurnCompleted(status)) => {
+                    remove_codex_sidecar(&codex_last_message_path);
+                    let cancelled = take_ai_cli_cancelled(&run_id);
+                    unregister_ai_cli(&run_id);
+                    if cancelled {
+                        return Err(append_cli_error_context(
+                            format!("CLI \"{binary}\" 已由用户中断。"),
+                            &terminal_output,
+                            "",
+                        ));
+                    }
+                    if codex_status_success(status) {
+                        return Ok(terminal_output);
+                    }
+                    return Err(format!(
+                        "CLI \"{binary}\" turn status {status}: {}",
+                        terminal_output.trim()
+                    ));
+                }
+                Ok(WaitOutcome::CodexLastMessageReady) => {
+                    remove_codex_sidecar(&codex_last_message_path);
+                    let cancelled = take_ai_cli_cancelled(&run_id);
+                    unregister_ai_cli(&run_id);
+                    if cancelled {
+                        return Err(append_cli_error_context(
+                            format!("CLI \"{binary}\" 已由用户中断。"),
+                            &terminal_output,
+                            "",
+                        ));
+                    }
+                    return Ok(terminal_output);
+                }
+                _ => {}
+            }
+        }
         let streamed_output = out_handle.join().unwrap_or_default();
         let output = if let Some(path) = codex_last_message_path.as_ref() {
-            let final_message = std::fs::read_to_string(path).unwrap_or_default();
-            let _ = std::fs::remove_file(path);
+            let final_message = codex_sidecar_output(path).unwrap_or_default();
+            remove_codex_sidecar(&codex_last_message_path);
             if final_message.trim().is_empty() {
                 streamed_output
             } else {
@@ -2618,6 +4456,60 @@ async fn ai_cli(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preview_image_mime_supports_common_web_formats() {
+        assert_eq!(
+            image_mime_for_path(std::path::Path::new("screen.avif")),
+            Some("image/avif")
+        );
+        assert_eq!(
+            image_mime_for_path(std::path::Path::new("favicon.ico")),
+            Some("image/x-icon")
+        );
+        assert_eq!(
+            image_mime_for_path(std::path::Path::new("photo.jfif")),
+            Some("image/jpeg")
+        );
+    }
+
+    #[test]
+    fn preview_text_mime_marks_html_and_markdown() {
+        assert_eq!(
+            text_mime_for_path(std::path::Path::new("Moon亮晶分析和渲染整体架构.html")),
+            "text/html"
+        );
+        assert_eq!(
+            text_mime_for_path(std::path::Path::new("README.markdown")),
+            "text/markdown"
+        );
+    }
+
+    #[test]
+    fn preview_text_decodes_utf16_before_binary_rejection() {
+        let bytes = vec![0xff, 0xfe, b'h', 0, b'i', 0];
+        assert!(probably_binary(&bytes));
+        assert!(has_utf16_bom(&bytes));
+        assert_eq!(decode_preview_text(bytes).as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn preview_fallback_finds_unique_bare_filename() {
+        let root = std::env::temp_dir().join(format!(
+            "freeultracode-preview-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let nested = root.join("app").join("src");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("shader.wgsl");
+        std::fs::write(&file, "@compute @workgroup_size(1) fn main() {}\n").unwrap();
+
+        let found = preview_bare_name_fallback("shader.wgsl", root.to_str());
+        assert_eq!(found.as_deref(), Some(file.as_path()));
+
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn summarizes_tool_result_variants() {
@@ -2695,6 +4587,26 @@ mod tests {
     }
 
     #[test]
+    fn codex_sidecar_output_ignores_empty_files() {
+        let path = std::env::temp_dir().join(format!(
+            "freeultracode-codex-sidecar-test-{}-{}.txt",
+            std::process::id(),
+            now_ms()
+        ));
+
+        std::fs::write(&path, "  \n").unwrap();
+        assert_eq!(codex_sidecar_output(&path), None);
+
+        std::fs::write(&path, "final answer\n").unwrap();
+        assert_eq!(
+            codex_sidecar_output(&path).as_deref(),
+            Some("final answer\n")
+        );
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn trims_cli_error_context_from_tail() {
         let text = "x".repeat(CLI_ERROR_CONTEXT_LIMIT + 32);
         let trimmed = trim_cli_error_context(&text);
@@ -2747,7 +4659,7 @@ mod tests {
 
         env.insert(
             "ANTHROPIC_BASE_URL".to_string(),
-            "http://127.0.0.1:8765/ch/open_router".to_string(),
+            "http://127.0.0.1:8766/ch/open_router".to_string(),
         );
         assert!(should_run_claude_bare_with_disable(Some(&env), false));
     }
@@ -2758,7 +4670,7 @@ mod tests {
         env.insert("ANTHROPIC_API_KEY".to_string(), "freecc".to_string());
         env.insert(
             "ANTHROPIC_BASE_URL".to_string(),
-            "http://127.0.0.1:8765/ch/open_router".to_string(),
+            "http://127.0.0.1:8766/ch/open_router".to_string(),
         );
 
         assert!(!should_run_claude_bare_with_disable(Some(&env), true));
@@ -2770,7 +4682,7 @@ mod tests {
         env.insert("ANTHROPIC_API_KEY".to_string(), "freecc".to_string());
         env.insert(
             "ANTHROPIC_BASE_URL".to_string(),
-            "http://127.0.0.1:8765/ch/kilo".to_string(),
+            "http://127.0.0.1:8766/ch/kilo".to_string(),
         );
         env.insert(
             "ANTHROPIC_MODEL".to_string(),
@@ -2799,7 +4711,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert(
             "ANTHROPIC_BASE_URL".to_string(),
-            "http://127.0.0.1:8765/ch/kilo".to_string(),
+            "http://127.0.0.1:8766/ch/kilo".to_string(),
         );
         env.insert("ANTHROPIC_API_KEY".to_string(), "local-token".to_string());
         env.insert(
@@ -2812,7 +4724,7 @@ mod tests {
             settings
                 .pointer("/env/ANTHROPIC_BASE_URL")
                 .and_then(|v| v.as_str()),
-            Some("http://127.0.0.1:8765/ch/kilo")
+            Some("http://127.0.0.1:8766/ch/kilo")
         );
         assert_eq!(
             settings
@@ -2866,7 +4778,7 @@ mod tests {
         let mut env = HashMap::new();
         env.insert(
             "ANTHROPIC_BASE_URL".to_string(),
-            "http://127.0.0.1:8765/ch/open_router".to_string(),
+            "http://127.0.0.1:8766/ch/open_router".to_string(),
         );
         env.insert("ANTHROPIC_MODEL".to_string(), "glm-4.6".to_string());
         let normalized = normalize_spawn_env(Some(env)).unwrap();
@@ -2879,7 +4791,16 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let builder =
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main_window(app);
+            let _ = app.emit(
+                SINGLE_INSTANCE_WARNING_EVENT,
+                SINGLE_INSTANCE_WARNING_MESSAGE,
+            );
+        }));
+
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init())
@@ -2891,6 +4812,8 @@ pub fn run() {
                         .build(),
                 )?;
             }
+
+            start_slash_catalog_scan(app.handle().clone());
 
             if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 let window_to_hide = window.clone();
@@ -2909,8 +4832,11 @@ pub fn run() {
                 .text(TRAY_MENU_QUIT_ID, "退出")
                 .build()?;
 
-            let _tray = TrayIconBuilder::with_id("main-tray")
-                .icon(app.default_window_icon().cloned().unwrap())
+            let mut tray = TrayIconBuilder::with_id("main-tray");
+            if let Some(icon) = app.default_window_icon().cloned() {
+                tray = tray.icon(icon);
+            }
+            let _tray = tray
                 .tooltip("FreeUltraCode")
                 .menu(&tray_menu)
                 .show_menu_on_left_click(false)
@@ -2938,8 +4864,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             ai_edit_graph,
             run_workflow,
+            run_ultracode,
             ai_cli,
             cancel_ai_cli,
+            slash_catalog,
             scan_model_clis,
             validate_cli_path,
             validate_shell_path,
@@ -2951,6 +4879,7 @@ pub fn run() {
             setup_local_model,
             open_external,
             preview_local_file,
+            save_clipboard_image,
             history::history_root,
             history::history_read_json,
             history::history_write_json,

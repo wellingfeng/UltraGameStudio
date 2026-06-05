@@ -1,10 +1,20 @@
 import { useEffect, useMemo, useState } from 'react';
-import { ExternalLink, FileWarning, Image as ImageIcon, Loader2, X } from 'lucide-react';
+import {
+  Code2,
+  ExternalLink,
+  FileText,
+  FileWarning,
+  Globe2,
+  Image as ImageIcon,
+  Loader2,
+  X,
+} from 'lucide-react';
 import {
   openLocalPath,
   previewLocalFile,
   type LocalFilePreview,
 } from '@/lib/tauri';
+import { useResizableWidth } from '@/lib/useResizableWidth';
 import type { FileRef } from './lib/filePath';
 import Markdown from './Markdown';
 
@@ -17,43 +27,170 @@ type PreviewState =
 const EXT_TO_LANG: Record<string, string> = {
   ts: 'ts',
   tsx: 'tsx',
+  mts: 'ts',
+  cts: 'ts',
   js: 'js',
   jsx: 'jsx',
   mjs: 'js',
   cjs: 'js',
   json: 'json',
   jsonc: 'json',
+  json5: 'json',
+  map: 'json',
+  webmanifest: 'json',
+  ipynb: 'json',
+  ndjson: 'json',
+  jsonl: 'json',
+  geojson: 'json',
+  topojson: 'json',
+  har: 'json',
   css: 'css',
   scss: 'css',
   sass: 'css',
   less: 'css',
+  pcss: 'css',
+  postcss: 'css',
+  styl: 'css',
   html: 'html',
   htm: 'html',
+  xhtml: 'html',
+  shtml: 'html',
+  xht: 'html',
+  hta: 'html',
+  mjml: 'html',
+  vue: 'vue',
+  svelte: 'html',
+  astro: 'html',
   svg: 'svg',
   xml: 'xml',
+  xsd: 'xml',
+  xsl: 'xml',
+  xslt: 'xml',
+  dtd: 'xml',
+  rss: 'xml',
+  atom: 'xml',
+  wsdl: 'xml',
+  csproj: 'xml',
+  fsproj: 'xml',
+  vbproj: 'xml',
+  vcxproj: 'xml',
   md: 'md',
   mdx: 'md',
+  markdown: 'md',
+  mkd: 'md',
+  mkdn: 'md',
+  mdown: 'md',
+  mdwn: 'md',
+  mdtxt: 'md',
+  mdtext: 'md',
+  rmd: 'md',
+  qmd: 'md',
   yml: 'yaml',
   yaml: 'yaml',
   toml: '',
   py: 'py',
+  pyw: 'py',
+  pyi: 'py',
   rs: 'rs',
   sh: 'bash',
   bash: 'bash',
   zsh: 'bash',
+  fish: 'bash',
+  ksh: 'bash',
   ps1: '',
+  psm1: '',
+  psd1: '',
   bat: '',
   cmd: '',
   sql: '',
+  gql: '',
+  graphql: '',
+  proto: '',
+  hcl: '',
+  tf: '',
+  tfvars: '',
+  nix: '',
+  go: '',
+  java: '',
+  kt: '',
+  kts: '',
+  c: '',
+  h: '',
+  cc: '',
+  cpp: '',
+  cxx: '',
+  hpp: '',
+  cs: '',
+  php: '',
+  swift: '',
+  scala: '',
+  dart: '',
+  lua: '',
   diff: 'diff',
+  patch: 'diff',
+  rej: 'diff',
+  mmd: 'md',
+  mermaid: '',
+  puml: '',
+  plantuml: '',
+  dot: '',
+  gv: '',
+  drawio: 'xml',
 };
 
-function languageFromPath(path: string): string {
+const HTML_PREVIEW_EXT = new Set(['html', 'htm', 'xhtml', 'xht', 'shtml', 'hta']);
+const MARKDOWN_PREVIEW_EXT = new Set([
+  'md',
+  'mdx',
+  'markdown',
+  'mkd',
+  'mkdn',
+  'mdown',
+  'mdwn',
+  'mdtxt',
+  'mdtext',
+  'rmd',
+  'qmd',
+]);
+
+type TextPreviewMode = 'code' | 'html' | 'markdown';
+
+const FILE_PREVIEW_DEFAULT_WIDTH = 760;
+const FILE_PREVIEW_MIN_WIDTH = 360;
+const FILE_PREVIEW_MAX_WIDTH = 1280;
+
+function filePreviewMaxWidth(): number {
+  if (typeof window === 'undefined') return FILE_PREVIEW_MAX_WIDTH;
+  return Math.max(
+    FILE_PREVIEW_MIN_WIDTH,
+    Math.min(FILE_PREVIEW_MAX_WIDTH, window.innerWidth - 48),
+  );
+}
+
+function filePreviewDefaultWidth(): number {
+  return Math.min(FILE_PREVIEW_DEFAULT_WIDTH, filePreviewMaxWidth());
+}
+
+function extensionFromPath(path: string): string {
   const clean = path.split(/[?#]/, 1)[0] ?? path;
   const base = clean.replace(/[\\/]+$/, '');
   const dot = base.lastIndexOf('.');
   if (dot === -1 || dot === base.length - 1) return '';
-  return EXT_TO_LANG[base.slice(dot + 1).toLowerCase()] ?? '';
+  return base.slice(dot + 1).toLowerCase();
+}
+
+function languageFromPath(path: string): string {
+  return EXT_TO_LANG[extensionFromPath(path)] ?? '';
+}
+
+function textPreviewModeFromPath(path: string, mime?: string | null): TextPreviewMode {
+  const normalizedMime = (mime ?? '').toLowerCase();
+  const ext = extensionFromPath(path);
+  if (normalizedMime.includes('html') || HTML_PREVIEW_EXT.has(ext)) return 'html';
+  if (normalizedMime.includes('markdown') || MARKDOWN_PREVIEW_EXT.has(ext)) {
+    return 'markdown';
+  }
+  return 'code';
 }
 
 function codeFence(text: string, language: string): string {
@@ -89,6 +226,13 @@ export default function FilePreviewDrawer({
   onClose: () => void;
 }) {
   const [state, setState] = useState<PreviewState>({ status: 'idle' });
+  const { width, onResizeStart } = useResizableWidth({
+    storageKey: 'freeultracode.filePreviewWidth.v1',
+    defaultWidth: filePreviewDefaultWidth(),
+    min: FILE_PREVIEW_MIN_WIDTH,
+    max: filePreviewMaxWidth(),
+    edge: 'left',
+  });
 
   useEffect(() => {
     if (!refData) {
@@ -125,10 +269,14 @@ export default function FilePreviewDrawer({
   const lineSuffix = refData?.startLine
     ? `:${refData.startLine}${refData.endLine ? `-${refData.endLine}` : ''}`
     : '';
+  const textPreviewMode =
+    file?.kind === 'text' ? textPreviewModeFromPath(file.path, file.mime) : 'code';
   const markdown = useMemo(() => {
     if (!file || file.kind !== 'text' || file.text == null) return '';
+    if (textPreviewMode === 'markdown') return file.text;
+    if (textPreviewMode === 'html') return '';
     return codeFence(file.text, languageFromPath(file.path));
-  }, [file]);
+  }, [file, textPreviewMode]);
 
   if (!refData) return null;
 
@@ -140,7 +288,18 @@ export default function FilePreviewDrawer({
         onClick={onClose}
         className="pointer-events-auto absolute inset-0 bg-bg/45 backdrop-blur-[1px]"
       />
-      <aside className="pointer-events-auto absolute bottom-0 right-0 top-0 flex w-[min(92vw,760px)] flex-col border-l border-border bg-panel shadow-2xl">
+      <aside
+        className="pointer-events-auto absolute bottom-0 right-0 top-0 flex flex-col border-l border-border bg-panel shadow-2xl"
+        style={{ width }}
+      >
+        <div
+          onMouseDown={onResizeStart}
+          title="拖动调整预览宽度"
+          aria-label="拖动调整预览宽度"
+          className="group absolute -left-1 bottom-0 top-0 z-20 flex w-2 cursor-col-resize items-center justify-center"
+        >
+          <div className="h-full w-0.5 bg-transparent transition-colors group-hover:bg-accent/50" />
+        </div>
         <header className="flex min-h-0 shrink-0 items-start gap-2 border-b border-border-soft px-3 py-2">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
@@ -216,8 +375,37 @@ export default function FilePreviewDrawer({
           </div>
         )}
 
-        {file?.kind === 'text' && (
+        {file?.kind === 'text' && textPreviewMode === 'html' && (
+          <div className="flex min-h-0 flex-1 flex-col bg-white">
+            <div className="flex shrink-0 items-center gap-2 border-b border-border-soft bg-panel px-3 py-1.5 font-mono text-[10px] text-fg-faint">
+              <Globe2 size={12} />
+              {file.mime ?? 'text/html'} · {formatBytes(file.sizeBytes)}
+            </div>
+            <iframe
+              title={file.fileName}
+              sandbox=""
+              srcDoc={file.text ?? ''}
+              className="min-h-0 flex-1 border-0 bg-white"
+            />
+          </div>
+        )}
+
+        {file?.kind === 'text' && textPreviewMode === 'markdown' && (
+          <div className="min-h-0 flex-1 overflow-auto bg-bg p-4">
+            <div className="mb-3 flex items-center gap-2 border-b border-border-soft pb-2 font-mono text-[10px] text-fg-faint">
+              <FileText size={12} />
+              {file.mime ?? 'text/markdown'} · {formatBytes(file.sizeBytes)}
+            </div>
+            <Markdown text={markdown} />
+          </div>
+        )}
+
+        {file?.kind === 'text' && textPreviewMode === 'code' && (
           <div className="ai-file-preview-code min-h-0 flex-1 overflow-hidden bg-bg">
+            <div className="flex shrink-0 items-center gap-2 border-b border-border-soft px-3 py-1.5 font-mono text-[10px] text-fg-faint">
+              <Code2 size={12} />
+              {file.mime ?? 'text/plain'} · {formatBytes(file.sizeBytes)}
+            </div>
             <Markdown text={markdown} />
           </div>
         )}
