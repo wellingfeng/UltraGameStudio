@@ -882,6 +882,83 @@ describe('simple-workflow chat mode', () => {
     expect(calls[3].prompt).toContain('再切回原模型呢？');
   });
 
+  it('mints a fresh native session id when a failed CLI chat is retried', async () => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({
+      workspaceId: workspace.id,
+      isWorkflow: false,
+      messages: [],
+      title: 'Chat',
+    });
+    resetStore(simpleBlueprint('Chat'));
+    const session = {
+      id: record.id,
+      workspaceId: workspace.id,
+      title: record.title,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      isWorkflow: false,
+      messageCount: 0,
+    };
+    useStore.setState({
+      historyReady: true,
+      activeWorkspaceId: workspace.id,
+      activeSessionId: record.id,
+      workspaces: [workspace],
+      sessions: [session],
+      sessionTree: { [workspace.id]: [session] },
+      locale: 'zh-CN',
+    });
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockImplementation(async (selection) => ({
+      selection,
+      adapter: 'claude-code',
+      modelClass: selection.modelClass,
+      model: selection.modelClass,
+      transport: 'cli',
+      mode: 'cli',
+      label: 'Claude Code',
+      source: 'global',
+      cliCommand: 'claude',
+    }));
+    const calls: Array<{ opts: { sessionId?: string; resume?: boolean } }> = [];
+    tauriMocks.aiEditViaCli.mockImplementation(async (_prompt, _adapter, opts) => {
+      calls.push({ opts });
+      // First attempt fails the way a relay outage does (connection refused),
+      // after claude has already registered the session id on disk.
+      if (calls.length === 1) {
+        throw new Error('API Error: Unable to connect to API (ConnectionRefused)');
+      }
+      return '重试成功的回答。';
+    });
+
+    useStore.getState().sendPrompt('第一次会失败');
+    await waitFor(
+      () => !useStore.getState().aiStreaming && calls.length === 1,
+      'first (failing) CLI chat call',
+    );
+
+    // Retry the same turn (the "继续"/resend affordance).
+    useStore.getState().sendPrompt('再试一次');
+    await waitFor(
+      () => !useStore.getState().aiStreaming && calls.length === 2,
+      'retry CLI chat call',
+    );
+
+    // The retry must NOT reuse the first attempt's session id (claude would
+    // reject it with "Session ID … is already in use"), and must create rather
+    // than resume — the failed attempt never established any warm context.
+    expect(calls[0].opts.sessionId).toEqual(expect.any(String));
+    expect(calls[0].opts.resume).toBe(false);
+    expect(calls[1].opts.sessionId).toEqual(expect.any(String));
+    expect(calls[1].opts.sessionId).not.toBe(calls[0].opts.sessionId);
+    expect(calls[1].opts.resume).toBe(false);
+  });
+
   it('does not resume a native Claude CLI session for favorited simple chat reruns', async () => {
     resetStore(simpleBlueprint('Reusable CLI chat'));
     useStore.setState({

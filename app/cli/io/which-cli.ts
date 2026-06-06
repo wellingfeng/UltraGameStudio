@@ -11,7 +11,8 @@
  *   3. config-file `adapters.<adapter>.path` (passed in by the caller)
  *   4. PATH scan for the adapter's default binary name (+ PATHEXT on Windows)
  */
-import { statSync } from 'node:fs';
+import { chmodSync, copyFileSync, readdirSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { delimiter, isAbsolute, join } from 'node:path';
 
 const IS_WINDOWS = process.platform === 'win32';
@@ -81,6 +82,64 @@ function isExecutableFile(path: string): boolean {
   } catch {
     return false;
   }
+}
+
+function userHomeDir(): string {
+  return process.env.USERPROFILE?.trim() || process.env.HOME?.trim() || homedir();
+}
+
+/**
+ * Best-effort self-heal for Bun-installed Claude Code after an interrupted
+ * auto-update leaves the package bin missing and only `claude(.exe).old.*`
+ * remains. The PATH shim still exists, but Bun exits before Claude starts.
+ */
+export function repairClaudeBunInstall(homeDir: string = userHomeDir()): boolean {
+  const home = homeDir.trim();
+  if (!home) return false;
+
+  const binDir = join(
+    home,
+    '.bun',
+    'install',
+    'global',
+    'node_modules',
+    '@anthropic-ai',
+    'claude-code',
+    'bin',
+  );
+
+  for (const targetName of ['claude.exe', 'claude']) {
+    const target = join(binDir, targetName);
+    if (isExecutableFile(target)) return false;
+
+    const prefix = `${targetName}.old.`;
+    let newest: { path: string; mtimeMs: number } | null = null;
+    try {
+      for (const name of readdirSync(binDir)) {
+        if (!name.startsWith(prefix)) continue;
+        const path = join(binDir, name);
+        const stat = statSync(path);
+        if (!stat.isFile()) continue;
+        if (!newest || stat.mtimeMs > newest.mtimeMs) {
+          newest = { path, mtimeMs: stat.mtimeMs };
+        }
+      }
+    } catch {
+      return false;
+    }
+
+    if (newest) {
+      try {
+        copyFileSync(newest.path, target);
+        chmodSync(target, statSync(newest.path).mode);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  }
+
+  return false;
 }
 
 /** Windows PATHEXT variants for a bare command (e.g. claude -> claude.CMD …). */

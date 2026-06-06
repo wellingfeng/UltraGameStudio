@@ -1145,6 +1145,12 @@ html.fuc-stream-scheme-solarized-dark {
   tab-size: 2;
 }
 .ai-code--wrap code { white-space: pre-wrap; word-break: break-word; }
+.ai-code--compact .ai-code__scroll code {
+  padding: 0.45rem 0.6rem;
+}
+.ai-code--compact .ai-code__scroll {
+  background: var(--stream-tool-panel-bg);
+}
 
 /* File preview drawer: use the code surface as the whole drawer body instead of
    the compact chat-message code-card shape. */

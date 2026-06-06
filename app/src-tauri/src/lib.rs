@@ -2850,7 +2850,7 @@ fn locate_fuc_cli(cwd: Option<&str>) -> Result<PathBuf, String> {
     let candidates = fuc_cli_candidates(cwd);
     for path in &candidates {
         if path.is_file() {
-            return std::fs::canonicalize(path)
+            return normalize_node_entry_path(path)
                 .map_err(|e| format!("无法解析 fuc CLI 路径 {}: {e}", path.display()));
         }
     }
@@ -2862,6 +2862,18 @@ fn locate_fuc_cli(cwd: Option<&str>) -> Result<PathBuf, String> {
     Err(format!(
         "未找到 app/cli/dist/fuc.mjs。请先在 app/ 下运行 npm run cli:build。\n已搜索:\n{searched}"
     ))
+}
+
+fn normalize_node_entry_path(path: &Path) -> std::io::Result<PathBuf> {
+    let canonical = std::fs::canonicalize(path)?;
+    #[cfg(windows)]
+    {
+        let raw = canonical.display().to_string();
+        if let Some(stripped) = raw.strip_prefix(r"\\?\") {
+            return Ok(PathBuf::from(stripped));
+        }
+    }
+    Ok(canonical)
 }
 
 fn default_ultracode_workdir(cli_path: &Path) -> PathBuf {
@@ -2903,8 +2915,17 @@ async fn run_ultracode(
     model: Option<String>,
     provider: Option<String>,
     concurrency: Option<u32>,
+    max_retries: Option<u32>,
+    max_agent_calls: Option<u32>,
+    max_rounds: Option<u32>,
+    verify_command: Option<String>,
     timeout_seconds: Option<u64>,
     run_id: String,
+    resume: Option<bool>,
+    planner_only: Option<bool>,
+    from_harness: Option<String>,
+    trace: Option<bool>,
+    interactive: Option<bool>,
     app: tauri::AppHandle,
 ) -> Result<UltracodeRunResult, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<UltracodeRunResult, String> {
@@ -2922,9 +2943,9 @@ async fn run_ultracode(
 
         let mut args = vec![
             cli_path.to_string_lossy().to_string(),
-            "--json".to_string(),
             "ultracode".to_string(),
             task,
+            "--json".to_string(),
             "--cwd".to_string(),
             workdir.to_string_lossy().to_string(),
         ];
@@ -2944,10 +2965,47 @@ async fn run_ultracode(
             args.push("--concurrency".to_string());
             args.push(value.to_string());
         }
+        if let Some(value) = max_retries {
+            args.push("--max-retries".to_string());
+            args.push(value.to_string());
+        }
+        if let Some(value) = max_agent_calls.filter(|value| *value > 0) {
+            args.push("--max-agent-calls".to_string());
+            args.push(value.to_string());
+        }
+        if let Some(value) = max_rounds.filter(|value| *value > 0) {
+            args.push("--max-rounds".to_string());
+            args.push(value.to_string());
+        }
+        if let Some(value) = verify_command
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+        {
+            args.push("--verify-command".to_string());
+            args.push(value);
+        }
         if let Some(value) = timeout_seconds.filter(|value| *value >= 30) {
             args.push("--timeout".to_string());
             args.push(value.to_string());
         }
+        if resume.unwrap_or(false) {
+            args.push("--resume".to_string());
+        }
+        if planner_only.unwrap_or(false) {
+            args.push("--planner-only".to_string());
+        }
+        if trace.unwrap_or(false) {
+            args.push("--trace".to_string());
+        }
+        if interactive.unwrap_or(false) {
+            args.push("--interactive".to_string());
+        }
+        if let Some(value) = from_harness.map(|v| v.trim().to_string()).filter(|v| !v.is_empty()) {
+            args.push("--from-harness".to_string());
+            args.push(value);
+        }
+        args.push("--run-id".to_string());
+        args.push(run_id.clone());
 
         let mut cmd = Command::new("node");
         hide_console(&mut cmd);
@@ -3045,7 +3103,7 @@ async fn run_ultracode(
             run_dir,
             result_json,
         };
-        if status.success() {
+        if status.success() || result.result_json.is_some() {
             Ok(result)
         } else {
             Err(format!(
@@ -4095,7 +4153,7 @@ async fn ai_cli(
                                                     delta.get("text").and_then(|t| t.as_str())
                                                 {
                                                     if prev_kind == "thinking" {
-                                                        emit_progress(&app2, &run2, "\n");
+                                                        emit_progress(&app2, &run2, "</think>");
                                                     }
                                                     prev_kind = "text";
                                                     emit_progress(&app2, &run2, tx);
@@ -4108,7 +4166,7 @@ async fn ai_cli(
                                                 {
                                                     if prev_kind != "thinking" {
                                                         emit_progress(
-                                                            &app2, &run2, "\n💭 思考：",
+                                                            &app2, &run2, "<think>",
                                                         );
                                                     }
                                                     prev_kind = "thinking";
@@ -4137,6 +4195,9 @@ async fn ai_cli(
                                                 // so don't re-emit (avoids duplication).
                                                 acc.push_str(tx);
                                                 if !partial_streaming {
+                                                    if prev_kind == "thinking" {
+                                                        emit_progress(&app2, &run2, "</think>");
+                                                    }
                                                     emit_progress(&app2, &run2, tx);
                                                 }
                                             }
@@ -4161,6 +4222,9 @@ async fn ai_cli(
                                                 id.clone(),
                                                 std::time::Instant::now(),
                                             );
+                                            if prev_kind == "thinking" {
+                                                emit_progress(&app2, &run2, "</think>");
+                                            }
                                             prev_kind = "";
                                             // Structured sentinel for the rich card.
                                             // Omit `args` when there is no input
@@ -4213,6 +4277,9 @@ async fn ai_cli(
                                     let truncated = raw.chars().count() > TOOL_RESULT_CLAMP;
                                     let result_body: String =
                                         raw.chars().take(TOOL_RESULT_CLAMP).collect();
+                                    if prev_kind == "thinking" {
+                                        emit_progress(&app2, &run2, "</think>");
+                                    }
                                     prev_kind = "";
                                     if !id.is_empty() {
                                         let patch = serde_json::json!({

@@ -192,7 +192,7 @@ afterEach(() => {
 });
 
 describe('AIDock slash suggestions', () => {
-  it('shows command suggestions after slash and inserts model-agnostic text', async () => {
+  it('shows command suggestions after slash and inserts only the slash token', async () => {
     resetStore();
     const view = await renderDock();
 
@@ -217,8 +217,43 @@ describe('AIDock slash suggestions', () => {
         review?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
 
-      expect(input.value).toContain('按代码审查视角检查');
-      expect(input.value).not.toContain('/rev');
+      expect(input.value).toBe('/review ');
+      expect(input.value).not.toBe('/rev');
+      expect(input.value).not.toContain('按代码审查视角检查');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('expands ordinary slash commands only when submitting', async () => {
+    resetStore();
+    const sendPrompt = vi.fn();
+    const runUltracodePrompt = vi.fn();
+    useStore.setState({ sendPrompt, runUltracodePrompt });
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '/review 检查 README');
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Enter',
+            ctrlKey: true,
+            bubbles: true,
+          }),
+        );
+      });
+
+      expect(sendPrompt).toHaveBeenCalledWith(
+        expect.stringContaining('按代码审查视角检查'),
+      );
+      expect(sendPrompt).toHaveBeenCalledWith(
+        expect.stringContaining('请求：\n检查 README'),
+      );
+      expect(runUltracodePrompt).not.toHaveBeenCalled();
+      expect(input.value).toBe('');
     } finally {
       await view.cleanup();
     }

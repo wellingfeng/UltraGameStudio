@@ -20,10 +20,12 @@ export default function ToolLine({
   name,
   detail,
   onOpenFile,
+  cwd,
 }: {
   name: string;
   detail: string;
   onOpenFile?: OpenFileFn;
+  cwd?: string;
 }) {
   const [open, setOpen] = useState(false);
   const collapsedDetail = compactToolSubject(name, detail);
@@ -39,7 +41,7 @@ export default function ToolLine({
       typeof p === 'string' ? (
         <span key={i}>{p}</span>
       ) : (
-        <FileChip key={i} refData={p} onOpenFile={onOpenFile} />
+        <FileChip key={i} refData={p} onOpenFile={onOpenFile} cwd={cwd} />
       ),
     );
   };

@@ -116,7 +116,7 @@ program
 
 program
   .command('ultracode <task>')
-  .description('即时生成、即时执行、带任务账本和验收门的动态 workflow harness')
+  .description('即时生成、即时执行、带任务账本、预算软停和验收门的动态 workflow harness')
   .option('-a, --adapter <adapter>', 'adapter override')
   .option('-m, --model <model>', 'model override (sonnet, opus, haiku, …)')
   .option('-p, --provider <id>', 'provider id (gateway routing)')
@@ -124,8 +124,14 @@ program
   .option('--interactive', 'enable terminal interaction')
   .option('--non-interactive', 'auto-skip interaction requests (default)')
   .option('--planner-only', 'only generate and persist harness.json, do not execute it')
+  .option('--resume', 'resume from .fuc-run/<run-id>/result.json')
+  .option('--from-harness <path>', 'reuse a saved harness.json and skip planning')
+  .option('--trace', 'persist streaming events in events.jsonl')
   .option('--concurrency <n>', 'concurrency limit')
   .option('--max-retries <n>', 'max auto-retries per node')
+  .option('--max-agent-calls <n>', 'override ultracode agent-call budget')
+  .option('--max-rounds <n>', 'override ultracode repair-round budget')
+  .option('--verify-command <command>', 'run a local verification command after ultracode; nonzero exit fails the run')
   .option('--timeout <seconds>', 'per-node timeout seconds')
   .option('--cwd <path>', 'working directory')
   .option('--run-id <id>', 'explicit run directory id under .fuc-run/')

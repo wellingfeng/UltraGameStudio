@@ -184,11 +184,36 @@ function tryParse(src: string): { value: unknown; json: string } | null {
   const trimmed = src.trim();
   if (!trimmed) return null;
   try {
-    const value = JSON.parse(trimmed) as unknown;
+    const value = sanitizeParsed(JSON.parse(trimmed) as unknown);
     return { value, json: JSON.stringify(value) };
   } catch {
     return null;
   }
+}
+
+/**
+ * Recursively strip prototype-pollution keys (`__proto__`, `constructor`,
+ * `prototype`) from a freshly `JSON.parse`d value. Model output is untrusted
+ * data and the parsed object is later spread into `node.params`
+ * (dynamicHarness.normalizeHarnessSpec), so a crafted `{"__proto__": …}` could
+ * otherwise reach an object spread. Rebuilds plain objects with only own,
+ * non-dangerous keys; arrays/primitives pass through (mapped for nested
+ * objects). Mirrors the same defensive posture as the workflow-script literal
+ * evaluator's reserved-key rejection.
+ */
+const DANGEROUS_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+
+function sanitizeParsed(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sanitizeParsed);
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, val] of Object.entries(value as Record<string, unknown>)) {
+      if (DANGEROUS_KEYS.has(key)) continue;
+      out[key] = sanitizeParsed(val);
+    }
+    return out;
+  }
+  return value;
 }
 
 /** Yield the inner content of every ```…``` fenced block, ```json first. */

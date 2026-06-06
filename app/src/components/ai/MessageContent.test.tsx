@@ -3,6 +3,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { act, createElement } from 'react';
 import { createRoot } from 'react-dom/client';
 import MessageContent from './MessageContent';
+import { encodeToolPatch } from './lib/toolEvent';
 
 /**
  * Integration smoke test: render a representative AI message through the real
@@ -77,6 +78,19 @@ describe('MessageContent integration', () => {
     expect(html).toMatch(/ai-file-chip/);
     expect(html).toMatch(/ai-file-chip--interactive/);
     expect(html).toMatch(/Moon亮晶分析/);
+  });
+
+  it('shows relative file references as full workspace paths when cwd is known', () => {
+    const html = renderToStaticMarkup(
+      createElement(MessageContent, {
+        text: 'Open `src/store/useStore.ts:42`.',
+        streaming: false,
+        cwd: 'E:\\OpenWorkflow',
+        onOpenFile: () => {},
+      }),
+    );
+    expect(html).toMatch(/E:\\OpenWorkflow\\src\\store\\useStore\.ts/);
+    expect(html).toMatch(/:42/);
   });
 
   it('shows a reveal-in-folder menu for interactive file chips', async () => {
@@ -173,5 +187,41 @@ describe('MessageContent integration', () => {
     expect(html).not.toMatch(/🔧/);
     expect(html).not.toMatch(/ai-file-chip/);
     expect(html).not.toMatch(/Program Files/);
+  });
+
+  it('renders structured tool output with rich code chrome', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const text =
+      'running' +
+      encodeToolPatch({
+        id: 'tool-1',
+        name: 'Read',
+        subject: 'app/src/example.ts',
+        args: { file_path: 'app/src/example.ts' },
+        status: 'done',
+        result: 'const answer: number = 42;\nconsole.log(answer);',
+      });
+
+    try {
+      await act(async () => {
+        root.render(createElement(MessageContent, { text, streaming: false }));
+      });
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>('.ai-tool-toggle')?.click();
+      });
+
+      expect(container.querySelector('.ai-tool-panel.ai-code')).not.toBeNull();
+      expect(container.textContent).toContain('typescript');
+      expect(container.textContent).toContain('json');
+      expect(container.querySelector('.hljs-keyword')).not.toBeNull();
+      expect(container.querySelector('.ai-tool-panel > pre')).toBeNull();
+    } finally {
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
   });
 });

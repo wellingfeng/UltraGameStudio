@@ -45,10 +45,12 @@ function MarkdownImpl({
   text,
   streaming = false,
   onOpenFile,
+  cwd,
 }: {
   text: string;
   streaming?: boolean;
   onOpenFile?: OpenFileFn;
+  cwd?: string;
 }) {
   const src = streaming ? repairMarkdown(normalizeMath(text)) : normalizeMath(text);
 
@@ -63,7 +65,7 @@ function MarkdownImpl({
         typeof p === 'string' ? (
           <span key={i}>{p}</span>
         ) : (
-          <FileChip key={i} refData={p} onOpenFile={onOpenFile} />
+          <FileChip key={i} refData={p} onOpenFile={onOpenFile} cwd={cwd} />
         ),
       );
     }
@@ -80,7 +82,7 @@ function MarkdownImpl({
             typeof p === 'string' ? (
               <span key={i}>{p}</span>
             ) : (
-              <FileChip key={i} refData={p} onOpenFile={onOpenFile} />
+              <FileChip key={i} refData={p} onOpenFile={onOpenFile} cwd={cwd} />
             ),
           )}
         </span>
@@ -146,10 +148,14 @@ function MarkdownImpl({
           </code>
         );
       }
-      return <InlineCode onOpenFile={onOpenFile}>{children}</InlineCode>;
+      return (
+        <InlineCode onOpenFile={onOpenFile} cwd={cwd}>
+          {children}
+        </InlineCode>
+      );
     },
     a: ({ href, children }) => (
-      <SmartLink href={href} onOpenFile={onOpenFile}>
+      <SmartLink href={href} onOpenFile={onOpenFile} cwd={cwd}>
         {children as ReactNode}
       </SmartLink>
     ),
@@ -157,7 +163,12 @@ function MarkdownImpl({
       const tool = parseToolLine(plainText(children));
       if (tool) {
         return (
-          <ToolLine name={tool.name} detail={tool.detail} onOpenFile={onOpenFile} />
+          <ToolLine
+            name={tool.name}
+            detail={tool.detail}
+            onOpenFile={onOpenFile}
+            cwd={cwd}
+          />
         );
       }
       return <p>{linkify(children)}</p>;

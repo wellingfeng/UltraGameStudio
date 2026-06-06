@@ -15,7 +15,10 @@ import {
   type LocalFilePreview,
 } from '@/lib/tauri';
 import { useResizableWidth } from '@/lib/useResizableWidth';
-import type { FileRef } from './lib/filePath';
+import {
+  displayFileRefPath,
+  type FileRef,
+} from './lib/filePath';
 import Markdown from './Markdown';
 
 type PreviewState =
@@ -265,7 +268,7 @@ export default function FilePreviewDrawer({
 
   const file = state.status === 'ready' ? state.file : null;
   const label = file?.fileName ?? refData?.basename ?? '文件预览';
-  const path = file?.path ?? refData?.path ?? '';
+  const path = file?.path ?? (refData ? displayFileRefPath(refData, cwd) : '');
   const lineSuffix = refData?.startLine
     ? `:${refData.startLine}${refData.endLine ? `-${refData.endLine}` : ''}`
     : '';

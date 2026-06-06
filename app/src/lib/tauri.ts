@@ -82,8 +82,17 @@ export interface UltracodeRunOptions {
   model?: string;
   provider?: string;
   concurrency?: number;
+  maxRetries?: number;
+  maxAgentCalls?: number;
+  maxRounds?: number;
+  verifyCommand?: string;
   timeoutSeconds?: number;
   runId?: string;
+  resume?: boolean;
+  plannerOnly?: boolean;
+  fromHarness?: string;
+  trace?: boolean;
+  interactive?: boolean;
   onProgress?: (text: string) => void;
 }
 
@@ -597,8 +606,17 @@ export async function runUltracode(
       model: opts.model ?? null,
       provider: opts.provider ?? null,
       concurrency: opts.concurrency ?? null,
+      maxRetries: opts.maxRetries ?? null,
+      maxAgentCalls: opts.maxAgentCalls ?? null,
+      maxRounds: opts.maxRounds ?? null,
+      verifyCommand: opts.verifyCommand ?? null,
       timeoutSeconds: opts.timeoutSeconds ?? null,
       runId,
+      resume: opts.resume ?? null,
+      plannerOnly: opts.plannerOnly ?? null,
+      fromHarness: opts.fromHarness ?? null,
+      trace: opts.trace ?? null,
+      interactive: opts.interactive ?? null,
     });
   } finally {
     unlisten?.();

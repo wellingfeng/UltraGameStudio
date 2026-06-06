@@ -290,7 +290,7 @@ export function resolveDirectRoute(
 ): ResolvedRoute | null {
   const config = loadFucConfig(cwd);
   const adapter = normalizeAdapter(selection.adapter);
-  const provider = config.providers?.[adapter] ?? config.providers?.[selection.adapter];
+  const provider = providerForSelection(config, selection, adapter);
   const transport = provider?.transport;
   if (transport !== 'anthropic' && transport !== 'openai-compatible') return null;
   const apiKey = apiKeyForAdapter(adapter);
@@ -320,7 +320,7 @@ export function resolveCliRoute(
 ): ResolvedRoute {
   const config = loadFucConfig(cwd);
   const adapter = normalizeAdapter(selection.adapter);
-  const provider = config.providers?.[adapter] ?? config.providers?.[selection.adapter];
+  const provider = providerForSelection(config, selection, adapter);
   const model = resolveModel(adapter, selection.modelClass, provider, 'cli');
   const apiKey = apiKeyForAdapter(adapter);
   const route: ResolvedRoute = {
@@ -339,6 +339,19 @@ export function resolveCliRoute(
 
 /** Resolve the concrete model id/flag for a route (mirror of resolveChannelModel + cliFallbackRoute). */
 type ProviderEntry = NonNullable<FucConfigFile['providers']>[string];
+
+function providerForSelection(
+  config: FucConfigFile,
+  selection: GatewaySelection,
+  adapter: string,
+): ProviderEntry | undefined {
+  const providerId = selection.providerId?.trim();
+  if (providerId) {
+    const explicit = config.providers?.[providerId];
+    if (explicit) return explicit;
+  }
+  return config.providers?.[adapter] ?? config.providers?.[selection.adapter];
+}
 
 function resolveModel(
   adapter: string,

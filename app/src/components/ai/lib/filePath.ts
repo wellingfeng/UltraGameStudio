@@ -29,6 +29,33 @@ export interface FileRef {
   col?: number;
 }
 
+export function fileRefLineSuffix(ref: Pick<FileRef, 'startLine' | 'endLine'>): string {
+  return ref.startLine
+    ? `:${ref.startLine}${ref.endLine ? `-${ref.endLine}` : ''}`
+    : '';
+}
+
+export function isAbsoluteFileRefPath(path: string): boolean {
+  return /^(?:[A-Za-z]:[/\\]|[/\\]|\\\\|~[/\\]|\$\w+[/\\])/.test(path.trim());
+}
+
+export function displayFileRefPath(ref: FileRef, cwd?: string): string {
+  const path = ref.path.trim();
+  const root = cwd?.trim().replace(/[\\/]+$/, '') ?? '';
+  if (!path || !root || isAbsoluteFileRefPath(path)) return ref.path;
+
+  const separator = root.includes('\\') ? '\\' : '/';
+  const relative = path.replace(/^\.[/\\]+/, '');
+  const normalizedRelative =
+    separator === '\\' ? relative.replace(/\//g, '\\') : relative.replace(/\\/g, '/');
+
+  return `${root}${separator}${normalizedRelative}`;
+}
+
+export function displayFileRefLabel(ref: FileRef, cwd?: string): string {
+  return `${displayFileRefPath(ref, cwd)}${fileRefLineSuffix(ref)}`;
+}
+
 export interface FileRefParseOptions {
   /** Markdown links / inline code are explicit file surfaces, so spaces are OK. */
   allowSpaces?: boolean;
@@ -175,7 +202,7 @@ function hasKnownFileIdentity(path: string): boolean {
 }
 
 function containsNonAscii(path: string): boolean {
-  return /[^\x00-\x7f]/.test(path);
+  return Array.from(path).some((ch) => ch.charCodeAt(0) > 0x7f);
 }
 
 /**

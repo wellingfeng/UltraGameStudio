@@ -92,6 +92,7 @@ import {
   refreshProviderModels,
 } from '@/lib/modelLists';
 import LazyMessageContent from '@/components/ai/LazyMessageContent';
+import FileText from '@/components/ai/FileText';
 import FilePreviewDrawer from '@/components/ai/FilePreviewDrawer';
 import type { FileRef } from '@/components/ai/lib/filePath';
 import type { OpenFileIntent } from '@/components/ai/FileChip';
@@ -470,6 +471,39 @@ function filterSlashSuggestions(
   }
 
   return [...starts, ...contains].slice(0, MAX_SLASH_SUGGESTIONS);
+}
+
+function findSlashSuggestionForText(
+  text: string,
+  suggestions: SlashSuggestion[],
+): { suggestion: SlashSuggestion; request: string } | null {
+  const match = /^\/[^\s]+(?:\s+([\s\S]*))?$/i.exec(text.trim());
+  if (!match) return null;
+  const command = text.trim().split(/\s+/, 1)[0]?.toLowerCase();
+  if (!command) return null;
+  const suggestion = suggestions.find(
+    (item) => item.name.toLowerCase() === command,
+  );
+  if (!suggestion) return null;
+  return {
+    suggestion,
+    request: (match[1] ?? '').trim(),
+  };
+}
+
+function expandSlashRequest(
+  text: string,
+  suggestions: SlashSuggestion[],
+): string {
+  const found = findSlashSuggestionForText(text, suggestions);
+  if (!found) return text;
+  const { suggestion, request } = found;
+  const instruction =
+    suggestion.insertText.trim() ||
+    suggestion.detail.trim() ||
+    `Use ${suggestion.name} for this request.`;
+  if (!request) return instruction;
+  return `${instruction}\n\n请求：\n${request}`;
 }
 
 function normalizeSearchQuery(value: string): string {
@@ -1140,6 +1174,7 @@ export default function AIDock({
   const activeSearchMatchNodeRef = useRef<HTMLElement | null>(null);
   const searchScrollTopRef = useRef<number | null>(null);
   const lastSearchActiveRef = useRef(false);
+  const stickToBottomRef = useRef(true);
 
   const isReadOnly = mode === 'running';
   const [dropActive, setDropActive] = useState(false);
@@ -1200,6 +1235,11 @@ export default function AIDock({
     () => normalizeSearchQuery(returnSearch),
     [returnSearch],
   );
+  // Mirrors normalizedSearch in a ref so the ResizeObserver callback (which
+  // is stable with [] deps) can read the latest value without stale closure.
+  const normalizedSearchRef = useRef(normalizedSearch);
+  normalizedSearchRef.current = normalizedSearch;
+
   const searchMatches = useMemo(
     () => buildSearchMatches(messages, normalizedSearch),
     [messages, normalizedSearch],
@@ -1512,6 +1552,7 @@ export default function AIDock({
     selectedFreeChannel,
     selectedDefaultProvider,
     selectedAdapter,
+    runSelection.modelOverride,
     runSelection.modelClass,
     composerModelOptions,
     modelListRevision,
@@ -1912,10 +1953,23 @@ export default function AIDock({
   const scrollToStreamEdge = useCallback((edge: 'top' | 'bottom') => {
     const stream = streamRef.current;
     if (!stream) return;
+    if (edge === 'bottom') stickToBottomRef.current = true;
     stream.scrollTo({
       top: edge === 'top' ? 0 : stream.scrollHeight,
       behavior: 'smooth',
     });
+  }, []);
+
+  // Track whether the user is parked at (or near) the bottom. Used by the
+  // auto-follow effect above so a manual upward scroll pins the viewport in
+  // place even while new messages keep streaming in. The 32px tolerance covers
+  // sub-pixel rounding and the small overflow that lazy-rendered markdown
+  // sometimes adds right after a relayout.
+  const handleStreamScroll = useCallback(() => {
+    const el = streamRef.current;
+    if (!el) return;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distanceFromBottom <= 32;
   }, []);
 
   const scrollToTopic = useCallback(
@@ -2036,10 +2090,7 @@ export default function AIDock({
       const end = clampSelection(trigger.end, current.length);
       const after = current.slice(end);
       const spacer = after.length > 0 && /^\s/.test(after) ? '' : ' ';
-      const inserted =
-        suggestion.name.toLowerCase() === '/ultracode'
-          ? `${suggestion.name} `
-          : suggestion.insertText + spacer;
+      const inserted = `${suggestion.name}${spacer}`;
       const next = current.slice(0, start) + inserted + after;
       const caret = start + inserted.length;
 
@@ -2190,13 +2241,48 @@ export default function AIDock({
     }
   }, [normalizedSearch]);
 
-  // Keep the latest message in view unless return search is active.
+  // Switching sessions / workspaces should default back to "follow bottom" so
+  // the freshly-loaded conversation lands at the latest message regardless of
+  // where the user had scrolled in the previous one. Runs before the
+  // auto-follow effect below so the very first paint after a session change
+  // already sees the reset flag.
+  useLayoutEffect(() => {
+    stickToBottomRef.current = true;
+  }, [activeSessionId, activeWorkspaceId]);
+
+  // Keep the latest message in view unless return search is active or the user
+  // has scrolled away from the bottom. `stickToBottomRef` is updated by the
+  // stream's onScroll handler — when the user is near the bottom we keep
+  // following new messages, otherwise we leave the viewport anchored where they
+  // left it (token-by-token streaming included).
+  //
+  // Uses ResizeObserver instead of useLayoutEffect to avoid a race condition:
+  // useLayoutEffect fires synchronously during React's commit phase, so a user
+  // scroll event that arrives between state update scheduling and effect
+  // execution would leave stickToBottomRef still true. ResizeObserver fires
+  // after the browser has processed layout and pending events, giving the
+  // onScroll handler a chance to mark the user as "scrolled away" first.
   useEffect(() => {
-    if (normalizedSearch) return;
-    if (searchScrollTopRef.current !== null) return;
     const el = streamRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, normalizedSearch]);
+    if (!el) return;
+    const followBottom = () => {
+      if (normalizedSearchRef.current) return;
+      if (searchScrollTopRef.current !== null) return;
+      if (!stickToBottomRef.current) return;
+      if (typeof el.scrollTo === 'function') {
+        el.scrollTo({ top: el.scrollHeight, behavior: 'instant' });
+      } else {
+        el.scrollTop = el.scrollHeight;
+      }
+    };
+    if (typeof ResizeObserver === 'undefined') {
+      followBottom();
+      return;
+    }
+    const ro = new ResizeObserver(followBottom);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   useEffect(() => {
     if (!normalizedSearch || !activeSearchMatchId || !activeSearchMatchMessageId) {
@@ -2408,9 +2494,10 @@ export default function AIDock({
       }
       return;
     }
+    const promptText = expandSlashRequest(text, activeAdapterSlashSuggestions);
     void (async () => {
       if (!(await ensureSelectedLocalChannelReady())) return;
-      sendPrompt(text);
+      sendPrompt(promptText);
       if (overrideText === undefined || options.clearDraft) {
         setComposerDraft('');
         draftRef.current = '';
@@ -2682,6 +2769,7 @@ export default function AIDock({
         <div className="relative min-h-0 flex-1">
           <div
             ref={streamRef}
+            onScroll={handleStreamScroll}
             className={
               'fuc-ai-return-stream h-full min-h-0 overflow-y-auto p-3 ' +
               (isChat ? 'pr-10' : '')
@@ -2768,10 +2856,10 @@ export default function AIDock({
                           onAnswer={(answer) => answerInteraction(m.id, answer)}
                           onDismiss={() => dismissInteraction(m.id)}
                         />
-                      ) : isUser || normalizedSearch ? (
-                        // User turns stay plain text; while a return search is
-                        // active we fall back to the plain highlighter for every
-                        // message so match marks land on real text nodes.
+                      ) : normalizedSearch ? (
+                        // While a return search is active we fall back to the
+                        // plain highlighter for every message so match marks
+                        // land on real text nodes.
                           <span
                             className={
                               'whitespace-pre-wrap break-words text-sm leading-relaxed ' +
@@ -2789,6 +2877,23 @@ export default function AIDock({
                             activeSearchMatchId,
                             setActiveSearchMatchNode,
                           )}
+                        </span>
+                      ) : isUser ? (
+                        <span
+                          className={
+                            'whitespace-pre-wrap break-words text-sm leading-relaxed ' +
+                            (isChatUser
+                              ? 'ai-stream-user-bubble max-w-[86%] rounded-md px-3 py-2 text-left'
+                              : isChat
+                                ? 'ai-stream-text w-[min(100%,calc(100%_-_2rem))]'
+                                : 'ai-stream-text')
+                          }
+                        >
+                          <FileText
+                            text={m.text}
+                            onOpenFile={onOpenFile}
+                            cwd={workspaceCwd || undefined}
+                          />
                         </span>
                       ) : (
                         // Assistant / system: rich markdown, code, tables, file
@@ -2811,6 +2916,7 @@ export default function AIDock({
                               (aiBusy && m.id === lastAssistantId)
                             }
                             scrollRootRef={streamRef}
+                            cwd={workspaceCwd || undefined}
                           />
                         </div>
                       )}

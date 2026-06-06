@@ -1,6 +1,11 @@
 import { useEffect, useState, type MouseEvent as ReactMouseEvent } from 'react';
 import { FileCode, FolderOpen } from 'lucide-react';
-import type { FileRef } from './lib/filePath';
+import {
+  displayFileRefLabel,
+  displayFileRefPath,
+  fileRefLineSuffix,
+  type FileRef,
+} from './lib/filePath';
 
 export interface OpenFileIntent {
   reveal?: boolean;
@@ -45,14 +50,16 @@ function contextMenuPosition(event: ReactMouseEvent): ContextMenuPosition {
 export default function FileChip({
   refData,
   onOpenFile,
+  cwd,
 }: {
   refData: FileRef;
   onOpenFile?: OpenFileFn;
+  cwd?: string;
 }) {
   const [menu, setMenu] = useState<ContextMenuPosition | null>(null);
-  const lineSuffix = refData.startLine
-    ? `:${refData.startLine}${refData.endLine ? `-${refData.endLine}` : ''}`
-    : '';
+  const lineSuffix = fileRefLineSuffix(refData);
+  const displayPath = displayFileRefPath(refData, cwd);
+  const label = displayFileRefLabel(refData, cwd);
   const interactive = typeof onOpenFile === 'function';
 
   useEffect(() => {
@@ -99,19 +106,19 @@ export default function FileChip({
         onContextMenu={openContextMenu}
         title={
           interactive
-            ? `${refData.path}${lineSuffix}\n右键：在文件夹中显示`
-            : refData.path + lineSuffix
+            ? `${label}\n右键：在文件夹中显示`
+            : label
         }
         className={
-          'ai-file-chip inline-flex max-w-full items-center gap-1 rounded border border-border bg-panel-2 px-1.5 py-px align-baseline font-mono text-[12px] leading-snug ' +
+          'ai-file-chip inline-flex max-w-full items-center gap-1 rounded border border-transparent bg-transparent px-0.5 py-px align-baseline font-mono text-[12px] leading-snug ' +
           (interactive
             ? 'ai-file-chip--interactive cursor-pointer'
             : 'cursor-default text-fg-dim')
         }
       >
         <FileCode size={11} className="shrink-0 opacity-70" />
-        <span className="ai-file-chip__label truncate">
-          {refData.basename}
+        <span className="ai-file-chip__label min-w-0 whitespace-normal break-all text-left">
+          {displayPath}
           {lineSuffix && (
             <span className={interactive ? 'opacity-75' : 'text-fg-faint'}>
               {lineSuffix}

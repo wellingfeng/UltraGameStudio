@@ -18,12 +18,16 @@ import {
   Globe,
   Info,
   Keyboard,
+  Monitor,
+  Moon,
   Palette,
   Plus,
   RefreshCw,
   Settings as SettingsIcon,
   SlidersHorizontal,
   Sparkles,
+  Sun,
+  Terminal,
   Trash2,
   Type,
   UploadCloud,
@@ -119,7 +123,9 @@ import {
   DEFAULT_STYLE_PRESET_ID,
   FONT_FAMILY_LIST,
   FONT_SIZE_LIMITS,
+  STYLE_PRESETS,
   STYLE_PRESET_LIST,
+  TERMINAL_STYLE_PRESET_IDS,
   isUnsupportedStylePreset,
   resolveFontFamilyId,
   resolveFontSizePx,
@@ -609,7 +615,6 @@ function PersonalizationSettings({
     selection?: GatewaySelection | null,
   ) => void;
 }) {
-  const activeKey = personalInstructionsKey(activeSelection);
   const activeLabel = personalInstructionsSelectionLabel(activeSelection);
   const entries = useMemo(
     () =>
@@ -618,7 +623,7 @@ function PersonalizationSettings({
         activeLabel,
         personalInstructionsByModel,
       ),
-    [activeKey, activeLabel, activeSelection, personalInstructionsByModel],
+    [activeLabel, activeSelection, personalInstructionsByModel],
   );
   const [drafts, setDrafts] = useState<Record<string, string>>({});
 
@@ -1138,10 +1143,10 @@ function GlobalRunControls({
   const [revision, setRevision] = useState(0);
   const [modelListRevision, setModelListRevision] = useState(0);
   const [loadingModels, setLoadingModels] = useState(false);
-  const runSelection = useMemo(
-    () => getActiveGatewaySelection(),
-    [revision],
-  );
+  const runSelection = useMemo(() => {
+    void revision;
+    return getActiveGatewaySelection();
+  }, [revision]);
 
   useEffect(() => {
     const refresh = () => setRevision((n) => n + 1);
@@ -3699,6 +3704,7 @@ function AppearanceSettings({ locale }: { locale: Locale }) {
   const setFontFamilyId = useStore((s) => s.setFontFamilyId);
   const setFontSizePx = useStore((s) => s.setFontSizePx);
   const activePresetId = resolveStylePresetId(appearance.stylePresetId);
+  const activePreset = STYLE_PRESETS[activePresetId];
   const activeFontFamilyId = resolveFontFamilyId(appearance.fontFamilyId);
   const activeFontSizePx = resolveFontSizePx(appearance.fontSizePx);
   const fontFamilyOptions = useMemo(
@@ -3736,53 +3742,102 @@ function AppearanceSettings({ locale }: { locale: Locale }) {
       )}
 
       <SettingRow
-        title={t(locale, 'settings.fontFamilyLabel')}
-        description={t(locale, 'settings.fontFamilyDescription')}
+        title={t(locale, 'settings.appearanceTypographyLabel')}
+        description={t(locale, 'settings.appearanceTypographyDescription')}
       >
-        <div className="w-full max-w-[20rem]">
-          <SelectControl
-            value={activeFontFamilyId}
-            options={fontFamilyOptions}
-            onChange={setFontFamilyId}
-            icon={<Type size={15} strokeWidth={2.1} />}
-          />
-        </div>
-      </SettingRow>
-
-      <SettingRow
-        title={t(locale, 'settings.fontSizeLabel')}
-        description={t(locale, 'settings.fontSizeDescription')}
-      >
-        <div className="inline-flex items-center gap-2">
-          <StepperControl
-            value={activeFontSizePx}
-            min={FONT_SIZE_LIMITS.min}
-            max={FONT_SIZE_LIMITS.max}
-            onChange={setFontSizePx}
-          />
-          <span className="w-6 font-mono text-xs text-fg-faint">px</span>
-        </div>
-      </SettingRow>
-
-      <SettingRow
-        title={t(locale, 'settings.appearanceStyleLabel')}
-        description={t(locale, 'settings.appearanceStyleDescription')}
-      >
-        <div className="w-full max-w-[34rem]">
-          <div className="grid gap-3">
-            {STYLE_PRESET_LIST.map((preset) => (
-              <StylePresetCard
-                key={preset.id}
-                preset={preset}
-                active={preset.id === activePresetId}
-                locale={locale}
-                onSelect={() => setStylePresetId(preset.id)}
-              />
-            ))}
+        <div className="flex w-full flex-col gap-2 sm:max-w-[28rem] sm:flex-row sm:items-center sm:justify-end">
+          <div className="min-w-0 flex-1 sm:max-w-[17rem]">
+            <SelectControl
+              value={activeFontFamilyId}
+              options={fontFamilyOptions}
+              onChange={setFontFamilyId}
+              icon={<Type size={15} strokeWidth={2.1} />}
+            />
+          </div>
+          <div className="inline-flex items-center justify-end gap-2">
+            <StepperControl
+              value={activeFontSizePx}
+              min={FONT_SIZE_LIMITS.min}
+              max={FONT_SIZE_LIMITS.max}
+              onChange={setFontSizePx}
+            />
+            <span className="w-6 font-mono text-xs text-fg-faint">px</span>
           </div>
         </div>
       </SettingRow>
+
+      <section className="rounded-lg border border-border bg-bg-alt p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 max-w-xl space-y-1">
+            <div className="text-sm font-medium text-fg">
+              {t(locale, 'settings.appearanceStyleLabel')}
+            </div>
+            <p className="text-xs leading-relaxed text-fg-faint">
+              {t(locale, 'settings.appearanceStyleDescription')}
+            </p>
+          </div>
+
+          <div className="flex min-w-[12rem] items-center justify-between gap-3 rounded-md border border-border-soft bg-panel px-3 py-2">
+            <div className="min-w-0">
+              <div className="text-[10px] font-semibold uppercase tracking-wide text-accent">
+                {t(locale, 'settings.appearanceActiveStyle')}
+              </div>
+              <div className="mt-0.5 truncate text-sm font-semibold text-fg">
+                {t(locale, activePreset.labelKey)}
+              </div>
+            </div>
+            <ThemeToneBadge preset={activePreset} locale={locale} />
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          {STYLE_PRESET_LIST.map((preset) => (
+            <StylePresetCard
+              key={preset.id}
+              preset={preset}
+              active={preset.id === activePresetId}
+              locale={locale}
+              onSelect={() => setStylePresetId(preset.id)}
+            />
+          ))}
+        </div>
+      </section>
     </div>
+  );
+}
+
+const terminalStylePresetIds: readonly string[] = TERMINAL_STYLE_PRESET_IDS;
+
+function stylePresetToneKey(
+  preset: StylePresetDefinition,
+): TranslationKey {
+  if (terminalStylePresetIds.includes(preset.id)) {
+    return 'settings.appearanceToneTerminal';
+  }
+  return preset.colorScheme === 'light'
+    ? 'settings.appearanceToneLight'
+    : 'settings.appearanceToneDark';
+}
+
+function ThemeToneBadge({
+  preset,
+  locale,
+}: {
+  preset: StylePresetDefinition;
+  locale: Locale;
+}) {
+  const toneKey = stylePresetToneKey(preset);
+  const Icon =
+    toneKey === 'settings.appearanceToneTerminal'
+      ? Terminal
+      : toneKey === 'settings.appearanceToneLight'
+        ? Sun
+        : Moon;
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-border bg-bg-alt px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-fg-dim">
+      <Icon size={12} strokeWidth={2.2} className="text-accent" />
+      {t(locale, toneKey)}
+    </span>
   );
 }
 
@@ -3803,14 +3858,14 @@ function StylePresetCard({
       aria-pressed={active}
       onClick={onSelect}
       className={cn(
-        'group w-full rounded-lg border p-4 text-left transition-colors',
+        'group relative min-h-[9.25rem] w-full overflow-hidden rounded-lg border p-4 text-left transition-colors',
         active
-          ? 'border-accent bg-accent/10'
+          ? 'border-accent bg-accent/10 ring-1 ring-accent/25'
           : 'border-border bg-panel hover:border-accent/50 hover:bg-bg',
       )}
     >
-      <div className="flex items-start gap-4">
-        <div className="grid h-10 w-16 shrink-0 grid-cols-5 overflow-hidden rounded-md border border-border-soft bg-bg-alt">
+      <div className="flex h-full flex-col gap-3">
+        <div className="grid h-11 w-full grid-cols-5 overflow-hidden rounded-md border border-border-soft bg-bg-alt">
           {preset.swatches.map((color, index) => (
             <span
               key={`${preset.id}-${index}`}
@@ -3821,29 +3876,30 @@ function StylePresetCard({
         </div>
 
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-semibold text-fg">
+          <div className="flex items-start gap-2">
+            <span className="min-w-0 flex-1 text-sm font-semibold text-fg">
               {t(locale, preset.labelKey)}
             </span>
             {active && (
-              <Check size={12} strokeWidth={2.4} className="text-accent" />
+              <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent text-bg">
+                <Check size={12} strokeWidth={2.6} />
+              </span>
             )}
           </div>
-          <p className="mt-1 text-xs leading-relaxed text-fg-faint">
+          <p className="mt-1 line-clamp-2 text-xs leading-relaxed text-fg-faint">
             {t(locale, preset.descriptionKey)}
           </p>
         </div>
 
-        <span
-          className={cn(
-            'shrink-0 rounded-md border px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider',
-            active
-              ? 'border-accent/40 bg-accent/10 text-accent'
-              : 'border-border bg-bg-alt text-fg-faint',
-          )}
-        >
-          {preset.colorScheme}
-        </span>
+        <div className="flex items-center justify-between gap-2">
+          <ThemeToneBadge preset={preset} locale={locale} />
+          <span className="inline-flex items-center gap-1 text-[11px] font-medium text-fg-faint transition-colors group-hover:text-fg-dim">
+            <Monitor size={12} strokeWidth={2.1} />
+            {active
+              ? t(locale, 'settings.appearanceSelected')
+              : t(locale, 'settings.appearancePreview')}
+          </span>
+        </div>
       </div>
     </button>
   );

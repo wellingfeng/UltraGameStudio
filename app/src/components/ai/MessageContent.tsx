@@ -38,11 +38,13 @@ function MessageContentImpl({
   streaming = false,
   showActions = false,
   onOpenFile,
+  cwd,
 }: {
   text: string;
   streaming?: boolean;
   showActions?: boolean;
   onOpenFile?: OpenFileFn;
+  cwd?: string;
 }) {
   const segments = segmentMessage(text, streaming);
 
@@ -100,6 +102,7 @@ function MessageContentImpl({
                   event={event}
                   childrenEvents={children}
                   onOpenFile={onOpenFile}
+                  cwd={cwd}
                 />
               ))}
             </div>
@@ -111,6 +114,7 @@ function MessageContentImpl({
               text={seg.text}
               streaming={streaming && i === lastAnswerIdx}
               onOpenFile={onOpenFile}
+              cwd={cwd}
             />
             {streaming && i === lastIdx && (
               <span className="ai-caret ai-caret--trailing" aria-hidden />

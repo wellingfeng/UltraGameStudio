@@ -36,6 +36,7 @@ function LazyMessageContentImpl({
   streaming = false,
   showActions = false,
   onOpenFile,
+  cwd,
   eager = false,
   scrollRootRef,
 }: {
@@ -45,6 +46,7 @@ function LazyMessageContentImpl({
   streaming?: boolean;
   showActions?: boolean;
   onOpenFile?: OpenFileFn;
+  cwd?: string;
   eager?: boolean;
   scrollRootRef?: RefObject<HTMLElement | null>;
 }) {
@@ -85,6 +87,7 @@ function LazyMessageContentImpl({
         streaming={streaming}
         showActions={showActions}
         onOpenFile={onOpenFile}
+        cwd={cwd}
       />
     );
   }

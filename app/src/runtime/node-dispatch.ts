@@ -68,6 +68,124 @@ function buildSchemaEnforcement(
   };
 }
 
+function withAgentTypeRole(prompt: string, agentType: string | undefined): string {
+  const role = agentType?.trim();
+  if (!role) return prompt;
+  return [
+    `你在本步骤中扮演运行时角色：${role}。`,
+    '这是 FreeUltraCode 的角色约束，会影响你的职责、视角和验收重点；当前 CLI 路径不会把它映射为 Claude Code 原生 subagent。',
+    '',
+    prompt,
+  ].join('\n');
+}
+
+function verdictPassed(text: string | undefined): boolean {
+  if (!text) return false;
+  const parsed = extractJson(text);
+  return (
+    !!parsed &&
+    typeof parsed.value === 'object' &&
+    parsed.value !== null &&
+    !Array.isArray(parsed.value) &&
+    (parsed.value as { pass?: unknown }).pass === true
+  );
+}
+
+/**
+ * Tri-state read of a candidate's `pass` field: `true` / `false` when the
+ * candidate parses to a verdict object carrying an explicit boolean, or `null`
+ * when the candidate is not a verdict (no parseable `pass`). Used by the
+ * machine-level veto so non-verdict candidates (plain artifacts) don't count as
+ * votes either way.
+ */
+function verdictVote(text: string): boolean | null {
+  const parsed = extractJson(text);
+  if (
+    !parsed ||
+    typeof parsed.value !== 'object' ||
+    parsed.value === null ||
+    Array.isArray(parsed.value)
+  ) {
+    return null;
+  }
+  const pass = (parsed.value as { pass?: unknown }).pass;
+  return typeof pass === 'boolean' ? pass : null;
+}
+
+/**
+ * Machine-level veto for verdict-style consensus (the acceptance gate).
+ *
+ * When the candidates are structured verdicts (each carrying a boolean `pass`),
+ * count the explicit votes. If the number of `pass: false` votes reaches the
+ * quorum, the gate FAILS deterministically — a single downstream synthesis agent
+ * must not be able to overturn a quorum of skeptics. Returns a forced fail
+ * verdict (a real DYNAMIC_VERDICT-shaped object) in that case, otherwise `null`
+ * to let normal synthesis proceed. Non-verdict candidates are ignored; if fewer
+ * than 2 real votes exist there is nothing to veto.
+ */
+function machineVetoVerdict(candidates: string[], quorum: number): string | null {
+  const votes = candidates.map(verdictVote).filter((v): v is boolean => v !== null);
+  if (votes.length < 2) return null;
+  const against = votes.filter((v) => v === false).length;
+  if (against < quorum) return null;
+  // Carry the rejecting verdicts' gaps/coverage forward so the report is useful.
+  const merged = mergeRejectingVerdicts(candidates);
+  return JSON.stringify({
+    pass: false,
+    acceptedArtifact: '',
+    evidence: merged.evidence,
+    criteriaCoverage: merged.criteriaCoverage,
+    gaps:
+      merged.gaps.length > 0
+        ? merged.gaps
+        : [
+            {
+              taskId: 'gate',
+              severity: 'P1',
+              reason: `机器级否决：${against}/${votes.length} 票判定未通过，达到否决阈值 ${quorum}。`,
+              nextAction: '修复反对票列出的 gaps 后重新验收。',
+            },
+          ],
+  });
+}
+
+/** Merge evidence/coverage/gaps from all candidates that voted fail. */
+function mergeRejectingVerdicts(candidates: string[]): {
+  evidence: string[];
+  criteriaCoverage: unknown[];
+  gaps: unknown[];
+} {
+  const evidence: string[] = [];
+  const criteriaCoverage: unknown[] = [];
+  const gaps: unknown[] = [];
+  for (const c of candidates) {
+    if (verdictVote(c) !== false) continue;
+    const parsed = extractJson(c);
+    const v = parsed?.value as
+      | { evidence?: unknown; criteriaCoverage?: unknown; gaps?: unknown }
+      | undefined;
+    if (!v) continue;
+    if (Array.isArray(v.evidence)) {
+      for (const e of v.evidence) if (typeof e === 'string') evidence.push(e);
+    }
+    if (Array.isArray(v.criteriaCoverage)) criteriaCoverage.push(...v.criteriaCoverage);
+    if (Array.isArray(v.gaps)) gaps.push(...v.gaps);
+  }
+  return { evidence, criteriaCoverage, gaps };
+}
+
+function maybeSkipAfterPassedVerdict(node: IRNode, results: Map<string, string>): string | null {
+  const source =
+    typeof node.params.skipIfVerdictPassFrom === 'string'
+      ? node.params.skipIfVerdictPassFrom
+      : '';
+  if (!source || !verdictPassed(results.get(source))) return null;
+  const outputFrom =
+    typeof node.params.skipOutputFrom === 'string' ? node.params.skipOutputFrom : '';
+  if (outputFrom && results.has(outputFrom)) return results.get(outputFrom) ?? '';
+  return typeof node.params.skipOutput === 'string' ? node.params.skipOutput : '';
+}
+
 /** The run's default gateway selection (already resolved in the context). */
 function globalSelection(context: RunContext): GatewaySelection {
   return context.selection;
@@ -158,7 +276,7 @@ export async function runParallel(
             callbacks,
             head: `【${stepLabel}】\n`,
             label: stepLabel,
-            basePrompt: b.prompt + upstream,
+            basePrompt: withAgentTypeRole(b.prompt, b.agentType) + upstream,
             selection: branchSelection,
             cli: { cwd: context.cwd, permission: context.permission },
             schema: buildSchemaEnforcement(b.schema, workflow),
@@ -179,6 +297,11 @@ export async function runParallel(
       .join('；');
     throw new Error(detail ? `所有并行分支均失败：${detail}` : '所有并行分支均失败');
   }
+  const okParts = settled
+    .filter((s): s is { ok: true; label: string; out: string } => s.ok)
+    .map((s) => ({ label: s.label, out: s.out }));
+  const reduced = await reduceFanOutResults(context, callbacks, node, okParts);
+  if (reduced !== null) return reduced;
   return settled
     .map((s) =>
       s.ok ? `【${s.label}】\n${s.out}` : `【${s.label}】\n(失败：${s.failure.message})`,
@@ -187,38 +310,128 @@ export async function runParallel(
 }
 
 /**
- * Run a `pipeline` node: stages execute sequentially, each receiving the
- * previous stage's output. Returns the final stage's output.
+ * Optional map-reduce for fan-out nodes. When a node sets a positive
+ * `reduceWhenOver` param AND the number of successful branch/item outputs
+ * exceeds it, run ONE reducing agent that compresses the N results into a
+ * compact structured digest (one line per item: id + status + key evidence +
+ * gap) before the joined blob flows downstream to the acceptance gate. This
+ * keeps a wide fan-out (e.g. 20 audited files) from dumping an over-long context
+ * into the gate. Returns the digest string, or `null` to skip reduction (param
+ * absent, threshold not exceeded, or too few outputs to be worth it). The
+ * reducing call goes through the gateway, so it is budget-charged like any agent.
  */
-export async function runPipeline(
+async function reduceFanOutResults(
   context: RunContext,
   callbacks: RunCallbacks,
   node: IRNode,
-  workflow: IRGraph,
-  results: Map<string, string>,
-): Promise<string> {
-  const stages = specList(node.params.stages, context.gateway);
-  if (stages.length === 0) return '';
-  const items = String(node.params.items ?? '').trim();
-  let prev = '';
-  const baseSelection = nodeSelection(context, node);
+  parts: { label: string; out: string }[],
+): Promise<string | null> {
+  const threshold =
+    typeof node.params.reduceWhenOver === 'number' && node.params.reduceWhenOver > 0
+      ? Math.floor(node.params.reduceWhenOver)
+      : 0;
+  if (threshold <= 0 || parts.length <= threshold || parts.length < 2) return null;
+  if (callbacks.isCancelled()) return null;
 
-  // A pipeline shares a single warm session across stages (claude adapter only)
-  // so each stage continues the previous context instead of cold-starting.
+  const block = parts
+    .map((p, i) => `【${i + 1}. ${p.label}】\n${p.out}`)
+    .join('\n\n');
+  const label = `${node.label ?? 'fan-out'} · 归约摘要`;
+  const prompt = [
+    `下面是 ${parts.length} 个并行/逐项产出的结果。请把它们归约成一份紧凑的结构化摘要，供后续验收使用。`,
+    '要求：每个条目一行，包含 条目标识、状态(完成/部分/失败)、关键证据(路径/命令/来源)、遗留 gap；',
+    '不要逐字复制原文，不要新增结论，无法判定的写「待核」。最后用一两句话概述整体完成度与主要风险。',
+    '',
+    block,
+  ].join('\n');
+  try {
+    return (
+      await runAgentWithInteraction({
+        context,
+        callbacks,
+        head: `【${label}】\n`,
+        label,
+        basePrompt: prompt,
+        selection: nodeSelection(context, node),
+        cli: { cwd: context.cwd, permission: context.permission },
+      })
+    ).trim();
+  } catch {
+    // A failed reduction must not drop the underlying results.
+    return null;
+  }
+}
+
+/**
+ * Parse a pipeline node's `items` param into a non-empty list of per-item input
+ * strings, or return `null` when it is not a JSON array (scalar / identifier /
+ * empty ⇒ legacy single-pass). Object/array elements are stringified; primitive
+ * elements are coerced to strings. This is the *fan-out* trigger: a JSON array
+ * runs each element independently through all stages (Claude Code's
+ * `pipeline(items, …)` semantics — per-file/per-unit migration & audit), while
+ * any other shape keeps the original single chained pass byte-for-byte.
+ *
+ * NOTE (scope): only the headless `/ultracode` path (raw IRGraph JSON, no
+ * emit/parse) reaches this. The emitter/parser deliberately are NOT taught to
+ * round-trip a JSON-array `items` literal (the parser already treats a bare
+ * array argument as legacy *stages*), so this stays a runtime interpretation.
+ */
+/**
+ * Hard ceiling on pipeline fan-out width. A planner that emits a huge `items`
+ * array could otherwise queue thousands of agent runs and burn the whole budget
+ * on one runaway node. Items beyond this are dropped with a `log()` notice (per
+ * CLAUDE.md: bounded coverage must never be silent). Mirrors the `slice` guard
+ * that already caps `parallel` branches in dynamicHarness.
+ */
+const MAX_FAN_OUT_ITEMS = 64;
+
+function pipelineFanOutItems(raw: string): { items: string[]; dropped: number } | null {
+  if (!raw || (raw[0] !== '[' && !raw.startsWith('['))) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed) || parsed.length === 0) return null;
+  const all = parsed.map((el) =>
+    typeof el === 'string' ? el : el === null || el === undefined ? '' : JSON.stringify(el),
+  );
+  const dropped = Math.max(0, all.length - MAX_FAN_OUT_ITEMS);
+  return { items: dropped > 0 ? all.slice(0, MAX_FAN_OUT_ITEMS) : all, dropped };
+}
+
+/** Truncate a per-item label so fan-out progress lines stay readable. */
+function shortItemLabel(item: string): string {
+  const flat = item.replace(/\s+/g, ' ').trim();
+  return flat.length > 24 ? `${flat.slice(0, 24)}…` : flat || '空条目';
+}
+
+/**
+ * Run one chain of stages over a single seed input (the `stage0Feed`). Each
+ * stage receives the previous stage's output; the first receives `stage0Feed`.
+ * A fresh warm session is used per chain (Claude adapter) so concurrent fan-out
+ * items never share conversation state. Returns the final stage's output.
+ */
+async function runPipelineChain(
+  context: RunContext,
+  callbacks: RunCallbacks,
+  workflow: IRGraph,
+  stages: RunSpec[],
+  baseSelection: GatewaySelection,
+  stage0Feed: string,
+  labelPrefix: string,
+): Promise<string> {
   const isClaude =
     baseSelection.adapter === 'claude-code' || baseSelection.adapter === 'claude';
   const sessionId = isClaude ? newSessionId() : undefined;
-
+  let prev = '';
   for (let i = 0; i < stages.length; i += 1) {
     if (callbacks.isCancelled()) break;
     const s = stages[i];
     const label = s.label || s.prompt.slice(0, 16) || `阶段${i + 1}`;
-    const stepLabel = `流水线阶段 ${i + 1}/${stages.length} · ${label}`;
-    const feed =
-      i === 0
-        ? buildDataContextString(node, workflow, results, contextCaps(node)) +
-          (items ? `\n\n输入数据: ${items}` : '')
-        : `\n\n---\n上一步输出：\n${prev}`;
+    const stepLabel = `${labelPrefix}流水线阶段 ${i + 1}/${stages.length} · ${label}`;
+    const feed = i === 0 ? stage0Feed : `\n\n---\n上一步输出：\n${prev}`;
     const stageSelection = context.gateway.applyOverride(
       baseSelection,
       runSpecGatewayOverride(s, context.gateway),
@@ -229,7 +442,7 @@ export async function runPipeline(
         callbacks,
         head: `【${stepLabel}】\n`,
         label: stepLabel,
-        basePrompt: s.prompt + feed,
+        basePrompt: withAgentTypeRole(s.prompt, s.agentType) + feed,
         selection: stageSelection,
         cli: {
           omitModel: !!(sessionId && i > 0),
@@ -242,6 +455,94 @@ export async function runPipeline(
     ).trim();
   }
   return prev;
+}
+
+/**
+ * Run a `pipeline` node. When `items` is a JSON array, each element is fanned
+ * out concurrently through all stages (per-item chains, bounded by the node's
+ * effective concurrency) and the per-item finals are joined — like a `parallel`
+ * of chains. Otherwise stages execute as a single sequential chain seeded by the
+ * upstream data context (legacy behaviour, byte-identical).
+ */
+export async function runPipeline(
+  context: RunContext,
+  callbacks: RunCallbacks,
+  node: IRNode,
+  workflow: IRGraph,
+  results: Map<string, string>,
+): Promise<string> {
+  const stages = specList(node.params.stages, context.gateway);
+  if (stages.length === 0) return '';
+  const itemsRaw = String(node.params.items ?? '').trim();
+  const baseSelection = nodeSelection(context, node);
+  const upstream = buildDataContextString(node, workflow, results, contextCaps(node));
+
+  const fanOut = pipelineFanOutItems(itemsRaw);
+  if (fanOut) {
+    if (fanOut.dropped > 0) {
+      callbacks.onLog(
+        `流水线 fan-out 条目超过上限 ${MAX_FAN_OUT_ITEMS}，已丢弃后 ${fanOut.dropped} 条（仅处理前 ${MAX_FAN_OUT_ITEMS} 条）。`,
+        'system',
+      );
+    }
+    const fanItems = fanOut.items;
+    const total = fanItems.length;
+    const settled = await runWithConcurrency(
+      fanItems,
+      Math.min(total, context.gateway.effectiveConcurrency(context.concurrency, baseSelection)),
+      async (item, i) => {
+        const prefix = `条目 ${i + 1}/${total} · `;
+        const stage0Feed = `${upstream}\n\n当前条目 (${i + 1}/${total}): ${item}`;
+        try {
+          const out = await runPipelineChain(
+            context,
+            callbacks,
+            workflow,
+            stages,
+            baseSelection,
+            stage0Feed,
+            prefix,
+          );
+          return { ok: true as const, item, out };
+        } catch (err) {
+          return { ok: false as const, item, out: '', failure: parseRunFailure(err) };
+        }
+      },
+    );
+
+    if (settled.every((s) => !s.ok)) {
+      const detail = settled
+        .map((s) => (s.ok ? '' : `${shortItemLabel(s.item)}: ${s.failure.message}`))
+        .filter(Boolean)
+        .join('；');
+      throw new Error(detail ? `所有流水线条目均失败：${detail}` : '所有流水线条目均失败');
+    }
+    const okParts = settled
+      .map((s, i) =>
+        s.ok ? { label: `条目 ${i + 1}/${total}: ${shortItemLabel(s.item)}`, out: s.out } : null,
+      )
+      .filter((p): p is { label: string; out: string } => p !== null);
+    const reduced = await reduceFanOutResults(context, callbacks, node, okParts);
+    if (reduced !== null) return reduced;
+    return settled
+      .map((s, i) =>
+        s.ok
+          ? `【条目 ${i + 1}/${total}: ${shortItemLabel(s.item)}】\n${s.out}`
+          : `【条目 ${i + 1}/${total}: ${shortItemLabel(s.item)}】\n(失败：${s.failure.message})`,
+      )
+      .join('\n\n');
+  }
+
+  const stage0Feed = upstream + (itemsRaw ? `\n\n输入数据: ${itemsRaw}` : '');
+  return runPipelineChain(
+    context,
+    callbacks,
+    workflow,
+    stages,
+    baseSelection,
+    stage0Feed,
+    '',
+  );
 }
 
 type ConsensusSample =
@@ -305,7 +606,7 @@ export async function runConsensus(
             callbacks,
             head: `【${stepLabel}】\n`,
             label: stepLabel,
-            basePrompt: s.prompt + upstream,
+            basePrompt: withAgentTypeRole(s.prompt, s.agentType) + upstream,
             selection: sampleSelection,
             cli: { cwd: context.cwd, permission: context.permission },
             schema: buildSchemaEnforcement(s.schema, workflow),
@@ -371,6 +672,20 @@ export async function resolveConsensus(
       'system',
     );
     if (best.n >= quorum) return best.rep;
+  }
+
+  // Machine-level veto for verdict-style gates (adversarial / multi-lens): if a
+  // quorum of voters explicitly returned `pass: false`, fail deterministically
+  // rather than letting the downstream synthesis agent overturn the skeptics.
+  if (strategy === 'adversarial' || strategy === 'multi-lens') {
+    const veto = machineVetoVerdict(candidates, quorum);
+    if (veto) {
+      callbacks.onLog(
+        `共识(机器级否决)：反对票达到否决阈值 ${quorum}，验收门直接判定未通过。`,
+        'system',
+      );
+      return veto;
+    }
   }
 
   const instruction =
@@ -650,17 +965,26 @@ export async function dispatchNode(
   workflow: IRGraph,
   results: Map<string, string>,
 ): Promise<string | null> {
+  const skipped = maybeSkipAfterPassedVerdict(node, results);
+  if (skipped !== null) {
+    callbacks.onLog(`${node.label ?? node.type} · 上一轮验收已通过，跳过本轮返工。`, 'system');
+    return skipped;
+  }
   const label = node.label ?? node.type;
   const selection = nodeSelection(context, node);
   switch (node.type) {
     case 'agent': {
       const base = String(node.params.prompt ?? node.label ?? '').trim();
       if (!base) return '';
+      const rolePrompt = withAgentTypeRole(
+        base,
+        typeof node.params.agentType === 'string' ? node.params.agentType : undefined,
+      );
       // If this node belongs to a linear claude agent chain (Fix 1), reuse the
       // chain's warm session — exactly mirroring runPipeline's stage handling.
       const chain = context.agentChains?.get(node.id);
       const prompt =
-        base + buildDataContextString(
+        rolePrompt + buildDataContextString(
           node,
           workflow,
           results,

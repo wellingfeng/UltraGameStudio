@@ -31,6 +31,7 @@ import { join } from 'node:path';
 import { createInterface } from 'node:readline';
 import {
   adapterProtocol,
+  repairClaudeBunInstall,
   shouldPassModel,
   whichCli,
 } from './which-cli';
@@ -317,6 +318,9 @@ function buildArgs(
  */
 export function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<string> {
   const protocol = adapterProtocol(opts.adapter);
+  if (protocol === 'claude') {
+    repairClaudeBunInstall();
+  }
   const isCodex = protocol === 'codex';
   const binary = whichCli(opts.adapter, { cliCommand: opts.cliCommand });
 

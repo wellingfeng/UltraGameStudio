@@ -12,13 +12,15 @@ import FileChip, { type OpenFileFn } from './FileChip';
 export default function InlineCode({
   children,
   onOpenFile,
+  cwd,
 }: {
   children?: ReactNode;
   onOpenFile?: OpenFileFn;
+  cwd?: string;
 }) {
   const text = childrenToText(children);
   const ref = text ? parseFileRef(text) : null;
-  if (ref) return <FileChip refData={ref} onOpenFile={onOpenFile} />;
+  if (ref) return <FileChip refData={ref} onOpenFile={onOpenFile} cwd={cwd} />;
 
   return (
     <code className="ai-inline-code rounded border border-border bg-panel-2 px-1 py-px font-mono text-[12.5px] text-accent-2">

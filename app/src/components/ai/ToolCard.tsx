@@ -5,6 +5,8 @@ import ToolIcon from './ToolIcon';
 import { scanFileRefs } from './lib/fileScan';
 import FileChip, { type OpenFileFn } from './FileChip';
 import { compactToolSubject, toolSubjectAllowsFileRefs } from './lib/toolDisplay';
+import RawCodeBlock from './RawCodeBlock';
+import { inferToolCodeLanguage, type ToolCodePanel } from './lib/toolCode';
 
 /** Format a duration in ms as a compact human string. */
 function fmtDuration(ms: number): string {
@@ -22,16 +24,28 @@ function StatusGlyph({ status }: { status: ToolEvent['status'] }) {
   return <Check size={12} className="text-status-success" />;
 }
 
-/** Render a tool's args/result body as JSON (or text) inside a CodeBlock-ish frame. */
-function Panel({ label, body }: { label: string; body: string }) {
+/** Render a tool's args/result body with the same code chrome as AI code blocks. */
+function Panel({
+  label,
+  body,
+  language,
+}: {
+  label: string;
+  body: string;
+  language: string;
+}) {
   return (
     <div className="mt-1">
       <div className="ai-tool-label mb-0.5 font-mono text-[10px] uppercase tracking-wider">
         {label}
       </div>
-      <pre className="ai-tool-panel ai-stream-text max-h-64 overflow-auto rounded-sm border px-2 py-1.5 font-mono text-[11px] leading-relaxed">
-        {body}
-      </pre>
+      <RawCodeBlock
+        raw={body}
+        language={language}
+        compact
+        className="ai-tool-panel"
+        maxLines={14}
+      />
     </div>
   );
 }
@@ -47,11 +61,13 @@ export default function ToolCard({
   childrenEvents,
   onOpenFile,
   depth = 0,
+  cwd,
 }: {
   event: ToolEvent;
   childrenEvents?: ToolEvent[];
   onOpenFile?: OpenFileFn;
   depth?: number;
+  cwd?: string;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -68,11 +84,12 @@ export default function ToolCard({
       typeof p === 'string' ? (
         <span key={i}>{p}</span>
       ) : (
-        <FileChip key={i} refData={p} onOpenFile={onOpenFile} />
+        <FileChip key={i} refData={p} onOpenFile={onOpenFile} cwd={cwd} />
       ),
     );
   };
 
+  const argsIsJson = event.args !== undefined && event.args !== null && typeof event.args !== 'string';
   const argsBody =
     event.args === undefined || event.args === null
       ? ''
@@ -84,6 +101,11 @@ export default function ToolCard({
     (event.result != null && event.result !== '') ||
     (childrenEvents?.length ?? 0) > 0 ||
     (subjectCompacted && !argsBody);
+  const toolLanguage = (
+    panel: ToolCodePanel,
+    body: string,
+    bodyFromJson = false,
+  ) => inferToolCodeLanguage(event, panel, body, bodyFromJson);
 
   return (
     <div
@@ -127,12 +149,25 @@ export default function ToolCard({
 
       {open && hasBody && (
         <div className="ai-tool-body px-2.5 py-1.5">
-          {subjectCompacted && !argsBody && <Panel label="详情" body={subject} />}
-          {argsBody && <Panel label="请求" body={argsBody} />}
+          {subjectCompacted && !argsBody && (
+            <Panel
+              label="详情"
+              body={subject}
+              language={toolLanguage('details', subject)}
+            />
+          )}
+          {argsBody && (
+            <Panel
+              label="请求"
+              body={argsBody}
+              language={toolLanguage('request', argsBody, argsIsJson)}
+            />
+          )}
           {event.result != null && event.result !== '' && (
             <Panel
               label={event.truncated ? '响应（已截断）' : '响应'}
               body={event.result}
+              language={toolLanguage('response', event.result)}
             />
           )}
           {childrenEvents?.map((child) => (
@@ -141,6 +176,7 @@ export default function ToolCard({
               event={child}
               onOpenFile={onOpenFile}
               depth={depth + 1}
+              cwd={cwd}
             />
           ))}
         </div>

@@ -88,6 +88,12 @@ import { shortId } from '@/lib/id';
 import { translatePromptFields } from '@/lib/promptTranslation';
 import { aiEditViaCli, cancelAiCli, isTauri, runUltracode } from '@/lib/tauri';
 import {
+  parseUltracodePrompt,
+  summarizeUltracodeResult,
+  ultracodeAccepted,
+  ultracodeModeLabel,
+} from './ultracodePrompt';
+import {
   applyGatewayOverride,
   completeGatewayText,
   nodeGatewayOverride,
@@ -3387,6 +3393,11 @@ export const useStore = create<StoreState>((set, get) => ({
   runUltracodePrompt: (task) => {
     const trimmed = task.trim();
     if (!trimmed) return;
+    const parsed = parseUltracodePrompt(trimmed);
+    const request =
+      parsed.request ||
+      (parsed.options.resume ? '续跑 /ultracode 任务' : trimmed);
+    const modeLabel = ultracodeModeLabel(parsed.options);
     const state = useStore.getState();
     if (state.mode === 'running') return;
     const sessionKey = activeWorkflowSessionKey(state);
@@ -3404,11 +3415,14 @@ export const useStore = create<StoreState>((set, get) => ({
     const assistantMsg: Message = {
       id: assistantId,
       role: 'assistant',
-      text: `⟳ /ultracode 正在生成动态 harness 并执行…`,
+      text:
+        modeLabel === 'planner-only'
+          ? `⟳ /ultracode 正在生成动态 harness 计划…`
+          : `⟳ /ultracode 正在生成动态 harness 并执行…`,
       routeLabel: '/ultracode',
       createdAt: now + 1,
     };
-    const promptUpdate = applyPromptTitle(state, trimmed, now);
+    const promptUpdate = applyPromptTitle(state, request, now);
     const chKey = chatTurnKey(runKey(sessionKey.workspaceId, sessionKey.sessionId), userMsg.id);
     const ch: AiEditChannel = {
       key: chKey,
@@ -3458,20 +3472,45 @@ export const useStore = create<StoreState>((set, get) => ({
 
     void (async () => {
       const startedAt = Date.now();
-      const runId = makeCliRunId();
+      const runId = parsed.options.runId || makeCliRunId();
       ch.cliRunIds.add(runId);
       let live = '';
       try {
-        const result = await runUltracode(trimmed, {
+        const gatewaySelection = ch.gatewaySelection;
+        if (gatewaySelection && isFreeChannelSelection(gatewaySelection)) {
+          await ensureFreeProxy(freeProxyOptionsForSelection(gatewaySelection));
+        }
+        const concurrency = parsed.options.concurrency ?? runConcurrency();
+        const result = await runUltracode(request, {
           cwd: state.composer.workspace || undefined,
-          adapter: ch.gatewaySelection?.adapter,
-          model: ch.gatewaySelection?.modelClass,
-          concurrency: 3,
+          adapter: gatewaySelection?.adapter,
+          model:
+            gatewaySelection?.modelOverride ||
+            gatewaySelection?.modelClass,
+          provider: gatewaySelection?.providerId,
+          concurrency,
+          maxRetries: parsed.options.maxRetries ?? runMaxRetries(),
+          maxAgentCalls: parsed.options.maxAgentCalls,
+          maxRounds: parsed.options.maxRounds,
+          timeoutSeconds: parsed.options.timeoutSeconds,
           runId,
+          resume: parsed.options.resume,
+          plannerOnly: parsed.options.plannerOnly,
+          fromHarness: parsed.options.fromHarness,
+          trace: parsed.options.trace,
+          interactive: parsed.options.interactive,
           onProgress: (chunk) => {
             live = (live + chunk).slice(-5000);
             replaceAssistant(
-              `⟳ /ultracode 执行中…\n账本 runId: ${runId}\n\n${live.trim()}`,
+              [
+                `⟳ /ultracode 执行中…`,
+                `runId: ${runId}`,
+                `工作区: ${state.composer.workspace || '默认'}`,
+                `模式: ${modeLabel}`,
+                `并发: ${concurrency}`,
+                '',
+                live.trim(),
+              ].join('\n'),
               false,
             );
           },
@@ -3481,7 +3520,10 @@ export const useStore = create<StoreState>((set, get) => ({
           `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(Date.now() - startedAt)}\n${summarizeUltracodeResult(result)}`,
           true,
         );
-        syncAndPersistSessionRunStatus(sessionKey, 'success');
+        syncAndPersistSessionRunStatus(
+          sessionKey,
+          ultracodeAccepted(result) ? 'success' : 'error',
+        );
       } catch (err) {
         if (!aiEditRegistered(ch)) return;
         const msg = (err as Error)?.message ?? String(err);
@@ -4255,6 +4297,10 @@ export const useStore = create<StoreState>((set, get) => ({
         // ask-each-time / full), matching the other run paths instead of
         // hard-coding 'full'.
         const chatPermission = state.composer.permission || 'full';
+        // Tracked across try/catch so a failure before the session ever
+        // completed can forget its (already disk-registered) session id —
+        // otherwise "继续"/retry reuses it and claude rejects the duplicate.
+        let nativeSession: ChatNativeSession | null = null;
         try {
           newBubble(withAiTiming('⟳ 生成中…'));
           let answer = '';
@@ -4263,7 +4309,7 @@ export const useStore = create<StoreState>((set, get) => ({
             const cli = await resolveAiCliRoute();
             routeLine = gatewayRouteLine(cli);
             setActive(withAiTiming(routedBody(routeLine, '⟳ 生成中…')));
-            const nativeSession = replayFavoriteSimpleChat
+            nativeSession = replayFavoriteSimpleChat
               ? null
               : chatNativeSessionFor(ch, cli);
             const nativeResume = nativeSession?.started === true;
@@ -4314,15 +4360,11 @@ export const useStore = create<StoreState>((set, get) => ({
             withAiTiming(routedBody(routeLine, answer.trim() || '（模型没有返回内容）')),
             true,
           );
-          if (useCli && !replayFavoriteSimpleChat) {
-            const cli = await resolveAiCliRoute();
-            const nativeSession = chatNativeSessionFor(ch, cli);
-            if (nativeSession) {
-              nativeSession.started = true;
-              nativeSession.coveredMessageCount = ch.messages.filter(
-                (m) => m.role !== 'system' && m.text.trim(),
-              ).length;
-            }
+          if (useCli && !replayFavoriteSimpleChat && nativeSession) {
+            nativeSession.started = true;
+            nativeSession.coveredMessageCount = ch.messages.filter(
+              (m) => m.role !== 'system' && m.text.trim(),
+            ).length;
           }
           // Record the input on the node (keeps the graph a single node).
           commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [trimmed]));
@@ -4332,6 +4374,13 @@ export const useStore = create<StoreState>((set, get) => ({
           );
         } catch (err) {
           const msg = (err as Error)?.message ?? String(err);
+          // The CLI failed (e.g. ConnectionRefused) before the model call
+          // succeeded. claude already registered the `--session-id` on disk, so
+          // drop the unstarted native session to free the id — otherwise the
+          // next retry reuses it and dies with "Session ID … is already in use".
+          if (nativeSession && !nativeSession.started) {
+            forgetChatNativeSession(nativeSession);
+          }
           if (activeId) setActive(withAiTiming(`✗ 调用失败: ${msg}`), true);
           else pushAssistant(withAiTiming(`✗ 调用失败: ${msg}`));
           persistAiMessages();
@@ -5299,6 +5348,22 @@ function chatNativeSessionFor(
   return created;
 }
 
+/**
+ * Drop a chat's native session from the map (by identity). Used when a CLI call
+ * fails before the session ever completed: claude registers the `--session-id`
+ * on disk the moment it launches (even if the model call then errors), so a
+ * naive retry would reuse the same id and hit "Session ID … is already in use".
+ * Forgetting the unstarted session forces the next turn to mint a fresh id.
+ */
+function forgetChatNativeSession(session: ChatNativeSession): void {
+  for (const [key, value] of chatNativeSessions) {
+    if (value === session) {
+      chatNativeSessions.delete(key);
+      return;
+    }
+  }
+}
+
 function runKey(workspaceId: string | null, sessionId: string | null): string {
   return workflowSessionKeyId({ workspaceId, sessionId });
 }
@@ -6260,56 +6325,6 @@ function stopWorkflowRun(): void {
 
 function makeCliRunId(): string {
   return `cli_${Date.now()}_${shortId('run')}`;
-}
-
-function summarizeUltracodeResult(result: Awaited<ReturnType<typeof runUltracode>>): string {
-  const json = result.resultJson as
-    | {
-        success?: unknown;
-        runId?: unknown;
-        runDir?: unknown;
-        durationMs?: unknown;
-        failedNodeId?: unknown;
-        artifacts?: {
-          report?: unknown;
-          verdict?: {
-            pass?: unknown;
-            gaps?: unknown;
-          };
-        };
-      }
-    | null
-    | undefined;
-  const runDir =
-    typeof json?.runDir === 'string'
-      ? json.runDir
-      : result.runDir || null;
-  const durationMs =
-    typeof json?.durationMs === 'number' ? json.durationMs : undefined;
-  const verdict = json?.artifacts?.verdict;
-  const pass = typeof verdict?.pass === 'boolean' ? verdict.pass : null;
-  const gaps = Array.isArray(verdict?.gaps) ? verdict.gaps.length : 0;
-  const report =
-    typeof json?.artifacts?.report === 'string'
-      ? json.artifacts.report.trim()
-      : '';
-  const lines = [
-    result.exitCode === 0 && (json?.success !== false)
-      ? '✓ /ultracode 已通过验收门。'
-      : '⚠ /ultracode 已结束，但验收未完全通过。',
-    `runId: ${typeof json?.runId === 'string' ? json.runId : result.runId}`,
-  ];
-  if (runDir) lines.push(`账本: ${runDir}`);
-  if (durationMs !== undefined) {
-    lines.push(`耗时: ${formatDuration(durationMs)}`);
-  }
-  if (pass !== null) lines.push(`验收: ${pass ? 'pass' : 'fail'}`);
-  if (gaps > 0) lines.push(`缺口: ${gaps} 项`);
-  if (report) lines.push(`\n${report}`);
-  if (!report && result.stdout.trim()) {
-    lines.push(`\n${result.stdout.trim().slice(0, 2000)}`);
-  }
-  return lines.join('\n');
 }
 
 async function cancelActiveCliRuns(ch: RunChannel | null): Promise<void> {

@@ -9,6 +9,7 @@ import { useStore } from '@/store/useStore';
 
 const tauriMocks = vi.hoisted(() => ({
   saveClipboardImage: vi.fn(),
+  previewLocalFile: vi.fn(),
 }));
 
 vi.mock('@/lib/tauri', async (importOriginal) => {
@@ -16,12 +17,22 @@ vi.mock('@/lib/tauri', async (importOriginal) => {
   return {
     ...actual,
     tauriAvailable: () => true,
+    previewLocalFile: tauriMocks.previewLocalFile,
     saveClipboardImage: tauriMocks.saveClipboardImage,
   };
 });
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
+
+class ResizeObserverStub {
+  observe() {}
+  unobserve() {}
+  disconnect() {}
+}
+
+(globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver =
+  ResizeObserverStub as typeof ResizeObserver;
 
 function resetStore(): void {
   useStore.setState({
@@ -107,6 +118,7 @@ function flushAsync(): Promise<void> {
 
 afterEach(() => {
   tauriMocks.saveClipboardImage.mockReset();
+  tauriMocks.previewLocalFile.mockReset();
   window.localStorage.clear();
   document.body.innerHTML = '';
 });
@@ -188,6 +200,52 @@ describe('AIDock pasted clipboard images', () => {
       expect(tauriMocks.saveClipboardImage).toHaveBeenCalledTimes(1);
       expect(input.value).toBe(
         'E:\\OpenWorkflows\\.omc\\clipboard-images\\shot.png',
+      );
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('renders user file paths as clickable full-path previews', async () => {
+    resetStore();
+    useStore.setState({
+      messages: [
+        {
+          id: 'm_user_file',
+          role: 'user',
+          text: 'app/src/App.tsx',
+          createdAt: 1,
+        },
+      ],
+    });
+    tauriMocks.previewLocalFile.mockResolvedValue({
+      path: 'E:\\OpenWorkflows\\app\\src\\App.tsx',
+      fileName: 'App.tsx',
+      kind: 'text',
+      mime: 'text/typescript',
+      sizeBytes: 12,
+      truncated: false,
+      text: 'export {};\n',
+      base64: null,
+    });
+    const view = await renderDock();
+
+    try {
+      const chip = view.container.querySelector<HTMLButtonElement>('.ai-file-chip');
+      expect(chip).not.toBeNull();
+      expect(chip!.textContent).toContain('E:\\OpenWorkflows\\app\\src\\App.tsx');
+
+      await act(async () => {
+        chip!.click();
+        await flushAsync();
+      });
+
+      expect(tauriMocks.previewLocalFile).toHaveBeenCalledWith(
+        'app/src/App.tsx',
+        { cwd: 'E:\\OpenWorkflows' },
+      );
+      expect(view.container.textContent).toContain(
+        'E:\\OpenWorkflows\\app\\src\\App.tsx',
       );
     } finally {
       await view.cleanup();

@@ -14,20 +14,24 @@ export default function SmartLink({
   href,
   children,
   onOpenFile,
+  cwd,
 }: {
   href?: string;
   children?: ReactNode;
   onOpenFile?: OpenFileFn;
+  cwd?: string;
 }) {
   const url = href ?? '';
   const isWebUrl = /^https?:/i.test(url);
   const isExternal = /^(https?:|mailto:)/i.test(url);
   const ref = parseFileRef(url, { allowSpaces: true });
-  if (ref) return <FileChip refData={ref} onOpenFile={onOpenFile} />;
+  if (ref) return <FileChip refData={ref} onOpenFile={onOpenFile} cwd={cwd} />;
 
   if (!isExternal) {
     const childRef = parseFileRef(childrenToText(children), { allowSpaces: true });
-    if (childRef) return <FileChip refData={childRef} onOpenFile={onOpenFile} />;
+    if (childRef) {
+      return <FileChip refData={childRef} onOpenFile={onOpenFile} cwd={cwd} />;
+    }
   }
 
   if (isExternal) {

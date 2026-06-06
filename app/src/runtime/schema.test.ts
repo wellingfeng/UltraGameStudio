@@ -43,6 +43,21 @@ describe('extractJson', () => {
   it('returns null when there is no JSON', () => {
     expect(extractJson('就是一段普通的中文说明，没有任何 JSON。')).toBeNull();
   });
+
+  it('strips prototype-pollution keys from parsed output', () => {
+    const text = '{ "objective": "x", "__proto__": { "polluted": true }, "nested": { "constructor": 1, "ok": 2 } }';
+    const out = extractJson(text);
+    expect(out).not.toBeNull();
+    const value = out!.value as Record<string, unknown>;
+    expect(value.objective).toBe('x');
+    expect(Object.prototype.hasOwnProperty.call(value, '__proto__')).toBe(false);
+    expect((value.nested as Record<string, unknown>)).toEqual({ ok: 2 });
+    // Global Object prototype must be untouched.
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+    // Normalized json string also excludes the dangerous keys.
+    expect(out!.json).not.toContain('__proto__');
+    expect(out!.json).not.toContain('constructor');
+  });
 });
 
 /* ----------------------------------------------------- validateAgainstSchema */
