@@ -1,0 +1,200 @@
+{
+  "version": 2,
+  "gateway": {
+    "host": "127.0.0.1",
+    "port": 48117,
+    "active-routes": {
+      "claude": "claude-official",
+      "codex": "codex-openai",
+      "gemini": "gemini-google"
+    }
+  },
+  "agents": [
+    {
+      "id": "claude",
+      "display-name": "Claude Code",
+      "kind": "claude",
+      "adapter": "cli",
+      "command": [
+        "claude"
+      ],
+      "provider": "anthropic",
+      "default-model": "claude-opus-4",
+      "default-launch": {
+        "mode": "native"
+      },
+      "menu": {
+        "top-level": true,
+        "group": "default",
+        "order": 10
+      },
+      "capabilities": [
+        "native-launch",
+        "gateway-launch",
+        "context-replay",
+        "desktop-route"
+      ],
+      "accounts": [
+        {
+          "id": "claude-official",
+          "display-name": "Official",
+          "provider": "anthropic",
+          "route": {
+            "id": "claude-official",
+            "strategy": "fixed",
+            "providers": [
+              {
+                "provider": "anthropic",
+                "model": "claude-opus-4",
+                "endpoint": "anthropic",
+                "priority": 10,
+                "simulate": {
+                  "succeeds": true,
+                  "latency-ms": 40,
+                  "response": "anthropic:claude-opus-4"
+                }
+              }
+            ]
+          },
+          "credential-ref": "cc-menu/claude/official",
+          "enabled": true
+        }
+      ],
+      "enabled": true
+    },
+    {
+      "id": "codex",
+      "display-name": "Codex",
+      "kind": "codex",
+      "adapter": "cli",
+      "command": [
+        "codex"
+      ],
+      "provider": "openai",
+      "default-model": "gpt-5.2-codex",
+      "default-launch": {
+        "mode": "native"
+      },
+      "menu": {
+        "top-level": true,
+        "group": "default",
+        "order": 20
+      },
+      "capabilities": [
+        "native-launch",
+        "gateway-launch",
+        "context-replay",
+        "desktop-route"
+      ],
+      "accounts": [
+        {
+          "id": "codex-openai",
+          "display-name": "Official",
+          "provider": "openai",
+          "route": {
+            "id": "codex-openai",
+            "strategy": "fixed",
+            "providers": [
+              {
+                "provider": "openai",
+                "model": "gpt-5.2-codex",
+                "endpoint": "open-ai-compatible",
+                "priority": 10,
+                "simulate": {
+                  "succeeds": true,
+                  "latency-ms": 35,
+                  "response": "openai:gpt-5.2-codex"
+                }
+              }
+            ]
+          },
+          "credential-ref": "cc-menu/codex/official",
+          "enabled": true
+        }
+      ],
+      "enabled": true
+    },
+    {
+      "id": "gemini",
+      "display-name": "Gemini",
+      "kind": "gemini",
+      "adapter": "cli",
+      "command": [
+        "gemini"
+      ],
+      "provider": "google",
+      "default-model": "gemini-3-pro",
+      "default-launch": {
+        "mode": "native"
+      },
+      "menu": {
+        "top-level": true,
+        "group": "default",
+        "order": 30
+      },
+      "capabilities": [
+        "native-launch",
+        "gateway-launch",
+        "context-replay",
+        "desktop-route"
+      ],
+      "accounts": [
+        {
+          "id": "gemini-google",
+          "display-name": "Official",
+          "provider": "google",
+          "route": {
+            "id": "gemini-google",
+            "strategy": "fixed",
+            "providers": [
+              {
+                "provider": "google",
+                "model": "gemini-3-pro",
+                "endpoint": "gemini",
+                "priority": 10,
+                "simulate": {
+                  "succeeds": true,
+                  "latency-ms": 45,
+                  "response": "google:gemini-3-pro"
+                }
+              }
+            ]
+          },
+          "credential-ref": "cc-menu/gemini/official",
+          "enabled": true
+        }
+      ],
+      "enabled": true
+    }
+  ],
+  "terminal": {
+    "windows": "wt",
+    "macos": "Terminal.app",
+    "linux": "x-terminal-emulator"
+  },
+  "sessions": {
+    "roots": [
+      "C:\\Users\\FW\\AppData\\Local\\cc-menu\\sample-sessions"
+    ],
+    "interval-seconds": 300
+  },
+  "desktop": {
+    "realtime-switching": true,
+    "managed-apps": [
+      {
+        "id": "claude-desktop",
+        "display-name": "Claude Code Desktop",
+        "agent-id": "claude",
+        "running": false,
+        "supports-hot-reload": true
+      },
+      {
+        "id": "codex-desktop",
+        "display-name": "Codex Desktop",
+        "agent-id": "codex",
+        "running": false,
+        "supports-hot-reload": true
+      }
+    ]
+  }
+}

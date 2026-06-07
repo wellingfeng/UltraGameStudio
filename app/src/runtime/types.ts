@@ -82,6 +82,13 @@ export interface RunResult {
   outputs: Record<string, string>;
   failedNodeId?: string;
   error?: Record<string, unknown> | null;
+  /**
+   * Per-node content hashes for this run's graph (see runtime/node-hash.ts).
+   * Persisted by the host alongside `outputs` so a later "continue" run can pass
+   * them back as `seedNodeHashes`: an output is only reused when the node's hash
+   * still matches, so editing the graph re-runs exactly the affected subgraph.
+   */
+  nodeHashes?: Record<string, string>;
 }
 
 /**

@@ -184,6 +184,10 @@ const FREE_CHANNEL_ENV_MAPPINGS: &[(&str, &[&str])] = &[
     ),
     ("gemini", &["GEMINI_API_KEY", "GOOGLE_API_KEY"]),
     ("deepseek", &["DEEPSEEK_API_KEY"]),
+    (
+        "volcengine",
+        &["ARK_API_KEY", "VOLCENGINE_API_KEY", "VOLC_API_KEY"],
+    ),
     ("mistral", &["MISTRAL_API_KEY"]),
     (
         "mistral_codestral",
@@ -373,6 +377,15 @@ fn extend_cli_slash_commands(
 
 fn slash_command_entries() -> Vec<SlashCatalogEntry> {
     let mut entries = vec![
+        app_slash_command_entry(
+            "/deep-research",
+            "深度调研",
+            "Deep Research",
+            "用 /ultracode 跑多源核验研究",
+            "Run source-grounded research through /ultracode",
+            "执行 deep-research：使用随 FreeUltraCode 一起发布的内置 workflow 协议 workflows/deep-research/WORKFLOW.md 和 protocol/model-agnostic-deep-research.md。必须先界定研究问题、来源边界、时间范围和风险等级；优先官方/一手来源；维护 source ledger 和 claim audit；区分已核验事实、供应商声明、社区观点、设计推断、未核验假设和 gaps。默认输出中文决策简报：优先级、Top opportunities/options、MVP/原型路径、暂不做事项、风险和验证信号；证据表作为附录。高风险或用户明确要求时再输出完整 dossier。不要声称访问任何供应商私有实现。",
+            "Run deep research using the built-in FreeUltraCode workflow protocol workflows/deep-research/WORKFLOW.md and protocol/model-agnostic-deep-research.md. Define the question, source boundary, time window, and risk level; prioritize official/primary sources; maintain a source ledger and claim audit; separate verified facts, vendor-stated claims, community reports, design inferences, unverified hypotheses, and gaps. Default to a decision brief with priority, top opportunities/options, MVP/prototype path, what not to do yet, risks, and validation signals; keep evidence tables as an appendix. Expand to a full dossier only for high-risk work or when explicitly requested. Do not claim access to private vendor internals.",
+        ),
         app_slash_command_entry(
             "/help",
             "帮助",
@@ -903,6 +916,14 @@ fn push_skill_root(out: &mut Vec<PathBuf>, seen: &mut HashSet<PathBuf>, path: Pa
     out.push(canonical);
 }
 
+fn bundled_deep_research_workflow_root(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join("workflows").join("deep-research"))
+        .filter(|dir| dir.is_dir())
+}
+
 fn skill_root_candidates() -> Vec<PathBuf> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
@@ -933,7 +954,10 @@ fn skill_root_candidates() -> Vec<PathBuf> {
     }
 
     if let Ok(cwd) = std::env::current_dir() {
-        for base in [Some(cwd.as_path()), cwd.parent()].into_iter().flatten() {
+        let mut base = Some(cwd.as_path());
+        let mut depth = 0;
+        while let Some(base_path) = base {
+            push_skill_root(&mut out, &mut seen, base_path.join("skills"));
             for rel in [
                 [".codex", "skills"],
                 [".agents", "skills"],
@@ -944,8 +968,13 @@ fn skill_root_candidates() -> Vec<PathBuf> {
                 [".claude", "plugins"],
                 [".gemini", "extensions"],
             ] {
-                push_skill_root(&mut out, &mut seen, base.join(rel[0]).join(rel[1]));
+                push_skill_root(&mut out, &mut seen, base_path.join(rel[0]).join(rel[1]));
             }
+            depth += 1;
+            if depth >= 4 {
+                break;
+            }
+            base = base_path.parent();
         }
     }
 
@@ -1316,7 +1345,11 @@ fn slash_entry_key(entry: &SlashCatalogEntry) -> String {
     .to_lowercase()
 }
 
-fn skill_entry_from_file(path: &Path) -> Option<SlashCatalogEntry> {
+fn is_app_reserved_slash_name(name: &str) -> bool {
+    matches!(name.trim().to_ascii_lowercase().as_str(), "/deep-research")
+}
+
+fn skill_entry_from_file(path: &Path, source: &str) -> Option<SlashCatalogEntry> {
     let text = std::fs::read_to_string(path).ok()?;
     let dir = path.parent()?;
     let fallback = dir.file_name()?.to_string_lossy().to_string();
@@ -1342,7 +1375,7 @@ fn skill_entry_from_file(path: &Path) -> Option<SlashCatalogEntry> {
     };
 
     Some(SlashCatalogEntry {
-        id: format!("skill:{token}"),
+        id: format!("skill:{source}:{token}"),
         kind: "skill".to_string(),
         name: slash_name,
         label: same_localized_text(&name),
@@ -1399,6 +1432,9 @@ fn scan_command_dir(
         }
         if child.is_file() {
             if let Some(entry) = command_entry_from_file(source, root, &child) {
+                if is_app_reserved_slash_name(&entry.name) {
+                    continue;
+                }
                 let key = slash_entry_key(&entry);
                 if seen_keys.insert(key) {
                     entries.push(entry);
@@ -1411,6 +1447,7 @@ fn scan_command_dir(
 }
 
 fn scan_skill_dir(
+    source: &str,
     dir: &Path,
     depth: usize,
     entries: &mut Vec<SlashCatalogEntry>,
@@ -1422,7 +1459,10 @@ fn scan_skill_dir(
 
     let skill_file = dir.join("SKILL.md");
     if skill_file.is_file() {
-        if let Some(entry) = skill_entry_from_file(&skill_file) {
+        if let Some(entry) = skill_entry_from_file(&skill_file, source) {
+            if is_app_reserved_slash_name(&entry.name) {
+                return;
+            }
             let key = slash_entry_key(&entry);
             if seen_keys.insert(key) {
                 entries.push(entry);
@@ -1445,7 +1485,7 @@ fn scan_skill_dir(
     };
     children.sort_by(|a, b| a.file_name().cmp(&b.file_name()));
     for child in children {
-        scan_skill_dir(&child, depth + 1, entries, seen_keys);
+        scan_skill_dir(source, &child, depth + 1, entries, seen_keys);
         if entries.len() >= MAX_SLASH_ENTRIES {
             break;
         }
@@ -1461,7 +1501,7 @@ fn scan_slash_catalog_blocking() -> SlashCatalogSnapshot {
     }
 
     for root in skill_root_candidates() {
-        scan_skill_dir(&root, 0, &mut entries, &mut seen_keys);
+        scan_skill_dir("local", &root, 0, &mut entries, &mut seen_keys);
     }
 
     SlashCatalogSnapshot {
@@ -1705,6 +1745,22 @@ impl Drop for TempFileGuard {
     }
 }
 
+/// Strip the Windows extended-length (`\\?\`) prefix from a path before it is
+/// handed to `cmd.exe /C`. `cmd` cannot resolve `\\?\C:\...` verbatim paths and
+/// fails with "系统找不到指定的路径" (exit code 1). Validation already simplifies
+/// stored paths, but a `\\?\` form may still reach the launcher (e.g. a PATH
+/// scan or an externally supplied override), so we strip defensively here too.
+/// On non-Windows the path passes through unchanged.
+fn cmd_arg_path(binary: &str) -> String {
+    if let Some(rest) = binary.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{rest}");
+    }
+    if let Some(rest) = binary.strip_prefix(r"\\?\") {
+        return rest.to_string();
+    }
+    binary.to_string()
+}
+
 fn spawn_cli_command(binary: &str) -> Command {
     #[cfg(windows)]
     {
@@ -1715,7 +1771,7 @@ fn spawn_cli_command(binary: &str) -> Command {
             .map(|ext| ext.to_ascii_lowercase());
         if matches!(ext.as_deref(), Some("cmd" | "bat")) {
             let mut cmd = new_spawn_command("cmd");
-            cmd.arg("/C").arg(binary);
+            cmd.arg("/C").arg(cmd_arg_path(binary));
             return cmd;
         }
     }
@@ -1760,7 +1816,7 @@ fn build_launch_command(binary: &str, args: &[String], shell: &Option<ShellSpec>
     match kind {
         "cmd" => {
             let mut cmd = new_spawn_command("cmd");
-            cmd.arg("/C").arg(binary);
+            cmd.arg("/C").arg(cmd_arg_path(binary));
             for a in args {
                 cmd.arg(a);
             }
@@ -1793,7 +1849,7 @@ fn build_launch_command(binary: &str, args: &[String], shell: &Option<ShellSpec>
                         powershell_command(path, binary, args)
                     } else if lower.ends_with("cmd.exe") || lower.ends_with("cmd") {
                         let mut cmd = new_spawn_command(path);
-                        cmd.arg("/C").arg(binary);
+                        cmd.arg("/C").arg(cmd_arg_path(binary));
                         for a in args {
                             cmd.arg(a);
                         }
@@ -1890,6 +1946,9 @@ const PREVIEW_TEXT_LIMIT: u64 = 1_500_000;
 const PREVIEW_IMAGE_LIMIT: u64 = 12 * 1024 * 1024;
 const PREVIEW_BASENAME_SEARCH_LIMIT: usize = 20_000;
 const CLIPBOARD_IMAGE_LIMIT: usize = 32 * 1024 * 1024;
+const SESSION_CAPTURE_LIMIT: usize = 128 * 1024 * 1024;
+const CAPTURE_IMAGE_FETCH_LIMIT: usize = 32 * 1024 * 1024;
+const CAPTURE_IMAGE_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// Normalize path separators per-platform.
 ///
@@ -1937,6 +1996,64 @@ fn image_mime_for_path(path: &std::path::Path) -> Option<&'static str> {
         "avif" => Some("image/avif"),
         _ => None,
     }
+}
+
+fn image_mime_for_content_type(content_type: &str) -> Option<&'static str> {
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    match media_type.as_str() {
+        "image/png" => Some("image/png"),
+        "image/apng" => Some("image/apng"),
+        "image/jpeg" | "image/jpg" | "image/pjpeg" => Some("image/jpeg"),
+        "image/gif" => Some("image/gif"),
+        "image/webp" => Some("image/webp"),
+        "image/bmp" | "image/x-ms-bmp" => Some("image/bmp"),
+        "image/x-icon" | "image/vnd.microsoft.icon" => Some("image/x-icon"),
+        "image/svg+xml" => Some("image/svg+xml"),
+        "image/avif" => Some("image/avif"),
+        _ => None,
+    }
+}
+
+fn image_mime_for_bytes(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return Some("image/png");
+    }
+    if bytes.starts_with(b"\xff\xd8\xff") {
+        return Some("image/jpeg");
+    }
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.starts_with(b"BM") {
+        return Some("image/bmp");
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"avif" {
+        return Some("image/avif");
+    }
+    let prefix = String::from_utf8_lossy(&bytes[..bytes.len().min(256)]).to_ascii_lowercase();
+    if prefix.contains("<svg") {
+        return Some("image/svg+xml");
+    }
+    None
+}
+
+fn image_mime_for_url(url: &str) -> Option<&'static str> {
+    let path = url
+        .split('#')
+        .next()
+        .unwrap_or(url)
+        .split('?')
+        .next()
+        .unwrap_or(url);
+    image_mime_for_path(std::path::Path::new(path))
 }
 
 fn text_mime_for_path(path: &std::path::Path) -> &'static str {
@@ -2294,6 +2411,73 @@ fn write_unique_clipboard_image(dir: &Path, ext: &str, bytes: &[u8]) -> Result<P
     Err("创建粘贴图片失败：文件名冲突。".to_string())
 }
 
+fn session_capture_dir(cwd: Option<&str>) -> PathBuf {
+    let cwd = cwd.unwrap_or_default().trim();
+    if !cwd.is_empty() {
+        let root = PathBuf::from(cwd);
+        if root.is_dir() {
+            return root.join(".omc").join("session-captures");
+        }
+    }
+    std::env::temp_dir()
+        .join("freeultracode")
+        .join("session-captures")
+}
+
+fn safe_session_capture_stem(file_name: Option<&str>) -> String {
+    let raw = file_name
+        .and_then(|name| Path::new(name).file_stem())
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("session-capture");
+    let mut out = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+            out.push(ch);
+        } else if ch.is_whitespace() {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches(['-', '_', '.']).to_string();
+    if trimmed.is_empty() {
+        "session-capture".to_string()
+    } else {
+        trimmed.chars().take(96).collect()
+    }
+}
+
+fn write_unique_session_capture(
+    dir: &Path,
+    stem: &str,
+    ext: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("创建截图目录失败：{e}"))?;
+
+    for attempt in 0..128 {
+        let name = if attempt == 0 {
+            format!("{stem}.{ext}")
+        } else {
+            format!("{stem}-{attempt}.{ext}")
+        };
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(mut file) => {
+                file.write_all(bytes)
+                    .map_err(|e| format!("写入截图失败：{e}"))?;
+                return Ok(path);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("创建截图文件失败：{err}")),
+        }
+    }
+
+    Err("创建截图文件失败：文件名冲突。".to_string())
+}
+
 fn save_clipboard_image_blocking(
     bytes_base64: String,
     mime: String,
@@ -2333,6 +2517,106 @@ async fn save_clipboard_image(
     .map_err(|e| format!("保存粘贴图片任务失败: {e}"))?
 }
 
+fn save_session_capture_blocking(
+    bytes_base64: String,
+    mime: String,
+    file_name: Option<String>,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    use base64::Engine;
+
+    let ext = clipboard_image_extension(&mime, file_name.as_deref())?;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(bytes_base64.trim())
+        .map_err(|e| format!("解析截图失败：{e}"))?;
+
+    if bytes.is_empty() {
+        return Err("截图为空。".to_string());
+    }
+    if bytes.len() > SESSION_CAPTURE_LIMIT {
+        return Err("截图文件过大，最大支持 128MB。".to_string());
+    }
+
+    let dir = session_capture_dir(cwd.as_deref());
+    let stem = safe_session_capture_stem(file_name.as_deref());
+    let path = write_unique_session_capture(&dir, &stem, ext, &bytes)?;
+    Ok(path.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn save_session_capture(
+    bytes_base64: String,
+    mime: String,
+    file_name: Option<String>,
+    cwd: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_session_capture_blocking(bytes_base64, mime, file_name, cwd)
+    })
+    .await
+    .map_err(|e| format!("保存截图任务失败: {e}"))?
+}
+
+fn fetch_capture_image_data_url_blocking(url: String) -> Result<String, String> {
+    use base64::Engine;
+
+    let url = url.trim();
+    if !(url.starts_with("http://") || url.starts_with("https://")) {
+        return Err("截图图片地址必须是 http(s)。".to_string());
+    }
+
+    let response = ureq::get(url)
+        .timeout(CAPTURE_IMAGE_FETCH_TIMEOUT)
+        .set(
+            "Accept",
+            "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8",
+        )
+        .set("User-Agent", "FreeUltraCode")
+        .call()
+        .map_err(|err| match err {
+            ureq::Error::Status(code, _) => format!("截图图片下载失败：HTTP {code}。"),
+            other => format!("截图图片下载失败：{other}"),
+        })?;
+
+    if let Some(len) = response
+        .header("content-length")
+        .and_then(|value| value.trim().parse::<usize>().ok())
+    {
+        if len > CAPTURE_IMAGE_FETCH_LIMIT {
+            return Err("截图图片过大，最大支持 32MB。".to_string());
+        }
+    }
+
+    let content_type = response.header("content-type").unwrap_or("").to_string();
+    let mut reader = response.into_reader();
+    let mut bytes = Vec::new();
+    std::io::Read::by_ref(&mut reader)
+        .take((CAPTURE_IMAGE_FETCH_LIMIT as u64) + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| format!("读取截图图片失败：{e}"))?;
+
+    if bytes.is_empty() {
+        return Err("截图图片为空。".to_string());
+    }
+    if bytes.len() > CAPTURE_IMAGE_FETCH_LIMIT {
+        return Err("截图图片过大，最大支持 32MB。".to_string());
+    }
+
+    let mime = image_mime_for_content_type(&content_type)
+        .or_else(|| image_mime_for_bytes(&bytes))
+        .or_else(|| image_mime_for_url(url))
+        .ok_or_else(|| "截图图片响应不是支持的图片格式。".to_string())?;
+    let base64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+    Ok(format!("data:{mime};base64,{base64}"))
+}
+
+#[tauri::command]
+async fn fetch_capture_image_data_url(url: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || fetch_capture_image_data_url_blocking(url))
+        .await
+        .map_err(|e| format!("截图图片下载任务失败: {e}"))?
+}
+
 fn fallback_local_model_hardware() -> LocalModelHardware {
     LocalModelHardware {
         ram_gb: None,
@@ -2346,7 +2630,11 @@ fn fallback_local_model_hardware() -> LocalModelHardware {
 #[cfg(target_os = "macos")]
 fn local_model_hardware_unix(fallback: &LocalModelHardware) -> LocalModelHardware {
     fn sysctl_number(name: &str) -> Option<u64> {
-        let output = new_spawn_command("sysctl").arg("-n").arg(name).output().ok()?;
+        let output = new_spawn_command("sysctl")
+            .arg("-n")
+            .arg(name)
+            .output()
+            .ok()?;
         if !output.status.success() {
             return None;
         }
@@ -2825,24 +3113,23 @@ fn setup_local_model_blocking(model: String) -> Result<(), String> {
 
     #[cfg(target_os = "windows")]
     {
-    let script_path = std::env::temp_dir().join("freeultracode-setup-local-model.ps1");
-    std::fs::write(&script_path, LOCAL_MODEL_SETUP_PS1.as_bytes())
-        .map_err(|e| format!("写入本地模型安装脚本失败: {e}"))?;
+        let script_path = std::env::temp_dir().join("freeultracode-setup-local-model.ps1");
+        std::fs::write(&script_path, LOCAL_MODEL_SETUP_PS1.as_bytes())
+            .map_err(|e| format!("写入本地模型安装脚本失败: {e}"))?;
 
-    let mut cmd = new_spawn_command("powershell");
-    cmd
-        .arg("-NoProfile")
-        .arg("-ExecutionPolicy")
-        .arg("Bypass")
-        .arg("-File")
-        .arg(&script_path)
-        .arg("-Provider")
-        .arg("ollama")
-        .arg("-Model")
-        .arg(model)
-        .spawn()
-        .map_err(|e| format!("启动本地模型安装脚本失败: {e}"))?;
-    Ok(())
+        let mut cmd = new_spawn_command("powershell");
+        cmd.arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&script_path)
+            .arg("-Provider")
+            .arg("ollama")
+            .arg("-Model")
+            .arg(model)
+            .spawn()
+            .map_err(|e| format!("启动本地模型安装脚本失败: {e}"))?;
+        Ok(())
     }
 }
 
@@ -2966,7 +3253,20 @@ fn fuc_cli_candidates(cwd: Option<&str>) -> Vec<PathBuf> {
     out
 }
 
-fn locate_fuc_cli(cwd: Option<&str>) -> Result<PathBuf, String> {
+fn bundled_fuc_cli_path(app: &AppHandle) -> Option<PathBuf> {
+    app.path()
+        .resource_dir()
+        .ok()
+        .map(|dir| dir.join("cli").join("fuc.mjs"))
+        .filter(|path| path.is_file())
+}
+
+fn locate_fuc_cli(cwd: Option<&str>, app: &AppHandle) -> Result<PathBuf, String> {
+    if let Some(path) = bundled_fuc_cli_path(app) {
+        return normalize_node_entry_path(&path)
+            .map_err(|e| format!("无法解析内置 fuc CLI 路径 {}: {e}", path.display()));
+    }
+
     let candidates = fuc_cli_candidates(cwd);
     for path in &candidates {
         if path.is_file() {
@@ -2980,7 +3280,7 @@ fn locate_fuc_cli(cwd: Option<&str>) -> Result<PathBuf, String> {
         .collect::<Vec<_>>()
         .join("\n");
     Err(format!(
-        "未找到 app/cli/dist/fuc.mjs。请先在 app/ 下运行 npm run cli:build。\n已搜索:\n{searched}"
+        "未找到 app/cli/dist/fuc.mjs 或内置 cli/fuc.mjs。请先在 app/ 下运行 npm run cli:build。\n已搜索:\n{searched}"
     ))
 }
 
@@ -3017,7 +3317,11 @@ fn emit_ultracode_progress(app: &tauri::AppHandle, run_id: &str, stream: &str, t
     if text.trim().is_empty() {
         return;
     }
-    let prefix = if stream == "stderr" { "stderr" } else { "stdout" };
+    let prefix = if stream == "stderr" {
+        "stderr"
+    } else {
+        "stdout"
+    };
     let _ = app.emit(
         "ai-cli-progress",
         serde_json::json!({
@@ -3055,11 +3359,28 @@ async fn run_ultracode(
         }
 
         let cwd_trimmed = cwd.as_deref().map(str::trim).filter(|dir| !dir.is_empty());
-        let cli_path = locate_fuc_cli(cwd_trimmed)?;
+        let cli_path = locate_fuc_cli(cwd_trimmed, &app)?;
         let workdir = cwd_trimmed
             .map(PathBuf::from)
             .filter(|path| path.is_dir())
             .unwrap_or_else(|| default_ultracode_workdir(&cli_path));
+        let deep_research_workflow = bundled_deep_research_workflow_root(&app);
+        let task = if task.contains("执行 deep-research")
+            || task.contains("Run deep research")
+            || task.contains("/deep-research")
+        {
+            match &deep_research_workflow {
+                Some(root) => format!(
+                    "{task}\n\n内置 deep-research workflow 路径：{root}\n请优先读取并遵循该目录下 WORKFLOW.md 和 protocol/model-agnostic-deep-research.md；这是随 FreeUltraCode 发布的内置 workflow，不是用户电脑上的普通 skill，不要依赖用户工作区里是否存在 skills/ 目录。",
+                    root = root.to_string_lossy()
+                ),
+                None => format!(
+                    "{task}\n\n内置 deep-research workflow 路径：未找到 Tauri bundled workflow resource；请按内置 deep-research 协议摘要执行，并在最终报告中记录该资源缺口。"
+                ),
+            }
+        } else {
+            task
+        };
 
         let mut args = vec![
             cli_path.to_string_lossy().to_string(),
@@ -3130,6 +3451,13 @@ async fn run_ultracode(
         let mut cmd = new_spawn_command("node");
         cmd.args(&args)
             .current_dir(&workdir)
+            .env(
+                "FUC_BUILTIN_DEEP_RESEARCH_WORKFLOW_DIR",
+                deep_research_workflow
+                    .as_ref()
+                    .map(|path| path.to_string_lossy().to_string())
+                    .unwrap_or_default(),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -5081,6 +5409,8 @@ pub fn run() {
             open_external,
             preview_local_file,
             save_clipboard_image,
+            save_session_capture,
+            fetch_capture_image_data_url,
             history::history_root,
             history::history_read_json,
             history::history_write_json,

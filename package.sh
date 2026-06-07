@@ -110,9 +110,14 @@ choose_targets
 c_info "bundle targets: $BUNDLES"
 
 # ---- Node.js / npm (frontend is built by Tauri's beforeBuildCommand) ----
-command -v node >/dev/null 2>&1 || { c_err "Node.js 18+ not found: https://nodejs.org"; exit 1; }
+require_node() {
+  command -v node >/dev/null 2>&1 || { c_err "Node.js 20.19+ or 22.12+ not found: https://nodejs.org"; exit 1; }
+  node -e "const [maj,min]=process.versions.node.split('.').map(Number); process.exit((maj===20&&min>=19)||maj>22||(maj===22&&min>=12)?0:1)" >/dev/null 2>&1 \
+    || { c_err "Node.js $(node -v) is unsupported. Install Node.js 20.19+ or 22.12+."; exit 1; }
+  c_ok "Node.js $(node -v)"
+}
+require_node
 command -v npm  >/dev/null 2>&1 || { c_err "npm not found (ships with Node.js)"; exit 1; }
-c_ok "Node.js $(node -v)"
 c_ok "npm $(npm -v)"
 
 ensure_deps() {

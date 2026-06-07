@@ -195,6 +195,25 @@ export const FREE_CHANNELS: FreeChannel[] = [
     needsKey: true,
   },
   {
+    // Volcengine Ark (火山方舟) — ByteDance's model platform. OpenAI-compatible
+    // endpoint at /api/v3/chat/completions; modern Ark accepts the bare model
+    // id directly (e.g. deepseek-v3-250324) so no inference-endpoint (ep-xxxx)
+    // is required. Each model grants a free token quota after you enable it in
+    // the console. The intro video that prompted this channel demoed
+    // deepseek-r1-250120 here.
+    id: 'volcengine',
+    label: 'Volcengine Ark (火山方舟)',
+    transport: 'openai',
+    upstreamBaseUrl: 'https://ark.cn-beijing.volces.com/api/v3',
+    defaultModel: 'deepseek-v3-250324',
+    fallbackModels: ['deepseek-r1-250528', 'deepseek-r1-250120'],
+    credentialUrl:
+      'https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey',
+    local: false,
+    needsKey: true,
+    note: 'Enable the model in the Ark console (each gets a free token quota), then call it by its Model ID. Override the model to any Ark id (DeepSeek / Doubao / Kimi …).',
+  },
+  {
     id: 'mistral',
     label: 'Mistral',
     transport: 'openai',

@@ -11,7 +11,8 @@ echo ============================================================
 echo.
 
 REM ---- prerequisites ----
-where node >nul 2>nul || ( echo [X] Node.js not found: https://nodejs.org & pause & exit /b 1 )
+where node >nul 2>nul || ( echo [X] Node.js 20.19+ or 22.12+ not found: https://nodejs.org & pause & exit /b 1 )
+node -e "const [maj,min]=process.versions.node.split('.').map(Number); process.exit((maj===20&&min>=19)||maj>22||(maj===22&&min>=12)?0:1)" >nul 2>nul || ( for /f "delims=" %%v in ('node -v') do echo [X] Node.js %%v is unsupported. Install Node.js 20.19+ or 22.12+. & pause & exit /b 1 )
 where cargo >nul 2>nul || ( echo [X] Rust/cargo not found: https://rustup.rs & pause & exit /b 1 )
 for /f "delims=" %%v in ('node -v') do echo [OK] Node.js %%v
 for /f "delims=" %%v in ('cargo -V') do echo [OK] %%v

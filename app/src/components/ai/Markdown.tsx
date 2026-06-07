@@ -5,7 +5,10 @@ import {
   type ReactElement,
   type ReactNode,
 } from 'react';
-import ReactMarkdown, { type Components } from 'react-markdown';
+import ReactMarkdown, {
+  defaultUrlTransform,
+  type Components,
+} from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import remarkBreaks from 'remark-breaks';
 import remarkMath from 'remark-math';
@@ -15,6 +18,7 @@ import 'katex/dist/katex.min.css';
 import { HL_LANGUAGES, HL_ALIASES } from './lib/highlight';
 import { repairMarkdown } from './lib/repairMarkdown';
 import { normalizeMath } from './lib/normalizeMath';
+import { protectWindowsPaths } from './lib/protectWindowsPaths';
 import { scanFileRefs } from './lib/fileScan';
 import { parseToolLine } from './lib/toolLine';
 import CodeBlock from './CodeBlock';
@@ -24,6 +28,16 @@ import ToolLine from './ToolLine';
 import Callout from './Callout';
 import { detectCallout, stripCalloutMarker } from './lib/callout';
 import FileChip, { type OpenFileFn } from './FileChip';
+
+function markdownUrlTransform(url: string, key: string): string | null | undefined {
+  if (
+    key === 'src' &&
+    /^data:image\/(?:png|jpe?g|webp|gif);base64,/i.test(url)
+  ) {
+    return url;
+  }
+  return defaultUrlTransform(url);
+}
 
 /**
  * Renders one answer chunk of markdown with GFM (tables, strikethrough, task
@@ -52,7 +66,8 @@ function MarkdownImpl({
   onOpenFile?: OpenFileFn;
   cwd?: string;
 }) {
-  const src = streaming ? repairMarkdown(normalizeMath(text)) : normalizeMath(text);
+  const normalized = protectWindowsPaths(normalizeMath(text));
+  const src = streaming ? repairMarkdown(normalized) : normalized;
 
   // Recursively walk rendered children, replacing bare file references inside
   // plain-text leaves with clickable chips. Elements (e.g. <strong>, <code>,
@@ -188,6 +203,14 @@ function MarkdownImpl({
       }
       return <blockquote>{children}</blockquote>;
     },
+    img: ({ src, alt }) => (
+      <img
+        src={src}
+        alt={alt ?? ''}
+        loading="lazy"
+        className="ai-generated-image"
+      />
+    ),
   };
 
   return (
@@ -202,6 +225,7 @@ function MarkdownImpl({
           rehypeKatex,
         ]}
         components={components}
+        urlTransform={markdownUrlTransform}
       >
         {src}
       </ReactMarkdown>

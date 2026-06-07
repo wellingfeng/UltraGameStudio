@@ -18,6 +18,7 @@ import {
 import { isRunnable, topoOrderExec } from '../core/topo';
 import { runFailureMeta } from './failure';
 import { newSessionId } from './gateway';
+import { computeNodeHashes, validCachedNodeIds } from './node-hash';
 import { runSingleNode } from './run-node';
 import type { NodeRunResult, RunCallbacks, RunContext, RunResult } from './types';
 
@@ -289,6 +290,17 @@ export interface ExecuteWorkflowOptions {
   seedOutputs?: Record<string, string>;
   /** Run states already known (resume seed); used to mark nodes done. */
   seedRunState?: Record<string, IRRunStatus>;
+  /**
+   * Per-node content hashes from the run that produced `seedOutputs` (see
+   * {@link computeNodeHashes}). When present, a seeded output is reused ONLY if
+   * the node's CURRENT hash matches its seed hash — i.e. neither the node nor
+   * any upstream node was edited since. A node whose hash changed (and therefore
+   * every node downstream of it) drops its stale cache and re-runs. This makes
+   * "edit the graph, then continue" correct: the edited subgraph re-runs while
+   * the untouched prefix is reused. Absent ⇒ legacy behaviour (reuse every
+   * seeded output by node id, the pre-hash semantics).
+   */
+  seedNodeHashes?: Record<string, string>;
 }
 
 /**
@@ -313,7 +325,25 @@ export async function executeWorkflowDag(
     order.some((node) => node.id === options.resumeFromNodeId)
       ? options.resumeFromNodeId
       : null;
-  const results = new Map<string, string>(Object.entries(options.seedOutputs ?? {}));
+
+  // Content-addressed resume (cf. DeepSeek-Code-Whale's per-call resume cache):
+  // a seeded output is only trustworthy if the node's spec AND all of its
+  // upstream specs are byte-identical to the run that produced it. We compute
+  // this run's Merkle node hashes once and intersect with the seed hashes; any
+  // node whose hash changed (it or an ancestor was edited) is NOT reusable, so
+  // it and its downstream re-run with fresh inputs. With no seed hashes we fall
+  // back to the legacy "reuse every seeded output by id" behaviour.
+  const nodeHashes = computeNodeHashes(workflow);
+  const seedOutputs = options.seedOutputs ?? {};
+  const reusable = options.seedNodeHashes
+    ? validCachedNodeIds(nodeHashes, options.seedNodeHashes)
+    : null; // null ⇒ legacy: trust every seeded id
+  const isReusable = (nodeId: string): boolean =>
+    reusable ? reusable.has(nodeId) : true;
+
+  const results = new Map<string, string>(
+    Object.entries(seedOutputs).filter(([nodeId]) => isReusable(nodeId)),
+  );
   const deps = buildDependencyGraph(order, workflow);
   const seedRunState = options.seedRunState ?? {};
 
@@ -328,9 +358,12 @@ export async function executeWorkflowDag(
     : -1;
   const done = new Set<string>();
   order.forEach((node, i) => {
-    if (results.has(node.id) || seedRunState[node.id] === 'success') {
+    if (results.has(node.id)) {
+      // Output present AND hash-valid (results was already filtered above).
       done.add(node.id);
-    } else if (resumeIdx >= 0 && i < resumeIdx) {
+    } else if (seedRunState[node.id] === 'success' && isReusable(node.id)) {
+      done.add(node.id);
+    } else if (resumeIdx >= 0 && i < resumeIdx && isReusable(node.id)) {
       done.add(node.id);
     }
   });
@@ -431,5 +464,6 @@ export async function executeWorkflowDag(
     outputs,
     failedNodeId: failedNodeId ?? undefined,
     error: runError,
+    nodeHashes,
   };
 }

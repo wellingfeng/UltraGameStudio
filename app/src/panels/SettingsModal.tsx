@@ -9,6 +9,7 @@ import {
 import {
   Check,
   ChevronDown,
+  Copy,
   Cpu,
   DownloadCloud,
   Eye,
@@ -23,7 +24,9 @@ import {
   Palette,
   Plus,
   RefreshCw,
+  Search,
   Settings as SettingsIcon,
+  SlashSquare,
   SlidersHorizontal,
   Sparkles,
   Sun,
@@ -90,6 +93,12 @@ import {
   type LocalModelRuntimeStatus,
   validateShellPath,
 } from '@/lib/tauri';
+import {
+  PROJECT_COMMAND_NAMES,
+  buildSlashSuggestions,
+  isProjectCommandName,
+  type SlashSuggestion,
+} from '@/lib/slashCommands';
 import LocalModelSetupDialog from '@/components/LocalModelSetupDialog';
 import {
   APP_VERSION,
@@ -147,6 +156,18 @@ import {
   refreshProviderModels,
 } from '@/lib/modelLists';
 import {
+  IMAGE_PROVIDERS,
+  imageProviderBaseUrl,
+  imageProviderModel,
+  imageProviderReady,
+  loadImageGenerationSettings,
+  saveImageGenerationSettings,
+  type ImageGenerationSettings,
+  type ImageProviderDefinition,
+  type ImageProviderCategory,
+  type ImageProviderId,
+} from '@/lib/imageGeneration';
+import {
   listGatewayRunOptions,
   systemDefaultGatewaySelection,
   workflowDefaultGatewaySelection,
@@ -157,7 +178,9 @@ type SettingsTab =
   | 'general'
   | 'personalization'
   | 'models'
+  | 'imageGeneration'
   | 'consensus'
+  | 'commands'
   | 'shortcuts'
   | 'appearance'
   | 'about';
@@ -167,6 +190,8 @@ const tabs: { id: SettingsTab; labelKey: TranslationKey; Icon: LucideIcon }[] = 
   { id: 'general', labelKey: 'settings.tabs.general', Icon: SlidersHorizontal },
   { id: 'personalization', labelKey: 'settings.tabs.personalization', Icon: FileText },
   { id: 'models', labelKey: 'settings.tabs.models', Icon: Cpu },
+  { id: 'imageGeneration', labelKey: 'settings.tabs.imageGeneration', Icon: Sparkles },
+  { id: 'commands', labelKey: 'settings.tabs.commands', Icon: SlashSquare },
   { id: 'shortcuts', labelKey: 'settings.tabs.shortcuts', Icon: Keyboard },
   { id: 'appearance', labelKey: 'settings.tabs.appearance', Icon: Palette },
   { id: 'about', labelKey: 'settings.tabs.about', Icon: Info },
@@ -396,8 +421,12 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 />
               ) : tab === 'models' ? (
                 <ChannelsSettings locale={locale} cliRuntime={cliRuntime} />
+              ) : tab === 'imageGeneration' ? (
+                <ImageGenerationSettingsPanel locale={locale} />
               ) : tab === 'consensus' ? (
                 <ConsensusSettings locale={locale} />
+              ) : tab === 'commands' ? (
+                <CommandsSettings locale={locale} />
               ) : tab === 'shortcuts' ? (
                 <ShortcutsSettings locale={locale} />
               ) : tab === 'appearance' ? (
@@ -921,6 +950,11 @@ function SelectControl<T extends string>({
       >
         {icon && <span className="shrink-0 text-fg-faint">{icon}</span>}
         <span className="min-w-0 flex-1 truncate text-fg">{selected?.label}</span>
+        {selected?.hint && (
+          <span className="hidden shrink-0 font-mono text-[10px] text-fg-faint sm:inline">
+            {selected.hint}
+          </span>
+        )}
         <ChevronDown
           size={15}
           strokeWidth={2.1}
@@ -998,7 +1032,7 @@ const PROVIDER_ADAPTER_SECTIONS: ReadonlyArray<{
   { adapter: 'gemini', dotClassName: 'bg-sky-400' },
 ];
 
-type BadgeState = 'direct' | 'cli' | 'unavailable';
+type BadgeState = 'direct' | 'cli' | 'unavailable' | 'default';
 type ProviderDraft = Omit<Provider, 'id'>;
 type ProviderEditorMode = 'add' | 'edit';
 
@@ -2728,6 +2762,396 @@ function uniqueStringOptions(values: string[]): string[] {
   return out;
 }
 
+function ImageGenerationSettingsPanel({ locale }: { locale: Locale }) {
+  const [settings, setSettings] = useState<ImageGenerationSettings>(() =>
+    loadImageGenerationSettings(),
+  );
+  // Commercial and free-credit providers live in separate tabs so each
+  // category stays self-contained instead of stacking in one long list.
+  const [category, setCategory] = useState<ImageProviderCategory>('commercial');
+
+  const update = (patch: Partial<ImageGenerationSettings>) => {
+    const next = { ...settings, ...patch };
+    saveImageGenerationSettings(next);
+    setSettings(loadImageGenerationSettings());
+  };
+
+  const providerOptions = IMAGE_PROVIDERS.map((provider) => ({
+    id: provider.id,
+    label: provider.label,
+    hint: `${imageProviderCategoryLabel(provider.category, locale)} · ${imageProviderStatusLabel(
+      provider,
+      settings,
+      locale,
+    )}`,
+  }));
+  const activeProviders = IMAGE_PROVIDERS.filter(
+    (provider) => provider.category === category,
+  );
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-lg font-semibold text-fg">
+          {t(locale, 'settings.imageGeneration.title')}
+        </h3>
+        <p className="mt-1 text-xs leading-relaxed text-fg-faint">
+          {t(locale, 'settings.imageGeneration.description')}
+        </p>
+      </div>
+
+      <SettingRow
+        title={t(locale, 'settings.imageGeneration.enabledLabel')}
+        description={t(locale, 'settings.imageGeneration.enabledDesc')}
+      >
+        <SwitchControl
+          checked={settings.enabled}
+          onChange={(enabled) => update({ enabled })}
+        />
+      </SettingRow>
+
+      <SettingRow
+        title={t(locale, 'settings.imageGeneration.defaultProviderLabel')}
+        description={t(locale, 'settings.imageGeneration.defaultProviderDesc')}
+      >
+        <div className="w-full min-w-[14rem]">
+          <SelectControl
+            value={settings.preferredProviderId}
+            options={providerOptions}
+            onChange={(id) =>
+              update({ preferredProviderId: id as ImageProviderId })
+            }
+            icon={<Sparkles size={15} strokeWidth={2.1} />}
+          />
+        </div>
+      </SettingRow>
+
+      <div>
+        <div
+          role="tablist"
+          aria-orientation="horizontal"
+          className="inline-flex w-fit gap-1 rounded-lg border border-border-soft bg-bg p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+        >
+          {imageProviderCategoryOrder.map((item) => {
+            const active = category === item;
+            return (
+              <button
+                key={item}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setCategory(item)}
+                className={cn(
+                  'min-h-11 min-w-[7rem] rounded-md border px-5 py-2.5 text-sm font-semibold outline-none transition-[background-color,border-color,color,box-shadow] focus-visible:ring-1 focus-visible:ring-accent',
+                  active
+                    ? 'border-accent bg-accent text-bg shadow-[0_8px_18px_-14px_rgba(124,140,255,0.9)]'
+                    : 'border-transparent text-fg-faint hover:border-border-soft hover:bg-panel hover:text-fg',
+                )}
+              >
+                {t(locale, imageProviderCategoryTitleKey(item))}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <section role="tabpanel" className="rounded-lg border border-border bg-bg-alt p-4">
+        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1">
+            <h4 className="text-sm font-semibold text-fg">
+              {t(locale, imageProviderCategoryTitleKey(category))}
+            </h4>
+            <p className="text-xs leading-relaxed text-fg-faint">
+              {t(locale, imageProviderCategoryDescKey(category))}
+            </p>
+          </div>
+          <StatusBadge state="default" label={String(activeProviders.length)} />
+        </div>
+        <div className="space-y-2.5">
+          {activeProviders.map((provider) => (
+            <ImageProviderSettingsRow
+              key={provider.id}
+              provider={provider}
+              settings={settings}
+              locale={locale}
+              onChange={(next) => {
+                saveImageGenerationSettings(next);
+                setSettings(loadImageGenerationSettings());
+              }}
+            />
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+const imageProviderCategoryOrder: ImageProviderCategory[] = [
+  'commercial',
+  'free-credit',
+];
+
+function imageProviderCategoryTitleKey(
+  category: ImageProviderCategory,
+): TranslationKey {
+  return category === 'free-credit'
+    ? 'settings.imageGeneration.freeCreditProviders'
+    : 'settings.imageGeneration.commercialProviders';
+}
+
+function imageProviderCategoryDescKey(
+  category: ImageProviderCategory,
+): TranslationKey {
+  return category === 'free-credit'
+    ? 'settings.imageGeneration.freeCreditProvidersDesc'
+    : 'settings.imageGeneration.commercialProvidersDesc';
+}
+
+function imageProviderCategoryLabel(
+  category: ImageProviderCategory,
+  locale: Locale,
+): string {
+  return t(
+    locale,
+    category === 'free-credit'
+      ? 'settings.imageGeneration.categoryFreeCredit'
+      : 'settings.imageGeneration.categoryCommercial',
+  );
+}
+
+function imageProviderCategoryBadgeClass(category: ImageProviderCategory): string {
+  return category === 'free-credit'
+    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+    : 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+}
+
+function imageProviderStatusLabel(
+  provider: ImageProviderDefinition,
+  settings: ImageGenerationSettings,
+  locale: Locale,
+): string {
+  if (imageProviderReady(provider.id, settings)) {
+    return t(locale, 'settings.freeChannels.ready');
+  }
+  if (provider.local) return t(locale, 'settings.freeChannels.localNeedsSetup');
+  if (provider.needsKey) return t(locale, 'settings.freeChannels.needsKey');
+  return t(locale, 'settings.imageGeneration.noKeyRequired');
+}
+
+function ImageProviderSettingsRow({
+  provider,
+  settings,
+  locale,
+  onChange,
+}: {
+  provider: ImageProviderDefinition;
+  settings: ImageGenerationSettings;
+  locale: Locale;
+  onChange: (settings: ImageGenerationSettings) => void;
+}) {
+  const [showKey, setShowKey] = useState(false);
+  const keyValue = settings.providerKeys[provider.id] ?? '';
+  const accountId = settings.providerAccountIds[provider.id] ?? '';
+  const baseUrl = settings.providerBaseUrls[provider.id] ?? '';
+  const model = imageProviderModel(provider.id, settings);
+  const ready = imageProviderReady(provider.id, settings);
+  const KeyIcon = showKey ? EyeOff : Eye;
+
+  const patchProvider = (
+    patch: Partial<{
+      key: string;
+      accountId: string;
+      baseUrl: string;
+      model: string;
+    }>,
+  ) => {
+    const next: ImageGenerationSettings = {
+      ...settings,
+      providerKeys: { ...settings.providerKeys },
+      providerAccountIds: { ...settings.providerAccountIds },
+      providerBaseUrls: { ...settings.providerBaseUrls },
+      providerModels: { ...settings.providerModels },
+    };
+    if (patch.key !== undefined) {
+      const value = patch.key.trim();
+      if (value) next.providerKeys[provider.id] = value;
+      else delete next.providerKeys[provider.id];
+    }
+    if (patch.accountId !== undefined) {
+      const value = patch.accountId.trim();
+      if (value) next.providerAccountIds[provider.id] = value;
+      else delete next.providerAccountIds[provider.id];
+    }
+    if (patch.baseUrl !== undefined) {
+      const value = patch.baseUrl.trim();
+      if (value) next.providerBaseUrls[provider.id] = value;
+      else delete next.providerBaseUrls[provider.id];
+    }
+    if (patch.model !== undefined) {
+      const value = patch.model.trim();
+      if (value) next.providerModels[provider.id] = value;
+      else delete next.providerModels[provider.id];
+    }
+    onChange(next);
+  };
+
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-bg-alt p-4">
+      <div className="flex flex-wrap items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-semibold text-fg">{provider.label}</span>
+            <span
+              className={cn(
+                'inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium',
+                imageProviderCategoryBadgeClass(provider.category),
+              )}
+            >
+              {imageProviderCategoryLabel(provider.category, locale)}
+            </span>
+            <StatusBadge
+              state={ready ? 'direct' : 'unavailable'}
+              label={imageProviderStatusLabel(provider, settings, locale)}
+            />
+          </div>
+          <p className="mt-1 text-[11px] leading-relaxed text-fg-faint">
+            {provider.note}
+          </p>
+        </div>
+        {provider.credentialUrl && (
+          <button
+            type="button"
+            onClick={() => void openExternal(provider.credentialUrl as string)}
+            className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+          >
+            <ExternalLink size={13} strokeWidth={2.2} />
+            {provider.local
+              ? t(locale, 'dock.localModelDownload')
+              : t(locale, 'settings.freeChannels.getKey')}
+          </button>
+        )}
+      </div>
+
+      <div className="grid gap-3 md:grid-cols-2">
+        {provider.needsAccountId && (
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.imageGeneration.accountIdLabel')}
+            </span>
+            <input
+              type="text"
+              value={accountId}
+              onChange={(event) =>
+                patchProvider({ accountId: event.target.value })
+              }
+              placeholder="Cloudflare Account ID"
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+            />
+          </label>
+        )}
+
+        {provider.needsKey || provider.id === 'pollinations' || provider.id === 'ai-horde' ? (
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.models.apiKey')}
+            </span>
+            <div className="relative">
+              <input
+                type={showKey ? 'text' : 'password'}
+                value={keyValue}
+                onChange={(event) => patchProvider({ key: event.target.value })}
+                placeholder={
+                  provider.id === 'ai-horde'
+                    ? 'optional, anonymous if empty'
+                    : 'sk-...'
+                }
+                autoComplete="off"
+                spellCheck={false}
+                className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 pr-14 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+              />
+              <div className="absolute inset-y-0 right-1 flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => setShowKey((v) => !v)}
+                  title={t(
+                    locale,
+                    showKey ? 'settings.models.hideKey' : 'settings.models.showKey',
+                  )}
+                  className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-fg"
+                >
+                  <KeyIcon size={13} strokeWidth={2} />
+                </button>
+                {keyValue && (
+                  <button
+                    type="button"
+                    onClick={() => patchProvider({ key: '' })}
+                    title={t(locale, 'settings.models.clear')}
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                  >
+                    <Trash2 size={13} strokeWidth={2} />
+                  </button>
+                )}
+              </div>
+            </div>
+          </label>
+        ) : null}
+
+        <label className="block space-y-1">
+          <span className="text-[11px] font-medium text-fg-dim">
+            {t(locale, 'settings.freeChannels.modelLabel')}
+          </span>
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(9rem,13rem)]">
+            <input
+              type="text"
+              value={model}
+              onChange={(event) => patchProvider({ model: event.target.value })}
+              placeholder={provider.defaultModel}
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+            />
+            <select
+              value={provider.models.includes(model) ? model : ''}
+              onChange={(event) => {
+                if (event.target.value) {
+                  patchProvider({ model: event.target.value });
+                }
+              }}
+              className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+            >
+              <option value="">{t(locale, 'settings.models.selectModel')}</option>
+              {provider.models.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+          </div>
+        </label>
+
+        {provider.supportsBaseUrl && (
+          <label className="block space-y-1 md:col-span-2">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.models.baseUrl')}
+            </span>
+            <input
+              type="text"
+              value={baseUrl}
+              onChange={(event) => patchProvider({ baseUrl: event.target.value })}
+              placeholder={imageProviderBaseUrl(provider.id, settings) || provider.endpointPlaceholder}
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+            />
+          </label>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ReadonlyField({
   label,
   value,
@@ -2740,6 +3164,136 @@ function ReadonlyField({
       <span className="text-[11px] font-medium text-fg-dim">{label}</span>
       <div className="min-h-[31px] rounded border border-border bg-bg px-2 py-1.5 text-xs text-fg-dim">
         {value}
+      </div>
+    </div>
+  );
+}
+
+function CommandsSettings({ locale }: { locale: Locale }) {
+  const [query, setQuery] = useState('');
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  // Curated, project-specific commands only — the generic prompt shortcuts and
+  // backend-discovered CLI/skill commands that the inline `/` menu also offers
+  // are intentionally excluded here. buildSlashSuggestions gives us localized
+  // label/detail; we then keep just the FreeUltraCode allowlist.
+  const commands = useMemo(() => {
+    const order = new Map(
+      PROJECT_COMMAND_NAMES.map((name, index) => [name.toLowerCase(), index]),
+    );
+    return buildSlashSuggestions([], locale)
+      .filter((item) => isProjectCommandName(item.name))
+      .sort(
+        (a, b) =>
+          (order.get(a.name.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) -
+          (order.get(b.name.toLowerCase()) ?? Number.MAX_SAFE_INTEGER),
+      );
+  }, [locale]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return commands;
+    return commands.filter((item) => item.searchText.includes(q));
+  }, [commands, query]);
+
+  const copyName = (item: SlashSuggestion) => {
+    void navigator.clipboard?.writeText(item.name).then(
+      () => {
+        setCopiedId(item.id);
+        window.setTimeout(() => {
+          setCopiedId((current) => (current === item.id ? null : current));
+        }, 1500);
+      },
+      () => {},
+    );
+  };
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-lg font-semibold text-fg">
+          {t(locale, 'settings.commandsTitle')}
+        </h3>
+        <p className="mt-1 text-xs leading-relaxed text-fg-faint">
+          {t(locale, 'settings.commandsDescription')}
+        </p>
+      </div>
+
+      <div className="relative">
+        <Search
+          size={14}
+          className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg-faint"
+        />
+        <input
+          type="text"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder={t(locale, 'settings.commandsSearchPlaceholder')}
+          className="w-full rounded-lg border border-border bg-bg-alt py-2 pl-9 pr-3 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
+        />
+      </div>
+
+      {filtered.length === 0 ? (
+        <p className="rounded-lg border border-border bg-bg-alt px-4 py-6 text-center text-xs text-fg-faint">
+          {t(locale, 'settings.commandsEmpty')}
+        </p>
+      ) : (
+        <div className="space-y-2">
+          {filtered.map((item) => (
+            <CommandRow
+              key={item.id}
+              item={item}
+              locale={locale}
+              copied={copiedId === item.id}
+              onCopy={() => copyName(item)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CommandRow({
+  item,
+  locale,
+  copied,
+  onCopy,
+}: {
+  item: SlashSuggestion;
+  locale: Locale;
+  copied: boolean;
+  onCopy: () => void;
+}) {
+  return (
+    <div className="group grid gap-2 rounded-lg border border-border bg-bg-alt px-4 py-3 md:grid-cols-[minmax(10rem,16rem)_minmax(0,1fr)] md:items-start">
+      <div className="flex min-w-0 items-center gap-2">
+        <code className="truncate font-mono text-sm font-medium text-accent">
+          {item.name}
+        </code>
+        <button
+          type="button"
+          onClick={onCopy}
+          aria-label={t(locale, 'settings.commands.copy')}
+          title={t(locale, 'settings.commands.copy')}
+          className="ml-auto shrink-0 rounded p-1 text-fg-faint opacity-0 transition-opacity hover:text-fg focus:opacity-100 group-hover:opacity-100"
+        >
+          {copied ? (
+            <Check size={13} className="text-accent-2" />
+          ) : (
+            <Copy size={13} />
+          )}
+        </button>
+      </div>
+      <div className="min-w-0">
+        {item.label && item.label !== item.name && (
+          <div className="text-sm font-medium text-fg">{item.label}</div>
+        )}
+        {item.detail && (
+          <p className="mt-0.5 text-xs leading-relaxed text-fg-faint">
+            {item.detail}
+          </p>
+        )}
       </div>
     </div>
   );

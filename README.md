@@ -41,7 +41,7 @@
 </p>
 
 <p align="center">
-  <a href="app/package.json"><img src="https://img.shields.io/badge/version-0.2.4-2F6FED?style=flat-square&labelColor=161b22" alt="version 0.2.4"></a>
+  <a href="app/package.json"><img src="https://img.shields.io/badge/version-0.2.8-2F6FED?style=flat-square&labelColor=161b22" alt="version 0.2.8"></a>
   <a href="app/src-tauri/tauri.conf.json"><img src="https://img.shields.io/badge/Tauri-2.11-24C8DB?style=flat-square&labelColor=161b22&logo=tauri&logoColor=white" alt="Tauri 2.11"></a>
   <a href="app/package.json"><img src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&labelColor=161b22&logo=react&logoColor=white" alt="React 18"></a>
   <a href="app/package.json"><img src="https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square&labelColor=161b22&logo=typescript&logoColor=white" alt="TypeScript 5.6"></a>
@@ -53,6 +53,11 @@
 <p align="center">
   <strong>Free channel routing</strong><br>
   <img src="app/doc/images/hero-free-channels.png" alt="FreeUltraCode free channel routing screenshot" width="960">
+</p>
+
+<p align="center">
+  <strong>Image generation and coding in one session</strong><br>
+  <img src="app/doc/images/生图/session-2026-06-07-2209.png" alt="FreeUltraCode switches from image generation to coding in one chat session" width="720">
 </p>
 
 > [!IMPORTANT]
@@ -76,6 +81,12 @@ Coding agents are useful, but premium model quota can disappear quickly. FreeUlt
 - Attach file paths or drag files into the composer.
 - Review streamed assistant output, command logs, file references, and generated summaries in one chat surface.
 - Continue with follow-up requests in the same session.
+
+### Image Generation + Coding
+
+- Use an image-generation model and a programming model inside the same local conversation.
+- Enter image mode when you need visual assets, icons, or design references, then switch back to the coding model to apply those assets to the app.
+- Keep the generated image, implementation request, command log, and final code changes in one session history.
 
 ### Free-Model Routing
 

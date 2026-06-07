@@ -273,6 +273,14 @@ export interface IRRunSnapshot {
    * right-hand panel. Absent for ordinary workflows. Ignored by emit/parse.
    */
   taskLedger?: TaskLedger;
+  /**
+   * Per-node content hashes (runtime/node-hash.ts `computeNodeHashes`) captured
+   * at the end of this run. On a later "continue", a seeded output is reused only
+   * if the node's current hash still matches the one recorded here — so editing
+   * the graph re-runs exactly the affected subgraph instead of silently reusing a
+   * stale cached result. Ignored by emit/parse; best-effort persistence.
+   */
+  nodeHashes?: Record<string, string>;
   updatedAt?: number;
 }
 

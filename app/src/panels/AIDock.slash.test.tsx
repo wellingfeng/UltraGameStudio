@@ -9,6 +9,24 @@ import { useStore } from '@/store/useStore';
 const slashCatalogMock = vi.hoisted(() => ({
   entries: [
     {
+      id: 'command:app:/deep-research',
+      kind: 'command',
+      name: '/deep-research',
+      label: { 'zh-CN': '深度调研', 'en-US': 'Deep Research' },
+      detail: {
+        'zh-CN': '用 /ultracode 跑多源核验研究',
+        'en-US': 'Run source-grounded research through /ultracode',
+      },
+      insertText: {
+        'zh-CN':
+          '执行 deep-research：使用随 FreeUltraCode 一起发布的内置 workflow 协议 workflows/deep-research/WORKFLOW.md 和 protocol/model-agnostic-deep-research.md。',
+        'en-US':
+          'Run deep research using the built-in FreeUltraCode workflow protocol workflows/deep-research/WORKFLOW.md and protocol/model-agnostic-deep-research.md.',
+      },
+      source: 'app',
+      sourceAdapter: 'app',
+    },
+    {
       id: 'command:app:/review',
       kind: 'command',
       name: '/review',
@@ -192,6 +210,183 @@ afterEach(() => {
 });
 
 describe('AIDock slash suggestions', () => {
+  it('keeps app-only commands like /image-mode-start when a backend catalog is present', async () => {
+    resetStore();
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '/image-mode');
+      });
+
+      const image = Array.from(
+        view.container.querySelectorAll('[role="option"]'),
+      ).find((option) => option.textContent?.includes('/image-mode-start'));
+      expect(image).toBeInstanceOf(HTMLElement);
+
+      await act(async () => {
+        image?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+
+      expect(input.value).toBe('/image-mode-start ');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('toggles sticky image mode via /image-mode-start and /image-mode-end', async () => {
+    resetStore();
+    const generateImagePrompt = vi.fn();
+    const sendPrompt = vi.fn();
+    useStore.setState({ generateImagePrompt, sendPrompt });
+    const view = await renderDock();
+
+    const submitEnter = (input: HTMLTextAreaElement) =>
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+
+    try {
+      const input = textarea(view.container);
+
+      // Enter image mode — no message is sent, the composer flag flips.
+      await act(async () => {
+        typeTextarea(input, '/image-mode-start');
+        submitEnter(input);
+      });
+      expect(useStore.getState().composer.imageMode).toBe(true);
+      expect(generateImagePrompt).not.toHaveBeenCalled();
+      expect(sendPrompt).not.toHaveBeenCalled();
+      // A system note announcing image mode lands in the message stream.
+      expect(
+        useStore
+          .getState()
+          .messages.some(
+            (m) => m.role === 'system' && m.text.includes('已进入生图模式'),
+          ),
+      ).toBe(true);
+
+      // Bare text in image mode routes to image generation, not AI editing.
+      await act(async () => {
+        typeTextarea(input, '一只柴犬');
+        submitEnter(input);
+      });
+      expect(generateImagePrompt).toHaveBeenCalledWith('一只柴犬');
+      expect(sendPrompt).not.toHaveBeenCalled();
+
+      // Explicit slash commands still win inside image mode.
+      await act(async () => {
+        typeTextarea(input, '/review 看看这段代码');
+        submitEnter(input);
+      });
+      expect(sendPrompt).toHaveBeenCalledTimes(1);
+
+      // Leaving image mode restores AI-editing routing for bare text.
+      await act(async () => {
+        typeTextarea(input, '/image-mode-end');
+        submitEnter(input);
+      });
+      expect(useStore.getState().composer.imageMode).toBe(false);
+      // Exiting image mode is announced in the stream too.
+      expect(
+        useStore
+          .getState()
+          .messages.some(
+            (m) => m.role === 'system' && m.text.includes('已退出生图模式'),
+          ),
+      ).toBe(true);
+
+      await act(async () => {
+        typeTextarea(input, '加一个登录节点');
+        submitEnter(input);
+      });
+      expect(sendPrompt).toHaveBeenCalledWith(expect.stringContaining('加一个登录节点'));
+      expect(generateImagePrompt).toHaveBeenCalledTimes(1);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('enters image mode and generates when text follows /image-mode-start', async () => {
+    resetStore();
+    const generateImagePrompt = vi.fn();
+    const sendPrompt = vi.fn();
+    useStore.setState({ generateImagePrompt, sendPrompt });
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+
+      // Picking the command from the menu and typing a prompt right after it
+      // must still enter image mode AND generate — not fall through to AI editing.
+      await act(async () => {
+        typeTextarea(input, '/image-mode-start 一张赛博朋克海报');
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Enter',
+            ctrlKey: true,
+            bubbles: true,
+          }),
+        );
+      });
+
+      expect(useStore.getState().composer.imageMode).toBe(true);
+      expect(generateImagePrompt).toHaveBeenCalledWith('一张赛博朋克海报');
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(input.value).toBe('');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('switches the bottom channel/model selectors to image providers in image mode', async () => {
+    resetStore();
+    useStore.setState({ composer: { ...defaultComposer, imageMode: true } });
+    const view = await renderDock();
+
+    try {
+      // The channel selector trigger should show an image provider, not a
+      // coding adapter/free channel.
+      const channelTrigger = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>('button[title]'),
+      ).find((btn) => btn.getAttribute('title') === '渠道');
+      expect(channelTrigger).toBeInstanceOf(HTMLButtonElement);
+
+      await act(async () => {
+        channelTrigger?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+
+      // Image provider labels (e.g. 硅基流动) appear; coding channels do not.
+      const menuText =
+        channelTrigger?.parentElement?.querySelector('[role="listbox"]')
+          ?.textContent ?? '';
+      expect(menuText).toContain('硅基流动');
+
+      // Selecting an image provider writes the image settings store, leaving the
+      // coding runSelection untouched.
+      const volcengine = Array.from(
+        view.container.querySelectorAll<HTMLElement>('[role="option"]'),
+      ).find((opt) => opt.textContent?.includes('火山方舟'));
+      expect(volcengine).toBeInstanceOf(HTMLElement);
+      await act(async () => {
+        volcengine?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+
+      const saved = JSON.parse(
+        window.localStorage.getItem('freeultracode.imageGeneration.v1') ?? '{}',
+      );
+      expect(saved.preferredProviderId).toBe('volcengine-seedream');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   it('shows command suggestions after slash and inserts only the slash token', async () => {
     resetStore();
     const view = await renderDock();
@@ -367,6 +562,40 @@ describe('AIDock slash suggestions', () => {
       });
 
       expect(runUltracodePrompt).toHaveBeenCalledWith('完成 100 题');
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(input.value).toBe('');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('routes submitted /deep-research commands through ultracode', async () => {
+    resetStore();
+    const sendPrompt = vi.fn();
+    const runUltracodePrompt = vi.fn();
+    useStore.setState({ sendPrompt, runUltracodePrompt });
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '/deep-research 调研 Claude Code deep research');
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Enter',
+            ctrlKey: true,
+            bubbles: true,
+          }),
+        );
+      });
+
+      expect(runUltracodePrompt).toHaveBeenCalledWith(
+        expect.stringContaining('执行 deep-research'),
+      );
+      expect(runUltracodePrompt).toHaveBeenCalledWith(
+        expect.stringContaining('研究问题：\n调研 Claude Code deep research'),
+      );
       expect(sendPrompt).not.toHaveBeenCalled();
       expect(input.value).toBe('');
     } finally {

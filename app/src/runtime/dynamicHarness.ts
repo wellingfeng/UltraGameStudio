@@ -20,7 +20,15 @@ export const DYNAMIC_HARNESS_SCHEMA =
   workerGroups: [{ id: '', title: '', focus: '', deliverable: '', acceptance: '', evidenceRequired: '' }],
   acceptanceRubric: [],
   acceptance: { voters: 2, strategy: 'adversarial' },
+  objectiveChecks: [{ kind: 'file-exists', path: '', contains: '', command: '', description: '' }],
   stopCondition: ''
+}`;
+
+export const DYNAMIC_PLAN_CRITIQUE_SCHEMA =
+  `{
+  ok: false,
+  issues: [{ field: '', severity: 'P1', problem: '', fix: '' }],
+  revisedSpec: ${DYNAMIC_HARNESS_SCHEMA}
 }`;
 
 export const DYNAMIC_TASK_LEDGER_SCHEMA =
@@ -58,6 +66,7 @@ export const DYNAMIC_VERDICT_SCHEMA =
 }`;
 
 export const PLANNER_NODE_ID = 'n_plan';
+export const PLAN_CRITIC_NODE_ID = 'n_plan_critic';
 export const LEDGER_NODE_ID = 'n_ledger';
 export const WORKERS_NODE_ID = 'n_workers';
 export const GATE_NODE_ID = 'n_gate';
@@ -116,6 +125,28 @@ export interface DynamicAcceptanceConfig {
   strategy: ConsensusStrategy;
 }
 
+/**
+ * A machine-runnable objective check the planner emits so acceptance does not
+ * rest solely on the model's self-verdict. Three kinds, ordered by safety:
+ *  - `file-exists`  — assert a path exists (read-only, always auto-run).
+ *  - `file-contains`— assert a file exists AND contains `contains` (read-only,
+ *    always auto-run). Doubles as deterministic evidence verification: a worker
+ *    that claims it wrote X can be checked against the filesystem for free.
+ *  - `command`      — run a shell command and assert exit 0. This executes
+ *    MODEL-GENERATED shell, so it is NOT auto-run by default; it only runs when
+ *    the user opts in with `--auto-verify`. Otherwise it is surfaced as a
+ *    suggested manual check in the report.
+ */
+export type DynamicObjectiveCheckKind = 'file-exists' | 'file-contains' | 'command';
+
+export interface DynamicObjectiveCheck {
+  kind: DynamicObjectiveCheckKind;
+  path?: string;
+  contains?: string;
+  command?: string;
+  description?: string;
+}
+
 export interface DynamicHarnessSpec {
   objective: string;
   nonGoals: string[];
@@ -129,6 +160,7 @@ export interface DynamicHarnessSpec {
   workerGroups: DynamicWorkerGroup[];
   acceptanceRubric: string[];
   acceptance?: DynamicAcceptanceConfig;
+  objectiveChecks?: DynamicObjectiveCheck[];
   stopCondition: string;
 }
 
@@ -184,6 +216,7 @@ export function buildDynamicPlannerGraph(request: string): IRGraph {
       gateway: { defaults: { adapter: 'claude-code', modelClass: 'sonnet' } },
       schemaDefs: {
         DYNAMIC_HARNESS: DYNAMIC_HARNESS_SCHEMA,
+        DYNAMIC_PLAN_CRITIQUE: DYNAMIC_PLAN_CRITIQUE_SCHEMA,
       },
     },
     nodes: [
@@ -198,6 +231,20 @@ export function buildDynamicPlannerGraph(request: string): IRGraph {
           prompt: dynamicPlannerPrompt(request),
         },
       },
+      {
+        id: PLAN_CRITIC_NODE_ID,
+        type: 'agent',
+        label: '规格复审',
+        params: {
+          // Escalate the critic above the planner: a stronger model auditing a
+          // cheaper planner's spec is the highest-ROI accuracy lever, because
+          // every downstream node inherits this spec's success criteria and
+          // scope. Reads the planner's full output (no truncation).
+          model: 'opus',
+          schema: 'DYNAMIC_PLAN_CRITIQUE',
+          prompt: planCriticPrompt(request),
+        },
+      },
       { id: 'n_end', type: 'end', label: 'End', params: {} },
     ],
     edges: [
@@ -208,8 +255,20 @@ export function buildDynamicPlannerGraph(request: string): IRGraph {
         kind: EXEC,
       },
       {
-        id: 'e_plan_end',
+        id: 'e_plan_critic',
         from: { node: PLANNER_NODE_ID, port: 'exec_out' },
+        to: { node: PLAN_CRITIC_NODE_ID, port: 'exec_in' },
+        kind: EXEC,
+      },
+      {
+        id: 'd_plan_critic',
+        from: { node: PLANNER_NODE_ID, port: 'data_out' },
+        to: { node: PLAN_CRITIC_NODE_ID, port: 'data_in' },
+        kind: DATA,
+      },
+      {
+        id: 'e_critic_end',
+        from: { node: PLAN_CRITIC_NODE_ID, port: 'exec_out' },
         to: { node: 'n_end', port: 'exec_in' },
         kind: EXEC,
       },
@@ -302,8 +361,13 @@ function repairModelForRound(round: number): string | undefined {
  */
 type MidStageKind = 'synthesize' | 'filter';
 
-function midStageKind(spec: DynamicHarnessSpec): MidStageKind | null {
-  if (spec.workerGroups.length < 2) return null;
+/**
+ * Pure strategy → mid-stage kind mapping, with NO structural guard. Both the
+ * worker-group path and the plan path consult this so a declared strategy maps
+ * to the same mid-stage everywhere. Callers apply their own applicability guard
+ * (worker path: ≥2 worker groups; plan path: see {@link planMidStageApplies}).
+ */
+function midStageStrategy(spec: DynamicHarnessSpec): MidStageKind | null {
   if (spec.strategies.includes('generate-and-filter') || spec.strategies.includes('tournament')) {
     return 'filter';
   }
@@ -311,15 +375,74 @@ function midStageKind(spec: DynamicHarnessSpec): MidStageKind | null {
   return null;
 }
 
+/** Worker-group-path mid-stage: only meaningful when ≥2 groups produce candidates. */
+function midStageKind(spec: DynamicHarnessSpec): MidStageKind | null {
+  if (spec.workerGroups.length < 2) return null;
+  return midStageStrategy(spec);
+}
+
+/**
+ * Plan-path mid-stage applicability. A synthesize/filter stage only earns its
+ * place when there are MULTIPLE candidate outputs to merge or pick between:
+ * either ≥2 terminal plan nodes feeding the gate, or a single terminal `parallel`
+ * step that itself fans out into ≥2 branches. A lone linear pipeline has nothing
+ * to merge, so the stage is skipped (no wasted agent call).
+ */
+function planMidStageApplies(spec: DynamicHarnessSpec, plan: DynamicPlanStep[]): boolean {
+  if (!midStageStrategy(spec)) return false;
+  const terminals = planTerminalStepIds(plan);
+  if (terminals.length >= 2) return true;
+  if (terminals.length === 1) {
+    const step = plan.find((s) => s.id === terminals[0]);
+    return !!step && step.kind === 'parallel' && (step.branches?.length ?? 0) >= 2;
+  }
+  return false;
+}
+
+/**
+ * Step ids that nothing else depends on (the plan's leaves), mirroring the
+ * dependency logic in {@link buildDynamicPlanHarnessGraph}: a step with an
+ * explicit (array) `dependsOn` uses those (filtered to existing ids); otherwise
+ * it implicitly depends on its predecessor. Kept id-level and round-independent
+ * so {@link estimateHarnessCalls} can reason about the mid-stage without building
+ * the graph.
+ */
+function planTerminalStepIds(plan: DynamicPlanStep[]): string[] {
+  const ids = plan.map((s) => s.id);
+  const idSet = new Set(ids);
+  const hasDependent = new Set<string>();
+  for (let i = 0; i < plan.length; i += 1) {
+    const step = plan[i];
+    const deps = Array.isArray(step.dependsOn)
+      ? step.dependsOn.filter((d) => idSet.has(d))
+      : i > 0
+        ? [plan[i - 1].id]
+        : [];
+    for (const d of deps) hasDependent.add(d);
+  }
+  return ids.filter((id) => !hasDependent.has(id));
+}
+
+/** Leaf agent-call cost of a mid-stage: filter = consensus(2 voters)+synthesis; synthesize = 1 agent. */
+function midStageLeafCalls(kind: MidStageKind): number {
+  return kind === 'filter' ? 3 : 1;
+}
+
 function midStageNodeId(round: number): string {
   return round === 1 ? 'n_synth' : `n_synth_r${round}`;
 }
 
-function midStageNode(spec: DynamicHarnessSpec, kind: MidStageKind, round: number): IRNode {
+/** Plan-path mid-stage id, namespaced apart from the worker-path `n_synth`. */
+function planMidStageNodeId(round: number): string {
+  return round === 1 ? 'n_plan_synth' : `n_plan_synth_r${round}`;
+}
+
+function midStageNode(spec: DynamicHarnessSpec, kind: MidStageKind, round: number, id?: string): IRNode {
+  const nodeId = id ?? midStageNodeId(round);
   const roundLabel = round > 1 ? ` · 返工 ${round}` : '';
   if (kind === 'filter') {
     return {
-      id: midStageNodeId(round),
+      id: nodeId,
       type: 'consensus',
       label: `候选筛选${roundLabel}`,
       params: {
@@ -334,7 +457,7 @@ function midStageNode(spec: DynamicHarnessSpec, kind: MidStageKind, round: numbe
     };
   }
   return {
-    id: midStageNodeId(round),
+    id: nodeId,
     type: 'agent',
     label: `综合${roundLabel}`,
     params: {
@@ -541,7 +664,9 @@ function buildDynamicPlanHarnessGraph(spec: DynamicHarnessSpec, rounds: number):
 
   const allPlanNodeIds: string[] = [];
   const allGateIds: string[] = [];
+  const allMidIds: string[] = [];
   const plan = spec.plan ?? [];
+  const mid = planMidStageApplies(spec, plan) ? midStageStrategy(spec) : null;
   let previousGateId: string | null = null;
 
   for (let round = 1; round <= rounds; round += 1) {
@@ -595,7 +720,27 @@ function buildDynamicPlanHarnessGraph(spec: DynamicHarnessSpec, rounds: number):
 
     const planNodeIds = plan.map((step) => stepNodeIds.get(step.id)!).filter(Boolean);
     const terminalPlanNodeIds = planNodeIds.filter((nodeId) => !outgoingPlanDeps.has(nodeId));
-    const gateInputs = terminalPlanNodeIds.length > 0 ? terminalPlanNodeIds : [roundAnchor];
+
+    // Strategy → mid-stage (Feature: make fan-out-and-synthesize / generate-and-filter /
+    // tournament actually change the DAG on the PLAN path, not just the legacy worker
+    // path). When the plan fans out into multiple candidate outputs, insert a single
+    // synthesize/filter node that merges or picks the best before the acceptance gate
+    // sees it — the same shape the worker path already uses.
+    let gateInputs = terminalPlanNodeIds.length > 0 ? terminalPlanNodeIds : [roundAnchor];
+    let roundMidId: string | null = null;
+    if (mid && terminalPlanNodeIds.length > 0) {
+      const midId = planMidStageNodeId(round);
+      allMidIds.push(midId);
+      roundMidId = midId;
+      nodes.push(midStageNode(spec, mid, round, midId));
+      for (const input of terminalPlanNodeIds) {
+        addExec(input, midId);
+        addData(input, midId);
+      }
+      addData(LEDGER_NODE_ID, midId);
+      gateInputs = [midId];
+    }
+
     const gateId = gateRoundNodeId(round, rounds);
     allGateIds.push(gateId);
     nodes.push({
@@ -619,6 +764,9 @@ function buildDynamicPlanHarnessGraph(spec: DynamicHarnessSpec, rounds: number):
     for (const input of gateInputs) addExec(input, gateId);
     addData(LEDGER_NODE_ID, gateId);
     if (previousGateId) addData(previousGateId, gateId);
+    // The gate evaluates the merged/filtered artifact when a mid-stage ran;
+    // otherwise it sees the plan nodes directly.
+    if (roundMidId) addData(roundMidId, gateId);
     for (const nodeId of planNodeIds) addData(nodeId, gateId);
     previousGateId = gateId;
   }
@@ -644,6 +792,9 @@ function buildDynamicPlanHarnessGraph(spec: DynamicHarnessSpec, rounds: number):
   addData(LEDGER_NODE_ID, REPORT_NODE_ID);
   for (const nodeId of allPlanNodeIds) {
     addData(nodeId, REPORT_NODE_ID);
+  }
+  for (const midId of allMidIds) {
+    addData(midId, REPORT_NODE_ID);
   }
   for (const gateId of allGateIds) addData(gateId, REPORT_NODE_ID);
 
@@ -796,6 +947,66 @@ export function parseDynamicHarnessSpecResult(
   return { spec: normalizeHarnessSpec(extracted.value, request), usedFallback: false };
 }
 
+export interface DynamicPlanCritique {
+  ok: boolean;
+  issues: { field: string; severity: string; problem: string; fix: string }[];
+}
+
+/**
+ * Resolve the harness spec from the planner + plan-critic outputs. The critic's
+ * `revisedSpec` is authoritative when present (it audited and repaired the
+ * planner's spec); we fall back to the raw planner spec, then to the
+ * keyword-inferred default. `usedFallback` is true only when NEITHER the critic
+ * nor the planner produced a usable spec. `critiqueApplied` reports whether the
+ * critic's revision was the source, and `critique` carries the issues it found
+ * (surfaced as a run event so a silently-corrected plan isn't invisible).
+ */
+export function resolvePlannedSpec(
+  plannerText: string | undefined,
+  critiqueText: string | undefined,
+  request: string,
+): {
+  spec: DynamicHarnessSpec;
+  usedFallback: boolean;
+  critiqueApplied: boolean;
+  critique: DynamicPlanCritique | null;
+} {
+  const critiqueExtract = critiqueText ? extractJson(critiqueText) : null;
+  const critiqueValue = critiqueExtract && isRecord(critiqueExtract.value) ? critiqueExtract.value : null;
+  const critique = critiqueValue ? parsePlanCritique(critiqueValue) : null;
+
+  // The critic's revisedSpec is authoritative when it is a usable object.
+  if (critiqueValue && isRecord(critiqueValue.revisedSpec)) {
+    return {
+      spec: normalizeHarnessSpec(critiqueValue.revisedSpec, request),
+      usedFallback: false,
+      critiqueApplied: true,
+      critique,
+    };
+  }
+
+  // No usable revision → fall back to the raw planner spec.
+  const planner = parseDynamicHarnessSpecResult(plannerText, request);
+  return {
+    spec: planner.spec,
+    usedFallback: planner.usedFallback,
+    critiqueApplied: false,
+    critique,
+  };
+}
+
+function parsePlanCritique(value: Record<string, unknown>): DynamicPlanCritique {
+  return {
+    ok: value.ok === true,
+    issues: arrayOfRecords(value.issues).map((issue) => ({
+      field: stringValue(issue.field, ''),
+      severity: stringValue(issue.severity, 'P2'),
+      problem: stringValue(issue.problem, ''),
+      fix: stringValue(issue.fix, ''),
+    })),
+  };
+}
+
 export function extractHarnessArtifacts(outputs: Record<string, string>): DynamicHarnessArtifacts {
   return {
     ledger: parseLedger(outputs[LEDGER_NODE_ID]),
@@ -946,15 +1157,56 @@ function dynamicPlannerPrompt(request: string): string {
     '不要让用户选择模式；你要根据任务风险和形态自己选择。',
     '优先生成 plan：1 到 6 个会真实执行的动态步骤，每个步骤 kind 只能是 agent、parallel、pipeline、consensus。',
     'agent 用于单一明确任务；parallel 用于互不依赖的 fan-out；pipeline 用于前后依赖的连续加工；consensus 只用于中间候选/核验，不要替代最终验收门。',
+    'dependsOn 语义必须准确：省略 dependsOn 表示默认依赖上一个步骤；dependsOn: [] 表示该步骤可从 ledger 后并行启动；任何综合、核验、定稿、报告、落盘步骤都必须显式 dependsOn 它需要读取的上游步骤，不能写成 []。',
+    '对 deep-research、产品调研、技术路线、架构建议这类任务，默认 plan 形状应为 scope → parallel source/context research → synthesis/recommendations → adversarial verification → final decision brief/report，并用 dependsOn 串起来。',
     'pipeline 默认是单条链（stages 顺序加工同一份输入）。如果你能在创作期就把要处理的对象逐一列举出来（例如多个文件、多个模块、多条记录），把 items 写成一个 JSON 数组字符串，例如 items: "[\\"src/a.ts\\",\\"src/b.ts\\"]"；这样每个条目会各自独立跑完所有 stage 并发执行（适合逐文件迁移/逐项审计）。无法在创作期列举的运行期动态清单不要硬塞，改用单条链或 parallel。',
     'plan 中每个步骤/分支/阶段都要写 title、prompt/focus、deliverable、acceptance、evidenceRequired；不要预声明不会运行的阶段。',
     '最终任务账本、验收门和报告由 harness 自动补上，plan 只描述中间执行体。',
     'workerGroups 必须是 2 到 5 个可并行或半独立的任务组，每组都要有 deliverable、acceptance、evidenceRequired。',
     'acceptance 按任务风险给出验收门强度：低风险 voters=2 strategy=adversarial；高风险（安全、事实核查、不可逆操作）voters 给 3 到 5，strategy 用 adversarial 或 multi-lens。',
-    'successCriteria 要可逐条核验——验收门会强制对每一条打勾，任一条不满足都不通过。',
+    'successCriteria 要可逐条核验——验收门会强制对每一条打勾，任一条不满足都不通过。每条标准都要写成可观测、可判定的样子（含明确对象/动词/可检查信号），避免“质量好”“符合预期”这类无法核验的措辞。',
+    '如果任务是产品/技术路线调研，successCriteria 必须验收决策价值，而不只是报告格式：至少包含 Top 3/5 opportunities、明确优先级、MVP/原型切入点、当前项目触点、本阶段不做什么、风险与验证信号。',
+    'objectiveChecks：尽量给出不依赖模型自评的客观检查，作为验收的真值信号。每项 kind 只能是 file-exists、file-contains、command 之一：',
+    '  - file-exists：断言某产物路径存在（填 path）。',
+    '  - file-contains：断言某文件存在且包含关键字符串（填 path 和 contains）。这也用于核验 worker 自报的“我写了 X”证据。',
+    '  - command：可复跑且退出码 0 即通过的命令（填 command，如测试/类型检查）。注意 command 默认不会自动执行（需要用户显式开启），所以能用 file-exists/file-contains 表达的就优先用它们。',
+    '  path 优先写相对工作区路径，并使用 / 分隔符（例如 app/src/core/ir.ts）；不要写 E:\\、C:\\、/Users/...、target/release 或其它机器专属绝对路径，除非用户明确给定。command 必须跨平台，优先 npm/node/git/rg 这类命令；不要默认生成 PowerShell、cmd.exe、bash 专属语法。',
+    '  每项都加一句 description 说明它验证哪条成功标准。无法给出客观检查时可留空数组，不要编造不存在的路径或命令。',
     '预算要务实，避免为了简单任务过度并行。',
     '',
     '用户任务：',
+    request,
+  ].join('\n');
+}
+
+/**
+ * Plan-critic prompt: a stronger model audits the planner's spec BEFORE any
+ * work runs. It is not asked to redo planning from scratch — it must return the
+ * planner's spec corrected in place (`revisedSpec`), so a good plan passes
+ * through nearly untouched while a flawed one gets repaired at the one point
+ * where the whole run's accuracy is still cheap to fix.
+ */
+function planCriticPrompt(request: string): string {
+  return [
+    '你是 /ultracode 的规格复审员（plan-critic）。',
+    '上游规划器已产出一份动态 harness 规格（DYNAMIC_HARNESS JSON，在你的输入里）。',
+    '你的职责不是重新规划，而是审计并就地修正这份规格，因为下游每个执行节点和验收门都继承它——这里是修正错误成本最低的位置。',
+    '逐项检查并修复：',
+    '1. successCriteria：每条是否可观测、可逐条机检？把“质量好/符合预期”这类无法核验的改写成带明确对象与可检查信号的判定句；漏掉的关键标准要补上。',
+    '2. workerGroups / plan：是否完整覆盖 objective，且彼此范围不重叠、不遗漏？有缺口就调整任务组或步骤。',
+    '3. nonGoals：是否真的把范围框住，挡掉了用户没要求的扩张？不足就补。',
+    '4. budget：maxAgentCalls / maxRounds 是否与任务规模匹配？过大就收敛，过小就适度提高。',
+    '5. acceptance：高风险任务（安全、事实核查、不可逆操作）voters 是否足够（3-5）？',
+    '6. objectiveChecks：是否给了不依赖模型自评的客观检查？能加 file-exists/file-contains 来核验产物或证据的就补上；不要编造不存在的路径或命令。',
+    '7. plan dependsOn：是否真的表达执行顺序？dependsOn: [] 只允许用于可并行启动的根步骤；综合、核验、定稿、报告、落盘步骤不能是空依赖，必须依赖其上游证据/草案步骤。',
+    '8. 决策型研究价值：如果用户要产品/技术路线建议，successCriteria 和 final deliverable 必须要求决策简报（优先级、MVP、项目触点、不做什么、验证信号），不能只验 source ledger / claim audit / 章节格式。',
+    '9. 跨平台性：路径和命令是否能在 Windows 与 macOS 上工作？objectiveChecks 的 path 优先相对路径 + / 分隔符；不要把 Windows 盘符、PowerShell、NSIS、target/release 等 host-specific 假设写进通用验收。',
+    '把发现的问题写进 issues（field/severity/problem/fix），把修正后的完整规格写进 revisedSpec。',
+    'revisedSpec 必须是一份完整、合法、可直接执行的 DYNAMIC_HARNESS（保留 plan/workerGroups 等所有字段，不要只给 diff）。',
+    '如果原规格已经过硬，ok=true、issues 可为空，revisedSpec 原样回填即可。',
+    '严格按 DYNAMIC_PLAN_CRITIQUE 输出。',
+    '',
+    '用户任务（用于判断规格是否切题）：',
     request,
   ].join('\n');
 }
@@ -1133,7 +1385,7 @@ function normalizeHarnessSpec(value: unknown, request: string): DynamicHarnessSp
   const fallback = fallbackHarnessSpec(request);
   if (!isRecord(value)) return fallback;
   const budgetRaw = isRecord(value.budget) ? value.budget : {};
-  const plan = normalizeDynamicPlan(value.plan);
+  const plan = normalizeDynamicPlan(value.plan, stringValue(value.objective, request));
   const workerGroups = arrayOfRecords(value.workerGroups)
     .map((group, index): DynamicWorkerGroup => ({
       id: stringValue(group.id, `t${index + 1}`),
@@ -1161,8 +1413,140 @@ function normalizeHarnessSpec(value: unknown, request: string): DynamicHarnessSp
     ...(normalizeAcceptance(value.acceptance)
       ? { acceptance: normalizeAcceptance(value.acceptance)! }
       : {}),
+    ...(normalizeObjectiveChecks(value.objectiveChecks).length > 0
+      ? { objectiveChecks: normalizeObjectiveChecks(value.objectiveChecks) }
+      : {}),
     stopCondition: stringValue(value.stopCondition, fallback.stopCondition),
   };
+}
+
+/** Hard ceiling on agent calls (mirrors the clampInt max in normalizeHarnessSpec). */
+export const HARD_MAX_AGENT_CALLS = 32;
+
+/**
+ * Leaf agent-call count a single plan step expands into at run time. Mirrors
+ * {@link dynamicPlanStepNode}: parallel → one call per branch, pipeline → one
+ * per stage, consensus → one per voter plus a synthesis pass, agent → one.
+ */
+function planStepLeafCalls(step: DynamicPlanStep): number {
+  switch (step.kind) {
+    case 'parallel':
+      return Math.max(1, step.branches?.length ?? 1);
+    case 'pipeline':
+      return Math.max(1, step.stages?.length ?? 1);
+    case 'consensus':
+      // voters + 1 synthesis pass (resolveConsensus); a machine veto can make
+      // this cheaper, so this is the worst case — exactly what budgeting wants.
+      return Math.max(1, step.voters?.length ?? 1) + 1;
+    case 'agent':
+    default:
+      return 1;
+  }
+}
+
+/**
+ * Estimate the worst-case agent-call cost of running the harness for `rounds`
+ * rounds. Mirrors buildDynamicHarnessGraph / buildWorkerHarness node expansion
+ * (setup = scope + ledger, per round = work + acceptance gate, plus a final
+ * report) so the budget can be reconciled against reality before the run.
+ * Worst case = no round short-circuits via skipIfVerdictPass.
+ */
+export function estimateHarnessCalls(spec: DynamicHarnessSpec, rounds: number): number {
+  const setup = 2; // n_scope + n_ledger
+  const report = 1; // n_report
+  const gateVoters = Math.max(2, spec.acceptance?.voters ?? 2);
+  const gateCost = gateVoters + 1; // voters + synthesis pass
+  let roundWork: number;
+  if (spec.plan && spec.plan.length > 0) {
+    const plan = spec.plan;
+    roundWork = plan.reduce((sum, step) => sum + planStepLeafCalls(step), 0);
+    // Plan-path mid-stage (synthesize/filter) when strategies + fan-out call for it.
+    const planMid = planMidStageApplies(spec, plan) ? midStageStrategy(spec) : null;
+    if (planMid) roundWork += midStageLeafCalls(planMid);
+  } else {
+    // Worker-group path: one call per group, plus an optional mid-stage.
+    const workers = Math.max(1, spec.workerGroups.length);
+    const mid = midStageKind(spec);
+    roundWork = workers + (mid ? midStageLeafCalls(mid) : 0);
+  }
+  return setup + rounds * (roundWork + gateCost) + report;
+}
+
+/**
+ * Reconcile budget.maxAgentCalls with budget.maxRounds so the planner can't
+ * declare more repair rounds than the call budget can fund — the failure mode
+ * where a 2-round plan exhausted its budget at the very first acceptance gate.
+ *
+ * Strategy: honor the requested rounds by raising maxAgentCalls to fit them,
+ * capped at {@link HARD_MAX_AGENT_CALLS}. Only when even the ceiling can't fund
+ * the requested rounds do we lower maxRounds to what fits (>= 1). Returns the
+ * possibly-adjusted spec plus a human-readable note when anything changed.
+ */
+export function reconcileBudget(
+  spec: DynamicHarnessSpec,
+  ceiling: number = HARD_MAX_AGENT_CALLS,
+): { spec: DynamicHarnessSpec; note: string | null } {
+  const hardCeiling = Math.max(1, Math.min(HARD_MAX_AGENT_CALLS, Math.floor(ceiling)));
+  const requestedRounds = spec.budget.maxRounds;
+  const requestedCalls = spec.budget.maxAgentCalls;
+  const needForRequested = estimateHarnessCalls(spec, requestedRounds);
+  if (requestedCalls >= needForRequested) return { spec, note: null };
+
+  // Prefer funding the requested rounds by raising the ceiling.
+  if (needForRequested <= hardCeiling) {
+    return {
+      spec: { ...spec, budget: { maxAgentCalls: needForRequested, maxRounds: requestedRounds } },
+      note:
+        `预算自洽：maxAgentCalls ${requestedCalls} 不足以支撑 ${requestedRounds} 轮` +
+        `（最坏需 ~${needForRequested} 次），已上调至 ${needForRequested}。`,
+    };
+  }
+
+  // The ceiling can't fund all requested rounds — keep the ceiling and drop
+  // rounds to the most that fits (never below 1).
+  let fitRounds = requestedRounds;
+  while (fitRounds > 1 && estimateHarnessCalls(spec, fitRounds) > hardCeiling) {
+    fitRounds -= 1;
+  }
+  const fitCalls = Math.min(
+    hardCeiling,
+    Math.max(requestedCalls, estimateHarnessCalls(spec, fitRounds)),
+  );
+  return {
+    spec: { ...spec, budget: { maxAgentCalls: fitCalls, maxRounds: fitRounds } },
+    note:
+      `预算自洽：${requestedRounds} 轮最坏需 ~${needForRequested} 次调用，超过上限 ${hardCeiling}；` +
+      `已降为 ${fitRounds} 轮并设 maxAgentCalls=${fitCalls}。`,
+  };
+}
+
+/**
+ * Normalize planner-supplied objective checks. Drops malformed/empty entries
+ * (a check that names neither a path nor a command is unrunnable noise), caps
+ * the count so a runaway planner can't spawn dozens of checks, and only keeps
+ * the fields each kind actually needs.
+ */
+function normalizeObjectiveChecks(value: unknown): DynamicObjectiveCheck[] {
+  return arrayOfRecords(value)
+    .map((raw): DynamicObjectiveCheck | null => {
+      const kind = raw.kind;
+      const path = optionalString(raw.path);
+      const contains = optionalString(raw.contains);
+      const command = optionalString(raw.command);
+      const description = optionalString(raw.description);
+      if (kind === 'file-exists' && path) {
+        return { kind, path, ...(description ? { description } : {}) };
+      }
+      if (kind === 'file-contains' && path && contains) {
+        return { kind, path, contains, ...(description ? { description } : {}) };
+      }
+      if (kind === 'command' && command) {
+        return { kind, command, ...(description ? { description } : {}) };
+      }
+      return null;
+    })
+    .filter((check): check is DynamicObjectiveCheck => check !== null)
+    .slice(0, 12);
 }
 
 /** Normalize a planner-supplied acceptance gate config (voters clamped 2..5). */
@@ -1214,9 +1598,9 @@ function normalizeStrategies(value: unknown, fallback: DynamicStrategy[]): Dynam
   return out.size > 0 ? [...out] : fallback;
 }
 
-function normalizeDynamicPlan(value: unknown): DynamicPlanStep[] {
+function normalizeDynamicPlan(value: unknown, objective = ''): DynamicPlanStep[] {
   const used = new Set<string>();
-  return arrayOfRecords(value)
+  const plan = arrayOfRecords(value)
     .map((step, index): DynamicPlanStep | null => {
       const kind = normalizePlanKind(step.kind);
       if (!kind) return null;
@@ -1225,6 +1609,9 @@ function normalizeDynamicPlan(value: unknown): DynamicPlanStep[] {
         used,
       );
       const title = stringValue(step.title ?? step.label, `动态步骤 ${index + 1}`);
+      const dependsOn = Array.isArray(step.dependsOn)
+        ? stringArray(step.dependsOn, []).map(safeId).filter(Boolean)
+        : undefined;
       const normalized: DynamicPlanStep = {
         id,
         kind,
@@ -1239,7 +1626,7 @@ function normalizeDynamicPlan(value: unknown): DynamicPlanStep[] {
         model: optionalString(step.model),
         schema: optionalString(step.schema),
         items: optionalString(step.items),
-        dependsOn: stringArray(step.dependsOn, []).map(safeId).filter(Boolean),
+        ...(dependsOn !== undefined ? { dependsOn } : {}),
         branches: normalizePlanActors(step.branches, 'branch'),
         stages: normalizePlanActors(step.stages, 'stage'),
         voters: normalizePlanActors(step.voters, 'voter'),
@@ -1251,6 +1638,39 @@ function normalizeDynamicPlan(value: unknown): DynamicPlanStep[] {
     })
     .filter((step): step is DynamicPlanStep => !!step)
     .slice(0, 6);
+  return repairAmbiguousResearchPlanDependencies(plan, objective);
+}
+
+function repairAmbiguousResearchPlanDependencies(
+  plan: DynamicPlanStep[],
+  objective: string,
+): DynamicPlanStep[] {
+  if (plan.length < 3) return plan;
+  if (!looksLikeSequentialResearchPlan(plan, objective)) return plan;
+
+  let changed = false;
+  const repaired = plan.map((step, index) => {
+    if (index === 0) return step;
+    if (Array.isArray(step.dependsOn) && step.dependsOn.length > 0) return step;
+    changed = true;
+    return { ...step, dependsOn: [plan[index - 1]!.id] };
+  });
+  return changed ? repaired : plan;
+}
+
+function looksLikeSequentialResearchPlan(plan: DynamicPlanStep[], objective: string): boolean {
+  const text = `${objective}\n${plan
+    .map((step) => `${step.title} ${step.focus ?? ''} ${step.prompt ?? ''}`)
+    .join('\n')}`.toLowerCase();
+  const researchSignal =
+    /deep[- ]?research|source ledger|claim audit|research|调研|研究|证据|来源|引用/.test(text);
+  const orderedSignals = [
+    /scope|freeze|范围|目标冻结/.test(text),
+    /synth|综合|汇总|矩阵|recommend|建议/.test(text),
+    /verify|verification|audit|核验|复核|验收/.test(text),
+    /final|report|brief|报告|简报|定稿/.test(text),
+  ].filter(Boolean).length;
+  return researchSignal && orderedSignals >= 2;
 }
 
 function uniquePlanId(base: string, used: Set<string>): string {

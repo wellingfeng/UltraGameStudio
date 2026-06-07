@@ -43,21 +43,12 @@ async function getOpenDialog() {
   return open;
 }
 
-/**
- * Dynamically load the fs plugin's read/write helpers (Tauri-only).
- *
- * Uses an opaque specifier + @vite-ignore so neither TypeScript nor Vite
- * tries to resolve the module at build/typecheck time — the plugin may or
- * may not be installed depending on the desktop build profile, and when it
- * isn't we silently fall back to the localStorage path in the caller.
- */
+/** Dynamically load the fs plugin's read/write helpers (Tauri-only). */
 async function getFs(): Promise<{
   writeTextFile: (path: string, contents: string) => Promise<void>;
   readTextFile: (path: string) => Promise<string>;
 }> {
-  const specifier = '@tauri-apps/plugin-fs';
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mod = (await import(/* @vite-ignore */ specifier)) as any;
+  const mod = await import('@tauri-apps/plugin-fs');
   return {
     writeTextFile: mod.writeTextFile,
     readTextFile: mod.readTextFile,

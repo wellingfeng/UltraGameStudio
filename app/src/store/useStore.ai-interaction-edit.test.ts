@@ -241,7 +241,9 @@ describe('AI edit interactions', () => {
     expect(useStore.getState().aiStreaming).toBe(false);
   });
 
-  it('starts a new workflow AI edit while another workflow is still generating', async () => {
+  // [dynamic-only refactor] newWorkflow 蓝图创建已停用（改为 no-op）；此旧用例
+  // 依赖创建第二个可视化 workflow 会话，保留源码但跳过以便日后恢复蓝图入口。
+  it.skip('starts a new workflow AI edit while another workflow is still generating', async () => {
     resetStore();
     useStore.setState({
       activeSessionId: 's_main',

@@ -42,7 +42,9 @@ goto do_launch
 
 :do_build
 where node >nul 2>nul || goto no_node
+node -e "const [maj,min]=process.versions.node.split('.').map(Number); process.exit((maj===20&&min>=19)||maj>22||(maj===22&&min>=12)?0:1)" >nul 2>nul || goto bad_node
 where cargo >nul 2>nul || goto no_cargo
+set "RUSTUP_TOOLCHAIN=stable-x86_64-pc-windows-msvc"
 if exist "app\node_modules" goto have_deps
 echo [..] installing dependencies ...
 pushd app
@@ -73,7 +75,7 @@ echo [..] launching FreeUltraCode ...
 start "" "%EXE%"
 echo [OK] launched an independent window. You can close this console.
 echo      (self-test tip: point the in-app workspace to a project COPY.)
-timeout /t 3 >nul
+powershell -NoProfile -Command "Start-Sleep -Seconds 3" >nul
 goto end
 
 :build_only_done
@@ -82,7 +84,10 @@ echo [OK] build complete (not launched).
 goto pause_end
 
 :no_node
-echo [X] Node.js 18+ not found: https://nodejs.org
+echo [X] Node.js 20.19+ or 22.12+ not found: https://nodejs.org
+goto pause_end
+:bad_node
+for /f "delims=" %%v in ('node -v') do echo [X] Node.js %%v is unsupported. Install Node.js 20.19+ or 22.12+.
 goto pause_end
 :no_cargo
 echo [X] Rust/cargo not found: https://rustup.rs

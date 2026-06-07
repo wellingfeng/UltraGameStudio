@@ -136,6 +136,13 @@ export interface ClipboardImageSaveRequest {
   cwd?: string | null;
 }
 
+export interface SessionCaptureSaveRequest {
+  bytesBase64: string;
+  mime: string;
+  fileName?: string | null;
+  cwd?: string | null;
+}
+
 export type LocalModelRuntimeState =
   | 'missing_model'
   | 'service_unavailable'
@@ -177,10 +184,16 @@ export type UnlistenFn = () => void;
  */
 export function tauriAvailable(): boolean {
   try {
+    if (typeof globalThis === 'undefined') return false;
+    const runtime = globalThis as typeof globalThis & {
+      isTauri?: unknown;
+      __TAURI__?: unknown;
+      __TAURI_INTERNALS__?: unknown;
+    };
     return (
-      typeof window !== 'undefined' &&
-      typeof (window as { __TAURI__?: unknown; __TAURI_INTERNALS__?: unknown })
-        .__TAURI_INTERNALS__ !== 'undefined'
+      runtime.isTauri === true ||
+      typeof runtime.__TAURI_INTERNALS__ !== 'undefined' ||
+      typeof runtime.__TAURI__ !== 'undefined'
     );
   } catch {
     return false;
@@ -544,6 +557,31 @@ export async function saveClipboardImage(
     fileName: request.fileName ?? null,
     cwd: request.cwd ?? null,
   });
+}
+
+/** Persist a generated session screenshot/GIF and return its local preview path. */
+export async function saveSessionCapture(
+  request: SessionCaptureSaveRequest,
+): Promise<string> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  return invoke<string>('save_session_capture', {
+    bytesBase64: request.bytesBase64,
+    mime: request.mime,
+    fileName: request.fileName ?? null,
+    cwd: request.cwd ?? null,
+  });
+}
+
+/** Fetch a remote chat image through the desktop backend and return a data URL. */
+export async function fetchCaptureImageDataUrl(url: string): Promise<string> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  return invoke<string>('fetch_capture_image_data_url', { url });
 }
 
 /** Best-effort cancellation for an in-flight local agent CLI invocation. */

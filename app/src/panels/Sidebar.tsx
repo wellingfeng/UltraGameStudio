@@ -3,7 +3,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  type CSSProperties,
 } from 'react';
 import {
   AlarmClock,
@@ -62,37 +61,6 @@ type SidebarLiveState = {
   aiEditingSessions: WorkflowSessionKey[];
   chattingSessions: WorkflowSessionKey[];
 };
-type WorkspaceToneStyle = CSSProperties & {
-  '--fuc-workspace-bg': string;
-  '--fuc-workspace-bg-hover': string;
-  '--fuc-workspace-bg-active': string;
-  '--fuc-workspace-chip-bg': string;
-  '--fuc-workspace-mark': string;
-};
-
-const WORKSPACE_TONE_HUES = [44, 86, 136, 168, 198, 224, 252, 278];
-
-function workspaceToneHash(workspaceId: string): number {
-  let hash = 0;
-  for (let i = 0; i < workspaceId.length; i += 1) {
-    hash = (hash * 31 + workspaceId.charCodeAt(i)) >>> 0;
-  }
-  return hash;
-}
-
-function workspaceToneStyle(workspaceId: string): WorkspaceToneStyle {
-  const hash = workspaceToneHash(workspaceId);
-  const hue = WORKSPACE_TONE_HUES[hash % WORKSPACE_TONE_HUES.length];
-  const saturation = 24 + (Math.floor(hash / 8) % 4) * 2;
-  const lightness = 42 + (Math.floor(hash / 32) % 3) * 3;
-  return {
-    '--fuc-workspace-bg': `hsl(${hue} ${saturation}% ${lightness}% / 0.12)`,
-    '--fuc-workspace-bg-hover': `hsl(${hue} ${saturation}% ${lightness}% / 0.17)`,
-    '--fuc-workspace-bg-active': `hsl(${hue} ${saturation + 3}% ${lightness + 2}% / 0.22)`,
-    '--fuc-workspace-chip-bg': `hsl(${hue} ${saturation + 3}% ${lightness + 2}% / 0.15)`,
-    '--fuc-workspace-mark': `hsl(${hue} ${saturation + 14}% ${lightness + 18}% / 0.82)`,
-  };
-}
 
 function sessionSortTimestamp(session: Session): number {
   return session.updatedAt ?? session.createdAt;
@@ -228,6 +196,25 @@ function sessionVisibleInTab(session: Session, tab: SidebarTab): boolean {
   return tab === 'history' || session.favorite === true;
 }
 
+function historySessionRowClassName(active: boolean): string {
+  return (
+    'group flex w-full flex-col items-start gap-0.5 rounded-md border px-2 py-1.5 text-left transition-colors ' +
+    (active
+      ? 'border-border bg-panel-2 text-fg shadow-[inset_2px_0_0_var(--accent)]'
+      : 'border-transparent bg-transparent text-fg-dim hover:border-border-soft hover:bg-panel-2/45 hover:text-fg') +
+    ' disabled:cursor-not-allowed disabled:opacity-50'
+  );
+}
+
+function historySessionEditRowClassName(active: boolean): string {
+  return (
+    'group flex w-full flex-col items-start gap-1 rounded-md border px-2 py-1.5 text-left transition-colors ' +
+    (active
+      ? 'border-border bg-panel-2 text-fg shadow-[inset_2px_0_0_var(--accent)]'
+      : 'border-transparent bg-transparent text-fg-dim hover:border-border-soft hover:bg-panel-2/45 hover:text-fg')
+  );
+}
+
 function FavoriteMarker({
   favorite,
   locale,
@@ -266,6 +253,7 @@ export default function Sidebar() {
   const locale = useStore((s) => s.locale);
   const sessions = useStore((s) => s.sessions);
   const historyReady = useStore((s) => s.historyReady);
+  const historyError = useStore((s) => s.historyError);
   const workspaces = useStore((s) => s.workspaces);
   const sessionTree = useStore((s) => s.sessionTree);
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
@@ -804,7 +792,7 @@ export default function Sidebar() {
           <div
             role="tablist"
             aria-label={t(locale, 'sidebar.historyTabs')}
-            className="grid grid-cols-2 rounded-md border border-border bg-bg p-0.5"
+            className="grid grid-cols-2 rounded-md border border-border-soft bg-bg p-0.5"
           >
             {(['history', 'favorites'] as const).map((tab) => (
               <button
@@ -852,7 +840,7 @@ export default function Sidebar() {
                 onChange={(event) => setSearchQuery(event.target.value)}
                 onKeyDown={handleSearchKeyDown}
                 spellCheck={false}
-                className="h-8 w-full min-w-0 appearance-none rounded-md border border-border bg-bg pl-7 pr-7 text-xs text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-accent disabled:cursor-wait disabled:opacity-60"
+                className="h-8 w-full min-w-0 appearance-none rounded-md border border-border-soft bg-bg pl-7 pr-7 text-xs text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-accent disabled:cursor-wait disabled:opacity-60"
               />
               {searchQuery.length > 0 && (
                 <button
@@ -883,6 +871,17 @@ export default function Sidebar() {
                 />
                 <span>{t(locale, 'sidebar.searchLoading')}</span>
               </div>
+            </div>
+          ) : historyError ? (
+            <div
+              role="alert"
+              aria-live="polite"
+              className="px-2 py-3 text-xs text-fg-faint"
+            >
+              <div className="text-fg-dim">
+                {t(locale, 'sidebar.historyLoadFailed')}
+              </div>
+              <div className="mt-1 break-words">{historyError}</div>
             </div>
           ) : isActiveTabEmpty ? (
             <div
@@ -932,29 +931,28 @@ export default function Sidebar() {
                   !isSearching && fullList.length > currentLimit;
                 const workspaceActive = workspace.id === activeWorkspaceId;
                 return (
-                  <li key={workspace.id} className="flex flex-col gap-1">
+                  <li key={workspace.id} className="flex flex-col gap-1.5">
                     <div
                       className={
-                        'rounded-md px-2.5 py-1.5 transition-colors ' +
+                        'rounded-md border px-2.5 py-1.5 transition-colors ' +
                         (workspaceActive
-                          ? 'bg-[var(--fuc-workspace-bg-active)]'
-                          : 'bg-[var(--fuc-workspace-bg)] hover:bg-[var(--fuc-workspace-bg-hover)]')
+                          ? 'border-border bg-panel-2'
+                          : 'border-border-soft bg-panel hover:border-border hover:bg-panel-2/60')
                       }
-                      style={workspaceToneStyle(workspace.id)}
                     >
-                      <div className="flex items-center gap-1.5 text-[11px] font-semibold text-fg">
-                        <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded bg-[var(--fuc-workspace-chip-bg)] text-[var(--fuc-workspace-mark)]">
+                      <div className="flex items-center gap-2 text-[11px] font-semibold text-fg">
+                        <span className="flex h-4 w-4 shrink-0 items-center justify-center rounded border border-border-soft bg-bg-alt text-fg-faint">
                           ▾
                         </span>
                         <span className="min-w-0 flex-1 truncate" title={workspace.path}>
                           {workspace.name}
                         </span>
-                        <span className="rounded bg-[var(--fuc-workspace-chip-bg)] px-1.5 py-0.5 font-mono text-[10px] leading-none text-fg-dim">
+                        <span className="rounded border border-border-soft bg-bg-alt px-1.5 py-0.5 font-mono text-[10px] font-semibold leading-none text-fg-dim">
                           {fullList.length}
                         </span>
                       </div>
                       {workspace.path && (
-                        <div className="truncate pl-[1.375rem] font-mono text-[9px] text-fg-faint">
+                        <div className="truncate pl-6 font-mono text-[9px] text-fg-faint">
                           {workspace.path}
                         </div>
                       )}
@@ -1004,12 +1002,9 @@ export default function Sidebar() {
                                       session.scheduledTask,
                                     )
                                   }
-                                  className={
-                                    'group flex w-full flex-col items-start gap-1 rounded-md px-2 py-1.5 text-left transition-colors ' +
-                                    (active
-                                      ? 'bg-panel-2 text-fg'
-                                      : 'text-fg-dim hover:bg-border-soft hover:text-fg')
-                                  }
+                                  className={historySessionEditRowClassName(
+                                    active,
+                                  )}
                                 >
                                   <span className="grid w-full grid-cols-[minmax(0,1fr)_var(--fuc-status-slot-size)] items-center gap-1.5">
                                     <input
@@ -1095,13 +1090,7 @@ export default function Sidebar() {
                                       session.scheduledTask,
                                     )
                                   }
-                                  className={
-                                    'group flex w-full flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-left transition-colors ' +
-                                    (active
-                                      ? 'bg-panel-2 text-fg'
-                                      : 'text-fg-dim hover:bg-border-soft hover:text-fg') +
-                                    ' disabled:cursor-not-allowed disabled:opacity-50'
-                                  }
+                                  className={historySessionRowClassName(active)}
                                 >
                                   <span className="grid w-full grid-cols-[minmax(0,1fr)_var(--fuc-status-slot-size)] items-center gap-1.5">
                                     <span className="flex min-w-0 flex-1 items-center gap-1">
@@ -1202,12 +1191,7 @@ export default function Sidebar() {
                             session.scheduledTask,
                           )
                         }
-                        className={
-                          'group flex w-full flex-col items-start gap-1 rounded-md px-2 py-1.5 text-left transition-colors ' +
-                          (active
-                            ? 'bg-panel-2 text-fg'
-                            : 'text-fg-dim hover:bg-border-soft hover:text-fg')
-                        }
+                        className={historySessionEditRowClassName(active)}
                       >
                         <span className="grid w-full grid-cols-[minmax(0,1fr)_var(--fuc-status-slot-size)] items-center gap-1.5">
                           <input
@@ -1282,13 +1266,7 @@ export default function Sidebar() {
                             session.scheduledTask,
                           )
                         }
-                        className={
-                          'group flex w-full flex-col items-start gap-0.5 rounded-md px-2 py-1.5 text-left transition-colors ' +
-                          (active
-                            ? 'bg-panel-2 text-fg'
-                            : 'text-fg-dim hover:bg-border-soft hover:text-fg') +
-                          ' disabled:cursor-not-allowed disabled:opacity-50'
-                        }
+                        className={historySessionRowClassName(active)}
                       >
                         <span className="grid w-full grid-cols-[minmax(0,1fr)_var(--fuc-status-slot-size)] items-center gap-1.5">
                           <span className="flex min-w-0 flex-1 items-center gap-1">

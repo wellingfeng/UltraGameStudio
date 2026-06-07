@@ -12,17 +12,21 @@ import {
   type NodeType,
   type PinKind,
 } from '@/core/ir';
-import { autoLayoutGraph } from '@/core/autoLayout';
-import { defaultBlueprint, simpleBlueprint, captainBlueprint } from '@/core/defaultBlueprint';
-import { isEmptyWorkflow } from '@/core/isEmptyWorkflow';
+// [dynamic-only refactor] 静态蓝图编辑相关模块已停用（autoLayout/genPrompt/intentEngine/
+// isEmptyWorkflow/determinism）。源码保留并已从编译图 exclude。simpleBlueprint 是
+// 聊天会话的底层结构，保留；defaultBlueprint/captainBlueprint 仅蓝图创建用，停用。
+// import { autoLayoutGraph } from '@/core/autoLayout';
+import { simpleBlueprint } from '@/core/defaultBlueprint';
+// import { defaultBlueprint, captainBlueprint } from '@/core/defaultBlueprint';
+// import { isEmptyWorkflow } from '@/core/isEmptyWorkflow';
 import { normalizeWorkflowNodeNumbers } from '@/core/nodeNumbers';
-import {
-  BLUEPRINT_DIRECT_EDIT_CONTRACT,
-  prepareGraphEdit,
-  replyIncludesIRGraph,
-  strictBlueprintRetryAppendix,
-} from '@/core/genPrompt';
-import { applyIntent } from '@/core/intentEngine';
+// import {
+//   BLUEPRINT_DIRECT_EDIT_CONTRACT,
+//   prepareGraphEdit,
+//   replyIncludesIRGraph,
+//   strictBlueprintRetryAppendix,
+// } from '@/core/genPrompt';
+// import { applyIntent } from '@/core/intentEngine';
 import { extractToolSentinels } from '@/components/ai/lib/toolEvent';
 import {
   personalInstructionsBlock,
@@ -64,6 +68,8 @@ import {
   setGenerationProvenance,
   type GenProvenance,
 } from '@/core/startInputs';
+// [dynamic-only refactor] determinism lint 仅用于蓝图 AI 改图分支，已停用。
+// import { findDeterminismHazards } from '@/core/determinism';
 import { readApiKey, readBaseUrl } from '@/lib/apiConfig';
 import { appendComposerDraftState } from '@/lib/composerEntryPolicy';
 import {
@@ -74,6 +80,14 @@ import {
 import { getCliRuntimeSnapshot } from '@/lib/cliConfig';
 import { maybeRunCcSwitchAutoImportOnFirstRun } from '@/lib/ccSwitchAutoImport';
 import { ensureFreeProxy, isFreeChannelSelection } from '@/lib/freeChannels';
+import {
+  generateImage,
+  imageProviderById,
+  loadImageGenerationSettings,
+  preferredReadyImageProviderId,
+  stripImageCommand,
+  type ImageProviderId,
+} from '@/lib/imageGeneration';
 import {
   modelClassFromModelId,
   nodeParamsWithGatewayOverride,
@@ -126,10 +140,14 @@ import {
   runFailureMeta,
   runWithConcurrency,
   newSessionId,
+  decodeProgressEvents,
+  emptyProgress,
+  reduceProgress,
   type RunCallbacks,
   type RunContext as RuntimeRunContext,
   type RunFailure,
   type RunGateway,
+  type UltracodeRunProgress,
 } from '@/runtime';
 import {
   DEFAULT_LOCALE,
@@ -351,6 +369,8 @@ export interface StoreState {
   workspaceHistory: string[];
   /** True once `.worktree` history has been loaded or gracefully skipped. */
   historyReady: boolean;
+  /** Last history initialization failure, shown instead of sample sessions. */
+  historyError: string | null;
   /** Resolved `.worktree` root path for diagnostics. */
   historyRootPath: string | null;
   /** Workspace buckets rendered as the first level of the history tree. */
@@ -445,7 +465,18 @@ export interface StoreState {
     scheduledTask: ScheduledTaskConfig,
   ) => Promise<void>;
   sendPrompt: (text: string) => void;
+  generateImagePrompt: (
+    text: string,
+    options?: { providerId?: ImageProviderId; model?: string },
+  ) => void;
   runUltracodePrompt: (task: string) => void;
+  /**
+   * Append a local message to the current chat session and persist it. Used by
+   * app-side actions that produce a result without an AI turn (e.g. the
+   * /screenshot and /screenshot-gif export commands echoing the user's command
+   * and surfacing their saved path + an inline preview). Returns the message id.
+   */
+  appendChatNote: (text: string, role?: 'user' | 'assistant' | 'system') => string;
   clearBlockedSendTip: () => void;
   /**
    * Submit the user's answer to an interactive node message (the AI-return dock
@@ -901,6 +932,19 @@ function makeSession(locale: Locale = DEFAULT_LOCALE): Session {
 
 function chatWorkflow(title: string | undefined, locale: Locale): IRGraph {
   return withNewSessionGatewayDefaults(simpleBlueprint(title, locale));
+}
+
+function imageResultMarkdown(result: {
+  providerLabel: string;
+  model: string;
+  prompt: string;
+  images: string[];
+}): string {
+  const routeLine = `⚙ 路由：${result.providerLabel} · 模型：${result.model}`;
+  const imageLines = result.images
+    .map((src, index) => `![生成图片 ${index + 1}](${src})`)
+    .join('\n\n');
+  return `${routeLine}\n✓ 图片生成完成\n\n提示词：${result.prompt}\n\n${imageLines}`;
 }
 
 function untitledSessionTitle(locale: Locale): string {
@@ -1493,7 +1537,10 @@ function commitGraphEdit(
 ): boolean {
   let nextWorkflow = ir;
   return applyWorkflowEdit(source, (state) => {
-    nextWorkflow = prepareGraphEdit(state.workflow, ir);
+    // [dynamic-only refactor] 原用 prepareGraphEdit(state.workflow, ir)(含 autoLayout)。
+    // 蓝图布局编辑已停用，退化为仅节点编号归一化。
+    void state;
+    nextWorkflow = normalizeWorkflowNodeNumbers(ir);
     return {
       workflow: nextWorkflow,
       selectedNodeId: null,
@@ -1737,7 +1784,8 @@ async function createNewChatSession(): Promise<void> {
 }
 
 async function createNewWorkflowSession(
-  build: (name: string | undefined, locale: Locale) => IRGraph = defaultBlueprint,
+  // [dynamic-only refactor] 默认 build 原为 defaultBlueprint(已停用)，改为 simpleBlueprint。
+  build: (name: string | undefined, locale: Locale) => IRGraph = simpleBlueprint,
 ): Promise<void> {
   const state = useStore.getState();
   const workspaceId = state.activeWorkspaceId;
@@ -2752,6 +2800,7 @@ async function initHistoryFromDisk(): Promise<void> {
       );
       return {
         historyReady: true,
+        historyError: null,
         historyRootPath: rootPath,
         workspaces,
         activeWorkspaceId: workspace.id,
@@ -2774,8 +2823,20 @@ async function initHistoryFromDisk(): Promise<void> {
       lastActiveWorkspaceId: workspace.id,
       lastActiveSessionId: active?.id,
     });
-  } catch {
-    useStore.setState({ historyReady: true });
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[history-init] failed to load history', err);
+    useStore.setState({
+      historyReady: true,
+      historyError: message || 'Unknown history initialization error',
+      historyRootPath: null,
+      workspaces: [],
+      activeWorkspaceId: null,
+      sessions: [],
+      sessionTree: {},
+      activeSessionId: null,
+      messages: [],
+    });
   }
 }
 
@@ -2874,10 +2935,12 @@ function renameWorkflowInLiveChannels(
 const persisted = loadComposer();
 const seedComposer: ComposerSettings = (() => {
   const c = persisted?.composer ?? defaultComposer;
-  // Backfill modelStrategy for legacy persisted composers that predate the field.
+  // Backfill modelStrategy + imageMode for legacy persisted composers that
+  // predate those fields.
   const withStrategy: ComposerSettings = {
     ...c,
     modelStrategy: c.modelStrategy ?? defaultComposer.modelStrategy,
+    imageMode: c.imageMode ?? defaultComposer.imageMode,
   };
   const valid = modelOptions.some((o) => o.id === withStrategy.model);
   return valid ? withStrategy : { ...withStrategy, model: defaultComposer.model };
@@ -3011,6 +3074,7 @@ export const useStore = create<StoreState>((set, get) => ({
     WORKSPACE_HISTORY_LIMIT,
   ),
   historyReady: false,
+  historyError: null,
   historyRootPath: null,
   workspaces: [],
   sessionTree: {},
@@ -3324,9 +3388,13 @@ export const useStore = create<StoreState>((set, get) => ({
 
   stopChat: () => stopActiveChat(),
 
+  // [dynamic-only refactor] 蓝图创建动作已停用（newWorkflow/newCaptainWorkflow）。
+  // GUI 不再提供可视化蓝图入口；保留空实现以满足 StoreState 契约与类型。
+  // newSimpleWorkflow 仍可用：simpleBlueprint 是聊天会话底层结构（保留模块）。
   // Load a fresh starter graph (start → agent → end), clean and in design mode.
-  newWorkflow: () =>
-    void createNewWorkflowSession(),
+  newWorkflow: () => {
+    /* disabled: blueprint authoring removed */
+  },
 
   // Load a minimal single-node starter graph (one agent, no sentinels).
   newSimpleWorkflow: () =>
@@ -3334,8 +3402,9 @@ export const useStore = create<StoreState>((set, get) => ({
 
   // Load the captain-loop starter graph (目标冻结 → 队长拆单 → 并行 worker →
   // 验收门 → 汇总) for complex, decomposable, high-stakes long tasks.
-  newCaptainWorkflow: () =>
-    void createNewWorkflowSession(captainBlueprint),
+  newCaptainWorkflow: () => {
+    /* [dynamic-only refactor] disabled: captainBlueprint authoring removed */
+  },
 
   newSession: () => {
     void createNewChatSession();
@@ -3442,10 +3511,21 @@ export const useStore = create<StoreState>((set, get) => ({
       ownedMessageIds: new Set<string>([userMsg.id, assistantId]),
     };
 
-    const replaceAssistant = (text: string, persist = false) => {
+    const replaceAssistant = (
+      text: string,
+      persist = false,
+      runProgress?: UltracodeRunProgress,
+    ) => {
       if (!aiEditRegistered(ch)) return;
       ch.messages = ch.messages.map((msg) =>
-        msg.id === assistantId ? { ...msg, text, routeLabel: '/ultracode' } : msg,
+        msg.id === assistantId
+          ? {
+              ...msg,
+              text,
+              routeLabel: '/ultracode',
+              ...(runProgress ? { runProgress } : {}),
+            }
+          : msg,
       );
       aiEditCommitMessages(ch, persist);
     };
@@ -3475,12 +3555,28 @@ export const useStore = create<StoreState>((set, get) => ({
       const runId = parsed.options.runId || makeCliRunId();
       ch.cliRunIds.add(runId);
       let live = '';
+      // Live run-progress snapshot, folded from the CLI's <<FUC_PROGRESS>>
+      // sentinels (decoded out of the streamed stderr) so the GUI can render a
+      // run-progress card above the log text. Seeded with the wall-clock start.
+      let progress: UltracodeRunProgress = { ...emptyProgress(), startedAt };
+      let concurrencyForDisplay = parsed.options.concurrency ?? runConcurrency();
+      const composeLiveText = () =>
+        [
+          `⟳ /ultracode 执行中…`,
+          `runId: ${runId}`,
+          `工作区: ${state.composer.workspace || '默认'}`,
+          `模式: ${modeLabel}`,
+          `并发: ${concurrencyForDisplay}`,
+          '',
+          live.trim(),
+        ].join('\n');
       try {
         const gatewaySelection = ch.gatewaySelection;
         if (gatewaySelection && isFreeChannelSelection(gatewaySelection)) {
           await ensureFreeProxy(freeProxyOptionsForSelection(gatewaySelection));
         }
         const concurrency = parsed.options.concurrency ?? runConcurrency();
+        concurrencyForDisplay = concurrency;
         const result = await runUltracode(request, {
           cwd: state.composer.workspace || undefined,
           adapter: gatewaySelection?.adapter,
@@ -3500,25 +3596,30 @@ export const useStore = create<StoreState>((set, get) => ({
           trace: parsed.options.trace,
           interactive: parsed.options.interactive,
           onProgress: (chunk) => {
-            live = (live + chunk).slice(-5000);
-            replaceAssistant(
-              [
-                `⟳ /ultracode 执行中…`,
-                `runId: ${runId}`,
-                `工作区: ${state.composer.workspace || '默认'}`,
-                `模式: ${modeLabel}`,
-                `并发: ${concurrency}`,
-                '',
-                live.trim(),
-              ].join('\n'),
-              false,
+            // Pull structured progress sentinels out of the chunk; the cleaned
+            // remainder (the human-readable log lines) stays in the stream. A
+            // sentinel-only stderr line leaves a dangling "[stderr] " prefix —
+            // drop those orphan tokens so the log doesn't sprout blank rows.
+            const { text: cleaned, events } = decodeProgressEvents(chunk);
+            const visible = cleaned.replace(
+              /\n[ \t]*\[(?:stderr|stdout)\][ \t]*(?=\n|$)/g,
+              '',
             );
+            live = (live + visible).slice(-5000);
+            if (events.length > 0) progress = reduceProgress(progress, events);
+            replaceAssistant(composeLiveText(), false, progress);
           },
         });
         if (!aiEditRegistered(ch)) return;
+        progress = {
+          ...progress,
+          phase: ultracodeAccepted(result) ? 'complete' : 'error',
+          endedAt: Date.now(),
+        };
         replaceAssistant(
           `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(Date.now() - startedAt)}\n${summarizeUltracodeResult(result)}`,
           true,
+          progress,
         );
         syncAndPersistSessionRunStatus(
           sessionKey,
@@ -3527,9 +3628,11 @@ export const useStore = create<StoreState>((set, get) => ({
       } catch (err) {
         if (!aiEditRegistered(ch)) return;
         const msg = (err as Error)?.message ?? String(err);
+        progress = { ...progress, phase: 'error', endedAt: Date.now() };
         replaceAssistant(
           `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(Date.now() - startedAt)} · 失败\n✗ /ultracode 调用失败: ${msg}`,
           true,
+          progress,
         );
         syncAndPersistSessionRunStatus(sessionKey, 'error');
       } finally {
@@ -3539,11 +3642,30 @@ export const useStore = create<StoreState>((set, get) => ({
     })();
   },
 
+  generateImagePrompt: (text, options = {}) => {
+    startImageGenerationTurn(text, options);
+  },
+
+  appendChatNote: (text, role = 'assistant') => {
+    const msg: Message = {
+      id: shortId('m'),
+      role,
+      text,
+      createdAt: Date.now(),
+    };
+    set((state) => ({ messages: [...state.messages, msg] }));
+    void persistMessage(msg);
+    return msg.id;
+  },
+
   sendPrompt: (text) => {
     const trimmed = text.trim();
     if (!trimmed) return;
     const state = useStore.getState();
     if (isWorkflowReadOnly(state)) return;
+    // Image generation is routed explicitly (the /image-mode-* sticky mode and
+    // /image one-shot command in AIDock), never inferred from message text here.
+    // sendPrompt always means AI editing / workflow authoring.
     const aiEditingSession = activeWorkflowSessionKey(state);
     const gatewaySelection = workflowDefaultGatewaySelection(
       state.workflow,
@@ -3657,6 +3779,35 @@ export const useStore = create<StoreState>((set, get) => ({
       aiEditCommitMessages(ch, true);
     };
 
+    // [dynamic-only refactor] 以下三个蓝图编辑辅助原从 @/core/genPrompt 导入(该模块已停用)。
+    // 它们仅被本函数下方"非简单模式"蓝图生成分支使用——该分支在纯聊天 GUI 下已不可达，
+    // 但仍需编译。保留为本地内联副本（与 genPrompt 原实现等价），以便日后整体恢复。
+    const BLUEPRINT_DIRECT_EDIT_CONTRACT = `---
+普通 AI 输入框编辑规则：
+- 默认目标是把用户需求写入 workflow 蓝图，而不是生成 Markdown 计划或让用户确认后再做。
+- 必须基于当前 IRGraph 输出“简短中文说明 + 一个完整 \`\`\`json IRGraph 代码块”。
+- 不要输出交互块，不要提问，不要等待批准，不要创建/修改本地文件。
+- 如果需求提到“规划代码修改/支持某功能/实现某能力”，把它转成 workflow 节点：例如需求理解、代码定位、实现、验证、回归检查、总结等步骤。
+- 信息不足时自行做保守假设，并把需要后续确认的事项放进蓝图中的澄清/验证节点。
+- 蓝图规模要和任务复杂度匹配：简单需求优先最小充分结构，复杂需求才展开更多步骤、分支和验证。`;
+    const replyIncludesIRGraph = (text: string): boolean => {
+      try {
+        const parsed = JSON.parse(extractJsonObject(text)) as Partial<IRGraph>;
+        return Array.isArray(parsed.nodes) && Array.isArray(parsed.edges);
+      } catch {
+        return false;
+      }
+    };
+    const strictBlueprintRetryAppendix = (previousReply: string): string =>
+      `\n\n---
+上一轮输出没有包含可解析的 workflow IRGraph，因此不能写入蓝图。上一轮输出节选如下：
+${previousReply.slice(0, 4000)}
+
+请忽略上一轮的 Markdown/计划/确认请求，直接基于最初的用户需求和当前 IRGraph 返回：
+1) 简短中文说明。
+2) 一个完整、可解析、可直接写入蓝图的 \`\`\`json IRGraph 代码块。
+不得创建或修改本地文件，不得等待用户批准。`;
+
     // No API key and no desktop CLI: local keyword fallback.
     if (!useApi && !useCli) {
       if (simpleMode) {
@@ -3671,18 +3822,11 @@ export const useStore = create<StoreState>((set, get) => ({
         removeAiEditChannel(ch);
         return;
       }
-      const result = applyIntent(ir, trimmed);
-      if (result.changed) {
-        commitAiChannelBlueprint(
-          ch,
-          appendStartUserInputs(result.ir, capturedStartInputs),
-        );
-        pushAssistant(`⟳ 已修改蓝图 (本地意图引擎)。${result.note}`);
-      } else {
-        pushAssistant(
-          `当前环境无法调用所选运行时。请在桌面版中使用本地 CLI，或切回 Claude Code 并配置 API key。\n（本地意图引擎：${result.note}）`,
-        );
-      }
+      // [dynamic-only refactor] 本地意图引擎(applyIntent)蓝图编辑已停用。
+      // 非简单模式 + 无后端：仅提示，不再做关键词改图。
+      pushAssistant(
+        `当前环境无法调用所选运行时。请在桌面版中使用本地 CLI，或切回 Claude Code 并配置 API key。`,
+      );
       removeAiEditChannel(ch);
       return;
     }
@@ -3693,9 +3837,9 @@ export const useStore = create<StoreState>((set, get) => ({
     let allowClarification = isClarifyingEditRequest(trimmed);
     const wrapped = isGrill
       ? `请扮演严格的需求评审者。针对当前工作流蓝图，用交互（select / input）逐个向我追问还没考虑清楚的关键问题，例如：每个节点的输入/输出、边界与异常处理、成功/验收标准、节点依赖与先后顺序、该并行还是串行、用什么运行时与模型。一次只问一个问题；问清若干轮后，再据此优化蓝图并按要求输出。`
-      : isEmptyWorkflow(ir)
-        ? `我希望新建一个 workflow，目的如下：\n${trimmed}`
-        : `我希望继续修改 workflow，根据下面意见你来优化流程：\n${trimmed}`;
+      // [dynamic-only refactor] 原用 isEmptyWorkflow(ir) 区分"新建/继续修改"措辞，
+      // 该模块已停用；非简单模式蓝图生成路径已不可达，措辞退化为统一文案。
+      : `我希望继续修改 workflow，根据下面意见你来优化流程：\n${trimmed}`;
     const irJson = JSON.stringify(ir);
     // `let` so the multi-angle research step (Feature 1) can fold its findings
     // into the generation context before any candidate/judge call reads it.
@@ -4738,13 +4882,12 @@ export const useStore = create<StoreState>((set, get) => ({
         label: defaults.label,
         params: { ...defaults.params, ...(params ?? {}) },
       };
-      const nextWorkflow = autoLayoutGraph(
-        {
-          ...state.workflow,
-          nodes: [...state.workflow.nodes, node],
-        },
-        state.workflow,
-      );
+      // [dynamic-only refactor] autoLayoutGraph(蓝图布局)已停用；蓝图编辑动作在
+      // 纯聊天 GUI 下不可达，这里直接追加节点不做自动布局。
+      const nextWorkflow = {
+        ...state.workflow,
+        nodes: [...state.workflow.nodes, node],
+      };
       return {
         workflow: workflowWithoutRunSnapshot(nextWorkflow),
         dirty: true,
@@ -4914,21 +5057,8 @@ export const useStore = create<StoreState>((set, get) => ({
   // the existing layered engine; stripping the prior layout forces a full
   // re-arrange rather than honoring stale coordinates.
   autoArrangeWorkflow: () => {
-    let committed = false;
-    set((state) => {
-      if (!canWriteWorkflow(state)) return state;
-      const arranged = autoLayoutGraph(
-        { ...state.workflow, layout: {} },
-        undefined,
-        { engine: 'layered', relayout: 'all' },
-      );
-      committed = true;
-      return {
-        workflow: { ...state.workflow, layout: arranged.layout },
-        dirty: true,
-      };
-    });
-    if (committed) void markActiveHistorySessionWorkflow();
+    // [dynamic-only refactor] 画布自动布局已停用（autoLayoutGraph 模块 exclude）。
+    /* disabled: blueprint canvas auto-layout removed */
   },
 
   // ── Run / mode control ─────────────────────────────────────────────────
@@ -5277,6 +5407,13 @@ interface RunChannel {
   runOutputs: Record<string, string>;
   failedNodeId: string | null;
   error: Record<string, unknown> | null;
+  /**
+   * Per-node content hashes from this run (runtime `computeNodeHashes`). Captured
+   * when the run finishes and persisted in the run snapshot, so the next
+   * "continue" reuses a cached node output only when its hash still matches —
+   * editing the graph re-runs the affected subgraph. Absent until the run ends.
+   */
+  nodeHashes?: Record<string, string>;
 }
 const activeRuns = new Map<string, RunChannel>();
 
@@ -5614,6 +5751,272 @@ function stopActiveChat(): void {
   }
 }
 
+const IMAGE_PROMPT_SYSTEM = `你是专业的"生图提示词工程师"。用户会给出一句关于想要生成的图片的描述或想法，你要把它扩写成一段高质量、可直接喂给文生图模型的提示词。
+要求：
+- 直接输出最终提示词正文，不要任何解释、前后缀、标题、引号或代码块。
+- 补全画面主体、风格、构图、光线、色调、镜头/视角、画质等关键要素，使画面具体而协调。
+- 保留用户明确指定的内容；用户没提到的细节由你做合理且不喧宾夺主的补充。
+- 与用户输入语言保持一致（中文需求输出中文提示词，英文需求输出英文提示词）。
+- 只描述要画什么，不要写"请生成/帮我画"之类的指令性措辞。`;
+
+/** Strip code fences / labels / surrounding quotes the model may wrap around the prompt. */
+function cleanGeneratedImagePrompt(raw: string): string {
+  let text = raw.trim();
+  const fence = /^```[^\n]*\n([\s\S]*?)\n```$/.exec(text);
+  if (fence) text = fence[1].trim();
+  text = text.replace(/^(?:生图提示词|提示词|prompt)\s*[:：]\s*/iu, '').trim();
+  const quoted = /^["'「『]([\s\S]+)["'」』]$/u.exec(text);
+  if (quoted) text = quoted[1].trim();
+  return text;
+}
+
+/**
+ * Step 1 of the fixed two-step image flow: send the user's description to the
+ * selected coding/text model and have it author a high-quality image-generation
+ * prompt. Returns null when no text-model backend is reachable (e.g. browser
+ * without an API key) so the caller can fall back to the raw user text. Honors
+ * the channel's abort signal (direct) and cliRunIds (CLI) so 停止 cancels it.
+ */
+async function refineImagePromptViaModel(
+  ch: AiEditChannel,
+  userText: string,
+  codingSelection: GatewaySelection,
+  permission: string,
+  onProgress: (live: string) => void,
+): Promise<{ prompt: string; routeLine: string; routeHeader: string } | null> {
+  const userContent = `请把下面的图片需求改写成一段高质量的生图提示词：\n\n${userText}`;
+  const direct = resolveDirectGatewayRoute(codingSelection);
+  if (direct) {
+    let full = '';
+    const text = await completeGatewayText({
+      route: direct,
+      system: IMAGE_PROMPT_SYSTEM,
+      userContent,
+      maxTokens: 1024,
+      signal: ch.abortController.signal,
+      onDelta: (chunk) => {
+        full += chunk;
+        onProgress(full);
+      },
+    });
+    return {
+      prompt: cleanGeneratedImagePrompt(full || text),
+      routeLine: gatewayRouteLine(direct),
+      routeHeader: gatewayRouteHeader(direct),
+    };
+  }
+  if (isTauri()) {
+    if (isFreeChannelSelection(codingSelection)) {
+      await ensureFreeProxy(freeProxyOptionsForSelection(codingSelection));
+    }
+    const cli = await resolveCliGatewayRoute(codingSelection);
+    const runId = makeCliRunId();
+    ch.cliRunIds.add(runId);
+    try {
+      let live = '';
+      const text = await aiEditViaCli(
+        `${IMAGE_PROMPT_SYSTEM}\n\n${userContent}`,
+        cli.adapter,
+        {
+          permission,
+          model: cli.model,
+          cliCommand: cli.cliCommand,
+          env: cli.env,
+          runId,
+          onProgress: (chunk) => {
+            live += chunk;
+            onProgress(live);
+          },
+        },
+      );
+      return {
+        prompt: cleanGeneratedImagePrompt(text || live),
+        routeLine: gatewayRouteLine(cli),
+        routeHeader: gatewayRouteHeader(cli),
+      };
+    } finally {
+      ch.cliRunIds.delete(runId);
+    }
+  }
+  return null;
+}
+
+function startImageGenerationTurn(
+  text: string,
+  options: { providerId?: ImageProviderId; model?: string } = {},
+): void {
+  const prompt = stripImageCommand(text);
+  if (!prompt) return;
+  const state = useStore.getState();
+  if (isWorkflowReadOnly(state)) return;
+  const sessionKey = activeWorkflowSessionKey(state);
+  const settings = loadImageGenerationSettings();
+  if (!settings.enabled) return;
+  const providerId = options.providerId ?? preferredReadyImageProviderId(settings);
+  // The coding/text model that authors the image prompt (step 1) is the channel
+  // the composer currently has selected — image mode only swaps the image
+  // provider selectors, not composer.model. Permission mirrors the composer so a
+  // CLI run behaves like the rest of the app.
+  const codingSelection = workflowDefaultGatewaySelection(
+    state.workflow,
+    state.composer.model,
+  );
+  const codingPermission = state.composer.permission || 'full';
+
+  if (state.blockedSendTip) useStore.setState({ blockedSendTip: null });
+
+  const now = Date.now();
+  const providerLabel = providerId
+    ? imageProviderById(providerId).label
+    : 'Image generation';
+  const model = providerId
+    ? options.model?.trim() ||
+      settings.providerModels[providerId]?.trim() ||
+      imageProviderById(providerId).defaultModel
+    : options.model?.trim() || '';
+  const userMsg: Message = {
+    id: shortId('m'),
+    role: 'user',
+    text,
+    createdAt: now,
+  };
+  const assistantId = shortId('m');
+  const assistantMsg: Message = {
+    id: assistantId,
+    role: 'assistant',
+    text: `⚙ 出图：${providerLabel}${model ? ` · 模型：${model}` : ''}\n① 正在让模型撰写生图提示词…`,
+    routeLabel: model ? `${providerLabel} · ${model}` : providerLabel,
+    createdAt: now + 1,
+  };
+  const promptUpdate = applyPromptTitle(state, prompt, now);
+  const activeSession = sessionForKey(state, sessionKey);
+  const simpleMode = promptUpdate.workflow.meta?.simple === true;
+  const baseMessages = state.messages;
+  const chSessionKey = runKey(sessionKey.workspaceId, sessionKey.sessionId);
+  const ch: AiEditChannel = {
+    key: chatTurnKey(chSessionKey, userMsg.id),
+    sessionKey: chSessionKey,
+    workspaceId: sessionKey.workspaceId,
+    sessionId: sessionKey.sessionId,
+    workflow: promptUpdate.workflow,
+    messages: [...baseMessages, userMsg, assistantMsg],
+    cliRunIds: new Set<string>(),
+    abortController: new AbortController(),
+    workflowSession: activeSession?.isWorkflow ?? !simpleMode,
+    chat: true,
+    ownedMessageIds: new Set<string>([userMsg.id, assistantId]),
+  };
+
+  const setAssistant = (textValue: string, persist: boolean) => {
+    if (!aiEditRegistered(ch)) return;
+    ch.messages = ch.messages.map((message) =>
+      message.id === assistantId
+        ? {
+            ...message,
+            text: textValue,
+            routeLabel: model ? `${providerLabel} · ${model}` : providerLabel,
+          }
+        : message,
+    );
+    aiEditCommitMessages(ch, persist);
+  };
+
+  addAiEditChannel(ch);
+  if (aiEditViewActive(ch)) {
+    useStore.setState({
+      messages: ch.messages,
+      sessions: promptUpdate.sessions,
+      sessionTree: promptUpdate.sessionTree,
+      workflow: ch.workflow,
+    });
+  }
+  updateAiEditSessionSummary(ch);
+  if (ch.workspaceId && ch.sessionId) {
+    void historyStore
+      .updateSession(ch.workspaceId, ch.sessionId, {
+        messages: ch.messages,
+        ...(ch.workflowSession ? { workflow: ch.workflow } : {}),
+        meta: { runStatus: 'running' },
+      })
+      .catch(() => {});
+  }
+  syncAndPersistSessionRunStatus(sessionKey, 'running');
+
+  void (async () => {
+    const startedAt = Date.now();
+    const elapsed = () =>
+      `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(
+        Date.now() - startedAt,
+      )}`;
+    try {
+      // ── Step ① — ask the selected coding/text model to author the image
+      // prompt. When no text-model backend is reachable (browser without an API
+      // key, tests) refineImagePromptViaModel returns null and we fall back to
+      // the raw user text so image generation still works end to end.
+      let imagePrompt = prompt;
+      let refineHeader = '';
+      try {
+        const refined = await refineImagePromptViaModel(
+          ch,
+          prompt,
+          codingSelection,
+          codingPermission,
+          (live) => {
+            if (!aiEditRegistered(ch)) return;
+            setAssistant(
+              `${elapsed()}\n① 撰写生图提示词中…\n\n${live.trim() || '⟳ 生成中…'}`,
+              false,
+            );
+          },
+        );
+        if (refined && refined.prompt) {
+          imagePrompt = refined.prompt;
+          refineHeader = refined.routeHeader;
+        }
+      } catch (err) {
+        if (ch.abortController.signal.aborted || !aiEditRegistered(ch)) return;
+        // Prompt authoring failed (model error/timeout). Degrade to the raw
+        // user text rather than failing the whole turn.
+        imagePrompt = prompt;
+      }
+      if (!aiEditRegistered(ch)) return;
+
+      // ── Step ② — feed the authored prompt to the image model. `text:false`
+      // skips stripImageCommand inside generateImage (already a clean prompt).
+      const promptModelLine = refineHeader
+        ? `✎ 提示词模型：${refineHeader}\n`
+        : '';
+      setAssistant(
+        `${elapsed()}\n${promptModelLine}② 已生成提示词，正在出图…\n\n生图提示词：${imagePrompt}`,
+        false,
+      );
+      const result = await generateImage(
+        {
+          prompt: imagePrompt,
+          providerId: options.providerId,
+          model: options.model,
+          signal: ch.abortController.signal,
+        },
+        settings,
+      );
+      const body = imageResultMarkdown(result);
+      setAssistant(`${elapsed()}\n${promptModelLine}${body}`, true);
+      commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [text]));
+      syncAndPersistSessionRunStatus(sessionKey, 'success');
+    } catch (err) {
+      if (!aiEditRegistered(ch)) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      setAssistant(
+        `${elapsed()} · 失败\n✗ 图片生成失败: ${msg}\n\n请在设置 > 生图中配置可用的图片 Provider，或切换到本地 ComfyUI。`,
+        true,
+      );
+      syncAndPersistSessionRunStatus(sessionKey, 'error');
+    } finally {
+      removeAiEditChannel(ch);
+    }
+  })();
+}
+
 /** Is a run alive? (false once the user hits 停止, or the channel is gone.) */
 function runRegistered(ch: RunChannel | null): ch is RunChannel {
   return !!ch && activeRuns.get(ch.key) === ch;
@@ -5652,6 +6055,7 @@ function channelSnapshot(ch: RunChannel, status: IRRunStatus): IRRunSnapshot {
     failedNodeId: ch.failedNodeId,
     error: ch.error,
     route: ch.config.gatewaySelection,
+    ...(ch.nodeHashes ? { nodeHashes: ch.nodeHashes } : {}),
     updatedAt: Date.now(),
   };
 }
@@ -5903,9 +6307,12 @@ function aiEditCommitWorkflow(ch: AiEditChannel | null, persist: boolean): void 
 
 function commitAiChannelBlueprint(ch: AiEditChannel, ir: IRGraph): boolean {
   if (!aiEditActive(ch)) return false;
+  // [dynamic-only refactor] 非 chat 通道（蓝图编辑）已停用；保留路径只有 chat 模式，
+  // 走 mergeAiEditChatWorkflow。原 else 分支用 prepareGraphEdit(含 autoLayout)，已停用，
+  // 退化为仅节点编号归一化以保持编译与单节点聊天语义。
   ch.workflow = ch.chat
     ? mergeAiEditChatWorkflow(ch, ir)
-    : prepareGraphEdit(ch.workflow, ir);
+    : normalizeWorkflowNodeNumbers(ir);
   aiEditCommitWorkflow(ch, true);
   return true;
 }
@@ -6209,6 +6616,11 @@ function startWorkflowRun(resume: boolean): void {
     ? workflow.nodes.find((node) => node.id === resumeFromNodeId)
     : null;
   const seedOutputs = resume ? { ...state.runOutputs } : {};
+  // Prior run's per-node hashes (persisted in the run snapshot). Passed to the
+  // engine on resume so a seeded output is reused only when the node's spec and
+  // all its upstreams are unchanged — an edited subgraph re-runs instead of
+  // silently reusing stale cache. Absent ⇒ engine falls back to legacy by-id reuse.
+  const seedNodeHashes = resume ? state.workflow.meta.run?.nodeHashes : undefined;
   const initialRunState = resume
     ? seedRunStateFromOutputs(workflow, seedOutputs, state.runState)
     : {};
@@ -6267,10 +6679,27 @@ function startWorkflowRun(resume: boolean): void {
   ch.messages = [...ch.messages, runMsg];
   channelCommit(ch, 'running', true);
 
+  // Advisory determinism lint: warn (don't block) when a codeblock uses
+  // Date.now()/Math.random()/new Date(), which would make hash-checked resume
+  // serve stale cache and throw under real Claude Code. See core/determinism.ts.
+  // [dynamic-only refactor] 决定性 lint(findDeterminismHazards)已停用（蓝图模块 exclude）。
+  // 该建议性告警仅在蓝图运行路径触发，纯聊天/ultracode 不经过此处。
+  /*
+  for (const finding of findDeterminismHazards(workflow)) {
+    const node = workflow.nodes.find((n) => n.id === finding.nodeId);
+    pushRunLog(
+      ch,
+      `⚠ ${node?.label ?? finding.nodeId}: ${finding.message}`,
+      'system',
+    );
+  }
+  */
+
   if (isTauri() || workflowHasDirectGatewayRoute(workflow, gatewaySelection)) {
     void executeViaCliInterpreter(ch, workflow, adapter, runStartedAt, {
       resumeFromNodeId,
       seedOutputs,
+      seedNodeHashes,
     });
   } else {
     void executeViaSimulator(ch, workflow, { resumeFromNodeId, seedOutputs });
@@ -6734,6 +7163,7 @@ async function executeViaCliInterpreter(
   options: {
     resumeFromNodeId?: string | null;
     seedOutputs?: Record<string, string>;
+    seedNodeHashes?: Record<string, string>;
   } = {},
 ): Promise<void> {
   const launchSelection =
@@ -6780,7 +7210,12 @@ async function executeViaCliInterpreter(
     resumeFromNodeId: options.resumeFromNodeId,
     seedOutputs: options.seedOutputs,
     seedRunState: ch.runState,
+    seedNodeHashes: options.seedNodeHashes,
   });
+
+  // Record this run's per-node hashes so a later "continue" can validate which
+  // cached outputs are still reusable (unchanged node + unchanged upstreams).
+  if (result.nodeHashes) ch.nodeHashes = result.nodeHashes;
 
   if (runActive(ch)) {
     const runFinishedAt = Date.now();

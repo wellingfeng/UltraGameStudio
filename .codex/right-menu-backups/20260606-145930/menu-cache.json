@@ -1,0 +1,364 @@
+{
+  "version": 2,
+  "top-level": [
+    {
+      "id": "launch-claude",
+      "label": "Claude Code",
+      "icon": {
+        "source": "fallback",
+        "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+        "note": "using CC-Menu executable icon fallback"
+      },
+      "action": {
+        "type": "default-launch",
+        "agent_id": "claude"
+      },
+      "children": []
+    },
+    {
+      "id": "launch-codex",
+      "label": "Codex",
+      "icon": {
+        "source": "registry",
+        "path": "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.519.3891.0_x64__2p2nqsd0c76g0\\app\\Codex.exe",
+        "note": "existing Windows registry icon"
+      },
+      "action": {
+        "type": "default-launch",
+        "agent_id": "codex"
+      },
+      "children": []
+    },
+    {
+      "id": "launch-gemini",
+      "label": "Gemini",
+      "icon": {
+        "source": "fallback",
+        "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+        "note": "using CC-Menu executable icon fallback"
+      },
+      "action": {
+        "type": "default-launch",
+        "agent_id": "gemini"
+      },
+      "children": []
+    },
+    {
+      "id": "cc-menu",
+      "label": "CC-Menu",
+      "icon": {
+        "source": "fallback",
+        "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+        "note": "using CC-Menu executable icon fallback"
+      },
+      "action": {
+        "type": "open-settings",
+        "tab": "dashboard"
+      },
+      "children": [
+        {
+          "id": "start-options",
+          "label": "Start with Options",
+          "icon": {
+            "source": "fallback",
+            "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+            "note": "using CC-Menu executable icon fallback"
+          },
+          "action": {
+            "type": "open-start-options"
+          },
+          "children": []
+        },
+        {
+          "id": "sessions",
+          "label": "Sessions",
+          "icon": {
+            "source": "fallback",
+            "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+            "note": "using CC-Menu executable icon fallback"
+          },
+          "action": {
+            "type": "open-sessions"
+          },
+          "children": []
+        },
+        {
+          "id": "sync-agents",
+          "label": "Sync Agents from CC-Switch",
+          "icon": {
+            "source": "fallback",
+            "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+            "note": "using CC-Menu executable icon fallback"
+          },
+          "action": {
+            "type": "sync-agents"
+          },
+          "children": []
+        },
+        {
+          "id": "sync-menus",
+          "label": "Sync Menus",
+          "icon": {
+            "source": "fallback",
+            "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+            "note": "using CC-Menu executable icon fallback"
+          },
+          "action": {
+            "type": "sync-menus"
+          },
+          "children": []
+        },
+        {
+          "id": "settings",
+          "label": "Settings",
+          "icon": {
+            "source": "fallback",
+            "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+            "note": "using CC-Menu executable icon fallback"
+          },
+          "action": {
+            "type": "open-settings",
+            "tab": "agents"
+          },
+          "children": []
+        },
+        {
+          "id": "accounts-claude",
+          "label": "---- Claude Code accounts",
+          "icon": {
+            "source": "fallback",
+            "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+            "note": "using CC-Menu executable icon fallback"
+          },
+          "action": {
+            "type": "separator"
+          },
+          "children": []
+        },
+        {
+          "id": "switch-claude-claude-official",
+          "label": "Claude Code: Official",
+          "icon": {
+            "source": "fallback",
+            "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+            "note": "using CC-Menu executable icon fallback"
+          },
+          "action": {
+            "type": "switch-route",
+            "agent_id": "claude",
+            "account_id": "claude-official"
+          },
+          "children": []
+        },
+        {
+          "id": "accounts-codex",
+          "label": "---- Codex accounts",
+          "icon": {
+            "source": "registry",
+            "path": "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.519.3891.0_x64__2p2nqsd0c76g0\\app\\Codex.exe",
+            "note": "existing Windows registry icon"
+          },
+          "action": {
+            "type": "separator"
+          },
+          "children": []
+        },
+        {
+          "id": "switch-codex-codex-openai",
+          "label": "Codex: Official",
+          "icon": {
+            "source": "registry",
+            "path": "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.519.3891.0_x64__2p2nqsd0c76g0\\app\\Codex.exe",
+            "note": "existing Windows registry icon"
+          },
+          "action": {
+            "type": "switch-route",
+            "agent_id": "codex",
+            "account_id": "codex-openai"
+          },
+          "children": []
+        },
+        {
+          "id": "accounts-gemini",
+          "label": "---- Gemini accounts",
+          "icon": {
+            "source": "fallback",
+            "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+            "note": "using CC-Menu executable icon fallback"
+          },
+          "action": {
+            "type": "separator"
+          },
+          "children": []
+        },
+        {
+          "id": "switch-gemini-gemini-google",
+          "label": "Gemini: Official",
+          "icon": {
+            "source": "fallback",
+            "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+            "note": "using CC-Menu executable icon fallback"
+          },
+          "action": {
+            "type": "switch-route",
+            "agent_id": "gemini",
+            "account_id": "gemini-google"
+          },
+          "children": []
+        }
+      ]
+    }
+  ],
+  "cc-menu": [
+    {
+      "id": "start-options",
+      "label": "Start with Options",
+      "icon": {
+        "source": "fallback",
+        "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+        "note": "using CC-Menu executable icon fallback"
+      },
+      "action": {
+        "type": "open-start-options"
+      },
+      "children": []
+    },
+    {
+      "id": "sessions",
+      "label": "Sessions",
+      "icon": {
+        "source": "fallback",
+        "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+        "note": "using CC-Menu executable icon fallback"
+      },
+      "action": {
+        "type": "open-sessions"
+      },
+      "children": []
+    },
+    {
+      "id": "sync-agents",
+      "label": "Sync Agents from CC-Switch",
+      "icon": {
+        "source": "fallback",
+        "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+        "note": "using CC-Menu executable icon fallback"
+      },
+      "action": {
+        "type": "sync-agents"
+      },
+      "children": []
+    },
+    {
+      "id": "sync-menus",
+      "label": "Sync Menus",
+      "icon": {
+        "source": "fallback",
+        "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+        "note": "using CC-Menu executable icon fallback"
+      },
+      "action": {
+        "type": "sync-menus"
+      },
+      "children": []
+    },
+    {
+      "id": "settings",
+      "label": "Settings",
+      "icon": {
+        "source": "fallback",
+        "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+        "note": "using CC-Menu executable icon fallback"
+      },
+      "action": {
+        "type": "open-settings",
+        "tab": "agents"
+      },
+      "children": []
+    },
+    {
+      "id": "accounts-claude",
+      "label": "---- Claude Code accounts",
+      "icon": {
+        "source": "fallback",
+        "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+        "note": "using CC-Menu executable icon fallback"
+      },
+      "action": {
+        "type": "separator"
+      },
+      "children": []
+    },
+    {
+      "id": "switch-claude-claude-official",
+      "label": "Claude Code: Official",
+      "icon": {
+        "source": "fallback",
+        "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+        "note": "using CC-Menu executable icon fallback"
+      },
+      "action": {
+        "type": "switch-route",
+        "agent_id": "claude",
+        "account_id": "claude-official"
+      },
+      "children": []
+    },
+    {
+      "id": "accounts-codex",
+      "label": "---- Codex accounts",
+      "icon": {
+        "source": "registry",
+        "path": "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.519.3891.0_x64__2p2nqsd0c76g0\\app\\Codex.exe",
+        "note": "existing Windows registry icon"
+      },
+      "action": {
+        "type": "separator"
+      },
+      "children": []
+    },
+    {
+      "id": "switch-codex-codex-openai",
+      "label": "Codex: Official",
+      "icon": {
+        "source": "registry",
+        "path": "C:\\Program Files\\WindowsApps\\OpenAI.Codex_26.519.3891.0_x64__2p2nqsd0c76g0\\app\\Codex.exe",
+        "note": "existing Windows registry icon"
+      },
+      "action": {
+        "type": "switch-route",
+        "agent_id": "codex",
+        "account_id": "codex-openai"
+      },
+      "children": []
+    },
+    {
+      "id": "accounts-gemini",
+      "label": "---- Gemini accounts",
+      "icon": {
+        "source": "fallback",
+        "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+        "note": "using CC-Menu executable icon fallback"
+      },
+      "action": {
+        "type": "separator"
+      },
+      "children": []
+    },
+    {
+      "id": "switch-gemini-gemini-google",
+      "label": "Gemini: Official",
+      "icon": {
+        "source": "fallback",
+        "path": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+        "note": "using CC-Menu executable icon fallback"
+      },
+      "action": {
+        "type": "switch-route",
+        "agent_id": "gemini",
+        "account_id": "gemini-google"
+      },
+      "children": []
+    }
+  ]
+}

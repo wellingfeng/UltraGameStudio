@@ -1,7 +1,7 @@
 {
   "name": "freeultracode-app",
   "private": true,
-  "version": "0.2.7",
+  "version": "0.2.8",
   "type": "module",
   "license": "MIT",
   "bin": {
@@ -19,7 +19,8 @@
     "cli:dev": "node --experimental-strip-types cli/bin/fuc.ts",
     "tauri": "tauri",
     "desktop": "tauri dev",
-    "package": "tauri build"
+    "check:built-in-workflows": "node scripts/check-built-in-workflows.mjs",
+    "package": "npm run cli:build && npm run check:built-in-workflows && node scripts/tauri-build-platform.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
@@ -27,6 +28,8 @@
     "@tauri-apps/plugin-fs": "^2.5.1",
     "@tauri-apps/plugin-opener": "^2.5.4",
     "@xyflow/react": "^12.3.5",
+    "gifenc": "^1.0.3",
+    "html2canvas": "^1.4.1",
     "katex": "^0.16.47",
     "lowlight": "^3.3.0",
     "lucide-react": "^1.17.0",

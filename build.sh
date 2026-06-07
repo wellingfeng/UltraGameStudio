@@ -28,7 +28,9 @@ echo
 
 # ---- prerequisites ----
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env" 2>/dev/null || true
-command -v node  >/dev/null 2>&1 || { c_err "Node.js not found: https://nodejs.org";    pause; exit 1; }
+command -v node  >/dev/null 2>&1 || { c_err "Node.js 20.19+ or 22.12+ not found: https://nodejs.org"; pause; exit 1; }
+node -e "const [maj,min]=process.versions.node.split('.').map(Number); process.exit((maj===20&&min>=19)||maj>22||(maj===22&&min>=12)?0:1)" >/dev/null 2>&1 \
+    || { c_err "Node.js $(node -v) is unsupported. Install Node.js 20.19+ or 22.12+."; pause; exit 1; }
 command -v cargo >/dev/null 2>&1 || { c_err "Rust/cargo not found: https://rustup.rs"; pause; exit 1; }
 c_ok "Node.js $(node -v)"
 c_ok "$(cargo -V)"

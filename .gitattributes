@@ -1,0 +1,37 @@
+# Normalize text files in the repository so macOS and Windows commits do not
+# churn only because of line endings.
+* text=auto
+
+# Unix scripts must stay LF or /usr/bin/env can fail on macOS/Linux.
+*.sh text eol=lf
+*.bash text eol=lf
+*.zsh text eol=lf
+
+# Windows scripts keep CRLF for cmd.exe and PowerShell compatibility.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Treat common binary assets as binary; do not attempt line-ending conversion.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.bmp binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.exe binary
+*.dll binary
+*.dylib binary
+*.so binary
+*.mp4 binary
+*.mov binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary

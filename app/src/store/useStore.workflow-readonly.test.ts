@@ -658,6 +658,7 @@ describe('workflow read-only guard', () => {
         model: 'claude-sonnet-4',
         workspace: '',
         modelStrategy: 'inherit',
+        imageMode: false,
       },
     });
 
@@ -749,7 +750,9 @@ describe('workflow read-only guard', () => {
     },
   );
 
-  it('allows creating a new workflow while the current workflow is running', () => {
+  // [dynamic-only refactor] newWorkflow 蓝图创建已停用（改为 no-op）；下面两个用例
+  // 断言的是已移除的可视化蓝图创建行为，故 skip（源码保留，便于日后恢复）。
+  it.skip('allows creating a new workflow while the current workflow is running', () => {
     resetStore('running', false);
 
     useStore.getState().newWorkflow();
@@ -769,7 +772,7 @@ describe('workflow read-only guard', () => {
     expect(state.dirty).toBe(false);
   });
 
-  it('allows creating a new workflow during an active AI blueprint edit', () => {
+  it.skip('allows creating a new workflow during an active AI blueprint edit', () => {
     resetStore('design', true);
 
     useStore.getState().newWorkflow();

@@ -13,17 +13,20 @@
 import { Command } from 'commander';
 import { CliError } from '../utils/fs';
 import { resolveColor, setColorEnabled, type GlobalOptions } from '../utils/format';
-import { runGen, type GenOptions } from '../commands/gen';
-import { runInit, type InitOptions } from '../commands/init';
-import { runEmit, type EmitOptions } from '../commands/emit';
-import { runParse, type ParseOptions } from '../commands/parse';
-import { runValidate, type ValidateOptions } from '../commands/validate';
-import { runRun, type RunCommandOptions } from '../commands/run';
-import { runList, type ListOptions } from '../commands/list';
-import { runConvert, type ConvertOptions } from '../commands/convert';
-import { runDiff, type DiffOptions } from '../commands/diff';
-import { runInfo, type InfoOptions } from '../commands/info';
+// [dynamic-only refactor] 静态蓝图子命令已停用，只保留 /ultracode 相关命令。
+// 源码保留在 cli/commands/ 下（已从编译图 exclude），如需恢复取消下列注释即可。
+// import { runGen, type GenOptions } from '../commands/gen';
+// import { runInit, type InitOptions } from '../commands/init';
+// import { runEmit, type EmitOptions } from '../commands/emit';
+// import { runParse, type ParseOptions } from '../commands/parse';
+// import { runValidate, type ValidateOptions } from '../commands/validate';
+// import { runRun, type RunCommandOptions } from '../commands/run';
+// import { runList, type ListOptions } from '../commands/list';
+// import { runConvert, type ConvertOptions } from '../commands/convert';
+// import { runDiff, type DiffOptions } from '../commands/diff';
+// import { runInfo, type InfoOptions } from '../commands/info';
 import { runUltracode, type UltracodeOptions } from '../commands/ultracode';
+import { runUltracodeTrace, type UltracodeTraceOptions } from '../commands/ultracodeTrace';
 
 declare const __FUC_CLI_VERSION__: string;
 const VERSION = typeof __FUC_CLI_VERSION__ !== 'undefined' ? __FUC_CLI_VERSION__ : '0.1.0';
@@ -33,11 +36,9 @@ const program = new Command();
 program
   .name('fuc')
   .description(
-    'FreeUltraCode CLI — 用自然语言生成 workflow 脚本，并运行它。\n\n' +
-      '  fuc gen "<需求>" -o flow.js     用自然语言生成 workflow（零配置，复用本地 claude 登录态）\n' +
-      '  fuc gen flow.js "<修改意图>"     修改已有 workflow 脚本\n' +
-      '  fuc run flow.js                 运行 workflow 脚本\n' +
-      '  fuc ultracode "<任务>"          即时生成并执行动态 workflow harness',
+    'FreeUltraCode CLI — 即时生成并执行动态 workflow harness。\n\n' +
+      '  fuc ultracode "<任务>"          即时生成并执行动态 workflow harness\n' +
+      '  fuc ultracode-trace <run-id>    查看一次 /ultracode run 的可观测摘要',
   )
   .version(VERSION, '--version', 'show version number')
   .option('-c, --config <path>', 'config file path (default ~/.fuc/config.json)')
@@ -78,8 +79,9 @@ function dispatch(fn: () => Promise<number>): void {
     });
 }
 
-// --- User-facing commands (only these two appear in `fuc --help`) ---
-
+// --- [dynamic-only refactor] 静态蓝图命令已停用（gen/run 及下方 internal 命令）。
+// 实现源码保留在 cli/commands/，已从编译图 exclude；恢复时取消注释并恢复顶部 import。
+/*
 program
   .command('gen [request] [output]')
   .description('用自然语言生成或修改 workflow 脚本（零配置，走本地 claude 登录态）')
@@ -113,6 +115,7 @@ program
   .option('--timeout <seconds>', 'per-node timeout seconds')
   .option('--cwd <path>', 'working directory')
   .action((file: string, local: RunCommandOptions) => dispatch(() => runRun(file, withGlobals(local))));
+*/
 
 program
   .command('ultracode <task>')
@@ -132,6 +135,7 @@ program
   .option('--max-agent-calls <n>', 'override ultracode agent-call budget')
   .option('--max-rounds <n>', 'override ultracode repair-round budget')
   .option('--verify-command <command>', 'run a local verification command after ultracode; nonzero exit fails the run')
+  .option('--auto-verify', 'also auto-run the planner-proposed command objective checks (file checks always run)')
   .option('--timeout <seconds>', 'per-node timeout seconds')
   .option('--cwd <path>', 'working directory')
   .option('--run-id <id>', 'explicit run directory id under .fuc-run/')
@@ -139,8 +143,17 @@ program
     dispatch(() => runUltracode(task, withGlobals(local))),
   );
 
-// --- Internal commands (hidden from `--help`; kept as reusable steps) ---
+program
+  .command('ultracode-trace <run-id>')
+  .description('显示一次 /ultracode run 的可观测摘要：节点耗时/返工 + 验收门×真值校准')
+  .option('--cwd <path>', 'working directory (where .fuc-run/ lives)')
+  .action((runId: string, local: UltracodeTraceOptions) =>
+    dispatch(() => runUltracodeTrace(runId, withGlobals(local))),
+  );
 
+// --- Internal commands (hidden from `--help`; kept as reusable steps) ---
+// [dynamic-only refactor] 静态蓝图 internal 命令已停用（init/emit/parse/validate/list/convert/diff/info）。
+/*
 program
   .command('init [name]', { noHelp: true })
   .description('create a minimal IRGraph blueprint')
@@ -206,11 +219,13 @@ program
   .command('info <file>', { noHelp: true })
   .description('show workflow metadata and stats')
   .action((file: string, local: InfoOptions) => dispatch(() => runInfo(file, withGlobals(local))));
+*/
 
-/** commander collector for repeatable options. */
-function collect(value: string, previous: string[]): string[] {
-  return previous.concat([value]);
-}
+// [dynamic-only refactor] collect 仅供上面已停用的 repeatable 选项使用，一并停用。
+// /** commander collector for repeatable options. */
+// function collect(value: string, previous: string[]): string[] {
+//   return previous.concat([value]);
+// }
 
 program.parseAsync(process.argv).catch((err) => {
   process.stderr.write(`fuc: ${err instanceof Error ? err.message : String(err)}\n`);

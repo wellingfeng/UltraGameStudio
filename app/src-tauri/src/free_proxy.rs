@@ -715,6 +715,11 @@ fn builtin_models_for_channel(channel_id: &str) -> &'static [&'static str] {
             "gemini-2.0-flash",
         ],
         "deepseek" => &["deepseek-chat", "deepseek-reasoner"],
+        "volcengine" => &[
+            "deepseek-v3-250324",
+            "deepseek-r1-250528",
+            "deepseek-r1-250120",
+        ],
         "mistral" => &["mistral-large-latest", "mistral-small-latest"],
         "mistral_codestral" => &["codestral-latest", "codestral-2405"],
         "opencode" => &["glm-5.1", "glm-4.6"],

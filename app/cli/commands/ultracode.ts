@@ -6,8 +6,9 @@
  * runtime, and persists the full run protocol under `.fuc-run/<run-id>/`.
  */
 import { spawn } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Dirent } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { formatDuration } from '../../src/runtime/format';
 import type { IRGraph, IRRunStatus } from '../../src/core/ir';
 import {
@@ -18,12 +19,20 @@ import {
   type RunResult,
 } from '../../src/runtime';
 import {
+  encodeProgressEvent,
+  type UltracodeNodeStatus,
+  type UltracodeProgressEvent,
+} from '../../src/runtime/ultracodeProgress';
+import {
   PLANNER_NODE_ID,
+  PLAN_CRITIC_NODE_ID,
   buildDynamicHarnessGraph,
   buildDynamicPlannerGraph,
   extractHarnessArtifacts,
   fallbackHarnessSpec,
   parseDynamicHarnessSpecResult,
+  reconcileBudget,
+  resolvePlannedSpec,
   verdictEffectivePass,
   type DynamicHarnessArtifacts,
   type DynamicHarnessSpec,
@@ -31,6 +40,101 @@ import {
 import { buildNodeGateway, runBlueprint, type RunEvent } from '../runtime-host';
 import { CliError, errMsg } from '../utils/fs';
 import { c, type GlobalOptions } from '../utils/format';
+import { buildRunSummary } from './ultracodeSummary';
+import { runObjectiveChecks, type ObjectiveChecksReport } from './objectiveChecks';
+
+/**
+ * Build timestamp baked in by cli/build.mjs (ISO seconds). `undefined` when the
+ * command is run straight from source via `cli:dev` (--experimental-strip-types),
+ * where there is no stale-dist hazard to guard against.
+ */
+declare const __FUC_BUILD_TIME__: string;
+const FUC_BUILD_TIME: string | null =
+  typeof __FUC_BUILD_TIME__ !== 'undefined' ? __FUC_BUILD_TIME__ : null;
+
+/**
+ * Whether to weave structured `<<FUC_PROGRESS>>` sentinels into stderr so the
+ * desktop GUI can render a live run-progress card. Enabled only when stderr is
+ * captured (not a TTY) — a human terminal sees the normal log lines untouched —
+ * and never in --json-only/quiet contexts where stderr text matters less.
+ * Overridable with FUC_PROGRESS_EVENTS=0 (force off) / =1 (force on).
+ */
+function progressEventsEnabled(): boolean {
+  const env = process.env.FUC_PROGRESS_EVENTS;
+  if (env === '0') return false;
+  if (env === '1') return true;
+  return !(process.stderr.isTTY ?? false);
+}
+
+const PROGRESS_EVENTS_ON = progressEventsEnabled();
+
+/** Emit one structured progress event to stderr (no-op when disabled). */
+function emitProgress(event: UltracodeProgressEvent): void {
+  if (!PROGRESS_EVENTS_ON) return;
+  process.stderr.write(encodeProgressEvent(event));
+}
+
+/**
+ * Staleness guard for the "edited source but ran a stale dist" failure mode that
+ * silently disabled the acceptance-gate budget reserve. When running from a
+ * bundled dist, compare its build time against the newest mtime in the command's
+ * own source tree (cli/ + src/runtime/). If source is newer, the dist is stale —
+ * warn loudly so the user rebuilds before trusting the run. Best-effort: any
+ * filesystem error degrades to silence (never blocks a legitimate run).
+ */
+function warnIfStaleBuild(quiet: boolean): void {
+  if (quiet || !FUC_BUILD_TIME) return;
+  const builtAt = Date.parse(FUC_BUILD_TIME);
+  if (Number.isNaN(builtAt)) return;
+  let here: string;
+  try {
+    here = dirname(fileURLToPath(import.meta.url));
+  } catch {
+    return;
+  }
+  // From cli/dist/ (bundled) or cli/commands/ (source), the CLI + runtime roots
+  // sit at ../.. and ../../src/runtime. Scan both for the newest source mtime.
+  const roots = [resolve(here, '..'), resolve(here, '..', '..', 'src', 'runtime')];
+  let newestSrc = 0;
+  for (const root of roots) {
+    newestSrc = Math.max(newestSrc, newestMtimeOfTsFiles(root, 0));
+  }
+  if (newestSrc > builtAt + 1000) {
+    const ageMin = Math.round((newestSrc - builtAt) / 60000);
+    process.stderr.write(
+      c.warn(
+        `⚠ CLI dist 可能已过期：构建于 ${FUC_BUILD_TIME}，但源码有更新（最新改动比构建晚约 ${ageMin} 分钟）。\n` +
+          `  本次运行用的是旧的 fuc.mjs，最近的源码改动可能未生效。请先重建：cd app && node cli/build.mjs\n`,
+      ),
+    );
+  }
+}
+
+/** Newest mtime (ms) among *.ts files under dir, recursing up to 3 levels. */
+function newestMtimeOfTsFiles(dir: string, depth: number): number {
+  if (depth > 3) return 0;
+  let newest = 0;
+  let entries: Dirent[];
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return 0;
+  }
+  for (const entry of entries) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) {
+      if (entry.name === 'node_modules' || entry.name === 'dist') continue;
+      newest = Math.max(newest, newestMtimeOfTsFiles(full, depth + 1));
+    } else if (entry.isFile() && entry.name.endsWith('.ts') && !entry.name.endsWith('.test.ts')) {
+      try {
+        newest = Math.max(newest, statSync(full).mtimeMs);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return newest;
+}
 
 export interface UltracodeOptions extends GlobalOptions {
   adapter?: string;
@@ -45,6 +149,7 @@ export interface UltracodeOptions extends GlobalOptions {
   maxAgentCalls?: string;
   maxRounds?: string;
   verifyCommand?: string;
+  autoVerify?: boolean;
   timeout?: string;
   runId?: string;
   resume?: boolean;
@@ -63,6 +168,22 @@ export interface UltracodeJsonResult {
   artifacts: DynamicHarnessArtifacts;
   budget?: UltracodeBudgetSnapshot;
   verification?: UltracodeVerificationResult;
+  /**
+   * Phase 2 observability — the two acceptance signals kept SEPARATE:
+   * `modelVerdictPass` is the model's self-graded gate (verdictEffectivePass),
+   * `groundTruthPass` is the objective --verify-command result (null when none).
+   * `success` above is a mixed convenience flag; for accuracy measurement read
+   * these two fields (and run-summary.json's gate quadrant), not `success`.
+   */
+  verdictSignals?: {
+    modelVerdictPass: boolean | null;
+    groundTruthPass: boolean | null;
+  };
+  /** Phase 1 observability — derived run flags surfaced for the summary. */
+  observability?: {
+    plannerFallback: boolean;
+    closingPass: boolean;
+  };
   durationMs: number;
   failedNodeId: string | null;
   error: Record<string, unknown> | null;
@@ -125,6 +246,10 @@ export async function runUltracode(
     if (!opts.quiet) {
       process.stderr.write(c.dim(`ultracode run: ${runId}\n`));
       process.stderr.write(c.dim(`run dir: ${runDir}\n`));
+      if (FUC_BUILD_TIME) {
+        process.stderr.write(c.dim(`cli build: ${FUC_BUILD_TIME}\n`));
+      }
+      warnIfStaleBuild(opts.quiet ?? false);
       if (opts.resume) {
         process.stderr.write(
           resumeSnapshot
@@ -138,6 +263,9 @@ export async function runUltracode(
 
     let spec: DynamicHarnessSpec;
     let plannerResult: RunResult | null = null;
+    // Run-scoped observability flags surfaced into result.json + run-summary.json.
+    let plannerFallback = false;
+    let ranClosingPass = false;
     if (resumeSnapshot) {
       spec = applyBudgetOverrides(resumeSnapshot.spec, opts);
     } else if (opts.fromHarness) {
@@ -192,16 +320,37 @@ export async function runUltracode(
 
       let usedFallback = false;
       if (plannerResult.success) {
-        const parsed = parseDynamicHarnessSpecResult(
+        // Resolve the spec from the planner + plan-critic pair. The critic's
+        // revisedSpec (a stronger model auditing the cheaper planner) is
+        // authoritative when present, since the whole run inherits this spec's
+        // success criteria and scope — the cheapest place to fix errors.
+        const resolved = resolvePlannedSpec(
           plannerResult.outputs[PLANNER_NODE_ID],
+          plannerResult.outputs[PLAN_CRITIC_NODE_ID],
           task,
         );
-        spec = parsed.spec;
-        usedFallback = parsed.usedFallback;
+        spec = resolved.spec;
+        usedFallback = resolved.usedFallback;
+        if (resolved.critiqueApplied) {
+          appendEvent(runDir, {
+            ts: Date.now(),
+            phase: 'planning',
+            kind: 'plan_critique_applied',
+            ok: resolved.critique?.ok ?? null,
+            issueCount: resolved.critique?.issues.length ?? 0,
+            issues: resolved.critique?.issues ?? [],
+          });
+          if (!opts.quiet && resolved.critique && resolved.critique.issues.length > 0) {
+            process.stderr.write(
+              c.dim(`规格复审修正了 ${resolved.critique.issues.length} 处问题。\n`),
+            );
+          }
+        }
       } else {
         spec = fallbackHarnessSpec(task);
         usedFallback = true;
       }
+      plannerFallback = usedFallback;
       if (usedFallback) {
         const reason = plannerResult.success
           ? 'planner 未产出可解析的 harness 规格'
@@ -219,6 +368,27 @@ export async function runUltracode(
         }
       }
       spec = applyBudgetOverrides(spec, opts);
+    }
+    // Reconcile the call budget against the declared repair rounds so the plan
+    // can't promise more rounds than the budget can fund (the failure mode where
+    // a 2-round plan ran out of calls at the first acceptance gate). When the
+    // user pinned --max-agent-calls, treat it as a hard ceiling: rounds drop to
+    // fit rather than the ceiling rising past the user's explicit cap.
+    {
+      const userCeiling = parseNumber(opts.maxAgentCalls);
+      const reconciled = reconcileBudget(spec, userCeiling ?? undefined);
+      if (reconciled.note) {
+        spec = reconciled.spec;
+        appendEvent(runDir, {
+          ts: Date.now(),
+          phase: 'planning',
+          kind: 'budget_reconciled',
+          note: reconciled.note,
+          maxAgentCalls: spec.budget.maxAgentCalls,
+          maxRounds: spec.budget.maxRounds,
+        });
+        if (!opts.quiet) process.stderr.write(c.dim(`${reconciled.note}\n`));
+      }
     }
     writeJson(join(runDir, 'harness.json'), spec);
 
@@ -244,6 +414,12 @@ export async function runUltracode(
     });
     const harnessGraph = resumeSnapshot?.workflow ?? buildDynamicHarnessGraph(spec);
     writeJson(join(runDir, 'workflow.fuc.json'), harnessGraph);
+    emitProgress({
+      kind: 'harness_ready',
+      totalNodes: getRunnableNodes(harnessGraph).length,
+      maxAgentCalls: spec.budget.maxAgentCalls,
+      objective: spec.objective,
+    });
     const seedOutputs = resumeSnapshot?.outputs;
     const seedRunState = resumeSnapshot
       ? nodeStatesFromResults(resumeSnapshot.nodeResults)
@@ -271,6 +447,7 @@ export async function runUltracode(
     const gateway = budgetGateway(baseGateway, budget, (spent) => {
       spentCalls = spent;
       updateStore(store, { agentCalls: spentCalls });
+      emitProgress({ kind: 'agent_calls', spent: spentCalls });
     }, () => {
       appendEvent(runDir, {
         ts: Date.now(),
@@ -315,6 +492,7 @@ export async function runUltracode(
     // produced, drawing from the reserved pool, so the user gets an honest
     // acceptance verdict instead of raw half-products.
     if (budget.workExhausted && !budget.exhausted) {
+      ranClosingPass = true;
       runResult = await runClosingPass({
         opts,
         cwd,
@@ -326,6 +504,7 @@ export async function runUltracode(
         onSpent: (spent) => {
           spentCalls = spent;
           updateStore(store, { agentCalls: spentCalls });
+          emitProgress({ kind: 'agent_calls', spent: spentCalls });
         },
       });
     }
@@ -335,12 +514,27 @@ export async function runUltracode(
       extractHarnessArtifacts(runResult.outputs),
       budgetSnapshot,
     );
+    // Capture the model's OWN acceptance verdict BEFORE verify-command folds its
+    // result into artifacts.verdict (withVerificationArtifacts rewrites pass to
+    // `pass && verification.passed`). Phase-2 calibration needs the unmutated
+    // self-verdict, otherwise the false-accept quadrant could never be detected.
+    const modelVerdictPass = artifacts.verdict
+      ? verdictEffectivePass(artifacts.verdict, spec.successCriteria)
+      : null;
     const verification = await maybeRunVerificationCommand(opts, cwd, runDir);
     if (verification) {
       artifacts = withVerificationArtifacts(artifacts, verification);
     }
+    // Objective checks the planner emitted: read-only file assertions always
+    // run; command checks run only under --auto-verify. Skipped command checks
+    // make the objective signal incomplete rather than a strong pass.
+    const objectiveReport = await maybeRunObjectiveChecks(spec, opts, cwd, runDir);
+    if (objectiveReport && (objectiveReport.ranCount > 0 || objectiveReport.skippedCount > 0)) {
+      artifacts = withObjectiveCheckArtifacts(artifacts, objectiveReport);
+    }
+    const groundTruthPass = combineGroundTruth(verification, objectiveReport);
     const failedNodeId = runResult.failedNodeId ??
-      (budgetSnapshot.exhausted || verification?.passed === false
+      (budgetSnapshot.exhausted || groundTruthPass === false
         ? inferResumeNodeId(harnessGraph, runResult.outputs, nodeStatesFromResults(runResult.nodeResults))
         : null);
     const json = resultJson(
@@ -353,8 +547,12 @@ export async function runUltracode(
       budgetSnapshot,
       failedNodeId,
       verification ?? undefined,
+      { plannerFallback, closingPass: ranClosingPass },
+      modelVerdictPass,
+      groundTruthPass,
     );
     writeJson(join(runDir, 'result.json'), json);
+    writeJson(join(runDir, 'run-summary.json'), buildRunSummary(json));
     if (opts.output) writeJson(resolve(process.cwd(), opts.output), json);
     updateStore(store, {
       phase: json.success ? 'complete' : 'error',
@@ -363,6 +561,7 @@ export async function runUltracode(
       error: runResult.error ?? null,
       agentCalls: spentCalls,
     });
+    emitProgress({ kind: 'phase', phase: json.success ? 'complete' : 'error' });
     emitResult(json, opts);
     return json.success ? 0 : 1;
   } catch (err) {
@@ -372,6 +571,7 @@ export async function runUltracode(
       status: 'error',
       error: msg,
     });
+    emitProgress({ kind: 'phase', phase: 'error' });
     appendEvent(runDir, { ts: Date.now(), phase: store.status.phase, kind: 'fatal', error: msg });
     if (err instanceof CliError) throw err;
     throw new CliError(msg, /NO_MODEL_GATEWAY_BACKEND|NO_API_KEY|NO_MODEL\b/.test(msg) ? 4 : 1);
@@ -386,6 +586,18 @@ function makeRunLogger(
   opts: UltracodeOptions,
 ): (event: RunEvent) => void {
   const quiet = opts.quiet ?? false;
+  // Only the execution harness feeds the GUI progress card's node list (its
+  // totalNodes denominator comes from the harness graph); planning nodes precede
+  // harness_ready and would otherwise inflate the count.
+  const emitNodes = phase === 'executing';
+  const nodeStatus = (state: IRRunStatus): UltracodeNodeStatus =>
+    state === 'success'
+      ? 'success'
+      : state === 'interrupted'
+        ? 'interrupted'
+        : state === 'running'
+          ? 'running'
+          : 'error';
   return (event) => {
     if (opts.trace || !isStreamEvent(event)) {
       appendEvent(store.runDir, { ts: Date.now(), phase, ...event });
@@ -397,6 +609,9 @@ function makeRunLogger(
           status: 'running',
           nodeStates: { ...store.status.nodeStates, [event.nodeId]: 'running' },
         });
+        if (emitNodes) {
+          emitProgress({ kind: 'node', id: event.nodeId, label: event.label, status: 'running' });
+        }
         if (!quiet) process.stderr.write(`${c.cyan('▶')} ${phase} ${event.nodeId}${event.label ? ` (${event.label})` : ''}\n`);
         break;
       case 'node_success':
@@ -405,6 +620,7 @@ function makeRunLogger(
           status: 'running',
           nodeStates: { ...store.status.nodeStates, [event.nodeId]: 'success' },
         });
+        if (emitNodes) emitProgress({ kind: 'node', id: event.nodeId, status: 'success' });
         if (!quiet) process.stderr.write(`${c.ok('✓')} ${phase} ${event.nodeId}\n`);
         break;
       case 'node_failure':
@@ -415,6 +631,9 @@ function makeRunLogger(
           failedNodeId: event.nodeId,
           error: event.failure,
         });
+        if (emitNodes) {
+          emitProgress({ kind: 'node', id: event.nodeId, status: nodeStatus(event.state) });
+        }
         if (!quiet) process.stderr.write(`${c.err('✗')} ${phase} ${event.nodeId}: ${event.failure.message}\n`);
         break;
       case 'node_retry':
@@ -855,6 +1074,115 @@ async function maybeRunVerificationCommand(
   return verification;
 }
 
+/**
+ * Run the planner's objective checks (file-exists/file-contains always;
+ * command only under --auto-verify). Returns null when the spec has no checks.
+ * Persists a report and surfaces start/complete events.
+ */
+async function maybeRunObjectiveChecks(
+  spec: DynamicHarnessSpec,
+  opts: UltracodeOptions,
+  cwd: string,
+  runDir: string,
+): Promise<ObjectiveChecksReport | null> {
+  const checks = spec.objectiveChecks ?? [];
+  if (checks.length === 0) return null;
+  const allowCommands = opts.autoVerify === true;
+  appendEvent(runDir, {
+    ts: Date.now(),
+    phase: 'executing',
+    kind: 'objective_checks_start',
+    total: checks.length,
+    allowCommands,
+  });
+  if (!opts.quiet) {
+    process.stderr.write(
+      c.dim(`objective checks: ${checks.length}${allowCommands ? '（含命令检查）' : '（仅只读文件检查）'}\n`),
+    );
+  }
+  const report = await runObjectiveChecks(checks, cwd, { allowCommands });
+  writeJson(join(runDir, 'objective-checks.json'), report);
+  appendEvent(runDir, {
+    ts: Date.now(),
+    phase: 'executing',
+    kind: 'objective_checks_complete',
+    ran: report.ranCount,
+    failed: report.failedCount,
+    passed: report.passed,
+  });
+  return report;
+}
+
+/**
+ * Combine the two objective ground-truth signals. A `false` from either source
+ * is authoritative (a failing check means the run did not meet ground truth).
+ * `true` requires every complete signal that produced an opinion to pass.
+ * Skipped command checks mean the objective signal is incomplete, so they do
+ * not override a model rejection as "ground truth passed".
+ */
+function combineGroundTruth(
+  verification: UltracodeVerificationResult | null,
+  objective: ObjectiveChecksReport | null,
+): boolean | null {
+  const signals: boolean[] = [];
+  if (verification) signals.push(verification.passed);
+  if (objective && objective.passed === false) signals.push(false);
+  if (objective && objective.passed === true && !objective.hasSkippedCommands) signals.push(true);
+  if (signals.length === 0) return null;
+  return signals.every(Boolean);
+}
+
+/**
+ * Fold objective-check results into the verdict + report so a failing check
+ * lands in gaps and the report, mirroring withVerificationArtifacts.
+ */
+function withObjectiveCheckArtifacts(
+  artifacts: DynamicHarnessArtifacts,
+  report: ObjectiveChecksReport,
+): DynamicHarnessArtifacts {
+  const lines = report.results.map((r) => {
+    const status = r.status === 'pass' ? '通过' : r.status === 'fail' ? '未通过' : '已跳过';
+    return `客观检查[${r.kind}] ${r.target}：${status}（${r.detail}）`;
+  });
+  const failed = report.results.filter((r) => r.status === 'fail');
+  const skippedCommands = report.results.filter((r) => r.status === 'skipped' && r.kind === 'command');
+  const evidence = [...(artifacts.verdict?.evidence ?? []), ...lines];
+  const gaps = [
+    ...(artifacts.verdict?.gaps ?? []),
+    ...failed.map((r) => ({
+      taskId: 'objective-check',
+      severity: 'P0',
+      reason: `客观检查未通过：[${r.kind}] ${r.target} — ${r.detail}`,
+      nextAction: '修复产物使客观检查通过，或修正 harness 规格中的检查后用同一 runId 续跑。',
+    })),
+    ...skippedCommands.map((r) => ({
+      taskId: 'objective-check',
+      severity: 'P2',
+      reason: `命令类客观检查未执行：[${r.kind}] ${r.target} — ${r.detail}`,
+      nextAction: '需要强客观验收时，用 --auto-verify 续跑或手动执行该命令并记录结果。',
+    })),
+  ];
+  const report_ = [
+    artifacts.report.trim(),
+    '',
+    '客观检查：',
+    ...lines.map((line) => `- ${line}`),
+  ]
+    .filter(Boolean)
+    .join('\n');
+  return {
+    ...artifacts,
+    verdict: {
+      pass: (artifacts.verdict?.pass ?? true) && report.failedCount === 0,
+      acceptedArtifact: artifacts.verdict?.acceptedArtifact ?? '',
+      evidence,
+      criteriaCoverage: artifacts.verdict?.criteriaCoverage ?? [],
+      gaps,
+    },
+    report: report_,
+  };
+}
+
 function runVerificationCommand(
   command: string,
   cwd: string,
@@ -965,19 +1293,41 @@ function resultJson(
   budget?: UltracodeBudgetSnapshot,
   failedNodeId?: string | null,
   verification?: UltracodeVerificationResult,
+  observability?: { plannerFallback: boolean; closingPass: boolean },
+  modelVerdictPassOverride?: boolean | null,
+  groundTruthPassOverride?: boolean | null,
 ): UltracodeJsonResult {
+  // Prefer the pre-verification model verdict captured by the caller; fall back
+  // to (re)computing it for callers that don't pass it (e.g. plannerOnly).
+  const modelVerdictPass =
+    modelVerdictPassOverride !== undefined
+      ? modelVerdictPassOverride
+      : artifacts.verdict
+        ? verdictEffectivePass(artifacts.verdict, spec.successCriteria)
+        : null;
+  // Combined objective ground truth (verify-command + objective checks). Callers
+  // that compute it pass it explicitly; legacy callers fall back to the
+  // verify-command result alone.
+  const groundTruthPass =
+    groundTruthPassOverride !== undefined
+      ? groundTruthPassOverride
+      : verification == null
+        ? null
+        : verification.passed === true;
   return {
     success:
       result.success &&
       !budget?.exhausted &&
-      verification?.passed !== false &&
-      (artifacts.verdict ? verdictEffectivePass(artifacts.verdict, spec.successCriteria) : result.success),
+      groundTruthPass !== false &&
+      (artifacts.verdict ? modelVerdictPass === true : result.success),
     runId,
     runDir,
     spec,
     artifacts,
     ...(budget ? { budget } : {}),
     ...(verification ? { verification } : {}),
+    verdictSignals: { modelVerdictPass, groundTruthPass },
+    ...(observability ? { observability } : {}),
     durationMs: Date.now() - startedAt,
     failedNodeId: failedNodeId ?? result.failedNodeId ?? null,
     error: result.error ?? null,

@@ -5,10 +5,13 @@ import { tauriAvailable } from '@/lib/tauri';
 import type { Message } from '@/store/types';
 import {
   deriveWorkspaceId,
+  isWorkspaceId,
   normalizeWorkspaceIdentityPath,
+  workspaceIdentityHashInput,
   workspaceLeafName,
 } from './paths';
 import {
+  DEFAULT_WORKSPACE_ID,
   HISTORY_SCHEMA_VERSION,
   UNASSIGNED_WORKSPACE_ID,
   type HistoryConfig,
@@ -117,13 +120,40 @@ function localSet(key: string, value: string): void {
   }
 }
 
-function localRemove(key: string): void {
+function localRemovePath(relPath: string): void {
   if (!hasLocalStorage()) return;
+  const exactKey = FALLBACK_PREFIX + relPath;
+  const childPrefix = `${exactKey}/`;
   try {
-    window.localStorage.removeItem(key);
+    const keys: string[] = [];
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const key = window.localStorage.key(i);
+      if (key === exactKey || key?.startsWith(childPrefix)) {
+        keys.push(key);
+      }
+    }
+    keys.forEach((key) => window.localStorage.removeItem(key));
   } catch {
     /* non-fatal */
   }
+}
+
+function localListDir(relPath: string): string[] {
+  if (!hasLocalStorage()) return [];
+  const prefix = relPath ? `${FALLBACK_PREFIX + relPath}/` : FALLBACK_PREFIX;
+  const out = new Set<string>();
+  try {
+    for (let i = 0; i < window.localStorage.length; i += 1) {
+      const key = window.localStorage.key(i);
+      if (!key?.startsWith(prefix)) continue;
+      const rest = key.slice(prefix.length);
+      if (!rest) continue;
+      out.add(rest.split('/')[0]);
+    }
+  } catch {
+    /* non-fatal */
+  }
+  return [...out].sort();
 }
 
 async function readJson<T>(relPath: string): Promise<T | null> {
@@ -138,8 +168,24 @@ async function readJson<T>(relPath: string): Promise<T | null> {
   }
 }
 
+// `JSON.stringify` faithfully serializes lone (unpaired) UTF-16 surrogates as
+// `\udXXX` escapes — they slip in when a string is truncated mid-emoji, which
+// is common in streamed/pasted model output. Browser `JSON.parse` tolerates
+// them, but the Rust backend's serde validator rejects the escape with
+// "unexpected end of hex escape", which aborts the whole history load. Replace
+// any unpaired surrogate with U+FFFD so every payload round-trips cleanly.
+function sanitizeLoneSurrogates(json: string): string {
+  return json.replace(
+    /\\u(d[89ab][0-9a-f]{2})(\\ud[c-f][0-9a-f]{2})?|\\ud[c-f][0-9a-f]{2}/gi,
+    (match, _high, lowPair) =>
+      // A matched high+low pair (lowPair present) is valid — keep it. A lone
+      // high (no lowPair) or a lone low (other branch) becomes U+FFFD.
+      lowPair ? match : '\\ufffd',
+  );
+}
+
 async function writeJson(relPath: string, value: unknown): Promise<void> {
-  const json = JSON.stringify(value, null, 2);
+  const json = sanitizeLoneSurrogates(JSON.stringify(value, null, 2));
   if (tauriAvailable()) {
     await command<void>('history_write_json', { relPath, json });
     return;
@@ -152,7 +198,14 @@ async function removePath(relPath: string, soft = true): Promise<void> {
     await command<void>('history_remove', { relPath, soft });
     return;
   }
-  localRemove(FALLBACK_PREFIX + relPath);
+  localRemovePath(relPath);
+}
+
+async function listDir(relPath: string): Promise<string[]> {
+  if (tauriAvailable()) {
+    return command<string[]>('history_list_dir', { relPath });
+  }
+  return localListDir(relPath);
 }
 
 function now(): number {
@@ -287,9 +340,47 @@ async function getConfigInternal(): Promise<HistoryConfig> {
   );
 }
 
+async function readWorkspaceIndexInternal(): Promise<WorkspaceSummary[]> {
+  return (await readJson<WorkspaceSummary[]>(WORKSPACES_INDEX)) ?? [];
+}
+
+async function listWorkspaceDirectoryIdsInternal(): Promise<string[]> {
+  return (await listDir('workspaces')).filter(
+    (name) => !name.endsWith('.json') && isWorkspaceId(name),
+  );
+}
+
+function sortWorkspaces(records: WorkspaceSummary[]): WorkspaceSummary[] {
+  return [...records].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function sortSessions(records: SessionSummary[]): SessionSummary[] {
+  return [...records].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+function finiteTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function minTimestamp(values: number[], fallback: number): number {
+  return values.length > 0 ? Math.min(...values) : fallback;
+}
+
+function maxTimestamp(values: number[], fallback: number): number {
+  return values.length > 0 ? Math.max(...values) : fallback;
+}
+
+function workspacePathIdentity(path: string): string {
+  const normalized = normalizePath(path);
+  return normalized ? workspaceIdentityHashInput(normalized) : '';
+}
+
+function isDefaultWorkspaceAlias(id: string): boolean {
+  return id === DEFAULT_WORKSPACE_ID || id === UNASSIGNED_WORKSPACE_ID;
+}
+
 async function listWorkspacesInternal(): Promise<WorkspaceSummary[]> {
-  const list = (await readJson<WorkspaceSummary[]>(WORKSPACES_INDEX)) ?? [];
-  return [...list].sort((a, b) => b.updatedAt - a.updatedAt);
+  return sortWorkspaces(await readWorkspaceIndexInternal());
 }
 
 async function writeWorkspaceIndexInternal(
@@ -297,7 +388,7 @@ async function writeWorkspaceIndexInternal(
 ): Promise<void> {
   await writeJson(
     WORKSPACES_INDEX,
-    [...records].sort((a, b) => b.updatedAt - a.updatedAt),
+    sortWorkspaces(records),
   );
 }
 
@@ -305,6 +396,24 @@ async function getWorkspaceInternal(
   id: string,
 ): Promise<WorkspaceRecord | null> {
   return readJson<WorkspaceRecord>(workspaceMetaPath(id));
+}
+
+function fallbackWorkspaceRecord(
+  summary: WorkspaceSummary,
+  normalizedPath: string,
+): WorkspaceRecord {
+  const ts = finiteTimestamp(summary.updatedAt) ? summary.updatedAt : now();
+  return {
+    id: summary.id,
+    path: normalizedPath,
+    name: summary.name || workspaceName(normalizedPath),
+    createdAt: ts,
+    updatedAt: ts,
+    lastActiveSessionId: summary.lastActiveSessionId,
+    sessionCount: finiteTimestamp(summary.sessionCount)
+      ? summary.sessionCount
+      : 0,
+  };
 }
 
 async function writeWorkspaceInternal(
@@ -318,6 +427,377 @@ async function writeWorkspaceInternal(
   ];
   await writeWorkspaceIndexInternal(next);
   return record;
+}
+
+interface WorkspaceMergeGroup {
+  canonicalId: string;
+  normalizedPath: string;
+  identityKey: string;
+  summaries: WorkspaceSummary[];
+}
+
+interface SessionMergeItem {
+  summary: SessionSummary;
+  record?: SessionRecord;
+}
+
+async function shouldRebuildWorkspaceIndexFromFilesInternal(
+  workspaceId: string,
+): Promise<boolean> {
+  if (!isDefaultWorkspaceAlias(workspaceId)) return true;
+  const workspace = await getWorkspaceInternal(workspaceId);
+  return !workspace || !normalizePath(workspace.path);
+}
+
+async function readSessionRecordsFromWorkspaceDirectoryInternal(
+  workspaceId: string,
+  allowedWorkspaceIds = new Set([workspaceId]),
+): Promise<SessionRecord[]> {
+  const fileNames = await listDir(`workspaces/${workspaceId}/sessions`);
+  const sessionIds = fileNames
+    .filter((name) => name.endsWith('.json') && name !== 'index.json')
+    .map((name) => name.slice(0, -'.json'.length));
+  return (
+    await Promise.all(
+      sessionIds.map((sessionId) => getSessionInternal(workspaceId, sessionId)),
+    )
+  ).filter(
+    (record): record is SessionRecord =>
+      record != null && allowedWorkspaceIds.has(record.workspaceId),
+  );
+}
+
+async function workspaceMergeIdentity(
+  summary: WorkspaceSummary,
+): Promise<{
+  canonicalId: string;
+  normalizedPath: string;
+  identityKey: string;
+}> {
+  const normalizedPath = normalizePath(summary.path ?? '');
+  if (!normalizedPath) {
+    return {
+      canonicalId: summary.id,
+      normalizedPath,
+      identityKey: `id:${summary.id}`,
+    };
+  }
+  const canonicalId = await workspaceIdForPath(normalizedPath);
+  return {
+    canonicalId,
+    normalizedPath,
+    identityKey: normalizedPath
+      ? workspaceIdentityHashInput(normalizedPath)
+      : canonicalId,
+  };
+}
+
+async function readWorkspaceSessionsForMergeInternal(
+  sourceWorkspaceId: string,
+  targetWorkspaceId: string,
+): Promise<SessionMergeItem[]> {
+  const summaries = await listSessionsInternal(sourceWorkspaceId);
+  return Promise.all(
+    summaries.map(async (summary) => {
+      const record = await getSessionInternal(sourceWorkspaceId, summary.id);
+      if (!record) {
+        return {
+          summary: {
+            ...summary,
+            workspaceId: targetWorkspaceId,
+          },
+        };
+      }
+      const nextRecord: SessionRecord = {
+        ...record,
+        workspaceId: targetWorkspaceId,
+      };
+      return {
+        summary: sessionSummary(nextRecord),
+        record: nextRecord,
+      };
+    }),
+  );
+}
+
+async function workspaceSummaryUsesDirectoryAsSource(
+  group: WorkspaceMergeGroup,
+  summary: WorkspaceSummary,
+): Promise<boolean> {
+  if (summary.id === group.canonicalId) return true;
+  if (!group.normalizedPath) return summary.id === group.canonicalId;
+
+  const summaryIdentity = workspacePathIdentity(summary.path ?? '');
+  const record = await getWorkspaceInternal(summary.id);
+  const recordIdentity = record ? workspacePathIdentity(record.path) : '';
+  if (recordIdentity) return recordIdentity === group.identityKey;
+  if (isDefaultWorkspaceAlias(summary.id) && summaryIdentity) return false;
+  return summaryIdentity === group.identityKey;
+}
+
+async function rebuildWorkspaceSessionIndexFromFilesInternal(
+  workspaceId: string,
+): Promise<SessionSummary[]> {
+  const list =
+    (await readJson<SessionSummary[]>(sessionIndexPath(workspaceId))) ?? [];
+  if (!(await shouldRebuildWorkspaceIndexFromFilesInternal(workspaceId))) {
+    return sortSessions(list);
+  }
+
+  const records =
+    await readSessionRecordsFromWorkspaceDirectoryInternal(workspaceId);
+  const rebuilt = sortSessions(records.map((record) => sessionSummary(record)));
+  await writeSessionIndexInternal(workspaceId, rebuilt);
+  const workspace = await getWorkspaceInternal(workspaceId);
+  if (workspace) {
+    await writeWorkspaceInternal({
+      ...workspace,
+      sessionCount: rebuilt.length,
+      updatedAt: maxTimestamp(
+        [workspace.updatedAt, ...rebuilt.map((session) => session.updatedAt)].filter(
+          finiteTimestamp,
+        ),
+        workspace.updatedAt,
+      ),
+    });
+  }
+  return rebuilt;
+}
+
+async function rebuildAllWorkspaceSessionIndexesInternal(): Promise<void> {
+  const workspaces = await readWorkspaceIndexInternal();
+  const directoryIds = await listWorkspaceDirectoryIdsInternal();
+  const workspaceIds = new Set([
+    ...workspaces.map((workspace) => workspace.id),
+    ...directoryIds,
+  ]);
+  for (const workspaceId of workspaceIds) {
+    await rebuildWorkspaceSessionIndexFromFilesInternal(workspaceId);
+  }
+}
+
+async function readRecoverableWorkspaceIndexInternal(): Promise<
+  WorkspaceSummary[]
+> {
+  const raw = await readWorkspaceIndexInternal();
+  const recovered = [...raw];
+  const seen = new Set(
+    raw.map(
+      (workspace) => `${workspace.id}\u0000${workspacePathIdentity(workspace.path ?? '')}`,
+    ),
+  );
+  const directoryIds = await listWorkspaceDirectoryIdsInternal();
+
+  for (const workspaceId of directoryIds) {
+    const workspace = await getWorkspaceInternal(workspaceId);
+    if (workspace) {
+      const summary = workspaceSummary(workspace);
+      const key = `${summary.id}\u0000${workspacePathIdentity(summary.path ?? '')}`;
+      if (!seen.has(key)) {
+        recovered.push(summary);
+        seen.add(key);
+      }
+      continue;
+    }
+
+    const sessions = await listSessionsInternal(workspaceId);
+    if (sessions.length === 0) continue;
+    const updatedAt = maxTimestamp(
+      sessions.map((session) => session.updatedAt).filter(finiteTimestamp),
+      now(),
+    );
+    const summary: WorkspaceSummary = {
+      id: workspaceId,
+      path: '',
+      name: workspaceName(''),
+      updatedAt,
+      sessionCount: sessions.length,
+      lastActiveSessionId: sessions[0]?.id,
+    };
+    const key = `${summary.id}\u0000`;
+    if (!seen.has(key)) {
+      recovered.push(summary);
+      seen.add(key);
+    }
+  }
+
+  return recovered;
+}
+
+function mergeSessionItems(items: SessionMergeItem[]): SessionMergeItem[] {
+  const byId = new Map<string, SessionMergeItem>();
+  for (const item of items) {
+    const existing = byId.get(item.summary.id);
+    if (!existing || item.summary.updatedAt >= existing.summary.updatedAt) {
+      byId.set(item.summary.id, item);
+    }
+  }
+  return sortSessions([...byId.values()].map((item) => item.summary)).map(
+    (summary) => byId.get(summary.id) ?? { summary },
+  );
+}
+
+async function mergeWorkspaceGroupInternal(
+  group: WorkspaceMergeGroup,
+): Promise<WorkspaceRecord> {
+  const trustedSummaries = (
+    await Promise.all(
+      group.summaries.map(async (summary) => ({
+        summary,
+        trusted: await workspaceSummaryUsesDirectoryAsSource(group, summary),
+      })),
+    )
+  )
+    .filter((item) => item.trusted)
+    .map((item) => item.summary);
+  const sourceIds = Array.from(
+    new Set([
+      ...trustedSummaries.map((summary) => summary.id),
+      group.canonicalId,
+    ]),
+  );
+  const sourceRecords = (
+    await Promise.all(
+      sourceIds.map(async (id) => {
+        const record = await getWorkspaceInternal(id);
+        if (record) return record;
+        const summary = trustedSummaries.find((item) => item.id === id);
+        return summary
+          ? fallbackWorkspaceRecord(summary, group.normalizedPath)
+          : null;
+      }),
+    )
+  ).filter((record): record is WorkspaceRecord => record != null);
+  const targetRecord =
+    sourceRecords.find((record) => record.id === group.canonicalId) ??
+    (await getWorkspaceInternal(group.canonicalId));
+  const newestRecord = [...sourceRecords].sort(
+    (a, b) => b.updatedAt - a.updatedAt,
+  )[0];
+  const sessionItems = mergeSessionItems(
+    (
+      await Promise.all(
+        sourceIds.map((sourceId) =>
+          readWorkspaceSessionsForMergeInternal(sourceId, group.canonicalId),
+        ),
+      )
+    ).flat(),
+  );
+  const sessions = sessionItems.map((item) => item.summary);
+  const sessionIds = new Set(sessions.map((session) => session.id));
+  const lastActiveSessionId =
+    (targetRecord?.lastActiveSessionId &&
+    sessionIds.has(targetRecord.lastActiveSessionId)
+      ? targetRecord.lastActiveSessionId
+      : undefined) ??
+    sourceRecords.find(
+      (record) =>
+        record.lastActiveSessionId &&
+        sessionIds.has(record.lastActiveSessionId),
+    )?.lastActiveSessionId ??
+    sessions[0]?.id;
+  const createdAt = minTimestamp(
+    sourceRecords.map((record) => record.createdAt).filter(finiteTimestamp),
+    now(),
+  );
+  const updatedAt = maxTimestamp(
+    [
+      ...sourceRecords.map((record) => record.updatedAt),
+      ...sessions.map((session) => session.updatedAt),
+    ].filter(finiteTimestamp),
+    createdAt,
+  );
+  const mergedRecord: WorkspaceRecord = {
+    ...(targetRecord ?? {}),
+    id: group.canonicalId,
+    path: group.normalizedPath,
+    name:
+      targetRecord?.name ??
+      newestRecord?.name ??
+      workspaceName(group.normalizedPath),
+    createdAt,
+    updatedAt,
+    ...(lastActiveSessionId ? { lastActiveSessionId } : {}),
+    sessionCount: sessions.length,
+  };
+
+  await writeJson(workspaceMetaPath(group.canonicalId), mergedRecord);
+  await Promise.all(
+    sessionItems
+      .filter((item): item is SessionMergeItem & { record: SessionRecord } =>
+        item.record != null,
+      )
+      .map((item) =>
+        writeJson(sessionPath(group.canonicalId, item.record.id), item.record),
+      ),
+  );
+  await writeSessionIndexInternal(group.canonicalId, sessions);
+
+  await Promise.all(
+    sourceIds
+      .filter((sourceId) => sourceId !== group.canonicalId)
+      .map((sourceId) => removePath(`workspaces/${sourceId}`, true)),
+  );
+
+  return mergedRecord;
+}
+
+async function reconcileWorkspaceIndexInternal(): Promise<void> {
+  const rawIndex = await readWorkspaceIndexInternal();
+  const raw = await readRecoverableWorkspaceIndexInternal();
+  if (raw.length === 0) return;
+
+  const groups = new Map<string, WorkspaceMergeGroup>();
+  for (const summary of raw) {
+    const identity = await workspaceMergeIdentity(summary);
+    const group = groups.get(identity.identityKey);
+    if (group) {
+      group.summaries.push(summary);
+      continue;
+    }
+    groups.set(identity.identityKey, {
+      ...identity,
+      summaries: [summary],
+    });
+  }
+
+  const idMap = new Map<string, string>();
+  const nextIndex: WorkspaceSummary[] = [];
+  let changed = raw.length !== rawIndex.length;
+
+  for (const group of groups.values()) {
+    const needsCanonicalization = group.summaries.some(
+      (summary) =>
+        summary.id !== group.canonicalId ||
+        normalizePath(summary.path ?? '') !== group.normalizedPath,
+    );
+    if (group.summaries.length > 1 || needsCanonicalization) {
+      const merged = await mergeWorkspaceGroupInternal(group);
+      nextIndex.push(workspaceSummary(merged));
+      for (const summary of group.summaries) {
+        if (await workspaceSummaryUsesDirectoryAsSource(group, summary)) {
+          idMap.set(summary.id, group.canonicalId);
+        }
+      }
+      changed = true;
+      continue;
+    }
+    nextIndex.push(group.summaries[0]);
+  }
+
+  if (!changed) return;
+
+  await writeWorkspaceIndexInternal(nextIndex);
+  const config = await getConfigInternal();
+  const lastActiveWorkspaceId = config.lastActiveWorkspaceId
+    ? idMap.get(config.lastActiveWorkspaceId) ?? config.lastActiveWorkspaceId
+    : undefined;
+  if (lastActiveWorkspaceId !== config.lastActiveWorkspaceId) {
+    await writeConfigInternal({
+      ...config,
+      lastActiveWorkspaceId,
+    });
+  }
 }
 
 async function resolveWorkspaceInternal(
@@ -352,9 +832,7 @@ async function resolveWorkspaceInternal(
 async function listSessionsInternal(
   workspaceId: string,
 ): Promise<SessionSummary[]> {
-  const list =
-    (await readJson<SessionSummary[]>(sessionIndexPath(workspaceId))) ?? [];
-  return [...list].sort((a, b) => b.updatedAt - a.updatedAt);
+  return rebuildWorkspaceSessionIndexFromFilesInternal(workspaceId);
 }
 
 async function writeSessionIndexInternal(
@@ -363,7 +841,7 @@ async function writeSessionIndexInternal(
 ): Promise<void> {
   await writeJson(
     sessionIndexPath(workspaceId),
-    [...records].sort((a, b) => b.updatedAt - a.updatedAt),
+    sortSessions(records),
   );
 }
 
@@ -528,7 +1006,22 @@ export const historyStore: HistoryStore = {
       if (!(await readJson<WorkspaceSummary[]>(WORKSPACES_INDEX))) {
         await writeWorkspaceIndexInternal([]);
       }
-      await migrateLocalWorkflowInternal();
+      // Maintenance passes (legacy migration, index rebuild, dedup) re-serialize
+      // and rewrite stored records. A single failing write here must not abort
+      // the whole load and strand the user's existing, readable sessions, so
+      // each pass is isolated — a thrown error is logged and skipped.
+      const maintenance: Array<[string, () => Promise<void>]> = [
+        ['migrateLocalWorkflow', migrateLocalWorkflowInternal],
+        ['rebuildWorkspaceSessionIndexes', rebuildAllWorkspaceSessionIndexesInternal],
+        ['reconcileWorkspaceIndex', reconcileWorkspaceIndexInternal],
+      ];
+      for (const [label, step] of maintenance) {
+        try {
+          await step();
+        } catch (err) {
+          console.error(`[history] maintenance step "${label}" failed`, err);
+        }
+      }
     });
   },
 

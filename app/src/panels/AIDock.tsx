@@ -10,7 +10,9 @@ import {
 } from 'react';
 import {
   ArrowDownToLine,
+  ArrowUp,
   ArrowUpToLine,
+  Check,
   ChevronDown,
   ChevronUp,
   Plus,
@@ -41,6 +43,7 @@ import {
   getCliRuntimeSnapshot,
   isCliAdapterAvailable,
 } from '@/lib/cliConfig';
+import { cn } from '@/lib/cn';
 import {
   FREE_CHANNELS,
   FREE_CHANNEL_AUTO_ID,
@@ -59,6 +62,15 @@ import {
   type FreeChannel,
 } from '@/lib/freeChannels';
 import LocalModelSetupDialog from '@/components/LocalModelSetupDialog';
+import {
+  IMAGE_PROVIDERS,
+  imageProviderModel,
+  imageProviderReady,
+  loadImageGenerationSettings,
+  saveImageGenerationSettings,
+  type ImageGenerationSettings,
+  type ImageProviderId,
+} from '@/lib/imageGeneration';
 import type { SelectOption } from '@/store/types';
 import {
   localizeSelectOption,
@@ -66,6 +78,12 @@ import {
   type Locale,
 } from '@/lib/i18n';
 import type { Message } from '@/store/types';
+import {
+  SLASH_COMMANDS,
+  buildSlashSuggestions,
+  slashText,
+  type SlashSuggestion,
+} from '@/lib/slashCommands';
 import {
   loadDockHeight,
   loadPaneWidth,
@@ -92,6 +110,9 @@ import {
   refreshProviderModels,
 } from '@/lib/modelLists';
 import LazyMessageContent from '@/components/ai/LazyMessageContent';
+import { captureConversation } from '@/lib/sessionScreenshot';
+import { recordConversationGif } from '@/lib/sessionGif';
+import UltracodeRunCard from '@/panels/UltracodeRunCard';
 import FileText from '@/components/ai/FileText';
 import FilePreviewDrawer from '@/components/ai/FilePreviewDrawer';
 import type { FileRef } from '@/components/ai/lib/filePath';
@@ -198,176 +219,7 @@ interface SlashTrigger {
   query: string;
 }
 
-type SlashSuggestionKind = 'command' | 'skill';
-type SlashSourceAdapter = RuntimeAdapterId | 'app' | 'agent';
-
-interface StaticSlashEntry {
-  id: string;
-  kind: SlashSuggestionKind;
-  name: string;
-  label: Partial<Record<Locale, string>>;
-  detail: Partial<Record<Locale, string>>;
-  insertText: Partial<Record<Locale, string>>;
-  source?: string | null;
-  sourceAdapter?: SlashSourceAdapter | null;
-}
-
-interface SlashSuggestion {
-  id: string;
-  kind: SlashSuggestionKind;
-  name: string;
-  label: string;
-  detail: string;
-  insertText: string;
-  source?: string | null;
-  sourceAdapter?: SlashSourceAdapter | null;
-  searchText: string;
-}
-
 const MAX_SLASH_SUGGESTIONS = 10;
-
-const SLASH_COMMANDS = [
-  {
-    name: '/help',
-    label: { 'zh-CN': '帮助', 'en-US': 'Help' },
-    detail: {
-      'zh-CN': '列出当前可用 command / skill',
-      'en-US': 'List available commands and skills',
-    },
-    text: {
-      'zh-CN': '列出当前可用的 slash command 和 Skill，按用途分组，并给出每个条目的触发词和适用场景。',
-      'en-US': 'List the available slash commands and skills, grouped by use case, with each trigger and when to use it.',
-    },
-  },
-  {
-    name: '/plan',
-    label: { 'zh-CN': '计划', 'en-US': 'Plan' },
-    detail: {
-      'zh-CN': '先拆步骤，再执行',
-      'en-US': 'Break down steps before acting',
-    },
-    text: {
-      'zh-CN': '先给出简短执行计划，再按计划完成任务；只保留必要步骤和风险点。',
-      'en-US': 'Start with a short execution plan, then complete the task; keep only necessary steps and risks.',
-    },
-  },
-  {
-    name: '/diagnose',
-    label: { 'zh-CN': '诊断', 'en-US': 'Diagnose' },
-    detail: {
-      'zh-CN': '复现 -> 根因 -> 修复 -> 验证',
-      'en-US': 'Reproduce -> root cause -> fix -> verify',
-    },
-    text: {
-      'zh-CN': '诊断这个问题：先复现或定位触发条件，再找根因，最后给出修复和验证结果。',
-      'en-US': 'Diagnose this: reproduce or identify the trigger, find the root cause, then provide the fix and verification.',
-    },
-  },
-  {
-    name: '/review',
-    label: { 'zh-CN': '审查', 'en-US': 'Review' },
-    detail: {
-      'zh-CN': '按代码审查视角找风险',
-      'en-US': 'Review for bugs and risks',
-    },
-    text: {
-      'zh-CN': '按代码审查视角检查：优先列出 bug、回归风险和缺失测试，给出文件/位置和修复建议。',
-      'en-US': 'Review this as code: list bugs, regression risks, and missing tests first, with file/location references and fixes.',
-    },
-  },
-  {
-    name: '/explain',
-    label: { 'zh-CN': '解释', 'en-US': 'Explain' },
-    detail: {
-      'zh-CN': '解释执行路径和关键依赖',
-      'en-US': 'Explain flow and dependencies',
-    },
-    text: {
-      'zh-CN': '解释这段内容的执行路径、关键依赖和容易误解的点，结论先行。',
-      'en-US': 'Explain the execution flow, key dependencies, and easy-to-misread parts. Start with the conclusion.',
-    },
-  },
-  {
-    name: '/test',
-    label: { 'zh-CN': '测试', 'en-US': 'Test' },
-    detail: {
-      'zh-CN': '补充或运行相关测试',
-      'en-US': 'Add or run relevant tests',
-    },
-    text: {
-      'zh-CN': '为当前任务补充或运行最相关的测试；若失败，说明失败点、可能根因和下一步。',
-      'en-US': 'Add or run the most relevant tests for this task; if they fail, report the failure, likely cause, and next step.',
-    },
-  },
-] as const;
-
-const STATIC_SLASH_ENTRIES: StaticSlashEntry[] = SLASH_COMMANDS.map(
-  (command) => ({
-    id: `command:${command.name}`,
-    kind: 'command',
-    name: command.name,
-    label: command.label,
-    detail: command.detail,
-    insertText: command.text,
-    source: 'app',
-    sourceAdapter: 'app',
-  }),
-);
-
-function slashText(
-  value: Partial<Record<Locale, string>> | Record<string, string | undefined>,
-  locale: Locale,
-): string {
-  return value[locale] ?? value['en-US'] ?? value['zh-CN'] ?? '';
-}
-
-function normalizeSlashSourceAdapter(value: unknown): SlashSourceAdapter | null {
-  if (typeof value !== 'string') return null;
-  const normalized = value.trim().toLowerCase();
-  if (normalized === 'claude' || normalized === 'anthropic') {
-    return 'claude-code';
-  }
-  if (
-    normalized === 'claude-code' ||
-    normalized === 'codex' ||
-    normalized === 'gemini' ||
-    normalized === 'app' ||
-    normalized === 'agent'
-  ) {
-    return normalized;
-  }
-  return null;
-}
-
-function slashSourceAdapterFromPath(value: unknown): SlashSourceAdapter | null {
-  if (typeof value !== 'string' || !value.trim()) return null;
-  const source = value.replace(/\\/g, '/').toLowerCase();
-  if (source.includes('/.claude/')) return 'claude-code';
-  if (source.includes('/.codex/')) return 'codex';
-  if (source.includes('/.gemini/')) return 'gemini';
-  if (source.includes('/.agents/')) return 'agent';
-  return null;
-}
-
-function slashEntrySourceAdapter(
-  entry: StaticSlashEntry | SlashCatalogEntry,
-): SlashSourceAdapter | null {
-  const direct = normalizeSlashSourceAdapter(
-    (entry as { sourceAdapter?: string | null }).sourceAdapter,
-  );
-  if (direct) return direct;
-
-  const source = entry.source ?? '';
-  const fromSource =
-    normalizeSlashSourceAdapter(source) ?? slashSourceAdapterFromPath(source);
-  if (fromSource) return fromSource;
-
-  const idSource = /^(?:command|skill):([^:]+):/.exec(entry.id)?.[1];
-  return (
-    normalizeSlashSourceAdapter(idSource) ??
-    slashSourceAdapterFromPath(entry.id)
-  );
-}
 
 function slashSuggestionRankForAdapter(
   suggestion: SlashSuggestion,
@@ -413,42 +265,6 @@ function findSlashTrigger(text: string, caret: number): SlashTrigger | null {
   const query = match[2] ?? '';
   const start = beforeCaret.length - query.length - 1;
   return { start, end: caret, query };
-}
-
-function buildSlashSuggestions(
-  catalogEntries: SlashCatalogEntry[],
-  locale: Locale,
-): SlashSuggestion[] {
-  const seen = new Set<string>();
-  const out: SlashSuggestion[] = [];
-  const entries = catalogEntries.length > 0 ? catalogEntries : STATIC_SLASH_ENTRIES;
-
-  for (const entry of entries) {
-    const label = slashText(entry.label, locale);
-    const detail = slashText(entry.detail, locale);
-    const insertText = slashText(entry.insertText, locale);
-    const source = entry.source ?? '';
-    const sourceAdapter = slashEntrySourceAdapter(entry);
-    const key = `${entry.kind}:${source || entry.id}:${entry.name}`.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({
-      id: entry.id,
-      kind: entry.kind,
-      name: entry.name,
-      label,
-      detail,
-      insertText,
-      source,
-      sourceAdapter,
-      searchText:
-        `${entry.name} ${label} ${detail} ${insertText} ${source} ${
-          sourceAdapter ?? ''
-        }`.toLowerCase(),
-    });
-  }
-
-  return out;
 }
 
 function filterSlashSuggestions(
@@ -542,6 +358,21 @@ function renderMessageText(text: string): string {
 
 function assistantHeaderLabel(message: Message): string {
   return message.routeLabel?.trim() || routeLabelFromText(message.text);
+}
+
+function isCaptureUtilityMessage(message: Message): boolean {
+  const text = message.text.trim();
+  if (
+    message.role === 'user' &&
+    /^\/screenshot(?:-gif)?$/i.test(text)
+  ) {
+    return true;
+  }
+  return (
+    /^✓\s*(?:已截图当前会话|Captured this conversation|已把当前会话录成滚动 GIF|Recorded this conversation as a scrolling GIF)/i.test(text) ||
+    /^✗\s*(?:截图失败|Screenshot failed|GIF 录制失败|GIF recording failed)/i.test(text) ||
+    /!\[(?:截图预览|screenshot preview|GIF 预览|GIF preview)\]\(/i.test(text)
+  );
 }
 
 function interactionSearchText(message: Message): string {
@@ -869,6 +700,23 @@ function providerSortRank(status: ProviderRuntimeStatus): number {
   return 3;
 }
 
+function splitInteractionOption(option: string): { title: string; detail: string } {
+  const lines = option
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length > 1) {
+    return { title: lines[0], detail: lines.slice(1).join(' ') };
+  }
+
+  const colon = option.match(/^(.{2,48}?)[：:]\s+(.+)$/);
+  if (colon) {
+    return { title: colon[1].trim(), detail: colon[2].trim() };
+  }
+
+  return { title: option.trim(), detail: '' };
+}
+
 /**
  * Renders a node's interaction request (select / input / confirm) inside the
  * AI-return stream. States:
@@ -900,9 +748,10 @@ function InteractionWidget({
 
   if (status === 'answered' && message.interactionAnswer) {
     return (
-      <div className="rounded-md border border-accent-2/40 bg-accent-2/5 px-2.5 py-1.5 text-xs text-fg-dim">
-        <span className="font-mono text-[10px] uppercase tracking-wider text-accent-2">
-          ✓ {t(locale, 'interaction.youAnswered')}
+      <div className="rounded-lg border border-accent-2/40 bg-accent-2/10 px-3 py-2 text-xs text-fg-dim shadow-sm">
+        <span className="inline-flex items-center gap-1 font-mono text-[10px] uppercase tracking-wider text-accent-2">
+          <Check size={12} strokeWidth={2.4} />
+          {t(locale, 'interaction.youAnswered')}
         </span>{' '}
         {summarizeAnswer(req, message.interactionAnswer)}
       </div>
@@ -910,74 +759,138 @@ function InteractionWidget({
   }
   if (status === 'cancelled') {
     return (
-      <div className="rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-xs text-fg-faint">
-        ✖ {t(locale, 'interaction.cancelled')}
+      <div className="rounded-lg border border-border bg-panel-2 px-3 py-2 text-xs text-fg-faint shadow-sm">
+        {t(locale, 'interaction.cancelled')}
       </div>
     );
   }
 
   const disabled = !active;
-  const toggle = (opt: string) =>
-    setSelected((cur) =>
-      cur.includes(opt) ? cur.filter((o) => o !== opt) : [...cur, opt],
-    );
+  const trimmedText = text.trim();
+  const canSubmitSelect = selected.length > 0 || trimmedText.length > 0;
+  const submitSelect = () => {
+    const values = req.multi
+      ? [...selected, ...(trimmedText ? [trimmedText] : [])]
+      : trimmedText
+        ? [trimmedText]
+        : selected;
+    if (values.length > 0) onAnswer({ kind: 'select', values });
+  };
+  const toggle = (opt: string) => {
+    if (req.type !== 'select') return;
+    setSelected((cur) => {
+      if (req.multi) {
+        return cur.includes(opt)
+          ? cur.filter((o) => o !== opt)
+          : [...cur, opt];
+      }
+      return cur.includes(opt) ? [] : [opt];
+    });
+  };
+  const submitInput = () => {
+    if (trimmedText) onAnswer({ kind: 'input', text: trimmedText });
+  };
 
   return (
-    <div className="flex flex-col gap-2 rounded-md border border-accent/40 bg-accent/5 px-2.5 py-2">
-      <div className="whitespace-pre-wrap text-sm leading-relaxed text-fg-dim">
+    <div className="flex w-full max-w-[min(760px,100%)] flex-col gap-2 rounded-lg border border-border bg-panel/95 p-3 shadow-lg shadow-black/20">
+      <div className="whitespace-pre-wrap text-sm font-medium leading-relaxed text-fg">
         {req.prompt}
       </div>
 
-      {req.type === 'select' && !req.multi && (
-        <div className="flex flex-wrap gap-1.5">
-          {req.options?.map((opt) => (
-            <button
-              key={opt}
-              type="button"
-              disabled={disabled}
-              onClick={() => onAnswer({ kind: 'select', values: [opt] })}
-              className="rounded border border-border bg-bg px-2 py-1 text-xs text-fg transition-colors hover:border-accent hover:text-accent disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {opt}
-            </button>
-          ))}
-        </div>
-      )}
-
-      {req.type === 'select' && req.multi && (
+      {req.type === 'select' && (
         <div className="flex flex-col gap-2">
-          <span className="font-mono text-[10px] uppercase tracking-wider text-fg-faint">
-            {t(locale, 'interaction.multiHint')}
-          </span>
-          <div className="flex flex-wrap gap-1.5">
+          {req.multi && (
+            <span className="font-mono text-[10px] uppercase tracking-wider text-fg-faint">
+              {t(locale, 'interaction.multiHint')}
+            </span>
+          )}
+          <div className="flex flex-col gap-1.5">
             {req.options?.map((opt) => {
               const on = selected.includes(opt);
+              const { title, detail } = splitInteractionOption(opt);
               return (
                 <button
                   key={opt}
                   type="button"
                   disabled={disabled}
+                  aria-pressed={on}
                   onClick={() => toggle(opt)}
-                  className={
-                    'rounded border px-2 py-1 text-xs transition-colors disabled:cursor-not-allowed disabled:opacity-50 ' +
-                    (on
-                      ? 'border-accent bg-accent/10 text-accent'
-                      : 'border-border bg-bg text-fg hover:border-accent/50')
-                  }
+                  className={cn(
+                    'group flex min-h-[54px] w-full items-start gap-3 rounded-md border px-3 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-55',
+                    on
+                      ? 'border-accent/70 bg-accent/10 text-fg'
+                      : 'border-border bg-panel-2 text-fg hover:border-accent/45 hover:bg-bg',
+                  )}
                 >
-                  {on ? '☑' : '☐'} {opt}
+                  <span
+                    aria-hidden="true"
+                    className={cn(
+                      'mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors',
+                      req.multi ? 'rounded-[4px]' : 'rounded-full',
+                      on
+                        ? 'border-accent bg-accent text-bg'
+                        : 'border-fg-faint/60 bg-bg text-transparent group-hover:border-accent/70',
+                    )}
+                  >
+                    <Check size={12} strokeWidth={3} />
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span className="block break-words text-sm font-medium leading-snug text-fg">
+                      {title}
+                    </span>
+                    {detail && (
+                      <span className="mt-0.5 block break-words text-xs leading-relaxed text-fg-faint">
+                        {detail}
+                      </span>
+                    )}
+                  </span>
                 </button>
               );
             })}
           </div>
-          <button
-            type="button"
-            disabled={disabled || selected.length === 0}
-            onClick={() => onAnswer({ kind: 'select', values: selected })}
-            className="self-start rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {t(locale, 'interaction.submit')}
-          </button>
+          <label className="flex flex-col gap-1.5 rounded-md border border-border bg-panel-2 px-3 py-2">
+            <span className="text-xs font-medium text-fg">
+              {t(locale, 'interaction.other')}
+            </span>
+            <input
+              value={text}
+              disabled={disabled}
+              onChange={(e) => setText(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey && canSubmitSelect) {
+                  e.preventDefault();
+                  submitSelect();
+                }
+              }}
+              placeholder={t(locale, 'interaction.otherPlaceholder')}
+              className="min-h-9 rounded-md border border-border bg-bg px-2.5 py-1.5 text-sm text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-accent focus:ring-1 focus:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
+            />
+          </label>
+          <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+            {!disabled && (
+              <button
+                type="button"
+                onClick={onDismiss}
+                className="min-h-8 rounded-md border border-transparent px-2.5 text-xs text-fg-faint transition-colors hover:border-border hover:bg-panel-2 hover:text-fg-dim focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                title={t(locale, 'interaction.skipTitle')}
+              >
+                {t(locale, 'interaction.skip')}
+              </button>
+            )}
+            {disabled && (
+              <span className="mr-auto font-mono text-[10px] text-fg-faint">
+                {t(locale, 'interaction.ended')}
+              </span>
+            )}
+            <button
+              type="button"
+              disabled={disabled || !canSubmitSelect}
+              onClick={submitSelect}
+              className="min-h-8 rounded-md bg-fg px-3 text-xs font-medium text-bg transition-colors hover:bg-fg-dim disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {t(locale, 'interaction.submit')}
+            </button>
+          </div>
         </div>
       )}
 
@@ -992,7 +905,7 @@ function InteractionWidget({
                 req.placeholder ?? t(locale, 'interaction.inputPlaceholder')
               }
               rows={3}
-              className="resize-none rounded border border-border bg-bg p-2 text-sm text-fg outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-50"
+              className="min-h-[92px] resize-none rounded-md border border-border bg-bg p-2.5 text-sm text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-accent focus:ring-1 focus:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
             />
           ) : (
             <input
@@ -1002,60 +915,82 @@ function InteractionWidget({
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey && text.trim()) {
                   e.preventDefault();
-                  onAnswer({ kind: 'input', text: text.trim() });
+                  submitInput();
                 }
               }}
               placeholder={
                 req.placeholder ?? t(locale, 'interaction.inputPlaceholder')
               }
-              className="rounded border border-border bg-bg px-2 py-1.5 text-sm text-fg outline-none focus:border-accent disabled:cursor-not-allowed disabled:opacity-50"
+              className="min-h-10 rounded-md border border-border bg-bg px-2.5 py-1.5 text-sm text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-accent focus:ring-1 focus:ring-accent disabled:cursor-not-allowed disabled:opacity-50"
             />
           )}
-          <button
-            type="button"
-            disabled={disabled || !text.trim()}
-            onClick={() => onAnswer({ kind: 'input', text: text.trim() })}
-            className="self-start rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {t(locale, 'interaction.submit')}
-          </button>
+          <div className="flex flex-wrap items-center justify-end gap-2 pt-1">
+            {!disabled && (
+              <button
+                type="button"
+                onClick={onDismiss}
+                className="min-h-8 rounded-md border border-transparent px-2.5 text-xs text-fg-faint transition-colors hover:border-border hover:bg-panel-2 hover:text-fg-dim focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                title={t(locale, 'interaction.skipTitle')}
+              >
+                {t(locale, 'interaction.skip')}
+              </button>
+            )}
+            {disabled && (
+              <span className="mr-auto font-mono text-[10px] text-fg-faint">
+                {t(locale, 'interaction.ended')}
+              </span>
+            )}
+            <button
+              type="button"
+              disabled={disabled || !trimmedText}
+              onClick={submitInput}
+              className="min-h-8 rounded-md bg-fg px-3 text-xs font-medium text-bg transition-colors hover:bg-fg-dim disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {t(locale, 'interaction.submit')}
+            </button>
+          </div>
         </div>
       )}
 
       {req.type === 'confirm' && (
-        <div className="flex gap-2">
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() => onAnswer({ kind: 'confirm', confirmed: true })}
-            className="rounded-md bg-accent px-2.5 py-1 text-xs font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {req.confirmLabel ?? t(locale, 'interaction.confirm')}
-          </button>
-          <button
-            type="button"
-            disabled={disabled}
-            onClick={() => onAnswer({ kind: 'confirm', confirmed: false })}
-            className="rounded-md border border-border px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent-3/60 hover:text-accent-3 disabled:cursor-not-allowed disabled:opacity-40"
-          >
-            {req.cancelLabel ?? t(locale, 'common.cancel')}
-          </button>
+        <div className="flex flex-col gap-2">
+          <div className="rounded-md border border-border bg-panel-2 px-3 py-2 text-xs leading-relaxed text-fg-faint">
+            {t(locale, 'interaction.confirmHint')}
+          </div>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            {!disabled && (
+              <button
+                type="button"
+                onClick={onDismiss}
+                className="min-h-8 rounded-md border border-transparent px-2.5 text-xs text-fg-faint transition-colors hover:border-border hover:bg-panel-2 hover:text-fg-dim focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-accent"
+                title={t(locale, 'interaction.skipTitle')}
+              >
+                {t(locale, 'interaction.skip')}
+              </button>
+            )}
+            {disabled && (
+              <span className="mr-auto font-mono text-[10px] text-fg-faint">
+                {t(locale, 'interaction.ended')}
+              </span>
+            )}
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => onAnswer({ kind: 'confirm', confirmed: false })}
+              className="min-h-8 rounded-md border border-border bg-panel-2 px-3 text-xs text-fg-dim transition-colors hover:border-accent-3/60 hover:text-accent-3 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {req.cancelLabel ?? t(locale, 'common.cancel')}
+            </button>
+            <button
+              type="button"
+              disabled={disabled}
+              onClick={() => onAnswer({ kind: 'confirm', confirmed: true })}
+              className="min-h-8 rounded-md bg-fg px-3 text-xs font-medium text-bg transition-colors hover:bg-fg-dim disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              {req.confirmLabel ?? t(locale, 'interaction.confirm')}
+            </button>
+          </div>
         </div>
-      )}
-
-      {disabled ? (
-        <span className="font-mono text-[10px] text-fg-faint">
-          {t(locale, 'interaction.ended')}
-        </span>
-      ) : (
-        <button
-          type="button"
-          onClick={onDismiss}
-          className="self-start font-mono text-[10px] text-fg-faint underline-offset-2 transition-colors hover:text-accent-3 hover:underline"
-          title={t(locale, 'interaction.skipTitle')}
-        >
-          {t(locale, 'interaction.skip')}
-        </button>
       )}
     </div>
   );
@@ -1093,7 +1028,9 @@ export default function AIDock({
   const isChat = layout === 'chat';
   const messages = useStore((s) => s.messages);
   const sendPrompt = useStore((s) => s.sendPrompt);
+  const generateImagePrompt = useStore((s) => s.generateImagePrompt);
   const runUltracodePrompt = useStore((s) => s.runUltracodePrompt);
+  const appendChatNote = useStore((s) => s.appendChatNote);
   const stopChat = useStore((s) => s.stopChat);
   const blockedSendTip = useStore((s) => s.blockedSendTip);
   const clearBlockedSendTip = useStore((s) => s.clearBlockedSendTip);
@@ -1161,6 +1098,14 @@ export default function AIDock({
   const answerInteraction = useStore((s) => s.answerInteraction);
   const dismissInteraction = useStore((s) => s.dismissInteraction);
   const streamRef = useRef<HTMLDivElement>(null);
+  // Session long-screenshot (`/screenshot`). While capturing we force every
+  // message to render its rich content (off-screen ones are otherwise plain-text
+  // placeholders, see LazyMessageContent) so the image is faithful, then restore.
+  const [captureStatus, setCaptureStatus] = useState<
+    { kind: 'busy' | 'done' | 'error'; text: string } | null
+  >(null);
+  const [forceEagerCapture, setForceEagerCapture] = useState(false);
+  const captureInFlightRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const chatTitleInputRef = useRef<HTMLInputElement>(null);
   const chatTitleCommitInFlightRef = useRef(false);
@@ -1291,6 +1236,7 @@ export default function AIDock({
     useChatRunButton && activeChatFavorite && reusableChatText
       ? reusableChatText
       : draft.trim();
+  const chatRunActive = useChatRunButton && activeChatting;
   useEffect(() => {
     if (!chatTitleEditing) setChatTitleDraft(chatTitle);
   }, [chatTitle, chatTitleEditing]);
@@ -1412,6 +1358,76 @@ export default function AIDock({
       });
     },
     [freeChannelRevision],
+  );
+  // Image-generation settings power the bottom channel/model selectors while
+  // the composer is in image mode. They live in their own store (separate from
+  // the AI-editing runSelection), so flipping image mode never disturbs the
+  // coding channel/model — leaving image mode just reads runSelection again.
+  const [imageSettings, setImageSettings] = useState<ImageGenerationSettings>(
+    () => loadImageGenerationSettings(),
+  );
+  useEffect(() => {
+    const refresh = () => setImageSettings(loadImageGenerationSettings());
+    window.addEventListener('fuc:image-generation-settings-changed', refresh);
+    return () =>
+      window.removeEventListener(
+        'fuc:image-generation-settings-changed',
+        refresh,
+      );
+  }, []);
+  const imageChannelOptions = useMemo<SelectOption[]>(
+    () =>
+      IMAGE_PROVIDERS.map((provider) => ({
+        id: provider.id,
+        label:
+          provider.label +
+          (imageProviderReady(provider.id, imageSettings) ? '' : ' ⚠'),
+        hint: t(
+          locale,
+          provider.category === 'commercial'
+            ? 'settings.imageGeneration.categoryCommercial'
+            : 'settings.imageGeneration.categoryFreeCredit',
+        ),
+        group: t(
+          locale,
+          provider.category === 'commercial'
+            ? 'settings.imageGeneration.commercialProviders'
+            : 'settings.imageGeneration.freeCreditProviders',
+        ),
+      })),
+    [imageSettings, locale],
+  );
+  const imageChannelValue = imageSettings.preferredProviderId;
+  const imageModelOptions = useMemo<SelectOption[]>(() => {
+    const provider = IMAGE_PROVIDERS.find(
+      (item) => item.id === imageSettings.preferredProviderId,
+    );
+    if (!provider) return [];
+    const current = imageProviderModel(provider.id, imageSettings);
+    return uniqueModelSelectOptions([current, ...provider.models]);
+  }, [imageSettings]);
+  const imageModelValue = imageProviderModel(
+    imageSettings.preferredProviderId,
+    imageSettings,
+  );
+  const onImageChannelChange = useCallback((id: string) => {
+    saveImageGenerationSettings({
+      ...loadImageGenerationSettings(),
+      preferredProviderId: id as ImageProviderId,
+    });
+  }, []);
+  const onImageModelChange = useCallback(
+    (model: string) => {
+      const selected = model.trim();
+      if (!selected) return;
+      const current = loadImageGenerationSettings();
+      const providerId = current.preferredProviderId;
+      saveImageGenerationSettings({
+        ...current,
+        providerModels: { ...current.providerModels, [providerId]: selected },
+      });
+    },
+    [],
   );
   const channelSelectOptions = useMemo<SelectOption[]>(
     () => {
@@ -2492,13 +2508,233 @@ export default function AIDock({
     [chatInputHeight],
   );
 
+  // Capture the whole conversation as a long screenshot. Forces every message
+  // to its rich renderer first (so off-screen placeholders don't leak into the
+  // image), waits two frames + a short settle for markdown/highlight/katex to
+  // paint, then rasterizes the full scroll box (auto-paged when very long).
+  const runSessionScreenshot = useCallback(async () => {
+    const zh = locale === 'zh-CN';
+    if (captureInFlightRef.current) return;
+    // Echo the command so the action is visible in the transcript even if the
+    // capture itself no-ops or fails.
+    appendChatNote('/screenshot', 'user');
+    const el = streamRef.current;
+    if (!el) {
+      appendChatNote(
+        zh ? '✗ 截图失败：找不到会话视图。' : '✗ Screenshot failed: conversation view not found.',
+      );
+      return;
+    }
+    if (messages.length === 0) {
+      appendChatNote(zh ? '当前会话为空，没有可截图的内容。' : 'Conversation is empty — nothing to capture.');
+      return;
+    }
+    captureInFlightRef.current = true;
+    setForceEagerCapture(true);
+    setCaptureStatus({
+      kind: 'busy',
+      text: zh ? '正在生成长截图…' : 'Capturing…',
+    });
+    const nextFrame = () =>
+      new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    try {
+      // Let the forced rich renderers mount and lay out before we rasterize.
+      await nextFrame();
+      await nextFrame();
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      const result = await captureConversation(el, {
+        cwd: workspaceCwd || undefined,
+      });
+      const preview = result.previewDataUrl
+        ? `\n\n![${zh ? '截图预览' : 'screenshot preview'}](${result.previewDataUrl})`
+        : '';
+      let note: string;
+      let status: string;
+      if (result.destination === 'browser-download') {
+        status = zh ? `已下载长截图（${result.pages} 张）` : `Downloaded ${result.pages} image(s)`;
+        note =
+          (zh
+            ? `✓ 已截图当前会话（${result.pages} 张），已通过浏览器下载到默认下载目录。`
+            : `✓ Captured this conversation (${result.pages} image(s)) — downloaded via your browser.`) +
+          preview;
+      } else {
+        const paths = result.paths.length > 0
+          ? result.paths
+          : result.destination.split('\n').filter(Boolean);
+        status = result.stitched
+          ? zh
+            ? `已保存 ${result.pages} 张拼接长图`
+            : `Saved ${result.pages} stitched pages`
+          : zh
+            ? '已保存长截图'
+            : 'Screenshot saved';
+        const pathLines = paths.map((p) => `- \`${p}\``).join('\n');
+        note =
+          (zh
+            ? `✓ 已截图当前会话${result.stitched ? `（${result.pages} 张拼接长图）` : ''}，保存到（点击路径可预览）：\n${pathLines}`
+            : `✓ Captured this conversation${result.stitched ? ` (${result.pages} stitched pages)` : ''}, saved to (click a path to preview):\n${pathLines}`) +
+          preview;
+      }
+      appendChatNote(note);
+      setCaptureStatus({ kind: 'done', text: status });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setCaptureStatus({ kind: 'error', text: (zh ? '截图失败：' : 'Capture failed: ') + msg });
+      appendChatNote((zh ? '✗ 截图失败：' : '✗ Screenshot failed: ') + msg);
+    } finally {
+      setForceEagerCapture(false);
+      captureInFlightRef.current = false;
+    }
+  }, [messages.length, locale, appendChatNote, workspaceCwd]);
+
+  // Record the whole conversation as a top-to-bottom scrolling GIF. Shares the
+  // same eager-render + settle machinery as the static screenshot, then hands
+  // the expanded stream to the GIF recorder (renders once, scrolls in frames).
+  const runSessionGif = useCallback(async () => {
+    const zh = locale === 'zh-CN';
+    if (captureInFlightRef.current) return;
+    appendChatNote('/screenshot-gif', 'user');
+    const el = streamRef.current;
+    if (!el) {
+      appendChatNote(
+        zh ? '✗ GIF 录制失败：找不到会话视图。' : '✗ GIF recording failed: conversation view not found.',
+      );
+      return;
+    }
+    if (messages.length === 0) {
+      appendChatNote(zh ? '当前会话为空，没有可录制的内容。' : 'Conversation is empty — nothing to record.');
+      return;
+    }
+    captureInFlightRef.current = true;
+    setForceEagerCapture(true);
+    setCaptureStatus({
+      kind: 'busy',
+      text: zh ? '正在录制 GIF…' : 'Recording GIF…',
+    });
+    const nextFrame = () =>
+      new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    try {
+      await nextFrame();
+      await nextFrame();
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      const result = await recordConversationGif(el, {
+        cwd: workspaceCwd || undefined,
+      });
+      const preview = result.previewDataUrl
+        ? `\n\n![${zh ? 'GIF 预览' : 'GIF preview'}](${result.previewDataUrl})`
+        : '';
+      let note: string;
+      let status: string;
+      if (result.destination === 'browser-download') {
+        status = zh ? `已下载 GIF（${result.frames} 帧）` : `Downloaded GIF (${result.frames} frames)`;
+        note =
+          (zh
+            ? `✓ 已把当前会话录成滚动 GIF（${result.frames} 帧），已通过浏览器下载到默认下载目录。`
+            : `✓ Recorded this conversation as a scrolling GIF (${result.frames} frames) — downloaded via your browser.`) +
+          preview;
+      } else {
+        const paths = result.paths.length > 0
+          ? result.paths
+          : [result.destination].filter(Boolean);
+        const pathLines = paths.map((p) => `- \`${p}\``).join('\n');
+        status = zh ? `已保存 GIF（${result.frames} 帧）` : `Saved GIF (${result.frames} frames)`;
+        note =
+          (zh
+            ? `✓ 已把当前会话录成滚动 GIF（${result.frames} 帧），保存到（点击路径可预览）：\n${pathLines}`
+            : `✓ Recorded this conversation as a scrolling GIF (${result.frames} frames), saved to (click the path to preview):\n${pathLines}`) +
+          preview;
+      }
+      appendChatNote(note);
+      setCaptureStatus({ kind: 'done', text: status });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setCaptureStatus({ kind: 'error', text: (zh ? 'GIF 录制失败：' : 'GIF recording failed: ') + msg });
+      appendChatNote((zh ? '✗ GIF 录制失败：' : '✗ GIF recording failed: ') + msg);
+    } finally {
+      setForceEagerCapture(false);
+      captureInFlightRef.current = false;
+    }
+  }, [messages.length, locale, appendChatNote, workspaceCwd]);
+
+  // Auto-dismiss the screenshot status banner once it settles (keep the
+  // "busy" state until capture finishes).
+  useEffect(() => {
+    if (!captureStatus || captureStatus.kind === 'busy') return;
+    const timer = setTimeout(() => setCaptureStatus(null), 4000);
+    return () => clearTimeout(timer);
+  }, [captureStatus]);
+
   const submit = (
     overrideText?: string,
     options: { clearDraft?: boolean } = {},
   ) => {
-    if (isReadOnly || activeAiEditing) return;
     const text = (overrideText ?? draft).trim();
     if (!text) return;
+    const clearDraftIfNeeded = () => {
+      if (overrideText === undefined || options.clearDraft) {
+        setComposerDraft('');
+        draftRef.current = '';
+        selectionRef.current = { start: 0, end: 0 };
+      }
+    };
+    // Session capture commands run regardless of read-only / active-editing
+    // state (they only read the DOM, never touch the workflow), and are checked
+    // before the guard below so they never silently no-op. GIF is matched before
+    // /screenshot so the `-gif` suffix isn't swallowed by the screenshot matcher.
+    if (/^\/(?:screenshot-gif|gif|录制gif|滚动gif)\s*$/iu.test(text)) {
+      clearDraftIfNeeded();
+      void runSessionGif();
+      return;
+    }
+    if (/^\/(?:screenshot|截图|长图)\s*$/iu.test(text)) {
+      clearDraftIfNeeded();
+      void runSessionScreenshot();
+      return;
+    }
+    if (isReadOnly || activeAiEditing) return;
+    // Sticky image mode toggles. The command enters/leaves image mode; the input
+    // background + placeholder reflect the mode. Any text typed after the command
+    // on the same line is treated as a first image prompt (so picking the command
+    // from the suggestion menu and typing right after it still works).
+    const imageModeStart = /^\/image-mode-start(?:\s+([\s\S]*))?$/i.exec(text);
+    if (imageModeStart) {
+      const wasImageMode = composer.imageMode;
+      setComposer({ imageMode: true });
+      clearDraftIfNeeded();
+      if (!wasImageMode) {
+        appendChatNote(t(locale, 'dock.imageModeEntered'), 'system');
+      }
+      const prompt = (imageModeStart[1] ?? '').trim();
+      if (prompt) generateImagePrompt(prompt);
+      return;
+    }
+    const imageModeEnd = /^\/image-mode-end(?:\s+([\s\S]*))?$/i.exec(text);
+    if (imageModeEnd) {
+      const wasImageMode = composer.imageMode;
+      setComposer({ imageMode: false });
+      clearDraftIfNeeded();
+      if (wasImageMode) {
+        appendChatNote(t(locale, 'dock.imageModeExited'), 'system');
+      }
+      return;
+    }
+    const deepResearchMatch = /^\/deep-research(?:\s+([\s\S]*))?$/i.exec(text);
+    if (deepResearchMatch) {
+      const question = (deepResearchMatch[1] ?? '').trim();
+      if (!question || activeChatting) return;
+      const instruction =
+        slashText(
+          SLASH_COMMANDS.find((command) => command.name === '/deep-research')?.text ?? {},
+          locale,
+        ) || 'Run deep research with source ledger, claim audit, citations, and gaps.';
+      runUltracodePrompt(`${instruction}\n\n研究问题：\n${question}`);
+      if (overrideText === undefined || options.clearDraft) {
+        setComposerDraft('');
+        draftRef.current = '';
+        selectionRef.current = { start: 0, end: 0 };
+      }
+      return;
+    }
     const ultracodeMatch = /^\/ultracode(?:\s+([\s\S]*))?$/i.exec(text);
     if (ultracodeMatch) {
       const task = (ultracodeMatch[1] ?? '').trim();
@@ -2509,6 +2745,14 @@ export default function AIDock({
         draftRef.current = '';
         selectionRef.current = { start: 0, end: 0 };
       }
+      return;
+    }
+    // Sticky image mode: bare text (no slash command matched above) generates an
+    // image instead of editing the workflow. Slash commands still win so the user
+    // can drop a /ultracode or /plan without leaving image mode.
+    if (composer.imageMode && !text.startsWith('/')) {
+      generateImagePrompt(text);
+      clearDraftIfNeeded();
       return;
     }
     const promptText = expandSlashRequest(text, activeAdapterSlashSuggestions);
@@ -2690,18 +2934,6 @@ export default function AIDock({
             </span>
           )}
           <div className="ml-auto flex shrink-0 items-center gap-1">
-            {isChat && activeChatting && (
-              <button
-                type="button"
-                onClick={stopChat}
-                title={t(locale, 'dock.stopChatTitle')}
-                aria-label={t(locale, 'dock.stopChatTitle')}
-                className="flex shrink-0 items-center gap-1.5 rounded-md border border-status-error/40 bg-status-error/15 px-3 py-1.5 text-xs font-semibold text-status-error transition-opacity hover:opacity-90"
-              >
-                <Square size={12} fill="currentColor" strokeWidth={2.2} />
-                <span>{t(locale, 'dock.runningStop')}</span>
-              </button>
-            )}
             {!isChat && searchToggleButton}
           </div>
           {returnSearchOpen && (
@@ -2784,6 +3016,22 @@ export default function AIDock({
           )}
         </header>
         <div className="relative min-h-0 flex-1">
+          {captureStatus && (
+            <div
+              className={
+                'pointer-events-none absolute left-1/2 top-2 z-30 -translate-x-1/2 rounded-md border px-3 py-1.5 text-xs shadow-lg ' +
+                (captureStatus.kind === 'error'
+                  ? 'border-accent-3/50 bg-panel-2 text-accent-3'
+                  : captureStatus.kind === 'busy'
+                    ? 'border-accent/40 bg-panel-2 text-fg-dim'
+                    : 'border-accent/50 bg-panel-2 text-fg')
+              }
+              role="status"
+              aria-live="polite"
+            >
+              {captureStatus.text}
+            </div>
+          )}
           <div
             ref={streamRef}
             onScroll={handleStreamScroll}
@@ -2825,9 +3073,11 @@ export default function AIDock({
                       ? 'text-accent-3'
                       : 'text-accent-2';
                   const preserveRoleCase = !!assistantLabel;
+                  const captureUtility = isCaptureUtilityMessage(m);
                   return (
                     <li
                       key={m.id}
+                      data-fuc-capture-exclude={captureUtility ? 'true' : undefined}
                       ref={(node) => {
                         if (node) messageRefs.current.set(m.id, node);
                         else messageRefs.current.delete(m.id);
@@ -2846,7 +3096,7 @@ export default function AIDock({
                         <span
                           title={roleLabel}
                           className={
-                            'min-w-0 truncate font-mono text-[10px] ' +
+                            'min-w-0 truncate py-0.5 font-mono text-[10px] leading-4 ' +
                             (preserveRoleCase
                               ? 'normal-case tracking-normal '
                               : 'uppercase tracking-wider ') +
@@ -2862,6 +3112,14 @@ export default function AIDock({
                           {formatMessageTime(m.createdAt)}
                         </span>
                       </div>
+                      {m.runProgress && (
+                        <UltracodeRunCard
+                          progress={m.runProgress}
+                          locale={locale}
+                          active={aiBusy && m.id === lastAssistantId}
+                          onStop={stopChat}
+                        />
+                      )}
                       {m.interaction ? (
                         <InteractionWidget
                           message={m}
@@ -2929,6 +3187,7 @@ export default function AIDock({
                             showActions={!isSystem}
                             onOpenFile={onOpenFile}
                             eager={
+                              forceEagerCapture ||
                               eagerMessageIds.has(m.id) ||
                               (aiBusy && m.id === lastAssistantId)
                             }
@@ -3051,6 +3310,7 @@ export default function AIDock({
               : isChat
                 ? 'fuc-ai-input--chat border-border '
                 : 'border-border ') +
+            (composer.imageMode && !dropActive ? 'fuc-ai-input--image ' : '') +
             (isReadOnly ? 'opacity-60 ' : '')
           }
         >
@@ -3135,7 +3395,9 @@ export default function AIDock({
             placeholder={
               isReadOnly
                 ? t(locale, 'dock.runningPlaceholder')
-                : t(locale, 'dock.placeholder')
+                : composer.imageMode
+                  ? t(locale, 'dock.imageModePlaceholder')
+                  : t(locale, 'dock.placeholder')
             }
             aria-expanded={slashOpen}
             aria-controls={slashOpen ? 'fuc-slash-suggestions' : undefined}
@@ -3165,17 +3427,22 @@ export default function AIDock({
               rounded-b-lg: parent has no overflow-hidden so dropdown menus can
               extend above the card; this keeps the toolbar visually flush with
               the parent's rounded bottom corners. */}
-          <div className="flex flex-wrap items-center gap-2 rounded-b-lg bg-bg px-2 py-2">
+          <div
+            className={
+              'flex flex-wrap items-center gap-2 rounded-b-lg px-2 py-2 ' +
+              (composer.imageMode ? 'bg-transparent' : 'bg-bg')
+            }
+          >
             <Select
               title={t(locale, 'dock.channelTitle')}
-              options={channelSelectOptions}
-              value={channelSelectValue}
-              onChange={onChannelChange}
+              options={composer.imageMode ? imageChannelOptions : channelSelectOptions}
+              value={composer.imageMode ? imageChannelValue : channelSelectValue}
+              onChange={composer.imageMode ? onImageChannelChange : onChannelChange}
               disabled={isReadOnly}
               className="min-w-0"
               icon="✦"
             />
-            {!simpleChatMode && activeSessionIsWorkflow && (
+            {!composer.imageMode && !simpleChatMode && activeSessionIsWorkflow && (
               <button
                 type="button"
                 title={t(locale, 'dock.modelStrategyTitle')}
@@ -3217,19 +3484,22 @@ export default function AIDock({
                 </ul>
               </div>
             )}
-            {modelSelectOptions.length > 0 && (
+            {(composer.imageMode ? imageModelOptions : modelSelectOptions)
+              .length > 0 && (
               <Select
                 title={
-                  loadingChannelModels
-                    ? t(locale, 'dock.modelVersionLoading')
-                    : t(locale, 'dock.modelVersionTitle')
+                  composer.imageMode
+                    ? t(locale, 'dock.modelVersionTitle')
+                    : loadingChannelModels
+                      ? t(locale, 'dock.modelVersionLoading')
+                      : t(locale, 'dock.modelVersionTitle')
                 }
-                options={modelSelectOptions}
-                value={modelSelectValue}
-                onChange={onModelChange}
+                options={composer.imageMode ? imageModelOptions : modelSelectOptions}
+                value={composer.imageMode ? imageModelValue : modelSelectValue}
+                onChange={composer.imageMode ? onImageModelChange : onModelChange}
                 disabled={isReadOnly}
                 className="min-w-0 max-w-[14rem]"
-                icon={loadingChannelModels ? '↻' : '◇'}
+                icon={!composer.imageMode && loadingChannelModels ? '↻' : '◇'}
               />
             )}
             <button
@@ -3268,40 +3538,56 @@ export default function AIDock({
             <div className="ml-auto flex items-center">
               <button
                 type="button"
-                onClick={() =>
-                  useChatRunButton
-                    ? submit(chatRunText, { clearDraft: true })
-                    : submit()
-                }
+                onClick={() => {
+                  if (chatRunActive) {
+                    stopChat();
+                    return;
+                  }
+                  if (useChatRunButton) {
+                    submit(chatRunText, { clearDraft: true });
+                    return;
+                  }
+                  submit();
+                }}
                 disabled={
-                  !(useChatRunButton ? chatRunText : draft.trim()) ||
-                  isReadOnly ||
-                  activeAiEditing
+                  !chatRunActive &&
+                  (!(useChatRunButton ? chatRunText : draft.trim()) ||
+                    isReadOnly ||
+                    activeAiEditing
+                  )
                 }
                 title={
-                  isReadOnly
-                    ? t(locale, 'dock.inputLockedTitle')
-                    : activeAiEditing
-                      ? t(locale, 'dock.aiGeneratingTitle')
-                      : useChatRunButton
-                        ? t(locale, 'dock.runChatTitle')
-                        : t(locale, 'dock.sendShortcut')
+                  chatRunActive
+                    ? t(locale, 'dock.stopChatTitle')
+                    : isReadOnly
+                      ? t(locale, 'dock.inputLockedTitle')
+                      : activeAiEditing
+                        ? t(locale, 'dock.aiGeneratingTitle')
+                        : useChatRunButton
+                          ? t(locale, 'dock.runChatTitle')
+                          : t(locale, 'dock.sendShortcut')
                 }
                 aria-label={
-                  useChatRunButton
-                    ? t(locale, 'dock.runChatTitle')
-                    : t(locale, 'dock.sendShortcut')
+                  chatRunActive
+                    ? t(locale, 'dock.stopChatTitle')
+                    : useChatRunButton
+                      ? t(locale, 'dock.runChatTitle')
+                      : t(locale, 'dock.sendShortcut')
                 }
                 className={
-                  'flex h-7 shrink-0 items-center justify-center rounded-md bg-accent text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 ' +
-                  (useChatRunButton ? 'px-2.5' : 'w-7')
+                  'flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40 ' +
+                  (chatRunActive
+                    ? 'border border-border bg-panel-2 text-fg-dim hover:border-accent hover:text-fg'
+                    : 'bg-fg-dim text-bg hover:bg-fg')
                 }
               >
-                {activeAiEditing
+                {chatRunActive ? (
+                  <Square size={12} strokeWidth={2.2} />
+                ) : activeAiEditing
                   ? '…'
-                  : useChatRunButton
-                    ? t(locale, 'canvas.run')
-                    : '↑'}
+                  : (
+                    <ArrowUp size={16} strokeWidth={2.4} />
+                  )}
               </button>
             </div>
           </div>

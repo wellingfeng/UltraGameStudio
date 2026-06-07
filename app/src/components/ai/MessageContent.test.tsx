@@ -30,6 +30,25 @@ describe('MessageContent integration', () => {
     'A [link](https://example.com).',
   ].join('\n');
 
+  it('preserves Windows clipboard-image paths through markdown so preview works', () => {
+    // CommonMark would collapse the `\.omc` escape and corrupt the path, leaving
+    // the file chip pointing at a non-existent file (so clicking it cannot
+    // preview). The protect pass keeps the original separators intact.
+    const B = String.fromCharCode(92);
+    const winPath = `E:${B}OpenWorkflow${B}.omc${B}clipboard-images${B}pasted-1780825313768-e964bfa29a1d4c87-0.png`;
+    const html = renderToStaticMarkup(
+      createElement(MessageContent, {
+        text: `已保存截图 ${winPath} 完成。`,
+        streaming: false,
+        onOpenFile: () => {},
+      }),
+    );
+    expect(html).toMatch(/ai-file-chip--interactive/);
+    // The `.omc` separator must survive: no `OpenWorkflow.omc` collapse.
+    expect(html).not.toMatch(/OpenWorkflow\.omc/);
+    expect(html).toMatch(/OpenWorkflow\\\.omc\\clipboard-images/);
+  });
+
   it('renders highlighted code, table, and file chip', () => {
     const html = renderToStaticMarkup(
       createElement(MessageContent, { text: sample, streaming: false }),
@@ -66,6 +85,21 @@ describe('MessageContent integration', () => {
     expect(html).not.toMatch(/<img[^>]*onerror/);
   });
 
+  it('renders generated image markdown with data URLs in the chat stream', () => {
+    const html = renderToStaticMarkup(
+      createElement(MessageContent, {
+        text:
+          '✓ 图片生成完成\n\n' +
+          '![生成图片 1](data:image/png;base64,iVBORw0KGgo=)',
+        streaming: false,
+      }),
+    );
+
+    expect(html).toMatch(/<img/);
+    expect(html).toMatch(/class="ai-generated-image"/);
+    expect(html).toMatch(/data:image\/png;base64,iVBORw0KGgo=/);
+  });
+
   it('renders sandbox markdown links with unicode local filenames as file chips', () => {
     const name = 'Moon亮晶分析和渲染整体架构.html';
     const html = renderToStaticMarkup(
@@ -91,6 +125,22 @@ describe('MessageContent integration', () => {
     );
     expect(html).toMatch(/E:\\OpenWorkflow\\src\\store\\useStore\.ts/);
     expect(html).toMatch(/:42/);
+  });
+
+  it('renders backticked Windows capture paths with spaces as interactive file chips', () => {
+    const B = String.fromCharCode(92);
+    const path = `E:${B}Open Workflow${B}.omc${B}session-captures${B}session-2026-06-07-1432.png`;
+    const html = renderToStaticMarkup(
+      createElement(MessageContent, {
+        text: `保存到（点击路径可预览）：\n- \`${path}\``,
+        streaming: false,
+        onOpenFile: () => {},
+      }),
+    );
+
+    expect(html).toMatch(/ai-file-chip--interactive/);
+    expect(html).toMatch(/Open Workflow/);
+    expect(html).toMatch(/session-captures/);
   });
 
   it('shows a reveal-in-folder menu for interactive file chips', async () => {

@@ -1,13 +1,20 @@
 import { describe, expect, it } from 'vitest';
 import {
   GATE_NODE_ID,
+  HARD_MAX_AGENT_CALLS,
   LEDGER_NODE_ID,
+  PLANNER_NODE_ID,
+  PLAN_CRITIC_NODE_ID,
   REPORT_NODE_ID,
   WORKERS_NODE_ID,
   buildDynamicHarnessGraph,
+  buildDynamicPlannerGraph,
+  estimateHarnessCalls,
   extractHarnessArtifacts,
   fallbackHarnessSpec,
   parseDynamicHarnessSpec,
+  reconcileBudget,
+  resolvePlannedSpec,
   verdictEffectivePass,
 } from './dynamicHarness';
 
@@ -97,6 +104,60 @@ describe('dynamic harness', () => {
     expect(spec.plan?.[1].id).toBe('build_verify');
     expect(spec.plan?.[1].dependsOn).toEqual(['scan_files']);
     expect(spec.plan?.[1].stages).toHaveLength(2);
+  });
+
+  it('preserves omitted dependsOn as implicit previous-step dependency', () => {
+    const spec = parseDynamicHarnessSpec(
+      JSON.stringify({
+        objective: '线性实现并验证',
+        successCriteria: ['完成'],
+        budget: { maxAgentCalls: 20, maxRounds: 1 },
+        strategies: [],
+        plan: [
+          { id: 'a', kind: 'agent', title: '步骤 A' },
+          { id: 'b', kind: 'agent', title: '步骤 B' },
+        ],
+        workerGroups: [],
+        acceptanceRubric: ['完成'],
+        stopCondition: '验收通过',
+      }),
+      'fallback',
+    );
+    expect(spec.plan?.[1].dependsOn).toBeUndefined();
+    const graph = buildDynamicHarnessGraph(spec);
+    const a = graph.nodes.find((n) => n.id.includes('_a'));
+    const b = graph.nodes.find((n) => n.id.includes('_b'));
+    expect(graph.edges.some((e) => e.from.node === a?.id && e.to.node === b?.id && e.kind === 'exec')).toBe(true);
+    expect(graph.edges.some((e) => e.from.node === LEDGER_NODE_ID && e.to.node === b?.id && e.kind === 'exec')).toBe(false);
+  });
+
+  it('repairs ambiguous deep-research plan dependencies into a decision chain', () => {
+    const spec = parseDynamicHarnessSpec(
+      JSON.stringify({
+        objective: '执行 deep-research，调研产品路线并输出建议',
+        successCriteria: ['有明确建议'],
+        budget: { maxAgentCalls: 20, maxRounds: 1 },
+        strategies: ['fan-out-and-synthesize', 'adversarial-verification'],
+        plan: [
+          { id: 'scope', kind: 'agent', title: 'Scope Freeze', dependsOn: [] },
+          { id: 'research', kind: 'parallel', title: 'Parallel Source Research', dependsOn: [] },
+          { id: 'synthesis', kind: 'agent', title: 'Synthesis Recommendations', dependsOn: [] },
+          { id: 'verify', kind: 'consensus', title: 'Adversarial Verification', dependsOn: [] },
+          { id: 'final', kind: 'agent', title: 'Final Decision Brief', dependsOn: [] },
+        ],
+        workerGroups: [],
+        acceptanceRubric: ['有决策价值'],
+        stopCondition: '验收通过',
+      }),
+      'fallback',
+    );
+    expect(spec.plan?.map((step) => step.dependsOn)).toEqual([
+      [],
+      ['scope'],
+      ['research'],
+      ['synthesis'],
+      ['verify'],
+    ]);
   });
 
   it('builds an executable ledger -> workers -> gate -> report graph', () => {
@@ -386,6 +447,119 @@ describe('dynamic harness', () => {
     expect(synth?.params.strategy).toBe('tournament');
   });
 
+  it('drives fan-out-and-synthesize on the PLAN path (production default path)', () => {
+    const spec = parseDynamicHarnessSpec(
+      JSON.stringify({
+        objective: '多来源调研并综合',
+        nonGoals: [],
+        successCriteria: ['有证据'],
+        budget: { maxAgentCalls: 20, maxRounds: 1 },
+        strategies: ['fan-out-and-synthesize', 'adversarial-verification'],
+        plan: [
+          {
+            id: 'research',
+            kind: 'parallel',
+            title: '并行调研',
+            branches: [
+              { title: '来源 A', focus: 'a', deliverable: 'da', acceptance: 'aa', evidenceRequired: 'ea' },
+              { title: '来源 B', focus: 'b', deliverable: 'db', acceptance: 'ab', evidenceRequired: 'eb' },
+            ],
+          },
+        ],
+        workerGroups: [],
+        acceptanceRubric: ['证据充分'],
+        stopCondition: '验收通过',
+      }),
+      'fallback',
+    );
+    const graph = buildDynamicHarnessGraph(spec);
+    const synth = graph.nodes.find((n) => n.id === 'n_plan_synth');
+    const research = graph.nodes.find((n) => n.id.includes('research'));
+    expect(synth?.type).toBe('agent'); // synthesize
+    expect(graph.edges.some((e) => e.from.node === research?.id && e.to.node === 'n_plan_synth' && e.kind === 'exec')).toBe(true);
+    expect(graph.edges.some((e) => e.from.node === 'n_plan_synth' && e.to.node === GATE_NODE_ID && e.kind === 'exec')).toBe(true);
+    expect(graph.edges.some((e) => e.from.node === 'n_plan_synth' && e.to.node === GATE_NODE_ID && e.kind === 'data')).toBe(true);
+  });
+
+  it('drives generate-and-filter into a tournament filter on the PLAN path', () => {
+    const spec = parseDynamicHarnessSpec(
+      JSON.stringify({
+        objective: '为产品起名并择优',
+        nonGoals: [],
+        successCriteria: ['有候选'],
+        budget: { maxAgentCalls: 20, maxRounds: 1 },
+        strategies: ['generate-and-filter', 'tournament'],
+        plan: [
+          { id: 'gen_a', kind: 'agent', title: '候选 A', dependsOn: [], focus: 'a', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' },
+          { id: 'gen_b', kind: 'agent', title: '候选 B', dependsOn: [], focus: 'b', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' },
+        ],
+        workerGroups: [],
+        acceptanceRubric: ['择优'],
+        stopCondition: '验收通过',
+      }),
+      'fallback',
+    );
+    const graph = buildDynamicHarnessGraph(spec);
+    const filter = graph.nodes.find((n) => n.id === 'n_plan_synth');
+    expect(filter?.type).toBe('consensus');
+    expect(filter?.params.strategy).toBe('tournament');
+    const genA = graph.nodes.find((n) => n.id.includes('gen_a'));
+    const genB = graph.nodes.find((n) => n.id.includes('gen_b'));
+    expect(graph.edges.some((e) => e.from.node === genA?.id && e.to.node === 'n_plan_synth' && e.kind === 'data')).toBe(true);
+    expect(graph.edges.some((e) => e.from.node === genB?.id && e.to.node === 'n_plan_synth' && e.kind === 'data')).toBe(true);
+  });
+
+  it('skips the plan mid-stage when there is a single linear chain (nothing to merge)', () => {
+    const spec = parseDynamicHarnessSpec(
+      JSON.stringify({
+        objective: '线性实现',
+        nonGoals: [],
+        successCriteria: ['完成'],
+        budget: { maxAgentCalls: 20, maxRounds: 1 },
+        strategies: ['fan-out-and-synthesize'],
+        plan: [
+          { id: 'a', kind: 'agent', title: '步骤 A', focus: 'a', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' },
+          { id: 'b', kind: 'agent', title: '步骤 B', dependsOn: ['a'], focus: 'b', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' },
+        ],
+        workerGroups: [],
+        acceptanceRubric: ['完成'],
+        stopCondition: '验收通过',
+      }),
+      'fallback',
+    );
+    const graph = buildDynamicHarnessGraph(spec);
+    expect(graph.nodes.some((n) => n.id === 'n_plan_synth')).toBe(false);
+    const b = graph.nodes.find((n) => n.id.includes('_b'));
+    expect(graph.edges.some((e) => e.from.node === b?.id && e.to.node === GATE_NODE_ID && e.kind === 'exec')).toBe(true);
+  });
+
+  it('counts the plan mid-stage in the budget estimate', () => {
+    // Two independent generators (explicit empty dependsOn ⇒ both terminal) plus
+    // a generate-and-filter strategy ⇒ the plan-path filter mid-stage applies.
+    const withFilter = parseDynamicHarnessSpec(
+      JSON.stringify({
+        objective: '为产品起名',
+        successCriteria: ['有候选'],
+        budget: { maxAgentCalls: 20, maxRounds: 1 },
+        strategies: ['generate-and-filter'],
+        plan: [
+          { id: 'g1', kind: 'agent', title: 'A', dependsOn: [] },
+          { id: 'g2', kind: 'agent', title: 'B', dependsOn: [] },
+        ],
+        workerGroups: [],
+        acceptanceRubric: ['择优'],
+        acceptance: { voters: 2, strategy: 'adversarial' },
+        stopCondition: 's',
+      }),
+      'fallback',
+    );
+    // work = 2 agents + filter(consensus 2 voters + synthesis = 3) = 5; gate = 3.
+    // setup 2 + 1*(5+3) + report 1 = 11.
+    expect(estimateHarnessCalls(withFilter, 1)).toBe(11);
+    // Without a fan-out strategy the mid-stage is gone: work = 2; 2+1*(2+3)+1 = 8.
+    expect(estimateHarnessCalls({ ...withFilter, strategies: [] }, 1)).toBe(8);
+  });
+
   it('honours acceptance config: more voters + escalated repair model', () => {
     const spec = parseDynamicHarnessSpec(
       JSON.stringify({
@@ -414,10 +588,171 @@ describe('dynamic harness', () => {
     expect(branches.every((b) => b.model === 'opus')).toBe(true);
   });
 
+  it('builds a planner graph with an escalated plan-critic stage', () => {
+    const graph = buildDynamicPlannerGraph('实现并验证一个功能');
+    const planner = graph.nodes.find((n) => n.id === PLANNER_NODE_ID);
+    const critic = graph.nodes.find((n) => n.id === PLAN_CRITIC_NODE_ID);
+    expect(planner?.type).toBe('agent');
+    expect(critic?.type).toBe('agent');
+    // Critic is escalated above the planner's default sonnet.
+    expect(critic?.params.model).toBe('opus');
+    expect(graph.meta.schemaDefs?.DYNAMIC_PLAN_CRITIQUE).toBeTruthy();
+    // planner -> critic exec + data, critic -> end exec.
+    expect(graph.edges.some((e) => e.from.node === PLANNER_NODE_ID && e.to.node === PLAN_CRITIC_NODE_ID && e.kind === 'exec')).toBe(true);
+    expect(graph.edges.some((e) => e.from.node === PLANNER_NODE_ID && e.to.node === PLAN_CRITIC_NODE_ID && e.kind === 'data')).toBe(true);
+    expect(graph.edges.some((e) => e.from.node === PLAN_CRITIC_NODE_ID && e.to.node === 'n_end' && e.kind === 'exec')).toBe(true);
+  });
+
+  it("prefers the critic's revisedSpec over the planner spec", () => {
+    const plannerText = JSON.stringify({
+      objective: '原始目标',
+      successCriteria: ['质量好'],
+      workerGroups: [{ id: 't1', title: 'A', focus: 'a', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' }],
+      stopCondition: 's',
+    });
+    const critiqueText = JSON.stringify({
+      ok: false,
+      issues: [{ field: 'successCriteria', severity: 'P1', problem: '不可机检', fix: '改写成可观测判定' }],
+      revisedSpec: {
+        objective: '修正后的目标',
+        successCriteria: ['app/x.ts 存在且包含 export function foo'],
+        workerGroups: [{ id: 't1', title: 'A', focus: 'a', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' }],
+        stopCondition: 's',
+      },
+    });
+    const resolved = resolvePlannedSpec(plannerText, critiqueText, 'fallback');
+    expect(resolved.critiqueApplied).toBe(true);
+    expect(resolved.usedFallback).toBe(false);
+    expect(resolved.spec.objective).toBe('修正后的目标');
+    expect(resolved.spec.successCriteria).toEqual(['app/x.ts 存在且包含 export function foo']);
+    expect(resolved.critique?.issues).toHaveLength(1);
+  });
+
+  it('falls back to the planner spec when the critic gives no usable revision', () => {
+    const plannerText = JSON.stringify({
+      objective: '保留这个目标',
+      successCriteria: ['标准A'],
+      workerGroups: [{ id: 't1', title: 'A', focus: 'a', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' }],
+      stopCondition: 's',
+    });
+    // Critic returned prose, not a DYNAMIC_PLAN_CRITIQUE object.
+    const resolved = resolvePlannedSpec(plannerText, '抱歉，我无法给出结构化复审。', 'fallback');
+    expect(resolved.critiqueApplied).toBe(false);
+    expect(resolved.usedFallback).toBe(false);
+    expect(resolved.spec.objective).toBe('保留这个目标');
+  });
+
+  it('normalizes objectiveChecks and drops unrunnable entries', () => {
+    const spec = parseDynamicHarnessSpec(
+      JSON.stringify({
+        objective: '实现功能',
+        successCriteria: ['文件存在'],
+        budget: { maxAgentCalls: 12, maxRounds: 1 },
+        strategies: ['fan-out-and-synthesize'],
+        workerGroups: [{ id: 't1', title: 'A', focus: 'a', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' }],
+        acceptanceRubric: ['证据充分'],
+        objectiveChecks: [
+          { kind: 'file-exists', path: 'app/src/core/ir.ts', description: '核心文件' },
+          { kind: 'file-contains', path: 'app/src/core/ir.ts', contains: 'IRGraph' },
+          { kind: 'command', command: 'npm run typecheck' },
+          { kind: 'file-exists' }, // no path → dropped
+          { kind: 'file-contains', path: 'x.ts' }, // no contains → dropped
+          { kind: 'nonsense', path: 'y' }, // bad kind → dropped
+        ],
+        stopCondition: 's',
+      }),
+      'fallback',
+    );
+    expect(spec.objectiveChecks).toHaveLength(3);
+    expect(spec.objectiveChecks?.map((c) => c.kind)).toEqual(['file-exists', 'file-contains', 'command']);
+  });
+
   it('builds a task-shaped fallback for debug requests', () => {
     const spec = fallbackHarnessSpec('修复 flaky test 偶发失败');
     expect(spec.budget.maxRounds).toBe(3);
     expect(spec.workerGroups.map((g) => g.title)).toContain('复现');
     expect(spec.strategies).toContain('loop-until-done');
+  });
+});
+
+describe('budget ↔ rounds reconciliation', () => {
+  // The shape of the run that failed: plan = parallel(4) → agent → consensus(1
+  // voter) → pipeline(2 stages); acceptance gate voters=3; budget 14 calls /
+  // 2 rounds. Per round work = 4 + 1 + (1+1) + 2 = 9; gate = 3+1 = 4. Setup 2,
+  // report 1. Two rounds need 2 + 2*(9+4) + 1 = 29 calls — far over 14.
+  const failedRunSpec = (): ReturnType<typeof fallbackHarnessSpec> => ({
+    ...fallbackHarnessSpec('调研 dynamic workflows 并给出优化建议'),
+    plan: [
+      { id: 'step1', kind: 'parallel', title: '并行调研', branches: [{}, {}, {}, {}] },
+      { id: 'step2', kind: 'agent', title: '归类综合' },
+      { id: 'step3', kind: 'consensus', title: '对抗核验', voters: [{}] },
+      { id: 'step4', kind: 'pipeline', title: '生成报告', stages: [{}, {}] },
+    ],
+    acceptance: { voters: 3, strategy: 'adversarial' },
+    budget: { maxAgentCalls: 14, maxRounds: 2 },
+  });
+
+  it('estimates worst-case calls matching the harness node expansion', () => {
+    const spec = failedRunSpec();
+    expect(estimateHarnessCalls(spec, 1)).toBe(2 + (9 + 4) + 1); // 16
+    expect(estimateHarnessCalls(spec, 2)).toBe(2 + 2 * (9 + 4) + 1); // 29
+  });
+
+  it('raises maxAgentCalls to fund the declared rounds when under the ceiling', () => {
+    const spec = {
+      ...failedRunSpec(),
+      plan: [{ id: 's1', kind: 'agent' as const, title: '执行' }],
+      acceptance: { voters: 2, strategy: 'adversarial' as const },
+      budget: { maxAgentCalls: 4, maxRounds: 2 },
+    };
+    // per round: 1 work + (2+1) gate = 4; two rounds = 2 + 2*4 + 1 = 11.
+    const { spec: out, note } = reconcileBudget(spec);
+    expect(out.budget.maxRounds).toBe(2);
+    expect(out.budget.maxAgentCalls).toBe(11);
+    expect(note).toMatch(/上调/);
+  });
+
+  it('would have caught the real failed run (budget 14, rounds 2)', () => {
+    const { spec: out, note } = reconcileBudget(failedRunSpec());
+    expect(note).not.toBeNull();
+    // 29 <= HARD_MAX (32), so it funds both rounds by raising the ceiling.
+    expect(out.budget.maxRounds).toBe(2);
+    expect(out.budget.maxAgentCalls).toBe(29);
+    expect(out.budget.maxAgentCalls).toBeGreaterThan(14);
+  });
+
+  it('drops rounds when even the hard ceiling cannot fund them', () => {
+    const spec = {
+      ...failedRunSpec(),
+      plan: [
+        { id: 'step1', kind: 'parallel' as const, title: 'p', branches: [{}, {}, {}, {}, {}] },
+        { id: 'step2', kind: 'pipeline' as const, title: 'pl', stages: [{}, {}, {}] },
+      ],
+      acceptance: { voters: 5, strategy: 'adversarial' as const },
+      budget: { maxAgentCalls: 14, maxRounds: 4 },
+    };
+    // per round: (5+3) work + (5+1) gate = 14; 4 rounds = 2 + 4*14 + 1 = 59 > 32.
+    const { spec: out, note } = reconcileBudget(spec);
+    expect(out.budget.maxRounds).toBeLessThan(4);
+    expect(out.budget.maxAgentCalls).toBeLessThanOrEqual(HARD_MAX_AGENT_CALLS);
+    expect(note).toMatch(/降为/);
+  });
+
+  it('honors an explicit user ceiling by lowering rounds instead of raising calls', () => {
+    // User pinned --max-agent-calls 16. Funding 2 rounds needs 29; cannot exceed
+    // 16, so rounds drop to what fits (1 round needs 16).
+    const { spec: out } = reconcileBudget(failedRunSpec(), 16);
+    expect(out.budget.maxAgentCalls).toBeLessThanOrEqual(16);
+    expect(out.budget.maxRounds).toBe(1);
+  });
+
+  it('leaves an already-consistent budget untouched', () => {
+    const spec = {
+      ...failedRunSpec(),
+      budget: { maxAgentCalls: 30, maxRounds: 2 },
+    };
+    const { spec: out, note } = reconcileBudget(spec);
+    expect(note).toBeNull();
+    expect(out).toBe(spec);
   });
 });

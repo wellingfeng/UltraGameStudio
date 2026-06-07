@@ -1,0 +1,15 @@
+{
+  "app": "cc-menu",
+  "exe": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe",
+  "installed_by": "cc-menu-setup",
+  "menu_cache": "C:\\Users\\FW\\AppData\\Local\\cc-menu\\menu-cache.json",
+  "service": {
+    "command": "\"C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu.exe\" --workspace \"C:\\Users\\FW\\AppData\\Local\\cc-menu\" service --watch",
+    "pid-file": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\CCMenu-service.pid",
+    "run-key": "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+    "value-name": "CCMenuService"
+  },
+  "ui_exe": "C:\\Users\\FW\\AppData\\Local\\Programs\\cc-menu\\cc-menu-ui.exe",
+  "version": "0.1.1",
+  "workspace": "C:\\Users\\FW\\AppData\\Local\\cc-menu"
+}

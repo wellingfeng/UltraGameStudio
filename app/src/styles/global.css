@@ -463,6 +463,17 @@ pre,
   border-color: var(--accent);
 }
 
+/* Sticky image-generation mode: tint the composer with the data accent so it
+   reads as a different surface than the default AI-coding input. */
+.fuc-ai-input--image {
+  background: color-mix(in oklab, var(--accent-2) 9%, var(--bg));
+  border-color: color-mix(in oklab, var(--accent-2) 55%, var(--border));
+}
+
+.fuc-ai-input--image:focus-within {
+  border-color: var(--accent-2);
+}
+
 .fuc-ai-input:focus {
   border-color: var(--accent);
 }
@@ -1075,6 +1086,18 @@ html.fuc-stream-scheme-solarized-dark {
 .ai-markdown li::marker { color: var(--fg-faint); }
 .ai-markdown li > input[type='checkbox'] { margin-right: 0.4em; }
 .ai-markdown a { color: var(--stream-link); }
+.ai-generated-image {
+  display: block;
+  max-width: min(100%, 34rem);
+  max-height: 32rem;
+  width: auto;
+  height: auto;
+  margin: 0.7rem 0;
+  border: 1px solid var(--stream-surface-border);
+  border-radius: 8px;
+  background: var(--stream-surface-bg);
+  object-fit: contain;
+}
 .ai-file-chip--interactive {
   color: var(--file-preview-link);
   transition:

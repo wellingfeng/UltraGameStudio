@@ -56,3 +56,20 @@ export {
   type VotingClassification,
   type ExecuteWorkflowOptions,
 } from './dag';
+export { computeNodeHashes, validCachedNodeIds } from './node-hash';
+export {
+  decodeProgressEvents,
+  encodeProgressEvent,
+  emptyProgress,
+  hasProgressSentinel,
+  progressCounts,
+  reduceProgress,
+  PROGRESS_OPEN,
+  PROGRESS_CLOSE,
+  type ProgressSentinelSplit,
+  type UltracodeNodeProgress,
+  type UltracodeNodeStatus,
+  type UltracodePhase,
+  type UltracodeProgressEvent,
+  type UltracodeRunProgress,
+} from './ultracodeProgress';

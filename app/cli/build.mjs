@@ -20,6 +20,13 @@ const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
 const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
 
+// Build timestamp (ISO, second precision) baked into the bundle so a running
+// `fuc` can report how old it is. This is the staleness guard for the
+// "edited source but ran a stale dist" failure mode — `ultracode` compares
+// this against the newest mtime of its own source tree and warns when the
+// dist predates the source.
+const __FUC_BUILD_TIME__ = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+
 await build({
   entryPoints: [join(here, 'bin', 'fuc.ts')],
   outfile: join(here, 'dist', 'fuc.mjs'),
@@ -36,8 +43,9 @@ await build({
   define: {
     __FUC_CLI_VERSION__: JSON.stringify(pkg.version),
     __APP_VERSION__: JSON.stringify(pkg.version),
+    __FUC_BUILD_TIME__: JSON.stringify(__FUC_BUILD_TIME__),
   },
   logLevel: 'info',
 });
 
-console.log('Built cli/dist/fuc.mjs');
+console.log(`Built cli/dist/fuc.mjs (build time ${__FUC_BUILD_TIME__})`);

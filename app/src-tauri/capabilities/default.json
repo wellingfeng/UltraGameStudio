@@ -11,6 +11,7 @@
     "dialog:allow-save",
     "fs:allow-read-text-file",
     "fs:allow-write-text-file",
+    "fs:allow-write-file",
     "fs:scope-home-recursive",
     "opener:allow-open-path",
     "opener:allow-reveal-item-in-dir"

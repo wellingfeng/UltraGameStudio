@@ -15,7 +15,8 @@ use std::os::windows::ffi::OsStrExt;
 
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{
-    MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    GetFileAttributesW, MoveFileExW, SetFileAttributesW, FILE_ATTRIBUTE_READONLY,
+    INVALID_FILE_ATTRIBUTES, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
 };
 
 const ROOT_DIRS: &[&str] = &[
@@ -155,26 +156,67 @@ fn unique_artifact_paths(
 }
 
 #[cfg(windows)]
-fn replace_file(src: &Path, dest: &Path) -> Result<(), String> {
-    let src_wide: Vec<u16> = src.as_os_str().encode_wide().chain(Some(0)).collect();
-    let dest_wide: Vec<u16> = dest.as_os_str().encode_wide().chain(Some(0)).collect();
-    let ok = unsafe {
-        MoveFileExW(
-            src_wide.as_ptr(),
-            dest_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if ok == 0 {
-        Err(format!(
-            "替换文件失败 {} -> {}: {}",
-            src.display(),
-            dest.display(),
-            std::io::Error::last_os_error()
-        ))
-    } else {
-        Ok(())
+fn to_wide(path: &Path) -> Vec<u16> {
+    path.as_os_str().encode_wide().chain(Some(0)).collect()
+}
+
+/// Windows sets the read-only attribute on some files (and antivirus/backup
+/// tools can flip it transiently). `MoveFileExW` over a read-only destination
+/// fails with ACCESS_DENIED, so clear the bit before attempting the rename.
+#[cfg(windows)]
+fn clear_readonly(dest_wide: &[u16]) {
+    unsafe {
+        let attrs = GetFileAttributesW(dest_wide.as_ptr());
+        if attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_READONLY) != 0 {
+            SetFileAttributesW(dest_wide.as_ptr(), attrs & !FILE_ATTRIBUTE_READONLY);
+        }
     }
+}
+
+#[cfg(windows)]
+fn replace_file(src: &Path, dest: &Path) -> Result<(), String> {
+    let src_wide = to_wide(src);
+    let dest_wide = to_wide(dest);
+
+    // ACCESS_DENIED (5) and SHARING_VIOLATION (32) are usually transient on
+    // Windows: the destination is briefly locked by antivirus, the Search
+    // indexer, or another reader. Clear any read-only attribute and retry a
+    // few times with a short backoff before giving up.
+    const ERROR_ACCESS_DENIED: i32 = 5;
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const MAX_ATTEMPTS: u32 = 8;
+
+    let mut last_err = std::io::Error::last_os_error();
+    for attempt in 0..MAX_ATTEMPTS {
+        clear_readonly(&dest_wide);
+        let ok = unsafe {
+            MoveFileExW(
+                src_wide.as_ptr(),
+                dest_wide.as_ptr(),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        };
+        if ok != 0 {
+            return Ok(());
+        }
+        last_err = std::io::Error::last_os_error();
+        let transient = matches!(
+            last_err.raw_os_error(),
+            Some(ERROR_ACCESS_DENIED) | Some(ERROR_SHARING_VIOLATION)
+        );
+        if !transient || attempt + 1 == MAX_ATTEMPTS {
+            break;
+        }
+        // 20ms, 40ms, 60ms ... — total worst-case ~0.5s, imperceptible on load.
+        std::thread::sleep(std::time::Duration::from_millis(20 * (attempt as u64 + 1)));
+    }
+
+    Err(format!(
+        "替换文件失败 {} -> {}: {}",
+        src.display(),
+        dest.display(),
+        last_err
+    ))
 }
 
 #[cfg(not(windows))]
@@ -371,9 +413,9 @@ pub async fn history_remove(rel_path: String, soft: bool) -> Result<(), String> 
     .map_err(|e| format!("history_remove 调度失败: {e}"))?
 }
 
-/// List the files (not subdirectories) directly inside `rel_path` under
-/// `.worktree`. Empty `rel_path` lists the root itself. Temp and corrupt files
-/// are filtered out so the caller sees only well-formed entries.
+/// List the direct children inside `rel_path` under `.worktree`. Empty
+/// `rel_path` lists the root itself. Temp and corrupt files are filtered out so
+/// the caller sees only well-formed entries.
 #[tauri::command]
 pub async fn history_list_dir(rel_path: String) -> Result<Vec<String>, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Vec<String>, String> {
@@ -400,11 +442,12 @@ pub async fn history_list_dir(rel_path: String) -> Result<Vec<String>, String> {
                 continue;
             }
             if let Ok(ft) = entry.file_type() {
-                if ft.is_file() {
+                if ft.is_file() || ft.is_dir() {
                     names.push(name);
                 }
             }
         }
+        names.sort();
         Ok(names)
     })
     .await

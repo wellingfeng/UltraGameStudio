@@ -243,7 +243,6 @@ describe('executeWorkflowDag', () => {
     expect(result.success).toBe(false); // cancelled mid-run
   });
 });
-
 /** A single terminal agent node: start → a → end. `a` is the exec-spine tail. */
 function singleAgentGraph(prompt = 'do the work'): IRGraph {
   return {
@@ -461,5 +460,97 @@ describe('classifyVotingNode (UI marker ↔ engine parity)', () => {
 
   it('leaves ordinary mid-graph nodes unmarked', () => {
     expect(classifyVotingNode(byId('a'), g).willVote).toBe(false);
+  });
+});
+
+describe('executeWorkflowDag — hash-checked resume', () => {
+  it('reuses a seeded output when the node hash still matches (no re-run)', async () => {
+    let aCalls = 0;
+    const gw = mockGateway(async (prompt) => {
+      if (prompt.includes('do A')) {
+        aCalls += 1;
+        return 'A-FRESH';
+      }
+      return 'B-OUTPUT';
+    });
+    const g = chainGraph();
+    // First run to capture this graph's node hashes.
+    const first = await executeWorkflowDag(g, collectingCallbacks([]), ctx(gw));
+    expect(aCalls).toBe(1);
+    // Resume the SAME graph: a's seeded output should be reused (a not re-run).
+    aCalls = 0;
+    const second = await executeWorkflowDag(g, collectingCallbacks([]), ctx(gw), {
+      seedOutputs: { a: 'A-CACHED' },
+      seedNodeHashes: first.nodeHashes,
+    });
+    expect(second.success).toBe(true);
+    expect(aCalls).toBe(0); // a reused from cache
+    expect(second.outputs.a).toBe('A-CACHED');
+  });
+
+  it('drops a stale seeded output when the node was edited since the seed run', async () => {
+    let aCalls = 0;
+    const gw = mockGateway(async (prompt) => {
+      if (prompt.includes('do A')) {
+        aCalls += 1;
+        return 'A-FRESH';
+      }
+      return 'B-OUTPUT';
+    });
+    const g = chainGraph();
+    const first = await executeWorkflowDag(g, collectingCallbacks([]), ctx(gw));
+    // Edit node a's prompt — its hash changes, so the seed no longer matches.
+    const edited = structuredClone(g);
+    edited.nodes.find((n) => n.id === 'a')!.params.prompt = 'do A v2';
+    aCalls = 0;
+    const second = await executeWorkflowDag(edited, collectingCallbacks([]), ctx(gw), {
+      seedOutputs: { a: 'A-CACHED' }, // stale cache must be ignored
+      seedNodeHashes: first.nodeHashes,
+    });
+    expect(second.success).toBe(true);
+    expect(aCalls).toBe(1); // a re-ran because its hash changed
+    expect(second.outputs.a).toBe('A-FRESH');
+  });
+
+  it('re-runs downstream when an upstream edit invalidates its hash', async () => {
+    let bCalls = 0;
+    const gw = mockGateway(async (prompt) => {
+      if (prompt.includes('do A')) return 'A-FRESH';
+      if (prompt.includes('do B')) {
+        bCalls += 1;
+        return 'B-FRESH';
+      }
+      return '';
+    });
+    const g = chainGraph();
+    const first = await executeWorkflowDag(g, collectingCallbacks([]), ctx(gw));
+    // Edit a (upstream of b). b's hash changes too ⇒ its seeded output is dropped.
+    const edited = structuredClone(g);
+    edited.nodes.find((n) => n.id === 'a')!.params.prompt = 'do A v2';
+    bCalls = 0;
+    const second = await executeWorkflowDag(edited, collectingCallbacks([]), ctx(gw), {
+      seedOutputs: { a: 'A-CACHED', b: 'B-CACHED' },
+      seedNodeHashes: first.nodeHashes,
+    });
+    expect(second.success).toBe(true);
+    expect(bCalls).toBe(1); // downstream re-ran due to upstream edit
+    expect(second.outputs.b).toBe('B-FRESH');
+  });
+
+  it('without seedNodeHashes falls back to legacy reuse-by-id (backward compatible)', async () => {
+    let aCalls = 0;
+    const gw = mockGateway(async (prompt) => {
+      if (prompt.includes('do A')) {
+        aCalls += 1;
+        return 'A-FRESH';
+      }
+      return 'B-OUTPUT';
+    });
+    const second = await executeWorkflowDag(chainGraph(), collectingCallbacks([]), ctx(gw), {
+      seedOutputs: { a: 'A-CACHED' }, // legacy: trusted by id, no hash check
+    });
+    expect(second.success).toBe(true);
+    expect(aCalls).toBe(0); // reused by id as before
+    expect(second.outputs.a).toBe('A-CACHED');
   });
 });

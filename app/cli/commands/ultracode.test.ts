@@ -79,6 +79,10 @@ describe('fuc ultracode', () => {
       gateway,
       concurrency: '3',
       maxRetries: '0',
+      // Pin a deliberately tiny budget via the CLI override: an explicit user
+      // ceiling that reconcileBudget must honor as a hard cap (lowering rounds,
+      // not raising calls), so the soft-stop path is still exercised.
+      maxAgentCalls: '4',
     });
 
     expect(code).toBe(1);
@@ -252,6 +256,9 @@ describe('fuc ultracode', () => {
       gateway,
       concurrency: '1',
       maxRetries: '0',
+      // Explicit user ceiling of 5 — honored as a hard cap so the reserve /
+      // closing-pass split (work ceiling 3, reserve 2) is exercised as intended.
+      maxAgentCalls: '5',
     });
 
     expect([0, 1]).toContain(code);
@@ -287,6 +294,187 @@ describe('fuc ultracode', () => {
     expect(result.artifacts.verdict.gaps.some((gap: { taskId: string }) => gap.taskId === 'verification')).toBe(true);
     expect(existsSync(join(runDir, 'verification.json'))).toBe(true);
     expect(readFileSync(join(runDir, 'events.jsonl'), 'utf8')).toContain('verification_complete');
+
+    // Phase-2 observability: the model's gate said pass, but ground truth failed
+    // ⇒ a false-accept must be detected (the pre-verification verdict is captured
+    // in verdictSignals, not erased by the verification fold).
+    expect(result.verdictSignals.modelVerdictPass).toBe(true);
+    expect(result.verdictSignals.groundTruthPass).toBe(false);
+    const summary = JSON.parse(readFileSync(join(runDir, 'run-summary.json'), 'utf8'));
+    expect(summary.gate.classification).toBe('false-accept');
+    expect(summary.outcome).toBe('fail');
+  });
+
+  it('runs read-only objective checks and folds a failing one into ground truth', async () => {
+    const calls: string[] = [];
+    const base = fakeUltracodeGateway(calls);
+    // Planner emits a file-exists check pointing at a path that does NOT exist
+    // in the run cwd → objective ground truth fails even though the model gate
+    // self-reports pass.
+    const gateway: RunGateway = {
+      ...base,
+      spawnCliAgent: async (prompt, adapter, opts) => {
+        if (prompt.includes('DYNAMIC_HARNESS') && !prompt.includes('DYNAMIC_PLAN_CRITIQUE')) {
+          opts.onProgress?.('chunk');
+          return JSON.stringify({
+            objective: '审查博客里的技术论断',
+            nonGoals: [],
+            successCriteria: ['产物文件存在'],
+            budget: { maxAgentCalls: 20, maxRounds: 1 },
+            strategies: ['fan-out-and-synthesize', 'adversarial-verification'],
+            workerGroups: [
+              { id: 't1', title: 'A', focus: 'a', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' },
+              { id: 't2', title: 'B', focus: 'b', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' },
+            ],
+            acceptanceRubric: ['证据充分'],
+            objectiveChecks: [{ kind: 'file-exists', path: 'definitely-missing-artifact.md' }],
+            stopCondition: '验收门通过',
+          });
+        }
+        return base.spawnCliAgent(prompt, adapter, opts);
+      },
+    };
+    const code = await runUltracode('审查博客里的技术论断', {
+      cwd: dir,
+      runId: 'uc-objchecks',
+      json: true,
+      quiet: true,
+      gateway,
+      concurrency: '3',
+      maxRetries: '0',
+    });
+
+    const result = JSON.parse(outBuf);
+    const runDir = join(dir, '.fuc-run', 'uc-objchecks');
+    expect(code).toBe(1);
+    expect(existsSync(join(runDir, 'objective-checks.json'))).toBe(true);
+    // Model gate self-reported pass, but the objective check failed → false-accept.
+    expect(result.verdictSignals.modelVerdictPass).toBe(true);
+    expect(result.verdictSignals.groundTruthPass).toBe(false);
+    expect(result.success).toBe(false);
+    const events = readFileSync(join(runDir, 'events.jsonl'), 'utf8');
+    expect(events).toContain('objective_checks_complete');
+    const summary = JSON.parse(readFileSync(join(runDir, 'run-summary.json'), 'utf8'));
+    expect(summary.gate.classification).toBe('false-accept');
+  });
+
+  it('skips planner-proposed command checks unless --auto-verify is set', async () => {
+    const calls: string[] = [];
+    const base = fakeUltracodeGateway(calls);
+    const gateway: RunGateway = {
+      ...base,
+      spawnCliAgent: async (prompt, adapter, opts) => {
+        if (prompt.includes('DYNAMIC_HARNESS') && !prompt.includes('DYNAMIC_PLAN_CRITIQUE')) {
+          opts.onProgress?.('chunk');
+          return JSON.stringify({
+            objective: '审查博客里的技术论断',
+            nonGoals: [],
+            successCriteria: ['命令通过'],
+            budget: { maxAgentCalls: 20, maxRounds: 1 },
+            strategies: ['fan-out-and-synthesize', 'adversarial-verification'],
+            workerGroups: [
+              { id: 't1', title: 'A', focus: 'a', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' },
+              { id: 't2', title: 'B', focus: 'b', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' },
+            ],
+            acceptanceRubric: ['证据充分'],
+            objectiveChecks: [{ kind: 'command', command: 'node -e "process.exit(5)"' }],
+            stopCondition: '验收门通过',
+          });
+        }
+        return base.spawnCliAgent(prompt, adapter, opts);
+      },
+    };
+    const code = await runUltracode('审查博客里的技术论断', {
+      cwd: dir,
+      runId: 'uc-cmd-skip',
+      json: true,
+      quiet: true,
+      gateway,
+      concurrency: '3',
+      maxRetries: '0',
+    });
+
+    const result = JSON.parse(outBuf);
+    const runDir = join(dir, '.fuc-run', 'uc-cmd-skip');
+    // Command check was skipped (no --auto-verify) → no objective signal → run
+    // succeeds on the model gate alone.
+    expect(code).toBe(0);
+    expect(result.success).toBe(true);
+    const report = JSON.parse(readFileSync(join(runDir, 'objective-checks.json'), 'utf8'));
+    expect(report.results[0].status).toBe('skipped');
+    expect(report.skippedCount).toBe(1);
+    expect(report.hasSkippedCommands).toBe(true);
+    expect(report.passed).toBeNull();
+  });
+
+  it('does not let weak objective checks override a model rejection', async () => {
+    const calls: string[] = [];
+    const base = fakeUltracodeGateway(calls);
+    const gateway: RunGateway = {
+      ...base,
+      spawnCliAgent: async (prompt, adapter, opts) => {
+        if (prompt.includes('DYNAMIC_HARNESS') && !prompt.includes('DYNAMIC_PLAN_CRITIQUE')) {
+          opts.onProgress?.('chunk');
+          return JSON.stringify({
+            objective: '审查博客里的技术论断',
+            nonGoals: [],
+            successCriteria: ['产物文件存在', '命令通过'],
+            budget: { maxAgentCalls: 20, maxRounds: 1 },
+            strategies: ['fan-out-and-synthesize', 'adversarial-verification'],
+            workerGroups: [
+              { id: 't1', title: 'A', focus: 'a', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' },
+              { id: 't2', title: 'B', focus: 'b', deliverable: 'd', acceptance: 'x', evidenceRequired: 'e' },
+            ],
+            acceptanceRubric: ['证据充分'],
+            objectiveChecks: [
+              { kind: 'file-exists', path: '.fuc-run/uc-weak-truth/request.json' },
+              { kind: 'command', command: 'node -e "process.exit(0)"' },
+            ],
+            stopCondition: '验收门通过',
+          });
+        }
+        if (prompt.includes('DYNAMIC_VERDICT')) {
+          opts.onProgress?.('chunk');
+          return JSON.stringify({
+            pass: false,
+            acceptedArtifact: '',
+            evidence: [],
+            criteriaCoverage: [{ criterion: '命令通过', met: false, evidence: '命令未执行' }],
+            gaps: [
+              {
+                taskId: 'verification',
+                severity: 'P1',
+                reason: '命令验收未执行',
+                nextAction: '使用 --auto-verify 续跑。',
+              },
+            ],
+          });
+        }
+        return base.spawnCliAgent(prompt, adapter, opts);
+      },
+    };
+    const code = await runUltracode('审查博客里的技术论断', {
+      cwd: dir,
+      runId: 'uc-weak-truth',
+      json: true,
+      quiet: true,
+      gateway,
+      concurrency: '3',
+      maxRetries: '0',
+    });
+
+    const result = JSON.parse(outBuf);
+    const runDir = join(dir, '.fuc-run', 'uc-weak-truth');
+    expect(code).toBe(1);
+    expect(result.success).toBe(false);
+    expect(result.verdictSignals.modelVerdictPass).toBe(false);
+    expect(result.verdictSignals.groundTruthPass).toBeNull();
+    const report = JSON.parse(readFileSync(join(runDir, 'objective-checks.json'), 'utf8'));
+    expect(report.passed).toBe(true);
+    expect(report.hasSkippedCommands).toBe(true);
+    const summary = JSON.parse(readFileSync(join(runDir, 'run-summary.json'), 'utf8'));
+    expect(summary.outcome).toBe('fail');
+    expect(summary.gate.classification).toBe('unverified');
   });
 });
 

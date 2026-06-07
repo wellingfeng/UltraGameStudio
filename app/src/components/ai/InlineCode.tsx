@@ -19,7 +19,7 @@ export default function InlineCode({
   cwd?: string;
 }) {
   const text = childrenToText(children);
-  const ref = text ? parseFileRef(text) : null;
+  const ref = text ? parseFileRef(text, { allowSpaces: true }) : null;
   if (ref) return <FileChip refData={ref} onOpenFile={onOpenFile} cwd={cwd} />;
 
   return (

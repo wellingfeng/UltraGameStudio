@@ -111,6 +111,12 @@ function aiInput(container: HTMLElement): HTMLTextAreaElement {
   return input;
 }
 
+function aiInputCard(container: HTMLElement): HTMLElement {
+  const card = container.querySelector('.fuc-ai-input-card');
+  if (!card) throw new Error('Missing AI input card');
+  return card as HTMLElement;
+}
+
 function optionalSearchInput(container: HTMLElement): HTMLInputElement | null {
   return container.querySelector('input[aria-label="搜索 AI 返回内容"]');
 }
@@ -131,11 +137,11 @@ function buttonByAriaLabel(
 }
 
 function sendButton(container: HTMLElement): HTMLButtonElement {
-  const button = Array.from(container.querySelectorAll('button')).find((item) =>
-    ['↑', '…'].includes(item.textContent?.trim() ?? ''),
+  const button = container.querySelector(
+    'button[aria-label="Ctrl+Enter 发送 · Enter 换行"]',
   );
   if (!button) throw new Error('Missing AI send button');
-  return button;
+  return button as HTMLButtonElement;
 }
 
 function modelStrategyButton(container: HTMLElement): HTMLButtonElement | null {
@@ -559,7 +565,8 @@ describe('PromptPanel running lock', () => {
       const runButton = buttonByAriaLabel(view.container, '运行当前会话输入');
 
       expect(runButton.disabled).toBe(false);
-      expect(runButton.textContent).toContain('运行');
+      expect(runButton.textContent?.trim()).toBe('');
+      expect(runButton.querySelector('svg')).not.toBeNull();
     } finally {
       await view.cleanup();
     }
@@ -637,11 +644,14 @@ describe('PromptPanel running lock', () => {
     }
   });
 
-  it('flips the simple chat top action to stop while chatting', async () => {
+  it('shows the simple chat stop action inside the input while chatting', async () => {
     resetStoreForPromptLock('design', 'hello');
+    const originalStopChat = useStore.getState().stopChat;
+    const stopChat = vi.fn();
     useStore.setState({
       workflow: simpleBlueprint('Simple chat'),
       chattingSessions: [{ workspaceId: null, sessionId: 's_prompt' }],
+      stopChat,
     });
     const view = await renderChatDock();
 
@@ -649,9 +659,20 @@ describe('PromptPanel running lock', () => {
       const stopButton = buttonByAriaLabel(view.container, '停止当前会话生成');
 
       expect(stopButton.disabled).toBe(false);
-      expect(stopButton.textContent).toContain('停止');
+      expect(aiInputCard(view.container).contains(stopButton)).toBe(true);
+      expect(stopButton.closest('header')).toBeNull();
+      expect(
+        view.container.querySelector('button[aria-label="运行当前会话输入"]'),
+      ).toBeNull();
+
+      await act(async () => {
+        stopButton.click();
+      });
+
+      expect(stopChat).toHaveBeenCalledTimes(1);
     } finally {
       await view.cleanup();
+      useStore.setState({ stopChat: originalStopChat });
     }
   });
 
@@ -707,7 +728,8 @@ describe('PromptPanel running lock', () => {
       const button = sendButton(view.container);
 
       expect(button.disabled).toBe(false);
-      expect(button.textContent?.trim()).toBe('↑');
+      expect(button.textContent?.trim()).toBe('');
+      expect(button.querySelector('svg')).not.toBeNull();
     } finally {
       await view.cleanup();
     }

@@ -261,9 +261,8 @@ fn resolve_spec_candidate(
     platform: CliPlatform,
 ) -> Result<CliScanCandidate, String> {
     for command in spec.commands {
-        if let Some(path) =
-            resolve_command_path(command)
-                .and_then(|candidate| validate_candidate_path(&candidate).ok())
+        if let Some(path) = resolve_command_path(command)
+            .and_then(|candidate| validate_candidate_path(&candidate).ok())
         {
             let resolved_path = path.normalized_path.clone();
             return Ok(CliScanCandidate {
@@ -337,8 +336,30 @@ fn search_path(variants: &[String]) -> Option<PathBuf> {
     None
 }
 
+/// Strip the Windows extended-length (`\\?\`) prefix that `fs::canonicalize`
+/// always emits. We never store or spawn that verbatim form: `cmd.exe /C`
+/// (used to launch `.cmd`/`.bat` shims like `claude.cmd`) cannot resolve a
+/// `\\?\C:\...` path and fails with "系统找不到指定的路径" (exit code 1).
+/// Drive-letter paths drop the prefix outright; UNC shares (`\\?\UNC\srv\share`)
+/// fold back to `\\srv\share`. Non-Windows paths pass through unchanged.
+fn simplify_canonical_path(path: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        let raw = path.to_string_lossy();
+        if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+            return PathBuf::from(format!(r"\\{rest}"));
+        }
+        if let Some(rest) = raw.strip_prefix(r"\\?\") {
+            return PathBuf::from(rest);
+        }
+    }
+    path.to_path_buf()
+}
+
 fn validate_candidate_path(path: &Path) -> Result<CliPathValidation, String> {
-    let canonical = fs::canonicalize(path).map_err(|err| classify_path_error(path, err))?;
+    let canonical = fs::canonicalize(path)
+        .map(|c| simplify_canonical_path(&c))
+        .map_err(|err| classify_path_error(path, err))?;
     let metadata = fs::metadata(&canonical).map_err(|err| classify_path_error(&canonical, err))?;
     if !metadata.is_file() {
         return Err("NOT_FILE: 请选择普通文件，而不是文件夹或特殊路径。".to_string());
@@ -520,5 +541,27 @@ mod tests {
         // Claude tiers / ids are filtered out for codex/gemini.
         assert!(!should_pass_model("codex", "sonnet"));
         assert!(!should_pass_model("gemini", "claude-opus-4-8"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn simplify_strips_verbatim_prefix() {
+        use std::path::Path;
+        // Drive-letter verbatim path drops the prefix entirely so `cmd /C` can
+        // resolve a `.cmd` shim instead of failing with "系统找不到指定的路径".
+        assert_eq!(
+            simplify_canonical_path(Path::new(r"\\?\C:\Users\me\claude.cmd")).to_string_lossy(),
+            r"C:\Users\me\claude.cmd"
+        );
+        // UNC verbatim paths fold back to a plain UNC share.
+        assert_eq!(
+            simplify_canonical_path(Path::new(r"\\?\UNC\srv\share\claude.cmd")).to_string_lossy(),
+            r"\\srv\share\claude.cmd"
+        );
+        // A path without the prefix is untouched.
+        assert_eq!(
+            simplify_canonical_path(Path::new(r"C:\bin\claude.cmd")).to_string_lossy(),
+            r"C:\bin\claude.cmd"
+        );
     }
 }

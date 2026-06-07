@@ -7,6 +7,7 @@ import type {
   InteractionAnswer,
   InteractionRequest,
 } from '@/core/interaction';
+import type { UltracodeRunProgress } from '@/runtime/ultracodeProgress';
 import type {
   Locale,
   PromptGroupLocaleValue,
@@ -64,6 +65,13 @@ export interface Message {
   interactionAnswer?: InteractionAnswer;
   /** Widget lifecycle; gates rendering (pending = active, else read-only). */
   interactionStatus?: InteractionStatus;
+  /**
+   * Present on the assistant message of a live `/ultracode` run: a structured
+   * snapshot of run progress (agent count, elapsed, per-node status) decoded
+   * from the CLI's `<<FUC_PROGRESS>>` sentinels. Drives the run-progress card
+   * rendered above the message's log text. See runtime/ultracodeProgress.ts.
+   */
+  runProgress?: UltracodeRunProgress;
 }
 
 export interface Session {
@@ -153,6 +161,11 @@ export interface ComposerSettings {
   workspace: string;
   /** AI 改图时为每个节点自动选模型的策略 */
   modelStrategy: ModelStrategy;
+  /**
+   * 粘性生图模式。true 时输入框里的裸文本(无 slash 命令)走图片生成而非
+   * AI 编程;由 /image-mode-start 开启、/image-mode-end 关闭。
+   */
+  imageMode: boolean;
 }
 
 export interface SessionComposerSettings {
