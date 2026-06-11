@@ -91,6 +91,7 @@ describe('image generation settings and routing', () => {
     ).map((provider) => provider.id);
 
     expect(freeCredit).toEqual([
+      'agnes-image',
       'siliconflow',
       'cloudflare',
       'pollinations',

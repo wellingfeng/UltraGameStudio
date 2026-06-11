@@ -82,7 +82,10 @@ export interface SkillInstallTarget {
   path: string;
   exists: boolean;
   skillCount: number;
+  skills: string[];
   isDefault: boolean;
+  /** "project" for the active workspace's skill dirs, "global" otherwise. */
+  scope: 'project' | 'global';
 }
 
 export interface InstalledSkill {
@@ -926,6 +929,50 @@ export async function openExternal(url: string): Promise<void> {
   await invoke('open_external', { url });
 }
 
+/** Default workspace folder name created when no workspace is selected. */
+export const DEFAULT_WORKSPACE_DIR_NAME = 'FreeUltraCode';
+
+/** Detect the current platform from the browser/runtime (best-effort). */
+function currentPlatform(): CliPlatform {
+  const platform =
+    typeof navigator === 'undefined' ? '' : navigator.platform.toLowerCase();
+  if (platform.includes('win')) return 'windows';
+  if (platform.includes('mac')) return 'macos';
+  return 'linux';
+}
+
+/**
+ * Resolve a sensible default workspace path for the host OS and create the
+ * directory on disk (Tauri only). Used when the user starts a new session
+ * without having selected any workspace folder.
+ *
+ * - Windows: `C:\FreeUltraCode`
+ * - macOS / Linux: `<home>/FreeUltraCode`
+ *
+ * Returns the absolute path, or null when running outside the desktop shell
+ * or when the directory could not be created.
+ */
+export async function ensureDefaultWorkspaceDir(): Promise<string | null> {
+  if (!tauriAvailable()) return null;
+  try {
+    let target: string;
+    if (currentPlatform() === 'windows') {
+      target = `C:\\${DEFAULT_WORKSPACE_DIR_NAME}`;
+    } else {
+      const { homeDir, join } = await import('@tauri-apps/api/path');
+      const home = await homeDir();
+      target = await join(home, DEFAULT_WORKSPACE_DIR_NAME);
+    }
+    const { exists, mkdir } = await import('@tauri-apps/plugin-fs');
+    if (!(await exists(target))) {
+      await mkdir(target, { recursive: true });
+    }
+    return target;
+  } catch {
+    return null;
+  }
+}
+
 /** Open a local directory in the OS file browser. Desktop-only. */
 export async function openWorkspaceDirectory(path: string): Promise<boolean> {
   if (!tauriAvailable()) return false;
@@ -1102,6 +1149,54 @@ export async function readWorkspaceChangesCache(
     rootPath,
     cacheKey,
   });
+}
+
+/** Read the last cached full VCS status snapshot so icons render instantly. */
+export async function readWorkspaceVcsStatusCache(
+  rootPath: string,
+  cacheKey: string,
+): Promise<WorkspaceChanges | null> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  return invoke<WorkspaceChanges | null>('workspace_vcs_status_cached', {
+    rootPath,
+    cacheKey,
+  });
+}
+
+/** Queue a background full VCS scan; progress arrives via onWorkspaceVcsScanProgress. */
+export async function startWorkspaceVcsStatusScan(
+  rootPath: string,
+  cacheKey: string,
+): Promise<void> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  await invoke('workspace_vcs_status_scan', { rootPath, cacheKey });
+}
+
+export interface WorkspaceVcsScanProgress {
+  rootPath: string;
+  phase: 'scanning' | 'done' | 'error' | string;
+  scannedSpecs: number;
+  foundItems: number;
+  truncated: boolean;
+  message?: string | null;
+}
+
+/** Subscribe to background VCS scan progress events. */
+export async function onWorkspaceVcsScanProgress(
+  cb: (progress: WorkspaceVcsScanProgress) => void,
+): Promise<UnlistenFn> {
+  if (!tauriAvailable()) return () => {};
+  const listen = await getListen();
+  return listen<WorkspaceVcsScanProgress>(
+    'workspace-vcs-scan-progress',
+    (event) => cb(event.payload),
+  );
 }
 
 /** Read a local file for the in-app right-side preview drawer. Desktop-only. */
@@ -1306,12 +1401,16 @@ export async function refreshSlashCatalog(): Promise<SlashCatalogSnapshot> {
 }
 
 /** List supported skill installation targets. Desktop-only. */
-export async function skillInstallTargets(): Promise<SkillInstallTarget[]> {
+export async function skillInstallTargets(
+  projectRoot?: string | null,
+): Promise<SkillInstallTarget[]> {
   if (!tauriAvailable()) {
     return [];
   }
   const invoke = await getInvoke();
-  return invoke<SkillInstallTarget[]>('skill_install_targets');
+  return invoke<SkillInstallTarget[]>('skill_install_targets', {
+    projectRoot: projectRoot ?? null,
+  });
 }
 
 /** Download a SKILL.md into a local skill root and refresh the slash catalog. */
@@ -1322,6 +1421,7 @@ export async function installSkillFromUrl(params: {
   targetId: string;
   overwrite?: boolean;
   sourceUrl?: string | null;
+  projectRoot?: string | null;
 }): Promise<InstalledSkill> {
   if (!tauriAvailable()) {
     throw new Error('NO_BACKEND');
@@ -1334,6 +1434,7 @@ export async function installSkillFromUrl(params: {
     targetId: params.targetId,
     overwrite: params.overwrite ?? false,
     sourceUrl: params.sourceUrl ?? null,
+    projectRoot: params.projectRoot ?? null,
   });
 }
 

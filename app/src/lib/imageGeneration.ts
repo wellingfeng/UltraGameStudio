@@ -1,4 +1,5 @@
 export type ImageProviderId =
+  | 'agnes-image'
   | 'siliconflow'
   | 'cloudflare'
   | 'pollinations'
@@ -97,6 +98,21 @@ export interface ImageGenerationRequest {
 const STORAGE_KEY = 'freeultracode.imageGeneration.v1';
 
 export const IMAGE_PROVIDERS: ImageProviderDefinition[] = [
+  {
+    id: 'agnes-image',
+    label: 'Agnes AI 图片',
+    category: 'free-credit',
+    apiKind: 'openai-images',
+    defaultModel: 'agnes-image-2.1-flash',
+    models: ['agnes-image-2.1-flash'],
+    needsKey: true,
+    local: false,
+    defaultBaseUrl: 'https://apihub.agnes-ai.com/v1',
+    supportsBaseUrl: true,
+    endpointPlaceholder: 'https://apihub.agnes-ai.com/v1',
+    credentialUrl: 'https://platform.agnes-ai.com',
+    note: 'Agnes AI 无限期免费开放的图片模型，OpenAI 兼容 /images/generations 接口。支持多风格文生图与图像编辑，正在灰度新增 4K 与多宽高比。Key 与文本模型通用，在 platform.agnes-ai.com 创建。',
+  },
   {
     id: 'siliconflow',
     label: '硅基流动 SiliconFlow',

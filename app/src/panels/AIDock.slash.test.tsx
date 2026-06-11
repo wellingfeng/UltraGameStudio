@@ -204,12 +204,56 @@ function typeTextarea(input: HTMLTextAreaElement, value: string): void {
   input.dispatchEvent(new Event('input', { bubbles: true }));
 }
 
+function flushAnimationFrame(): Promise<void> {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
 afterEach(() => {
   window.localStorage.clear();
   document.body.innerHTML = '';
 });
 
 describe('AIDock slash suggestions', () => {
+  it('opens slash suggestions from the command button before mention', async () => {
+    resetStore();
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+      const buttons = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>('button'),
+      );
+      const commandButton = buttons.find(
+        (button) => button.textContent?.trim() === '/命令',
+      );
+      const mentionButton = buttons.find(
+        (button) => button.textContent?.trim() === '@提及',
+      );
+
+      expect(commandButton).toBeInstanceOf(HTMLButtonElement);
+      expect(mentionButton).toBeInstanceOf(HTMLButtonElement);
+      expect(
+        commandButton!.compareDocumentPosition(mentionButton!) &
+          Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy();
+
+      await act(async () => {
+        commandButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await flushAnimationFrame();
+      });
+
+      expect(input.value).toBe('/');
+      expect(
+        view.container.querySelector('#fuc-slash-suggestions'),
+      ).toBeInstanceOf(HTMLElement);
+      expect(view.container.textContent).toContain('/deep-research');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   it('keeps app-only commands like /image-mode-start when a backend catalog is present', async () => {
     resetStore();
     const view = await renderDock();
@@ -236,7 +280,7 @@ describe('AIDock slash suggestions', () => {
     }
   });
 
-  it('shows estimated context usage in the input toolbar', async () => {
+  it('renders the flat segmented permission control in the input card', async () => {
     resetStore();
     useStore.setState({
       messages: [
@@ -258,13 +302,15 @@ describe('AIDock slash suggestions', () => {
     const view = await renderDock();
 
     try {
-      const badge = view.container.querySelector<HTMLElement>(
-        '[aria-label^="估算"]',
+      const group = view.container.querySelector<HTMLElement>(
+        '[role="radiogroup"]',
       );
-      expect(badge).toBeInstanceOf(HTMLElement);
-      expect(badge?.textContent).toMatch(/^<?\d+%$/);
-      expect(badge?.className).toContain('rounded-full');
-      expect(badge?.getAttribute('style')).toContain('conic-gradient');
+      expect(group).toBeInstanceOf(HTMLElement);
+      const radios = group?.querySelectorAll('[role="radio"]') ?? [];
+      // One flat segment per permission option (full / readonly / ask).
+      expect(radios.length).toBe(3);
+      const checked = group?.querySelector('[role="radio"][aria-checked="true"]');
+      expect(checked).toBeInstanceOf(HTMLElement);
     } finally {
       await view.cleanup();
     }

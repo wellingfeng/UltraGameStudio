@@ -13,6 +13,8 @@ export interface SelectProps {
   value: string;
   onChange: (id: string) => void;
   disabled?: boolean;
+  variant?: 'default' | 'ghost';
+  showSelectedHint?: boolean;
   /** Optional leading glyph, e.g. a folder icon for the workspace selector. */
   icon?: string;
   /** Accessible label for the trigger. */
@@ -25,6 +27,8 @@ export default function Select({
   value,
   onChange,
   disabled = false,
+  variant = 'default',
+  showSelectedHint = true,
   icon,
   title,
   className,
@@ -58,15 +62,19 @@ export default function Select({
         onClick={() => setOpen((v) => !v)}
         className={cn(
           'flex max-w-full items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors',
-          open
-            ? 'border-accent bg-border-soft text-fg'
-            : 'border-border bg-panel-2 text-fg-dim hover:border-accent hover:text-fg',
+          variant === 'ghost'
+            ? open
+              ? 'border-transparent bg-border-soft/70 text-fg'
+              : 'border-transparent bg-transparent text-fg-dim hover:bg-border-soft/55 hover:text-fg'
+            : open
+              ? 'border-accent bg-border-soft text-fg'
+              : 'border-border bg-panel-2 text-fg-dim hover:border-accent hover:text-fg',
           disabled && 'cursor-not-allowed opacity-50 hover:border-border hover:text-fg-dim',
         )}
       >
         {icon && <span className="shrink-0 text-fg-faint">{icon}</span>}
         <span className="min-w-0 flex-1 truncate">{selected?.label}</span>
-        {selected?.hint && (
+        {showSelectedHint && selected?.hint && (
           <span className="shrink-0 rounded bg-border-soft px-1 py-0.5 text-[10px] text-fg-faint">
             {selected.hint}
           </span>

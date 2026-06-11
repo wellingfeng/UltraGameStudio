@@ -146,6 +146,18 @@ export const SLASH_COMMANDS = [
     },
   },
   {
+    name: '/mesh-search',
+    label: { 'zh-CN': '搜索在线模型库', 'en-US': 'Search Model Libraries' },
+    detail: {
+      'zh-CN': '按关键字搜索 Sketchfab、Poly Haven、Fab、Unity Asset Store 等在线 3D 模型库，可下载的直接下载到会话',
+      'en-US': 'Search online 3D model libraries (Sketchfab, Poly Haven, Fab, Unity Asset Store, ...) by keyword; downloadable results are pulled into the chat',
+    },
+    text: {
+      'zh-CN': '',
+      'en-US': '',
+    },
+  },
+  {
     name: '/deep-research',
     label: { 'zh-CN': '深度调研', 'en-US': 'Deep Research' },
     detail: {
@@ -295,6 +307,7 @@ export const GAME_PROJECT_COMMAND_NAMES = [
   '/game',
   '/mesh-mode-start',
   '/mesh-mode-end',
+  '/mesh-search',
 ] as const;
 
 const PROJECT_COMMAND_NAME_SET: ReadonlySet<string> = new Set(

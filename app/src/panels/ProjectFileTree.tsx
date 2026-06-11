@@ -14,20 +14,31 @@ import {
   ChevronRight,
   Code2,
   File,
-  FileDiff,
+  FilePen,
+  // FileDiff, // 工作区改动 tab 已移除，不再使用该图标。
   FileText,
   Folder,
   FolderOpen,
+  History,
   Image as ImageIcon,
   LayoutGrid,
   List,
   Loader2,
   RefreshCw,
-  X,
 } from 'lucide-react';
 import FilePreviewDrawer from '@/components/ai/FilePreviewDrawer';
 import type { FileRef } from '@/components/ai/lib/filePath';
 import { t } from '@/lib/i18n';
+import {
+  extractSessionFiles,
+  type SessionFileEntry,
+} from '@/lib/sessionFiles';
+import {
+  buildSessionIgnorePredicate,
+  sessionIgnoreRootFromContents,
+  type SessionIgnoreRoot,
+} from '@/lib/sessionFileIgnore';
+import { IGNORE_FILE_NAMES } from '@/lib/ignoreRules';
 import {
   applyProjectFileDragDropEffect,
   finishProjectFileDrag,
@@ -35,24 +46,26 @@ import {
   updateProjectFileDragPoint,
 } from '@/lib/projectFileDrag';
 import {
-  ensureCachedSessionChangesBaseline,
-  readCachedSessionChanges,
-  readPersistedSessionChanges,
-  refreshCachedSessionChanges,
-  sessionChangesCacheKey,
-} from '@/lib/sessionChanges';
-import {
-  listWorkspaceVcsStatus,
-  listWorkspaceVcsStatusShallow,
+  // 文件修改状态扫描功能已停用：这些 P4/VCS 扫描接口会对服务器（尤其是
+  // Perforce 大型 depot）发起海量 reconcile 请求，存在压垮服务器的风险，
+  // 因此整个“扫描文件修改状态”功能连同其后台扫描调用一并注释关闭。
+  // listWorkspaceVcsStatusShallow,
+  // readWorkspaceVcsStatusCache,
+  // startWorkspaceVcsStatusScan,
+  // onWorkspaceVcsScanProgress,
+  // type WorkspaceVcsScanProgress,
   listWorkspaceDirectory,
   openLocalPath,
   previewLocalFile,
-  type WorkspaceChangeFile,
-  type WorkspaceChangeLine,
   type WorkspaceChanges,
   type WorkspaceTreeEntry,
 } from '@/lib/tauri';
 import { useResizableWidth } from '@/lib/useResizableWidth';
+import {
+  uniqueWorkspaceHistory,
+  workspacePathKey,
+} from '@/lib/workspaceHistory';
+import { basename } from '@/lib/folderPicker';
 import {
   buildWorkspaceVcsTreeStatus,
   workspaceVcsStatusForEntry,
@@ -63,7 +76,7 @@ import {
 } from '@/lib/workspaceVcsTreeStatus';
 import { useStore } from '@/store/useStore';
 
-type ProjectPanelTab = 'files' | 'changes';
+type ProjectPanelTab = 'files' | 'session';
 type ProjectTreeViewMode = 'tree' | 'preview';
 type ProjectEngine = 'unreal' | 'unity' | 'godot' | 'generic';
 
@@ -107,35 +120,17 @@ interface WorkspaceTreeState {
 
 type WorkspaceTreeCache = Record<string, WorkspaceTreeState>;
 
-type WorkspaceChangesState =
-  | { status: 'idle'; snapshot: WorkspaceChanges | null; message?: undefined }
-  | { status: 'loading'; snapshot: WorkspaceChanges | null; message?: undefined }
-  | { status: 'ready'; snapshot: WorkspaceChanges; message?: undefined }
-  | { status: 'error'; snapshot: WorkspaceChanges | null; message: string };
-
 type WorkspaceVcsTreeState =
   | { status: 'idle'; snapshot: WorkspaceChanges | null; message?: undefined }
   | { status: 'loading'; snapshot: WorkspaceChanges | null; message?: undefined }
   | { status: 'ready'; snapshot: WorkspaceChanges; message?: undefined }
   | { status: 'error'; snapshot: WorkspaceChanges | null; message: string };
 
-type WorkspaceChangeHunkStatus = 'added' | 'deleted' | 'modified';
-
 interface ProjectTreeRenderEntry {
   entry: WorkspaceTreeEntry;
   virtualDeleted: boolean;
   vcsStatus?: WorkspaceVcsTreeStatusKind;
   vcsScanning?: boolean;
-}
-
-interface WorkspaceChangeHunk {
-  key: string;
-  status: WorkspaceChangeHunkStatus;
-  oldStart: number | null;
-  oldEnd: number | null;
-  newStart: number | null;
-  newEnd: number | null;
-  lines: WorkspaceChangeLine[];
 }
 
 const IMAGE_EXTENSIONS = new Set([
@@ -197,7 +192,19 @@ const THUMBNAIL_ROOT_MARGIN = '280px 0px';
 const CONTEXT_MENU_WIDTH = 176;
 const CONTEXT_MENU_HEIGHT = 36;
 const CONTEXT_MENU_MARGIN = 8;
-const VCS_TREE_REFRESH_INTERVAL_MS = 30_000;
+// 文件修改状态扫描已停用，扫描轮询间隔与开关偏好读取不再需要。
+// const VCS_TREE_REFRESH_INTERVAL_MS = 30_000;
+// const VCS_STATUS_SCAN_ENABLED_STORAGE_KEY =
+//   'freeultracode.projectFileTreeVcsScan.v1';
+//
+// function readVcsScanEnabledPreference(): boolean {
+//   if (typeof window === 'undefined') return false;
+//   // Default OFF: scanning file modification status runs many VCS commands, so
+//   // it stays disabled until the user explicitly opts in.
+//   return (
+//     window.localStorage.getItem(VCS_STATUS_SCAN_ENABLED_STORAGE_KEY) === 'on'
+//   );
+// }
 const VCS_STATUS_ICON_SRC: Record<WorkspaceVcsTreeStatusKind, string> = {
   added: `${import.meta.env.BASE_URL}vcs/tortoisegit/AddedIcon.png`,
   modified: `${import.meta.env.BASE_URL}vcs/tortoisegit/ModifiedIcon.png`,
@@ -205,151 +212,12 @@ const VCS_STATUS_ICON_SRC: Record<WorkspaceVcsTreeStatusKind, string> = {
   renamed: `${import.meta.env.BASE_URL}vcs/tortoisegit/ReplacedIcon.png`,
 };
 
-function formatCachedAt(locale: string, timestamp: number): string {
-  try {
-    return new Intl.DateTimeFormat(locale, {
-      month: '2-digit',
-      day: '2-digit',
-      hour: '2-digit',
-      minute: '2-digit',
-    }).format(new Date(timestamp));
-  } catch {
-    return new Date(timestamp).toLocaleString();
-  }
-}
-
-function changedLineCount(snapshot: WorkspaceChanges | null): number {
-  return snapshot?.files.reduce((sum, file) => sum + file.lines.length, 0) ?? 0;
-}
-
-function workspaceChangeFileKey(file: WorkspaceChangeFile): string {
-  return `${file.oldPath ?? ''}:${file.path}`;
-}
-
-function changeStatusLabel(status: WorkspaceChangeFile['status']): string {
-  if (status === 'added') return '新增';
-  if (status === 'deleted') return '删除';
-  if (status === 'renamed') return '重命名';
-  return '修改';
-}
-
-function changeStatusClass(status: WorkspaceChangeFile['status']): string {
-  if (status === 'added') return 'border-status-success/40 text-status-success';
-  if (status === 'deleted') return 'border-status-error/45 text-status-error';
-  if (status === 'renamed') return 'border-accent-2/45 text-accent-2';
-  return 'border-accent/45 text-accent';
-}
-
 function changeSourceLabel(source?: string): string {
   if (source === 'git') return 'Git';
   if (source === 'svn') return 'SVN';
   if (source === 'p4') return 'P4';
   if (source === 'none') return '无 VCS';
   return '快照';
-}
-
-function changeLineMarker(line: WorkspaceChangeLine): string {
-  if (line.kind === 'added') return '+';
-  if (line.kind === 'deleted') return '-';
-  if (line.kind === 'replacedAdded') return '~+';
-  return '~-';
-}
-
-function changeLineNumber(line: WorkspaceChangeLine): string {
-  const value = line.newLine ?? line.oldLine;
-  return value == null ? '' : String(value);
-}
-
-function changeLineClass(line: WorkspaceChangeLine): string {
-  if (line.kind === 'added') return 'bg-status-success/10 text-status-success';
-  if (line.kind === 'deleted') return 'bg-status-error/10 text-status-error';
-  if (line.kind === 'replacedAdded') return 'bg-accent/10 text-accent';
-  return 'bg-amber-500/10 text-amber-300';
-}
-
-function lineIsAdded(line: WorkspaceChangeLine): boolean {
-  return line.kind === 'added' || line.kind === 'replacedAdded';
-}
-
-function lineIsDeleted(line: WorkspaceChangeLine): boolean {
-  return line.kind === 'deleted' || line.kind === 'replacedDeleted';
-}
-
-function workspaceChangeHunkStatus(lines: WorkspaceChangeLine[]): WorkspaceChangeHunkStatus {
-  const hasAdded = lines.some(lineIsAdded);
-  const hasDeleted = lines.some(lineIsDeleted);
-  if (hasAdded && hasDeleted) return 'modified';
-  if (hasAdded) return 'added';
-  return 'deleted';
-}
-
-function buildWorkspaceChangeHunks(lines: WorkspaceChangeLine[]): WorkspaceChangeHunk[] {
-  const hunks: WorkspaceChangeHunk[] = [];
-  let current: WorkspaceChangeLine[] = [];
-  let lastOldLine: number | null = null;
-  let lastNewLine: number | null = null;
-
-  const flush = () => {
-    if (current.length === 0) return;
-    const oldLines = current
-      .map((line) => line.oldLine ?? null)
-      .filter((line): line is number => line != null);
-    const newLines = current
-      .map((line) => line.newLine ?? null)
-      .filter((line): line is number => line != null);
-    const oldStart = oldLines.length > 0 ? Math.min(...oldLines) : null;
-    const oldEnd = oldLines.length > 0 ? Math.max(...oldLines) : null;
-    const newStart = newLines.length > 0 ? Math.min(...newLines) : null;
-    const newEnd = newLines.length > 0 ? Math.max(...newLines) : null;
-
-    hunks.push({
-      key: `${oldStart ?? ''}:${oldEnd ?? ''}:${newStart ?? ''}:${newEnd ?? ''}:${hunks.length}`,
-      status: workspaceChangeHunkStatus(current),
-      oldStart,
-      oldEnd,
-      newStart,
-      newEnd,
-      lines: current,
-    });
-    current = [];
-    lastOldLine = null;
-    lastNewLine = null;
-  };
-
-  for (const line of lines) {
-    const oldLine = line.oldLine ?? null;
-    const newLine = line.newLine ?? null;
-    const oldGap = oldLine != null && lastOldLine != null && oldLine > lastOldLine + 1;
-    const newGap = newLine != null && lastNewLine != null && newLine > lastNewLine + 1;
-    if (current.length > 0 && (oldGap || newGap)) flush();
-
-    current.push(line);
-    if (oldLine != null) lastOldLine = oldLine;
-    if (newLine != null) lastNewLine = newLine;
-  }
-
-  flush();
-  return hunks;
-}
-
-function lineRange(start: number | null, end: number | null): string {
-  if (start == null || end == null) return '';
-  return start === end ? String(start) : `${start}-${end}`;
-}
-
-function changeHunkLabel(hunk: WorkspaceChangeHunk): string {
-  const oldRange = lineRange(hunk.oldStart, hunk.oldEnd);
-  const newRange = lineRange(hunk.newStart, hunk.newEnd);
-  if (hunk.status === 'added') return `新增 ${newRange}`;
-  if (hunk.status === 'deleted') return `删除 ${oldRange}`;
-  if (oldRange && newRange) return `修改 ${oldRange} -> ${newRange}`;
-  return '修改';
-}
-
-function changeHunkStatusClass(status: WorkspaceChangeHunkStatus): string {
-  if (status === 'added') return 'border-status-success/40 bg-status-success/10 text-status-success';
-  if (status === 'deleted') return 'border-status-error/45 bg-status-error/10 text-status-error';
-  return 'border-accent/45 bg-accent/10 text-accent';
 }
 
 function directoryKey(path: string): string {
@@ -776,14 +644,16 @@ function buildRenderEntries(
   vcsIndex: WorkspaceVcsTreeStatusIndex,
 ): ProjectTreeRenderEntry[] {
   const realPaths = new Set(entries.map((entry) => directoryKey(entry.relativePath)));
-  const showScanning = vcsIndex.scanScope === 'root' && vcsIndex.source !== 'none';
+  // No per-directory spinners: while the background scan runs, directories
+  // without a known status simply keep their default icon (no overlay). The
+  // overall scan progress is shown as a thin top progress bar instead.
   const renderEntries: ProjectTreeRenderEntry[] = entries.map((entry) => {
     const vcsStatus = workspaceVcsStatusForEntry(entry, vcsIndex);
     return {
       entry,
       virtualDeleted: false,
       vcsStatus,
-      vcsScanning: showScanning && entry.kind === 'directory' && !vcsStatus,
+      vcsScanning: false,
     };
   });
 
@@ -808,14 +678,15 @@ function treeVcsStatusLine(
     const source = state.snapshot?.source && state.snapshot.source !== 'none'
       ? changeSourceLabel(state.snapshot.source)
       : 'VCS';
-    if (state.snapshot?.scanScope === 'root' && state.snapshot.source !== 'none') {
-      return `${workspaceLabel} · ${source} · 根目录 ${state.snapshot.files.length} 项 · 正在扫描子目录...`;
+    if (state.snapshot?.source && state.snapshot.source !== 'none') {
+      return `${workspaceLabel} · ${source} · ${state.snapshot.files.length} 项 · 正在后台扫描...`;
     }
     return `正在刷新 ${source} 状态...`;
   }
   if (state.status === 'error') return `VCS 状态刷新失败：${state.message}`;
   if (state.snapshot?.source && state.snapshot.source !== 'none') {
-    return `${workspaceLabel} · ${changeSourceLabel(state.snapshot.source)} · ${state.snapshot.files.length} 项改动`;
+    const suffix = state.snapshot.truncated ? ' · 部分目录未完成收集' : '';
+    return `${workspaceLabel} · ${changeSourceLabel(state.snapshot.source)} · ${state.snapshot.files.length} 项改动${suffix}`;
   }
   return workspaceLabel;
 }
@@ -824,18 +695,26 @@ export default function ProjectFileTree() {
   const locale = useStore((s) => s.locale);
   const workspaces = useStore((s) => s.workspaces);
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
-  const activeSessionId = useStore((s) => s.activeSessionId);
-  const aiEditingSessions = useStore((s) => s.aiEditingSessions);
-  const chattingSessions = useStore((s) => s.chattingSessions);
-  const runningSessions = useStore((s) => s.runningSessions);
+  const composerWorkspace = useStore((s) => s.composer.workspace);
+  const composerWorkspaceFolders = useStore((s) => s.composer.workspaceFolders);
+  // 「会话文件」标签的数据来源：当前会话里 AI 工具调用（<<FUC_TOOL>> 内联事件）
+  // 读取/修改过的文件。完全不依赖 git/p4/svn 等版本管理指令。
+  const sessionMessages = useStore((s) => s.messages);
+  // 文件修改状态扫描已停用，会话忙/闲状态不再用于触发自动重扫。
+  // const activeSessionId = useStore((s) => s.activeSessionId);
+  // const aiEditingSessions = useStore((s) => s.aiEditingSessions);
+  // const chattingSessions = useStore((s) => s.chattingSessions);
+  // const runningSessions = useStore((s) => s.runningSessions);
   const [cache, setCache] = useState<WorkspaceTreeCache>({});
   const cacheRef = useRef(cache);
   const [previewRef, setPreviewRef] = useState<FileRef | null>(null);
+  // 「工作区改动」tab 已停用（会触发 P4 reconcile 洪水）。改为「会话文件」tab：
+  // 只展示当前会话里 AI 读取/修改过的文件，纯前端解析消息流，不碰版本管理。
   const [panelTab, setPanelTab] = useState<ProjectPanelTab>(() => {
     if (typeof window === 'undefined') return 'files';
     return window.localStorage.getItem('freeultracode.projectRightPanelTab.v1') ===
-      'changes'
-      ? 'changes'
+      'session'
+      ? 'session'
       : 'files';
   });
   const [viewMode, setViewMode] = useState<ProjectTreeViewMode>(() => {
@@ -845,24 +724,28 @@ export default function ProjectFileTree() {
       ? 'preview'
       : 'tree';
   });
-  const [changesState, setChangesState] = useState<WorkspaceChangesState>({
-    status: 'idle',
-    snapshot: null,
-  });
-  const [vcsTreeState, setVcsTreeState] = useState<WorkspaceVcsTreeState>({
-    status: 'idle',
-    snapshot: null,
-  });
-  const [selectedChangeKey, setSelectedChangeKey] = useState<string | null>(null);
+  // 文件修改状态扫描已停用。保留一个恒定的 idle 快照，使文件树渲染逻辑
+  // （vcsTreeStatusIndex / treeVcsStatusLine）继续工作但永远不显示状态图标，
+  // 也不会触发任何后台 P4/VCS 扫描请求。
+  const vcsTreeState: WorkspaceVcsTreeState = { status: 'idle', snapshot: null };
+  // const [vcsTreeState, setVcsTreeState] = useState<WorkspaceVcsTreeState>({
+  //   status: 'idle',
+  //   snapshot: null,
+  // });
+  // const [vcsScanProgress, setVcsScanProgress] =
+  //   useState<WorkspaceVcsScanProgress | null>(null);
+  // const [vcsScanEnabled, setVcsScanEnabled] = useState<boolean>(
+  //   readVcsScanEnabledPreference,
+  // );
   const [previewDirectories, setPreviewDirectories] = useState<Record<string, string>>({});
   const [thumbnailCache, setThumbnailCache] = useState<ThumbnailCache>({});
   const [visibleThumbnails, setVisibleThumbnails] = useState<ThumbnailVisibility>({});
   const [contextMenu, setContextMenu] = useState<ProjectEntryContextMenuState>(null);
   const visibleThumbnailsRef = useRef<ThumbnailVisibility>({});
-  const changesLoadSeqRef = useRef(0);
-  const vcsTreeLoadSeqRef = useRef(0);
-  const vcsTreeRefreshInFlightRef = useRef(false);
-  const activeSessionBusyRef = useRef(false);
+  // 文件修改状态扫描已停用，相关序列号 / in-flight 标记不再需要。
+  // const vcsTreeLoadSeqRef = useRef(0);
+  // const vcsTreeRefreshInFlightRef = useRef(false);
+  // const activeSessionBusyRef = useRef(false);
 
   useEffect(() => {
     cacheRef.current = cache;
@@ -895,43 +778,114 @@ export default function ProjectFileTree() {
     [activeWorkspaceId, workspaces],
   );
   const activeWorkspacePath = activeWorkspace?.path?.trim() ?? '';
-  const workspaceChangesRootPath = activeWorkspacePath;
-  const activeSessionBusy = useMemo(() => {
-    if (!activeSessionId) return false;
-    const matchesActive = (key: { workspaceId: string | null; sessionId: string | null }) =>
-      key.sessionId === activeSessionId &&
-      (key.workspaceId ?? null) === (activeWorkspaceId ?? null);
-    return (
-      aiEditingSessions.some(matchesActive) ||
-      chattingSessions.some(matchesActive) ||
-      runningSessions.some(matchesActive)
-    );
-  }, [
-    activeSessionId,
-    activeWorkspaceId,
-    aiEditingSessions,
-    chattingSessions,
-    runningSessions,
-  ]);
-  const changesCacheKey = useMemo(
-    () =>
-      sessionChangesCacheKey(
-        activeWorkspace?.id,
-        'workspace',
-        workspaceChangesRootPath,
-      ),
-    [activeWorkspace?.id, workspaceChangesRootPath],
+
+
+  // The right-hand panel browses every folder attached to the active session:
+  // the composer's primary workspace plus its extra folders (configured in
+  // Project Settings → 概览 and inherited by new sessions). The folder bar lets
+  // the user pick which root to browse; the tree below shows that root.
+  const rootFolders = useMemo(() => {
+    const folders = uniqueWorkspaceHistory([
+      composerWorkspace,
+      ...composerWorkspaceFolders,
+      activeWorkspacePath,
+    ]);
+    return folders;
+  }, [composerWorkspace, composerWorkspaceFolders, activeWorkspacePath]);
+
+  // 会话文件过滤：读取每个根目录下的 .gitignore/.p4ignore/.svnignore（纯文本读取，
+  // 不调用任何 git/p4/svn 指令），编译成忽略匹配器，用于隐藏不在版本管理中的文件。
+  const [ignoreRoots, setIgnoreRoots] = useState<SessionIgnoreRoot[]>([]);
+  const rootFoldersKey = useMemo(
+    () => rootFolders.map((path) => workspacePathKey(path)).join('|'),
+    [rootFolders],
   );
-  const activeTree = activeWorkspace
-    ? cache[activeWorkspace.id]
-    : undefined;
+  useEffect(() => {
+    let cancelled = false;
+    const roots = rootFolders.filter((path) => path.trim());
+    if (roots.length === 0) {
+      setIgnoreRoots([]);
+      return;
+    }
+    void (async () => {
+      const loaded = await Promise.all(
+        roots.map(async (root): Promise<SessionIgnoreRoot> => {
+          const contents = await Promise.all(
+            IGNORE_FILE_NAMES.map(async (name) => {
+              try {
+                const preview = await previewLocalFile(name, { cwd: root });
+                return preview.kind === 'text' && preview.text ? preview.text : '';
+              } catch {
+                // Missing ignore file (or no desktop backend) → no rules from it.
+                return '';
+              }
+            }),
+          );
+          return sessionIgnoreRootFromContents(root, contents);
+        }),
+      );
+      if (!cancelled) setIgnoreRoots(loaded);
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // rootFoldersKey captures the identity of the root set; reload on change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rootFoldersKey]);
+
+  // 当前会话相关文件：从消息流里的 AI 工具调用事件解析得到，纯前端、零 VCS 请求。
+  // 再用上面读取到的 ignore 规则过滤掉不受版本管理的文件。
+  const sessionFiles = useMemo(() => {
+    const isIgnored = buildSessionIgnorePredicate(ignoreRoots);
+    return extractSessionFiles(sessionMessages, { isIgnored });
+  }, [sessionMessages, ignoreRoots]);
+  const [selectedRootKey, setSelectedRootKey] = useState<string>('');
+  const selectedRootPath = useMemo(() => {
+    if (rootFolders.length === 0) return '';
+    const match = rootFolders.find(
+      (path) => workspacePathKey(path) === selectedRootKey,
+    );
+    return match ?? rootFolders[0];
+  }, [rootFolders, selectedRootKey]);
+  const activeRootKey = selectedRootPath ? workspacePathKey(selectedRootPath) : '';
+
+  useEffect(() => {
+    if (!selectedRootPath) return;
+    const key = workspacePathKey(selectedRootPath);
+    if (key !== selectedRootKey) setSelectedRootKey(key);
+  }, [selectedRootPath, selectedRootKey]);
+
+  // 文件修改状态扫描已停用，不再计算会话忙/闲状态。
+  // const activeSessionBusy = useMemo(() => {
+  //   if (!activeSessionId) return false;
+  //   const matchesActive = (key: { workspaceId: string | null; sessionId: string | null }) =>
+  //     key.sessionId === activeSessionId &&
+  //     (key.workspaceId ?? null) === (activeWorkspaceId ?? null);
+  //   return (
+  //     aiEditingSessions.some(matchesActive) ||
+  //     chattingSessions.some(matchesActive) ||
+  //     runningSessions.some(matchesActive)
+  //   );
+  // }, [
+  //   activeSessionId,
+  //   activeWorkspaceId,
+  //   aiEditingSessions,
+  //   chattingSessions,
+  //   runningSessions,
+  // ]);
+  // 文件修改状态扫描已停用，无需后台 VCS 状态缓存键。
+  // const vcsStatusCacheKey = useMemo(
+  //   () => changesCacheKey ?? `vcs:${activeWorkspace?.id ?? 'default'}`,
+  //   [changesCacheKey, activeWorkspace?.id],
+  // );
+  const activeTree = activeRootKey ? cache[activeRootKey] : undefined;
   const rootState = activeTree?.directories[''];
   const projectEngine = useMemo(
     () => detectProjectEngine(rootState?.entries),
     [rootState?.entries],
   );
-  const previewDirectory = activeWorkspace
-    ? previewDirectories[activeWorkspace.id] ?? ''
+  const previewDirectory = activeRootKey
+    ? previewDirectories[activeRootKey] ?? ''
     : '';
   const previewDirectoryKey = directoryKey(previewDirectory);
   const previewDirectoryState = activeTree?.directories[previewDirectoryKey];
@@ -1043,114 +997,178 @@ export default function ProjectFileTree() {
     }
   }, []);
 
+  // 文件修改状态扫描已停用，开关切换逻辑不再需要。
+  // const toggleVcsScanEnabled = useCallback(() => {
+  //   setVcsScanEnabled((prev) => {
+  //     const next = !prev;
+  //     if (typeof window !== 'undefined') {
+  //       window.localStorage.setItem(
+  //         VCS_STATUS_SCAN_ENABLED_STORAGE_KEY,
+  //         next ? 'on' : 'off',
+  //       );
+  //     }
+  //     return next;
+  //   });
+  // }, []);
+
   const updatePanelTab = useCallback((nextTab: ProjectPanelTab) => {
-    if (nextTab === 'changes') {
-      setSelectedChangeKey(null);
-    }
     setPanelTab(nextTab);
     if (typeof window !== 'undefined') {
       window.localStorage.setItem('freeultracode.projectRightPanelTab.v1', nextTab);
     }
   }, []);
 
+  const openSessionFile = useCallback((entry: SessionFileEntry) => {
+    setPreviewRef({ path: entry.path, basename: entry.basename });
+  }, []);
+
+  // ===========================================================================
+  // 文件修改状态扫描（VCS status scan）—— 已整体停用
+  //
+  // 该功能会对版本控制服务器发起大量请求：在 Perforce 大型 depot（如 UE 引擎库）
+  // 下，它会按目录递归执行 `p4 reconcile -n -ead <dir>/...`，单次扫描可产生数百条
+  // reconcile 请求，足以拖垮 P4 服务器。为彻底消除该风险，整段后台扫描逻辑连同其
+  // 触发点一并注释关闭。`refreshVcsTreeStatus` 保留为 no-op，使现有调用点无需改动。
+  // 如需恢复，请同时取消注释顶部的 tauri 导入、相关 state/ref 与下方各 effect。
+  // ===========================================================================
   const refreshVcsTreeStatus = useCallback(() => {
-    if (!activeWorkspacePath || vcsTreeRefreshInFlightRef.current) return;
-    vcsTreeRefreshInFlightRef.current = true;
-    const seq = vcsTreeLoadSeqRef.current + 1;
-    vcsTreeLoadSeqRef.current = seq;
-    setVcsTreeState((prev) => ({
-      status: 'loading',
-      snapshot: prev.snapshot,
-    }));
+    /* no-op: 文件修改状态扫描已停用 */
+  }, []);
 
-    void (async () => {
-      try {
-        const shallowSnapshot = await listWorkspaceVcsStatusShallow(activeWorkspacePath);
-        if (vcsTreeLoadSeqRef.current !== seq) return;
-        setVcsTreeState({ status: 'loading', snapshot: shallowSnapshot });
-      } catch {
-        // Fall through to the full scan; it reports the real error if the backend is unavailable.
-      }
+  // const refreshVcsTreeStatus = useCallback(() => {
+  //   if (!vcsScanEnabled) return;
+  //   if (!activeWorkspacePath || vcsTreeRefreshInFlightRef.current) return;
+  //   vcsTreeRefreshInFlightRef.current = true;
+  //   const seq = vcsTreeLoadSeqRef.current + 1;
+  //   vcsTreeLoadSeqRef.current = seq;
+  //
+  //   void (async () => {
+  //     // 1) Render the last cached snapshot instantly so switching back to a
+  //     //    workspace shows icons immediately without re-scanning from zero.
+  //     try {
+  //       const cached = await readWorkspaceVcsStatusCache(
+  //         activeWorkspacePath,
+  //         vcsStatusCacheKey,
+  //       );
+  //       if (vcsTreeLoadSeqRef.current !== seq) return;
+  //       if (cached) {
+  //         setVcsTreeState({ status: 'ready', snapshot: cached });
+  //       } else {
+  //         setVcsTreeState((prev) => ({ status: 'loading', snapshot: prev.snapshot }));
+  //       }
+  //     } catch {
+  //       setVcsTreeState((prev) => ({ status: 'loading', snapshot: prev.snapshot }));
+  //     }
+  //
+  //     // 2) Quick shallow root-level pass so top-level icons update fast.
+  //     try {
+  //       const shallowSnapshot = await listWorkspaceVcsStatusShallow(activeWorkspacePath);
+  //       if (vcsTreeLoadSeqRef.current !== seq) return;
+  //       setVcsTreeState((prev) => {
+  //         // Don't downgrade a richer cached/full snapshot to the shallow one.
+  //         if (prev.status === 'ready' && prev.snapshot.scanScope === 'full') {
+  //           return prev;
+  //         }
+  //         return { status: 'loading', snapshot: shallowSnapshot };
+  //       });
+  //     } catch {
+  //       // Background scan below will surface the real error via progress events.
+  //     }
+  //
+  //     // 3) Kick off the background full scan. It runs in a backend worker,
+  //     //    caches its result, and reports progress via events. We don't await
+  //     //    the full scan here, so the UI stays responsive on large projects.
+  //     try {
+  //       await startWorkspaceVcsStatusScan(activeWorkspacePath, vcsStatusCacheKey);
+  //     } catch (err) {
+  //       if (vcsTreeLoadSeqRef.current !== seq) return;
+  //       setVcsTreeState((prev) => ({
+  //         status: 'error',
+  //         snapshot: prev.snapshot,
+  //         message: errorMessage(err),
+  //       }));
+  //     } finally {
+  //       if (vcsTreeLoadSeqRef.current === seq) {
+  //         vcsTreeRefreshInFlightRef.current = false;
+  //       }
+  //     }
+  //   })();
+  // }, [activeWorkspacePath, vcsStatusCacheKey, vcsScanEnabled]);
 
-      try {
-        const snapshot = await listWorkspaceVcsStatus(activeWorkspacePath);
-        if (vcsTreeLoadSeqRef.current !== seq) return;
-        setVcsTreeState({ status: 'ready', snapshot });
-      } catch (err) {
-        if (vcsTreeLoadSeqRef.current !== seq) return;
-        setVcsTreeState((prev) => ({
-          status: 'error',
-          snapshot: prev.snapshot,
-          message: errorMessage(err),
-        }));
-      } finally {
-        if (vcsTreeLoadSeqRef.current === seq) {
-          vcsTreeRefreshInFlightRef.current = false;
-        }
-      }
-    })();
-  }, [activeWorkspacePath]);
+  // Drive UI from background scan progress events: update the thin progress bar
+  // while scanning, and re-read the cached result when a scan completes.
+  // 已停用：不再监听后台扫描进度事件。
+  // useEffect(() => {
+  //   if (!activeWorkspacePath) return;
+  //   let unlisten: (() => void) | undefined;
+  //   let disposed = false;
+  //   void onWorkspaceVcsScanProgress((progress) => {
+  //     if (progress.phase === 'scanning') {
+  //       setVcsScanProgress(progress);
+  //       return;
+  //     }
+  //     if (progress.phase === 'error') {
+  //       setVcsScanProgress(null);
+  //       setVcsTreeState((prev) => ({
+  //         status: 'error',
+  //         snapshot: prev.snapshot,
+  //         message: progress.message ?? 'VCS 状态扫描失败',
+  //       }));
+  //       return;
+  //     }
+  //     // phase === 'done': pull the freshly cached snapshot.
+  //     setVcsScanProgress(null);
+  //     const seq = vcsTreeLoadSeqRef.current;
+  //     void readWorkspaceVcsStatusCache(activeWorkspacePath, vcsStatusCacheKey)
+  //       .then((snapshot) => {
+  //         if (vcsTreeLoadSeqRef.current !== seq || !snapshot) return;
+  //         setVcsTreeState({ status: 'ready', snapshot });
+  //       })
+  //       .catch(() => {});
+  //   }).then((fn) => {
+  //     if (disposed) {
+  //       fn();
+  //     } else {
+  //       unlisten = fn;
+  //     }
+  //   });
+  //   return () => {
+  //     disposed = true;
+  //     unlisten?.();
+  //   };
+  // }, [activeWorkspacePath, vcsStatusCacheKey]);
+
+  // 已停用：不再在挂载 / 切换工作区时启动扫描，也不再每 30 秒轮询扫描。
+  // useEffect(() => {
+  //   vcsTreeLoadSeqRef.current = vcsTreeLoadSeqRef.current + 1;
+  //   vcsTreeRefreshInFlightRef.current = false;
+  //   setVcsScanProgress(null);
+  //   setVcsTreeState({ status: 'idle', snapshot: null });
+  //   if (!activeWorkspacePath || !vcsScanEnabled) return;
+  //
+  //   refreshVcsTreeStatus();
+  //   if (typeof window === 'undefined') return;
+  //
+  //   const interval = window.setInterval(
+  //     refreshVcsTreeStatus,
+  //     VCS_TREE_REFRESH_INTERVAL_MS,
+  //   );
+  //   return () => window.clearInterval(interval);
+  // }, [activeWorkspacePath, refreshVcsTreeStatus, vcsScanEnabled]);
 
   useEffect(() => {
-    vcsTreeLoadSeqRef.current = vcsTreeLoadSeqRef.current + 1;
-    vcsTreeRefreshInFlightRef.current = false;
-    setVcsTreeState({ status: 'idle', snapshot: null });
-    if (!activeWorkspacePath) return;
-
-    refreshVcsTreeStatus();
-    if (typeof window === 'undefined') return;
-
-    const interval = window.setInterval(
-      refreshVcsTreeStatus,
-      VCS_TREE_REFRESH_INTERVAL_MS,
-    );
-    return () => window.clearInterval(interval);
-  }, [activeWorkspacePath, refreshVcsTreeStatus]);
-
-  useEffect(() => {
-    if (!activeWorkspace || !activeWorkspacePath) return;
-    const tree = cacheRef.current[activeWorkspace.id];
-    if (tree?.rootPath === activeWorkspacePath && tree.directories['']) return;
-    void loadDirectory(activeWorkspace.id, activeWorkspacePath, '');
-  }, [activeWorkspace, activeWorkspacePath, loadDirectory]);
-
-  useEffect(() => {
-    const snapshot = readCachedSessionChanges(changesCacheKey);
-    setChangesState(snapshot ? { status: 'ready', snapshot } : { status: 'idle', snapshot: null });
-    setSelectedChangeKey(null);
-    if (!snapshot && workspaceChangesRootPath && changesCacheKey) {
-      const seq = changesLoadSeqRef.current + 1;
-      changesLoadSeqRef.current = seq;
-      void readPersistedSessionChanges(workspaceChangesRootPath, changesCacheKey)
-        .then((persisted) => {
-          if (changesLoadSeqRef.current !== seq || !persisted) return;
-          setChangesState({ status: 'ready', snapshot: persisted });
-        })
-        .catch(() => {});
-    }
-    if (workspaceChangesRootPath && changesCacheKey) {
-      void ensureCachedSessionChangesBaseline(
-        workspaceChangesRootPath,
-        changesCacheKey,
-        null,
-      ).catch(() => {});
-    }
-  }, [workspaceChangesRootPath, changesCacheKey]);
-
-  useEffect(() => {
-    if (!selectedChangeKey) return;
-    const snapshot = changesState.snapshot;
-    if (!snapshot?.files.some((file) => workspaceChangeFileKey(file) === selectedChangeKey)) {
-      setSelectedChangeKey(null);
-    }
-  }, [changesState.snapshot, selectedChangeKey]);
+    if (!activeRootKey || !selectedRootPath) return;
+    const tree = cacheRef.current[activeRootKey];
+    if (tree?.rootPath === selectedRootPath && tree.directories['']) return;
+    void loadDirectory(activeRootKey, selectedRootPath, '');
+  }, [activeRootKey, selectedRootPath, loadDirectory]);
 
   useEffect(() => {
     setVisibleThumbnails({});
-  }, [activeWorkspace?.id, previewDirectoryKey, viewMode]);
+  }, [activeRootKey, previewDirectoryKey, viewMode]);
 
   useEffect(() => {
-    if (viewMode !== 'preview' || !activeWorkspacePath) return;
+    if (viewMode !== 'preview' || !selectedRootPath) return;
     const imageEntries = previewDirectoryEntries.filter(
       (entry) => isImageEntry(entry) && visibleThumbnails[thumbnailKey(entry)],
     );
@@ -1173,7 +1191,7 @@ export default function ProjectFileTree() {
 
     for (const entry of missing) {
       const key = thumbnailKey(entry);
-      void previewLocalFile(entry.path, { cwd: activeWorkspacePath })
+      void previewLocalFile(entry.path, { cwd: selectedRootPath })
         .then((result) => {
           if (result.kind !== 'image' || !result.base64 || !result.mime) {
             throw new Error('not image');
@@ -1200,7 +1218,7 @@ export default function ProjectFileTree() {
         });
     }
   }, [
-    activeWorkspacePath,
+    selectedRootPath,
     previewDirectoryEntries,
     thumbnailCache,
     visibleThumbnails,
@@ -1278,28 +1296,28 @@ export default function ProjectFileTree() {
     const targetPath = contextMenu.entry.path;
     setContextMenu(null);
     void openLocalPath(targetPath, {
-      cwd: activeWorkspacePath || undefined,
+      cwd: selectedRootPath || undefined,
       reveal: true,
     }).then((opened) => {
       if (!opened && typeof window !== 'undefined') {
         window.alert('当前环境不能打开系统文件浏览器。请使用桌面端。');
       }
     });
-  }, [activeWorkspacePath, contextMenu]);
+  }, [selectedRootPath, contextMenu]);
 
   const toggleDirectory = useCallback(
     (entry: WorkspaceTreeEntry, options: { skipLoad?: boolean } = {}) => {
-      if (!activeWorkspace || !activeWorkspacePath) return;
+      if (!activeRootKey || !selectedRootPath) return;
       const key = directoryKey(entry.relativePath);
-      const tree = cacheRef.current[activeWorkspace.id];
+      const tree = cacheRef.current[activeRootKey];
       const nextExpanded = !(tree?.expanded[key] === true);
 
       setCache((prev) => {
-        const previous = prev[activeWorkspace.id];
+        const previous = prev[activeRootKey];
         if (!previous) return prev;
         const next = {
           ...prev,
-          [activeWorkspace.id]: {
+          [activeRootKey]: {
             ...previous,
             expanded: {
               ...previous.expanded,
@@ -1312,93 +1330,105 @@ export default function ProjectFileTree() {
       });
 
       if (nextExpanded && !tree?.directories[key] && !options.skipLoad) {
-        void loadDirectory(activeWorkspace.id, activeWorkspacePath, key);
+        void loadDirectory(activeRootKey, selectedRootPath, key);
       }
     },
-    [activeWorkspace, activeWorkspacePath, loadDirectory],
+    [activeRootKey, selectedRootPath, loadDirectory],
   );
 
   const refreshActiveWorkspace = useCallback(() => {
-    if (!activeWorkspace || !activeWorkspacePath) return;
+    if (!activeRootKey || !selectedRootPath) return;
     setPreviewDirectories((prev) => ({
       ...prev,
-      [activeWorkspace.id]: '',
+      [activeRootKey]: '',
     }));
     refreshVcsTreeStatus();
-    void loadDirectory(activeWorkspace.id, activeWorkspacePath, '', {
+    void loadDirectory(activeRootKey, selectedRootPath, '', {
       force: true,
     });
-  }, [activeWorkspace, activeWorkspacePath, loadDirectory, refreshVcsTreeStatus]);
+  }, [activeRootKey, selectedRootPath, loadDirectory, refreshVcsTreeStatus]);
 
-  const refreshSessionChanges = useCallback(() => {
-    if (!workspaceChangesRootPath || !changesCacheKey) return;
-    const seq = changesLoadSeqRef.current + 1;
-    changesLoadSeqRef.current = seq;
-    setSelectedChangeKey(null);
-    setChangesState((prev) => ({
-      status: 'loading',
-      snapshot: prev.snapshot,
-    }));
-    void refreshCachedSessionChanges(
-      workspaceChangesRootPath,
-      changesCacheKey,
-      null,
-    )
-      .then((snapshot) => {
-        if (changesLoadSeqRef.current !== seq) return;
-        setChangesState({ status: 'ready', snapshot });
-      })
-      .catch((err) => {
-        if (changesLoadSeqRef.current !== seq) return;
-        setChangesState((prev) => ({
-          status: 'error',
-          snapshot: prev.snapshot,
-          message: errorMessage(err),
-        }));
-      });
-  }, [workspaceChangesRootPath, changesCacheKey]);
+  // 工作区改动扫描已停用：原实现会调用 refreshCachedSessionChanges →
+  // listWorkspaceChanges → 后端 p4_workspace_changes，对 P4 发起大量 reconcile
+  // 请求。改动 tab 入口已移除（改为「会话文件」tab）。
 
-  useEffect(() => {
-    if (panelTab !== 'changes') return;
-    if (!workspaceChangesRootPath || !changesCacheKey) return;
-    if (changesState.status !== 'idle') return;
-    refreshSessionChanges();
-  }, [
-    workspaceChangesRootPath,
-    changesCacheKey,
-    changesState.status,
-    panelTab,
-    refreshSessionChanges,
-  ]);
+  // const refreshSessionChanges = useCallback(() => {
+  //   if (!workspaceChangesRootPath || !changesCacheKey) return;
+  //   const seq = changesLoadSeqRef.current + 1;
+  //   changesLoadSeqRef.current = seq;
+  //   setSelectedChangeKey(null);
+  //   setChangesState((prev) => ({
+  //     status: 'loading',
+  //     snapshot: prev.snapshot,
+  //   }));
+  //   void refreshCachedSessionChanges(
+  //     workspaceChangesRootPath,
+  //     changesCacheKey,
+  //     null,
+  //   )
+  //     .then((snapshot) => {
+  //       if (changesLoadSeqRef.current !== seq) return;
+  //       setChangesState({ status: 'ready', snapshot });
+  //     })
+  //     .catch((err) => {
+  //       if (changesLoadSeqRef.current !== seq) return;
+  //       setChangesState((prev) => ({
+  //         status: 'error',
+  //         snapshot: prev.snapshot,
+  //         message: errorMessage(err),
+  //       }));
+  //     });
+  // }, [workspaceChangesRootPath, changesCacheKey]);
 
-  useEffect(() => {
-    const wasBusy = activeSessionBusyRef.current;
-    activeSessionBusyRef.current = activeSessionBusy;
-    if (!wasBusy || activeSessionBusy) return;
-    if (!workspaceChangesRootPath || !changesCacheKey) return;
-    refreshSessionChanges();
-    refreshVcsTreeStatus();
-  }, [
-    activeSessionBusy,
-    workspaceChangesRootPath,
-    changesCacheKey,
-    refreshSessionChanges,
-    refreshVcsTreeStatus,
-  ]);
+  // 已停用：不再在切换到“工作区改动”标签时自动发起改动扫描。
+  // 该扫描在 P4 工作区下同样会触发大量 reconcile 请求；如需查看改动，
+  // 请改用面板底部的“刷新改动”按钮手动触发。
+  // useEffect(() => {
+  //   if (panelTab !== 'changes') return;
+  //   if (!vcsScanEnabled) return;
+  //   if (!workspaceChangesRootPath || !changesCacheKey) return;
+  //   if (changesState.status !== 'idle') return;
+  //   refreshSessionChanges();
+  // }, [
+  //   vcsScanEnabled,
+  //   workspaceChangesRootPath,
+  //   changesCacheKey,
+  //   changesState.status,
+  //   panelTab,
+  //   refreshSessionChanges,
+  // ]);
+
+  // 已停用：会话从忙变闲时不再自动重扫工作区改动 / 文件状态。
+  // useEffect(() => {
+  //   const wasBusy = activeSessionBusyRef.current;
+  //   activeSessionBusyRef.current = activeSessionBusy;
+  //   if (!wasBusy || activeSessionBusy) return;
+  //   if (!vcsScanEnabled) return;
+  //   if (!workspaceChangesRootPath || !changesCacheKey) return;
+  //   refreshSessionChanges();
+  //   refreshVcsTreeStatus();
+  // }, [
+  //   activeSessionBusy,
+  //   vcsScanEnabled,
+  //   workspaceChangesRootPath,
+  //   changesCacheKey,
+  //   refreshSessionChanges,
+  //   refreshVcsTreeStatus,
+  // ]);
 
   const openPreviewDirectory = useCallback(
     (relativePath: string, options: { skipLoad?: boolean } = {}) => {
-      if (!activeWorkspace || !activeWorkspacePath) return;
+      if (!activeRootKey || !selectedRootPath) return;
       const key = directoryKey(relativePath);
       setPreviewDirectories((prev) => ({
         ...prev,
-        [activeWorkspace.id]: key,
+        [activeRootKey]: key,
       }));
-      if (!options.skipLoad && !cacheRef.current[activeWorkspace.id]?.directories[key]) {
-        void loadDirectory(activeWorkspace.id, activeWorkspacePath, key);
+      if (!options.skipLoad && !cacheRef.current[activeRootKey]?.directories[key]) {
+        void loadDirectory(activeRootKey, selectedRootPath, key);
       }
     },
-    [activeWorkspace, activeWorkspacePath, loadDirectory],
+    [activeRootKey, selectedRootPath, loadDirectory],
   );
 
   const renderDirectory = useCallback(
@@ -1409,7 +1439,7 @@ export default function ProjectFileTree() {
       const renderEntries = buildRenderEntries(
         directory?.entries ?? [],
         key,
-        activeWorkspacePath,
+        selectedRootPath,
         vcsTreeStatusIndex,
       );
 
@@ -1554,7 +1584,7 @@ export default function ProjectFileTree() {
     },
     [
       activeTree,
-      activeWorkspacePath,
+      selectedRootPath,
       finishEntryDrag,
       locale,
       openEntryContextMenu,
@@ -1570,7 +1600,7 @@ export default function ProjectFileTree() {
     const renderEntries = buildRenderEntries(
       directory?.entries ?? [],
       previewDirectoryKey,
-      activeWorkspacePath,
+      selectedRootPath,
       vcsTreeStatusIndex,
     );
     const segments = previewDirectoryKey
@@ -1591,7 +1621,7 @@ export default function ProjectFileTree() {
             type="button"
             onClick={() => openPreviewDirectory('')}
             className="max-w-[7rem] truncate rounded px-1.5 py-0.5 hover:bg-panel-2 hover:text-fg"
-            title={activeWorkspacePath}
+            title={selectedRootPath}
           >
             {t(locale, 'projectTree.previewRoot')}
           </button>
@@ -1694,7 +1724,7 @@ export default function ProjectFileTree() {
       </div>
     );
   }, [
-    activeWorkspacePath,
+    selectedRootPath,
     locale,
     openEntryContextMenu,
     openPreviewDirectory,
@@ -1709,247 +1739,109 @@ export default function ProjectFileTree() {
     vcsTreeStatusIndex,
   ]);
 
-  const renderSessionChanges = useCallback((): ReactNode => {
-    if (!activeWorkspace || !workspaceChangesRootPath || !changesCacheKey) {
+  const renderSessionFiles = useCallback((): ReactNode => {
+    if (sessionFiles.length === 0) {
       return (
-        <div className="px-3 py-4 text-sm leading-relaxed text-fg-faint">
-          选择工作区后显示改动。
+        <div className="space-y-2 px-3 py-6 text-center">
+          <History size={20} className="mx-auto text-fg-faint" />
+          <p className="text-xs leading-relaxed text-fg-faint">
+            {t(locale, 'sessionFiles.empty')}
+          </p>
         </div>
       );
     }
-
-    const snapshot = changesState.snapshot;
-    if (changesState.status === 'loading' && !snapshot) {
-      return (
-        <div className="flex h-16 items-center justify-center gap-2 text-xs text-fg-faint">
-          <Loader2 size={14} className="animate-spin text-accent" />
-          <span>读取改动中</span>
-        </div>
-      );
-    }
-
-    if (changesState.status === 'error' && !snapshot) {
-      return (
-        <div className="px-2 py-2">
-          <div className="flex items-start gap-2 rounded-md border border-status-error/40 bg-status-error/10 p-2 text-xs leading-snug text-status-error">
-            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-            <span className="break-words">{changesState.message}</span>
-          </div>
-        </div>
-      );
-    }
-
-    if (!snapshot) {
-      return (
-        <div className="px-3 py-8 text-center text-xs leading-relaxed text-fg-faint">
-          点击刷新读取当前工作区改动。
-        </div>
-      );
-    }
-
-    if (snapshot.files.length === 0) {
-      return (
-        <div className="px-3 py-8 text-center text-xs leading-relaxed text-fg-faint">
-          {snapshot.truncated
-            ? '已完成部分扫描，未发现可显示改动；部分目录可能未收集。'
-            : '当前工作区暂无文件改动。'}
-        </div>
-      );
-    }
-
-    const selectedFile = selectedChangeKey
-      ? snapshot.files.find((file) => workspaceChangeFileKey(file) === selectedChangeKey) ?? null
-      : null;
-    const lineCount = changedLineCount(snapshot);
-    const isVcsSnapshot = snapshot.source != null && snapshot.source !== 'snapshot';
 
     return (
-      <div className="space-y-3 px-2 py-2">
-        <div className="flex min-w-0 items-center gap-2 text-[11px] text-fg-faint">
-          <span className="truncate">
-            {changeSourceLabel(snapshot.source)} · {snapshot.files.length} 个文件
-            {lineCount > 0 ? ` · ${lineCount} 行` : ''}
-          </span>
-          <span className="ml-auto shrink-0">
-            {formatCachedAt(locale, snapshot.generatedAtMs)}
-          </span>
-        </div>
-
-        {changesState.status === 'error' && (
-          <div className="flex items-start gap-2 rounded-md border border-status-error/40 bg-status-error/10 p-2 text-xs leading-snug text-status-error">
-            <AlertTriangle size={14} className="mt-0.5 shrink-0" />
-            <span className="break-words">{changesState.message}</span>
-          </div>
-        )}
-
-        {selectedFile ? (
-          <section className="space-y-2">
+      <div className="space-y-1.5 px-2 py-2">
+        <p className="px-1 text-[10px] leading-relaxed text-fg-faint">
+          {t(locale, 'sessionFiles.hint')}
+        </p>
+        {sessionFiles.map((entry) => {
+          const dragEntry: WorkspaceTreeEntry = {
+            name: entry.basename,
+            path: entry.path,
+            relativePath: entry.path,
+            kind: 'file',
+            hidden: false,
+            sizeBytes: null,
+            modifiedAtMs: null,
+          };
+          const edited = entry.action === 'edited';
+          return (
             <button
+              key={entry.path}
               type="button"
-              onClick={() => setSelectedChangeKey(null)}
-              className="text-[11px] text-fg-faint transition-colors hover:text-fg"
+              draggable
+              onDragStart={(event) => startEntryDrag(event, dragEntry)}
+              onDrag={trackEntryDrag}
+              onDragEnd={finishEntryDrag}
+              onClick={() => openSessionFile(entry)}
+              title={entry.path}
+              className="group flex w-full min-w-0 cursor-grab items-center gap-2 rounded-md border border-border-soft bg-panel-2/60 px-2 py-2 text-left transition-colors hover:border-accent/45 hover:bg-panel-2 active:cursor-grabbing"
             >
-              返回文件列表
-            </button>
-            <div className="flex min-w-0 items-center gap-2">
-              <span
-                className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg"
-                title={selectedFile.path}
-              >
-                {selectedFile.path}
+              <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
+                {edited ? (
+                  <FilePen size={14} className="text-accent" />
+                ) : (
+                  <FileText size={14} className="text-fg-faint" />
+                )}
+              </span>
+              <span className="min-w-0 flex-1">
+                <span className="block truncate font-mono text-[11px] text-fg" title={entry.path}>
+                  {entry.basename}
+                </span>
+                <span className="mt-0.5 block truncate text-[10px] text-fg-faint">
+                  {entry.path}
+                </span>
               </span>
               <span
                 className={
                   'shrink-0 rounded border px-1.5 py-0.5 text-[10px] leading-none ' +
-                  changeStatusClass(selectedFile.status)
+                  (edited
+                    ? 'border-accent/45 text-accent'
+                    : 'border-border-soft text-fg-faint')
                 }
               >
-                {changeStatusLabel(selectedFile.status)}
+                {edited
+                  ? t(locale, 'sessionFiles.actionEdited')
+                  : t(locale, 'sessionFiles.actionRead')}
               </span>
-            </div>
-            {selectedFile.oldPath && selectedFile.oldPath !== selectedFile.path && (
-              <div
-                className="truncate font-mono text-[10px] text-fg-faint"
-                title={selectedFile.oldPath}
-              >
-                {selectedFile.oldPath}
-              </div>
-            )}
-            {selectedFile.binary ? (
-              <div className="rounded border border-border-soft bg-panel-2 px-2 py-1.5 text-[11px] text-fg-faint">
-                二进制文件已变更，未展示行内容。
-              </div>
-            ) : selectedFile.lines.length === 0 ? (
-              <div className="rounded border border-border-soft bg-panel-2 px-2 py-1.5 text-[11px] text-fg-faint">
-                {isVcsSnapshot
-                  ? '文件已变更，未读取行内容。'
-                  : selectedFile.truncated
-                  ? '内容未缓存或过大，无法展示行内容。'
-                  : '无可展示文本行。'}
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {buildWorkspaceChangeHunks(selectedFile.lines).map((hunk) => (
-                  <div
-                    key={hunk.key}
-                    className="overflow-hidden rounded-md border border-border-soft bg-bg/55"
-                  >
-                    <div className="flex min-w-0 items-center gap-2 border-b border-border-soft/60 px-2 py-1.5 text-[10px] text-fg-faint">
-                      <span
-                        className={
-                          'shrink-0 rounded border px-1.5 py-0.5 leading-none ' +
-                          changeHunkStatusClass(hunk.status)
-                        }
-                      >
-                        {changeStatusLabel(hunk.status)}
-                      </span>
-                      <span className="min-w-0 truncate font-mono">
-                        {changeHunkLabel(hunk)}
-                      </span>
-                    </div>
-                    <div className="overflow-x-auto py-1 font-mono text-[11px] leading-5">
-                      {hunk.lines.map((line, index) => (
-                        <div
-                          key={`${line.oldLine ?? ''}:${line.newLine ?? ''}:${index}`}
-                          className={
-                            'flex min-w-max items-start gap-2 px-2 ' +
-                            changeLineClass(line)
-                          }
-                        >
-                          <span className="w-7 shrink-0 select-none text-right font-semibold">
-                            {changeLineMarker(line)}
-                          </span>
-                          <span className="w-10 shrink-0 select-none text-right text-fg-faint">
-                            {changeLineNumber(line)}
-                          </span>
-                          <code className="whitespace-pre pr-3">
-                            {line.content || ' '}
-                          </code>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-            {selectedFile.truncated && (
-              <div className="mt-1 text-[10px] text-fg-faint">内容已截断。</div>
-            )}
-          </section>
-        ) : (
-          <div className="space-y-1.5">
-            {snapshot.files.map((file) => {
-              const fileKey = workspaceChangeFileKey(file);
-              const hunkCount = file.binary ? 0 : buildWorkspaceChangeHunks(file.lines).length;
-              return (
-                <button
-                  key={fileKey}
-                  type="button"
-                  onClick={() => setSelectedChangeKey(fileKey)}
-                  className="group flex w-full min-w-0 items-center gap-2 rounded-md border border-border-soft bg-panel-2/60 px-2 py-2 text-left transition-colors hover:border-accent/45 hover:bg-panel-2"
-                >
-                  <span
-                    className={
-                      'shrink-0 rounded border px-1.5 py-0.5 text-[10px] leading-none ' +
-                      changeStatusClass(file.status)
-                    }
-                  >
-                    {changeStatusLabel(file.status)}
-                  </span>
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate font-mono text-[11px] text-fg" title={file.path}>
-                      {file.path}
-                    </span>
-                    <span className="mt-0.5 block truncate text-[10px] text-fg-faint">
-                      {file.binary
-                        ? '二进制文件'
-                        : file.lines.length === 0 && file.truncated
-                          ? isVcsSnapshot
-                            ? '文件已变更'
-                            : '内容未缓存'
-                        : `${file.lines.length} 行 · ${hunkCount} 处`}
-                      {!isVcsSnapshot && file.truncated ? ' · 已截断' : ''}
-                    </span>
-                  </span>
-                  <ChevronRight
-                    size={13}
-                    className="shrink-0 text-fg-faint transition-colors group-hover:text-fg"
-                  />
-                </button>
-              );
-            })}
-          </div>
-        )}
-
-        {snapshot.truncated && (
-          <div className="text-[11px] text-fg-faint">
-            改动较多或部分 VCS 分片超时，已显示当前可用结果。
-          </div>
-        )}
+              {entry.touchCount > 1 && (
+                <span className="shrink-0 font-mono text-[10px] text-fg-faint">
+                  {t(locale, 'sessionFiles.touchCount').replace(
+                    '{count}',
+                    String(entry.touchCount),
+                  )}
+                </span>
+              )}
+            </button>
+          );
+        })}
       </div>
     );
   }, [
-    activeWorkspace,
-    changesCacheKey,
-    changesState,
     locale,
-    selectedChangeKey,
-    workspaceChangesRootPath,
+    sessionFiles,
+    startEntryDrag,
+    trackEntryDrag,
+    finishEntryDrag,
+    openSessionFile,
   ]);
 
   const rootLoading = rootState?.status === 'loading';
-  const canRefresh = Boolean(activeWorkspace && activeWorkspacePath && !rootLoading);
-  const changesLoading = changesState.status === 'loading';
-  const canRefreshChanges = Boolean(
-    activeWorkspace && workspaceChangesRootPath && changesCacheKey && !changesLoading,
-  );
-  const activeSnapshot = changesState.snapshot;
-  const changesRootTitle =
-    activeSnapshot?.rootPath ?? workspaceChangesRootPath ?? activeWorkspacePath;
+  const canRefresh = Boolean(selectedRootPath && !rootLoading);
   const projectTreeStatusTitle = treeVcsStatusLine(
-    activeWorkspace?.name ?? t(locale, 'projectTree.noWorkspace'),
+    selectedRootPath
+      ? basename(selectedRootPath) || selectedRootPath
+      : activeWorkspace?.name ?? t(locale, 'projectTree.noWorkspace'),
     vcsTreeState,
   );
+  // Folder bar sizing: show every attached folder, but cap the visible height at
+  // 3 rows (≈30px each) and scroll beyond that. The bar only renders when there
+  // are 2+ folders, so a single-folder project stays compact.
+  const FOLDER_ROW_HEIGHT = 30;
+  const MAX_VISIBLE_FOLDERS = 3;
+  const folderBarMaxHeight = FOLDER_ROW_HEIGHT * MAX_VISIBLE_FOLDERS;
 
   return (
     <>
@@ -1985,38 +1877,31 @@ export default function ProjectFileTree() {
                 <FolderOpen size={13} className="shrink-0 text-accent-2" />
                 <span className="truncate">{t(locale, 'projectTree.title')}</span>
               </button>
+              {/* 「会话文件」tab：只展示当前会话里 AI 读取/修改过的文件，纯前端解析消息流，
+                  不触发任何 git/p4/svn 等版本管理指令（旧的「工作区改动」tab 会触发 P4
+                  reconcile 洪水，已彻底移除）。 */}
               <button
                 type="button"
                 role="tab"
-                aria-selected={panelTab === 'changes'}
-                onClick={() => updatePanelTab('changes')}
+                aria-selected={panelTab === 'session'}
+                onClick={() => updatePanelTab('session')}
                 className={
                   'flex h-7 min-w-0 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs transition-colors hover:text-fg ' +
-                  (panelTab === 'changes' ? 'bg-panel text-fg' : 'text-fg-faint')
+                  (panelTab === 'session' ? 'bg-panel text-fg' : 'text-fg-faint')
                 }
               >
-                <FileDiff size={13} className="shrink-0 text-accent" />
-                <span className="truncate">工作区改动</span>
-                {activeSnapshot && activeSnapshot.files.length > 0 && (
+                <History size={13} className="shrink-0 text-accent" />
+                <span className="truncate">{t(locale, 'sessionFiles.tab')}</span>
+                {sessionFiles.length > 0 && (
                   <span className="shrink-0 rounded bg-accent/15 px-1 font-mono text-[10px] text-accent">
-                    {activeSnapshot.files.length}
+                    {sessionFiles.length}
                   </span>
                 )}
               </button>
             </div>
-            {panelTab === 'changes' && selectedChangeKey && (
-              <button
-                type="button"
-                onClick={() => setSelectedChangeKey(null)}
-                title="关闭差异详情"
-                aria-label="关闭差异详情"
-                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg"
-              >
-                <X size={16} strokeWidth={2.2} />
-              </button>
-            )}
             {panelTab === 'files' && (
               <div className="ml-auto flex shrink-0 rounded-md border border-border-soft bg-panel-2 p-0.5">
+                {/* 文件修改状态扫描已停用，移除其开关按钮（眼睛图标）。 */}
               <button
                 type="button"
                 aria-pressed={viewMode === 'tree'}
@@ -2046,18 +1931,59 @@ export default function ProjectFileTree() {
           </div>
           <div
             className="mt-1 truncate font-mono text-[10px] text-fg-faint"
-            title={panelTab === 'changes' ? changesRootTitle : activeWorkspacePath}
+            title={panelTab === 'session' ? t(locale, 'sessionFiles.title') : selectedRootPath}
           >
-            {panelTab === 'changes' && activeSnapshot
-              ? `${changeSourceLabel(activeSnapshot.source)} · ${formatCachedAt(locale, activeSnapshot.generatedAtMs)}`
+            {panelTab === 'session'
+              ? t(locale, 'sessionFiles.count').replace(
+                  '{count}',
+                  String(sessionFiles.length),
+                )
               : projectTreeStatusTitle}
           </div>
         </header>
 
+        {/* 工作区文件夹条：展示当前会话挂载的多个文件夹（在“项目设置 → 概览”中配置，
+            新建对话自动继承）。仅 2 个及以上文件夹时显示；高度随数量增长，但最多显示
+            3 个，超出可滚动。点击切换当前浏览的文件夹根。 */}
+        {panelTab === 'files' && rootFolders.length > 1 && (
+          <div
+            className="shrink-0 overflow-y-auto border-b border-border-soft px-1.5 py-1"
+            style={{ maxHeight: folderBarMaxHeight }}
+          >
+            {rootFolders.map((path) => {
+              const key = workspacePathKey(path);
+              const active = key === activeRootKey;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setSelectedRootKey(key)}
+                  title={path}
+                  className={
+                    'flex h-[28px] w-full min-w-0 items-center gap-1.5 rounded px-2 text-left text-xs transition-colors ' +
+                    (active
+                      ? 'bg-panel-2 text-fg'
+                      : 'text-fg-dim hover:bg-panel-2/60 hover:text-fg')
+                  }
+                >
+                  {active ? (
+                    <FolderOpen size={13} className="shrink-0 text-accent-2" />
+                  ) : (
+                    <Folder size={13} className="shrink-0 text-fg-faint" />
+                  )}
+                  <span className="min-w-0 flex-1 truncate">
+                    {basename(path) || path}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        )}
+
         <div className="min-h-0 flex-1 overflow-auto py-1">
-          {panelTab === 'changes' ? (
-            renderSessionChanges()
-          ) : !activeWorkspace || !activeWorkspacePath ? (
+          {panelTab === 'session' ? (
+            renderSessionFiles()
+          ) : !selectedRootPath ? (
             <div className="px-3 py-4 text-sm leading-relaxed text-fg-faint">
               {t(locale, 'projectTree.empty')}
             </div>
@@ -2068,37 +1994,29 @@ export default function ProjectFileTree() {
           )}
         </div>
 
-        <div className="shrink-0 border-t border-border-soft p-2">
-          <button
-            type="button"
-            disabled={panelTab === 'changes' ? !canRefreshChanges : !canRefresh}
-            onClick={panelTab === 'changes' ? refreshSessionChanges : refreshActiveWorkspace}
-            title={panelTab === 'changes' ? '刷新工作区改动' : t(locale, 'projectTree.refresh')}
-            className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-border bg-panel-2 px-2 text-sm text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <RefreshCw
-              size={14}
-              className={
-                rootLoading ||
-                changesLoading ||
-                (panelTab === 'files' && vcsTreeState.status === 'loading')
-                  ? 'animate-spin text-accent'
-                  : 'text-fg-faint'
-              }
-            />
-            <span>
-              {panelTab === 'changes'
-                ? changesLoading
-                  ? '刷新中'
-                  : '刷新改动'
-                : rootLoading
+        {/* 「会话文件」tab 的列表随消息流实时更新，无需手动刷新按钮；仅文件树 tab
+            提供刷新（重新列目录）。 */}
+        {panelTab === 'files' && (
+          <div className="shrink-0 border-t border-border-soft p-2">
+            <button
+              type="button"
+              disabled={!canRefresh}
+              onClick={refreshActiveWorkspace}
+              title={t(locale, 'projectTree.refresh')}
+              className="flex h-8 w-full items-center justify-center gap-2 rounded-md border border-border bg-panel-2 px-2 text-sm text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <RefreshCw
+                size={14}
+                className={rootLoading ? 'animate-spin text-accent' : 'text-fg-faint'}
+              />
+              <span>
+                {rootLoading
                   ? t(locale, 'projectTree.refreshing')
-                  : vcsTreeState.status === 'loading'
-                    ? '刷新状态'
                   : t(locale, 'projectTree.refresh')}
-            </span>
-          </button>
-        </div>
+              </span>
+            </button>
+          </div>
+        )}
       </aside>
 
       {contextMenu && (
@@ -2112,7 +2030,7 @@ export default function ProjectFileTree() {
 
       <FilePreviewDrawer
         refData={previewRef}
-        cwd={activeWorkspacePath || undefined}
+        cwd={selectedRootPath || undefined}
         onClose={() => setPreviewRef(null)}
       />
     </>

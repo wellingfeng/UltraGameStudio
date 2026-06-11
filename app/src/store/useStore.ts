@@ -65,7 +65,9 @@ import {
   recordEstimatedModelUsageForSelection,
   recordModelUsageForRoute,
   mergeUsageReports,
+  readUsageMeterSnapshot,
   usageReportFromCliUsage,
+  usageTurnFromSnapshots,
   type ModelUsageReport,
 } from '@/lib/usageMeter';
 import {
@@ -124,6 +126,13 @@ import {
   type ThreeDProviderId,
 } from '@/lib/threeDGeneration';
 import {
+  loadMeshLibrarySettings,
+  meshLibraryById,
+  searchMeshLibraries,
+  stripMeshSearchCommand,
+  type MeshSearchResult,
+} from '@/lib/meshLibrary';
+import {
   buildGameExpertPrompt,
   normalizeGameExpertSettings,
   type GameExpertSettings,
@@ -148,6 +157,7 @@ import {
   aiEditViaCli,
   cancelAiCli,
   downloadModelAsset,
+  ensureDefaultWorkspaceDir,
   isTauri,
   runUltracode,
 } from '@/lib/tauri';
@@ -440,6 +450,17 @@ export interface StoreState {
   /** Currently selected workspace bucket. */
   activeWorkspaceId: string | null;
   /**
+   * Workspace pinned by the top-left workspace switcher (and workspace-header
+   * clicks). This is a pure navigation/browsing selection: it only changes on
+   * explicit workspace navigation (dropdown selection, workspace header click,
+   * init, or deletion fallback) and is deliberately NOT touched when the user
+   * opens a session that happens to live in another workspace. Drives the top
+   * switcher label and the workspace ordering in the Sidebar so opening a
+   * cross-workspace session no longer reshuffles the list. Falls back to
+   * `activeWorkspaceId` when null (e.g. before history init).
+   */
+  selectedWorkspaceId: string | null;
+  /**
    * Workflow sessions that are currently executing. A run is bound to its owning
    * session (not the active view), so it keeps running in the background when the
    * user switches sessions. Drives the Sidebar "running" badges. See the
@@ -542,6 +563,12 @@ export interface StoreState {
     text: string,
     options?: { providerId?: ThreeDProviderId; model?: string },
   ) => void;
+  /**
+   * Search the enabled online 3D model libraries (Project Settings > 模型库) for
+   * the given query and render thumbnails / previews / downloads into the active
+   * chat. Wired to the `/mesh-search` slash command in AIDock.
+   */
+  searchMeshLibraryPrompt: (text: string) => void;
   runUltracodePrompt: (task: string) => void;
   /**
    * Append a local message to the current chat session and persist it. Used by
@@ -574,6 +601,14 @@ export interface StoreState {
   addWorkspaceFolder: (path: string) => void;
   removeWorkspaceFolder: (path: string) => void;
   removeWorkspace: (path: string) => void;
+  /**
+   * Apply a project's configured workspace folders to the active session's
+   * composer. Called after Project Settings → 概览 saves its folder list so the
+   * currently-open session immediately operates over the same multi-folder set
+   * (new sessions inherit it from workspace metadata). No-op when the given
+   * workspace is not the active one.
+   */
+  applyWorkspaceFolders: (workspaceId: string, folders: string[]) => void;
 
   // Graph editing
   addNode: (
@@ -983,15 +1018,30 @@ function workspaceHistoryWithRecentPaths(
   );
 }
 
-function defaultSessionComposer(workspace?: string): ComposerSettings {
+function defaultSessionComposer(
+  workspace?: string,
+  folders?: readonly string[],
+): ComposerSettings {
   const trimmed = workspace?.trim();
   return normalizeComposerSettings(
     {
       ...defaultComposer,
       workspace: trimmed || defaultComposer.workspace,
-      workspaceFolders: [],
+      workspaceFolders: folders ? [...folders] : [],
     },
   );
+}
+
+/**
+ * Read the project-configured extra workspace folders from a workspace's
+ * persisted metadata. New chat sessions inherit these so the composer (and the
+ * CLI adapters) operate over the same multi-folder set the user configured in
+ * Project Settings → 概览.
+ */
+function workspaceFoldersFromMetadata(
+  metadata: WorkspaceSummary['metadata'],
+): string[] {
+  return projectSettingsFromMetadata(metadata).folders;
 }
 
 function normalizeComposerSettings(value: Partial<ComposerSettings> | undefined): ComposerSettings {
@@ -1403,6 +1453,95 @@ async function downloadThreeDAssets(
   }
 
   return { downloaded, downloadErrors };
+}
+
+function meshSearchResultMarkdown(
+  result: MeshSearchResult,
+  downloaded: Map<string, string>,
+): string {
+  const lines: string[] = [];
+  lines.push(`🔎 在线模型库搜索：${result.query}`);
+  if (result.items.length > 0) {
+    lines.push(`\n找到 ${result.items.length} 个可预览结果：`);
+    for (const item of result.items) {
+      const parts: string[] = [];
+      parts.push(`### ${item.title} · ${item.libraryLabel}`);
+      const meta = [
+        item.author ? `作者：${item.author}` : '',
+        item.license ? `许可：${item.license}` : '',
+        item.free ? '可下载' : '需授权',
+      ]
+        .filter(Boolean)
+        .join(' · ');
+      if (meta) parts.push(meta);
+      if (item.thumbnailUrl) {
+        parts.push(`![${item.title}](${item.thumbnailUrl})`);
+      }
+      const localPath = item.downloadUrl ? downloaded.get(item.downloadUrl) : undefined;
+      if (localPath) {
+        parts.push(`已下载到本地：[预览 3D 模型](${modelAssetHref(localPath)})`);
+      } else if (item.downloadUrl) {
+        parts.push(`[预览 / 下载 3D 模型](${item.downloadUrl})`);
+      }
+      parts.push(`[在 ${item.libraryLabel} 打开](${item.pageUrl})`);
+      lines.push(parts.join('\n\n'));
+    }
+  }
+  if (result.linkOuts.length > 0) {
+    lines.push('\n以下库无公开下载 API 或未配置账号，已生成搜索深链：');
+    for (const link of result.linkOuts) {
+      const reason = link.reason ? `（${link.reason}）` : '';
+      lines.push(`- [${link.libraryLabel} 搜索结果](${link.searchUrl})${reason}`);
+    }
+  }
+  if (result.errors.length > 0) {
+    lines.push('\n部分库搜索失败：');
+    for (const error of result.errors) {
+      lines.push(`- ${error.libraryLabel}：${error.message}`);
+    }
+  }
+  if (result.items.length === 0 && result.linkOuts.length === 0) {
+    lines.push('\n没有启用任何在线模型库。请在项目设置 > 模型库中启用并配置账号。');
+  }
+  return lines.join('\n');
+}
+
+async function downloadMeshSearchAssets(
+  result: MeshSearchResult,
+  settings: ReturnType<typeof loadMeshLibrarySettings>,
+  cwd?: string,
+): Promise<Map<string, string>> {
+  const downloaded = new Map<string, string>();
+  if (!settings.autoDownload) return downloaded;
+  let index = 0;
+  for (const item of result.items) {
+    if (!item.downloadUrl || !/^https?:\/\//i.test(item.downloadUrl)) continue;
+    // The Sketchfab download endpoint returns a JSON archive descriptor, not a
+    // raw model file, so skip auto-downloading it (link-out for the user).
+    if (item.libraryId === 'sketchfab') continue;
+    try {
+      const saved = await downloadModelAsset(item.downloadUrl, {
+        cwd,
+        fileName: meshSearchAssetFileName(item.downloadUrl, item.format, index),
+      });
+      downloaded.set(item.downloadUrl, saved.path);
+      index += 1;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (message === 'NO_BACKEND') return downloaded;
+    }
+  }
+  return downloaded;
+}
+
+function meshSearchAssetFileName(src: string, format: string | undefined, index: number): string {
+  const clean = src.trim().split(/[?#]/, 1)[0] ?? '';
+  const ext =
+    /\.(glb|gltf|obj|stl|fbx|ply|usdz|zip)$/i.exec(clean)?.[1]?.toLowerCase() ??
+    (format && /^(glb|gltf|obj|stl|fbx|ply|usdz|zip)$/i.test(format)
+      ? format.toLowerCase()
+      : 'glb');
+  return `mesh-search-${index + 1}.${ext}`;
 }
 
 function threeDFailureHint(message: string): string {
@@ -2486,9 +2625,51 @@ async function branchChatSessionFromMessage(messageId: string): Promise<void> {
 
 async function createNewChatSession(): Promise<void> {
   const state = useStore.getState();
-  const workspaceId = state.activeWorkspaceId;
+  let workspaceId = state.activeWorkspaceId;
   const title = untitledSessionTitle(state.locale);
   const workflow = chatWorkflow(title, state.locale);
+
+  // No workspace selected yet: fall back to a default workspace folder so the
+  // new session has a real cwd instead of being a detached local-only session.
+  // Resolve (and create on disk) the platform default, register it as a
+  // workspace, then continue with that id.
+  if (state.historyReady && !workspaceId) {
+    const defaultPath = await ensureDefaultWorkspaceDir();
+    if (defaultPath) {
+      try {
+        const defaultWorkspace =
+          await historyStore.resolveWorkspaceByPath(defaultPath);
+        workspaceId = defaultWorkspace.id;
+        const workspaces = await historyStore.listWorkspaces();
+        useStore.setState((s) => {
+          const workspaceHistory = workspaceHistoryWithRecent(
+            defaultPath,
+            s.workspaceHistory,
+            WORKSPACE_HISTORY_LIMIT,
+          );
+          const composer = normalizeComposerSettings({
+            ...s.composer,
+            workspace: defaultPath,
+          });
+          saveComposerSoon({
+            composer,
+            composerBySession: s.composerBySession,
+            workspaceHistory,
+          });
+          return {
+            workspaces,
+            activeWorkspaceId: defaultWorkspace.id,
+            selectedWorkspaceId: defaultWorkspace.id,
+            composer,
+            workspaceHistory,
+          };
+        });
+      } catch (err) {
+        console.error('[new-session] failed to create default workspace', err);
+      }
+    }
+  }
+
   if (!state.historyReady || !workspaceId) {
     const session = makeSession(state.locale);
     useStore.setState((s) => {
@@ -2545,7 +2726,10 @@ async function createNewChatSession(): Promise<void> {
       s,
       sessionKey,
       nextWorkflow,
-      defaultSessionComposer(workspace?.path),
+      defaultSessionComposer(
+        workspace?.path,
+        workspaceFoldersFromMetadata(workspace?.metadata),
+      ),
     );
     return {
       workflow: composerPatch.workflow,
@@ -2558,6 +2742,7 @@ async function createNewChatSession(): Promise<void> {
       sessions: sessionTree[workspaceId] ?? [session],
       sessionTree,
       activeSessionId: session.id,
+      selectedWorkspaceId: workspaceId,
       messages: [],
       canvasViewport: null,
       currentFilePath: null,
@@ -2748,7 +2933,10 @@ async function openWorkflowInSession(
       s,
       sessionKey,
       workflow,
-      defaultSessionComposer(workspace?.path),
+      defaultSessionComposer(
+        workspace?.path,
+        workspaceFoldersFromMetadata(workspace?.metadata),
+      ),
     );
     if (workspace?.path) {
       saveComposerSoon({
@@ -2770,6 +2958,7 @@ async function openWorkflowInSession(
       mode: 'design',
       currentFilePath: path ?? null,
       activeWorkspaceId: workspaceId,
+      selectedWorkspaceId: workspaceId,
       workspaces,
       sessions: sessionTree[workspaceId] ?? [session],
       sessionTree,
@@ -2966,7 +3155,10 @@ async function activateHistorySession(
       sessionId: session.id,
     });
     const workspace = s.workspaces.find((ws) => ws.id === targetWorkspaceId);
-    const fallbackComposer = defaultSessionComposer(workspace?.path);
+    const fallbackComposer = defaultSessionComposer(
+      workspace?.path,
+      workspaceFoldersFromMetadata(workspace?.metadata),
+    );
     const workspaceHistory = workspace?.path
       ? workspaceHistoryWithRecent(
           workspace.path,
@@ -3168,11 +3360,18 @@ async function deleteHistoryWorkspace(workspaceId: string): Promise<void> {
     const activeSessionId = deletingActiveWorkspace
       ? nextActiveSessionId
       : s.activeSessionId;
+    // The top switcher's pinned workspace is independent of the active session.
+    // Only re-point it when the pinned workspace itself is the one being deleted.
+    const selectedWorkspaceId =
+      s.selectedWorkspaceId === workspaceId
+        ? workspaces[0]?.id ?? null
+        : s.selectedWorkspaceId;
 
     if (!deletingActiveWorkspace) {
       return {
         workspaces,
         sessionTree,
+        selectedWorkspaceId,
         sessions: s.activeWorkspaceId
           ? sessionTree[s.activeWorkspaceId] ?? s.sessions
           : s.sessions,
@@ -3183,6 +3382,7 @@ async function deleteHistoryWorkspace(workspaceId: string): Promise<void> {
       workspaces,
       sessionTree,
       activeWorkspaceId,
+      selectedWorkspaceId,
       activeSessionId,
       sessions: activeSessions,
       messages: [],
@@ -3589,7 +3789,10 @@ async function activateWorkspacePath(path: string): Promise<void> {
       s,
       sessionKey,
       workflow,
-      defaultSessionComposer(trimmed),
+      defaultSessionComposer(
+        trimmed,
+        workspaceFoldersFromMetadata(workspace.metadata),
+      ),
     );
     const workspaceHistory = workspaceHistoryWithRecent(
       trimmed,
@@ -3604,6 +3807,7 @@ async function activateWorkspacePath(path: string): Promise<void> {
     return {
       workspaces,
       activeWorkspaceId: workspace.id,
+      selectedWorkspaceId: workspace.id,
       sessions: sessions.map((item) => sessionFromSummary(item)),
       sessionTree,
       activeSessionId: active?.id ?? null,
@@ -3706,7 +3910,7 @@ async function initHistoryFromDisk(): Promise<void> {
         {
           ...s.composer,
           workspace: workspace.path || s.composer.workspace,
-          workspaceFolders: [],
+          workspaceFolders: workspaceFoldersFromMetadata(workspace.metadata),
         },
       );
       return {
@@ -3715,6 +3919,7 @@ async function initHistoryFromDisk(): Promise<void> {
         historyRootPath: rootPath,
         workspaces,
         activeWorkspaceId: workspace.id,
+        selectedWorkspaceId: workspace.id,
         sessions: sessions.map((item) => sessionFromSummary(item)),
         sessionTree,
         activeSessionId: active?.id ?? null,
@@ -3743,6 +3948,7 @@ async function initHistoryFromDisk(): Promise<void> {
       historyRootPath: null,
       workspaces: [],
       activeWorkspaceId: null,
+      selectedWorkspaceId: null,
       sessions: [],
       sessionTree: {},
       activeSessionId: null,
@@ -3987,6 +4193,7 @@ export const useStore = create<StoreState>((set, get) => ({
   workspaces: [],
   sessionTree: {},
   activeWorkspaceId: null,
+  selectedWorkspaceId: null,
   runningSessions: [],
   runningSessionProgress: {},
   runningSessionId: null,
@@ -4594,6 +4801,10 @@ export const useStore = create<StoreState>((set, get) => ({
     startThreeDGenerationTurn(text, options);
   },
 
+  searchMeshLibraryPrompt: (text) => {
+    startMeshSearchTurn(text);
+  },
+
   appendChatNote: (text, role = 'assistant') => {
     const msg: Message = {
       id: shortId('m'),
@@ -4986,6 +5197,28 @@ ${previousReply.slice(0, 4000)}
       aiEditCommitMessages(ch, persist);
     };
     const persistAiMessages = () => aiEditCommitMessages(ch, true);
+    // Per-turn token usage: snapshot the session meter before the turn, diff it
+    // after the reply lands, and stamp the delta onto the assistant bubble so the
+    // chat history keeps each turn's tokens/cache even after reload.
+    const usageMeterContext = {
+      workspaceId: ch.workspaceId,
+      sessionId: ch.sessionId,
+    };
+    const stampUsageOnMessage = (
+      messageId: string,
+      before: ReturnType<typeof readUsageMeterSnapshot>,
+    ) => {
+      if (!messageId) return;
+      const delta = usageTurnFromSnapshots(
+        before,
+        readUsageMeterSnapshot(usageMeterContext),
+      );
+      if (delta.totalTokens <= 0) return;
+      ch.messages = ch.messages.map((m) =>
+        m.id === messageId ? { ...m, usage: delta } : m,
+      );
+      aiEditCommitMessages(ch, true);
+    };
     let aiCliRoutePromise: Promise<Awaited<ReturnType<typeof resolveCliGatewayRoute>>> | null =
       null;
     const resolveAiCliRoute = () => {
@@ -5502,7 +5735,11 @@ ${previousReply.slice(0, 4000)}
     // into the chat bubble, and append the input to the lone start node so the
     // node mirrors the conversation. The graph never grows past one node.
     if (simpleMode) {
-      void (async () => {
+      // Serialize turns for this chat session so a follow-up sent mid-stream
+      // ("插话") queues behind the in-flight turn and then runs with --resume
+      // (warm context) instead of colliding on the same native --session-id.
+      // Favorite reruns mint a fresh session per turn, so they need no queue.
+      const runChatTurn = async () => {
         const chatSystem = [
           SIMPLE_CHAT_SYSTEM,
           languageAdaptationPrompt(state.locale),
@@ -5537,8 +5774,10 @@ ${previousReply.slice(0, 4000)}
         // completed can forget its (already disk-registered) session id —
         // otherwise "继续"/retry reuses it and claude rejects the duplicate.
         let nativeSession: ChatNativeSession | null = null;
+        const usageBefore = readUsageMeterSnapshot(usageMeterContext);
         try {
           newBubble(withAiTiming('⟳ 生成中…'));
+          const turnMessageId = activeId;
           let answer = '';
           let routeLine = gatewayRouteLine(directRoute);
           if (useCli) {
@@ -5608,6 +5847,7 @@ ${previousReply.slice(0, 4000)}
             { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
             'success',
           );
+          stampUsageOnMessage(turnMessageId, usageBefore);
         } catch (err) {
           const msg = (err as Error)?.message ?? String(err);
           // The CLI failed (e.g. ConnectionRefused) before the model call
@@ -5629,13 +5869,24 @@ ${previousReply.slice(0, 4000)}
         } finally {
           removeAiEditChannel(ch);
         }
-      })();
+      };
+      // CLI turns share one native --session-id per chat session, so a follow-up
+      // sent mid-stream must queue behind the in-flight turn and then --resume it
+      // (otherwise claude rejects the duplicate id with "already in use"). API
+      // turns have no such constraint and stay concurrent. Favorite reruns mint a
+      // fresh session per turn, so they never queue.
+      if (useCli && !replayFavoriteSimpleChat) {
+        void enqueueChatTurn(chSessionKey, runChatTurn);
+      } else {
+        void runChatTurn();
+      }
       return;
     }
 
     void (async () => {
       let convo = userContent;
       let finalized = false;
+      const usageBefore = readUsageMeterSnapshot(usageMeterContext);
       try {
         // FEATURE 1 — multi-angle research before generation. max<=1 ⇒ skipped
         // entirely. Starts at `min` lenses; when adaptive escalation is on and
@@ -5796,6 +6047,9 @@ ${previousReply.slice(0, 4000)}
         else pushAssistant(withAiTiming(`✗ 调用失败: ${msg}`));
         persistAiMessages();
       } finally {
+        // Stamp the whole turn's token usage onto the final assistant bubble so
+        // the blueprint-generation path also keeps per-turn tokens/cache.
+        stampUsageOnMessage(activeId, usageBefore);
         removeAiEditChannel(ch);
       }
     })();
@@ -6090,6 +6344,40 @@ ${previousReply.slice(0, 4000)}
       );
       saveComposerSoon({ composer, composerBySession, workspaceHistory });
       return { composer, composerBySession, workspaceHistory };
+    });
+  },
+
+  applyWorkspaceFolders: (workspaceId, folders) => {
+    if (isActiveAiEditingSession(useStore.getState())) return;
+    set((state) => {
+      if (!workspaceId || state.activeWorkspaceId !== workspaceId) return state;
+      const workspace = state.workspaces.find((ws) => ws.id === workspaceId);
+      const primary = normalizeWorkspacePath(
+        state.composer.workspace || workspace?.path || '',
+      );
+      const composer = normalizeComposerSettings({
+        ...state.composer,
+        workspace: primary,
+        workspaceFolders: folders,
+      });
+      const snapshot: SessionComposerSettings = {
+        composer,
+        gatewaySelection: workflowDefaultGatewaySelection(
+          state.workflow,
+          composer.model,
+        ),
+      };
+      const composerBySession = rememberSessionComposer(
+        { ...state, composer },
+        state.composerBySession,
+        snapshot,
+      );
+      saveComposerSoon({
+        composer,
+        composerBySession,
+        workspaceHistory: state.workspaceHistory,
+      });
+      return { composer, composerBySession };
     });
   },
 
@@ -6696,6 +6984,32 @@ interface ChatNativeSession {
 }
 
 const chatNativeSessions = new Map<string, ChatNativeSession>();
+
+/**
+ * Per-session serialization for simple-chat turns. A follow-up message can be
+ * sent while a turn is still streaming ("插话"): it is accepted immediately and
+ * shown in the transcript, then runs right after the in-flight turn finishes so
+ * it can `--resume` the warm native session instead of colliding with the live
+ * process on the same `--session-id` (which claude rejects with "Session ID …
+ * is already in use"). Turns for the same chat session run strictly in order;
+ * a failed turn does not block the queued ones.
+ */
+const chatTurnQueues = new Map<string, Promise<void>>();
+
+function enqueueChatTurn(
+  sessionKey: string,
+  run: () => Promise<void>,
+): Promise<void> {
+  const prev = chatTurnQueues.get(sessionKey) ?? Promise.resolve();
+  const next = prev.catch(() => {}).then(run);
+  chatTurnQueues.set(sessionKey, next);
+  void next.catch(() => {}).finally(() => {
+    if (chatTurnQueues.get(sessionKey) === next) {
+      chatTurnQueues.delete(sessionKey);
+    }
+  });
+  return next;
+}
 
 function chatNativeSessionKey(
   ch: Pick<AiEditChannel, 'sessionKey' | 'sessionId'>,
@@ -7959,6 +8273,143 @@ function startThreeDGenerationTurn(
       const msg = err instanceof Error ? err.message : String(err);
       setAssistant(
         `${elapsed()} · 失败\n✗ 3D 模型生成失败: ${msg}\n\n${threeDFailureHint(msg)}`,
+        true,
+      );
+      syncAndPersistSessionRunStatus(sessionKey, 'error');
+    } finally {
+      removeAiEditChannel(ch);
+    }
+  })();
+}
+
+function startMeshSearchTurn(text: string): void {
+  const query = stripMeshSearchCommand(text);
+  const state = useStore.getState();
+  if (isWorkflowReadOnly(state)) return;
+  const sessionKey = activeWorkflowSessionKey(state);
+  const settings = loadMeshLibrarySettings();
+
+  if (state.blockedSendTip) useStore.setState({ blockedSendTip: null });
+
+  const now = Date.now();
+  const enabledLabels = settings.enabledIds
+    .map((id) => meshLibraryById(id)?.label)
+    .filter((label): label is string => !!label);
+  const userMsg: Message = {
+    id: shortId('m'),
+    role: 'user',
+    text,
+    createdAt: now,
+  };
+  const assistantId = shortId('m');
+  const assistantMsg: Message = {
+    id: assistantId,
+    role: 'assistant',
+    text: query
+      ? `🔎 在线模型库搜索：${query}\n库：${
+          enabledLabels.length ? enabledLabels.join('、') : '未启用任何模型库'
+        }\n① 正在搜索…`
+      : '🔎 在线模型库搜索\n请在 /mesh-search 后输入要搜索的关键字。',
+    routeLabel: '在线模型库',
+    createdAt: now + 1,
+  };
+  const promptUpdate = applyPromptTitle(state, query || '在线模型库搜索', now);
+  const activeSession = sessionForKey(state, sessionKey);
+  const simpleMode = promptUpdate.workflow.meta?.simple === true;
+  const baseMessages = state.messages;
+  const chSessionKey = runKey(sessionKey.workspaceId, sessionKey.sessionId);
+  const workspaceRootPath = sessionChangesRootPathForSession(state, sessionKey);
+  const ch: AiEditChannel = {
+    key: chatTurnKey(chSessionKey, userMsg.id),
+    sessionKey: chSessionKey,
+    workspaceId: sessionKey.workspaceId,
+    sessionId: sessionKey.sessionId,
+    workspaceRootPath,
+    workflow: promptUpdate.workflow,
+    messages: [...baseMessages, userMsg, assistantMsg],
+    cliRunIds: new Set<string>(),
+    abortController: new AbortController(),
+    workflowSession: activeSession?.isWorkflow ?? !simpleMode,
+    chat: true,
+    ownedMessageIds: new Set<string>([userMsg.id, assistantId]),
+  };
+
+  const setAssistant = (textValue: string, persist: boolean) => {
+    if (!aiEditRegistered(ch)) return;
+    ch.messages = ch.messages.map((message) =>
+      message.id === assistantId
+        ? { ...message, text: textValue, routeLabel: '在线模型库' }
+        : message,
+    );
+    aiEditCommitMessages(ch, persist);
+  };
+
+  addAiEditChannel(ch);
+  if (aiEditViewActive(ch)) {
+    useStore.setState({
+      messages: ch.messages,
+      sessions: promptUpdate.sessions,
+      sessionTree: promptUpdate.sessionTree,
+      workflow: ch.workflow,
+    });
+  }
+  updateAiEditSessionSummary(ch);
+
+  if (!query) {
+    setAssistant(
+      '🔎 在线模型库搜索\n请在 /mesh-search 后输入要搜索的关键字，例如 `/mesh-search 低多边形宝箱`。',
+      true,
+    );
+    commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [text]));
+    removeAiEditChannel(ch);
+    return;
+  }
+
+  if (ch.workspaceId && ch.sessionId) {
+    void historyStore
+      .updateSession(ch.workspaceId, ch.sessionId, {
+        messages: ch.messages,
+        ...(ch.workflowSession ? { workflow: ch.workflow } : {}),
+        meta: { runStatus: 'running' },
+      })
+      .catch(() => {});
+  }
+  syncAndPersistSessionRunStatus(sessionKey, 'running');
+
+  void (async () => {
+    const startedAt = Date.now();
+    const elapsed = () =>
+      `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(
+        Date.now() - startedAt,
+      )}`;
+    try {
+      const result = await searchMeshLibraries(query, settings, ch.abortController.signal);
+      if (!aiEditRegistered(ch)) return;
+      const downloadable = result.items.filter(
+        (item) => item.downloadUrl && item.libraryId !== 'sketchfab',
+      ).length;
+      setAssistant(
+        `${elapsed()}\n② 找到 ${result.items.length} 个可预览结果${
+          downloadable > 0 && settings.autoDownload
+            ? `，正在下载 ${downloadable} 个可直接下载的模型…`
+            : '…'
+        }`,
+        false,
+      );
+      const downloaded = await downloadMeshSearchAssets(
+        result,
+        settings,
+        state.composer.workspace || undefined,
+      );
+      if (!aiEditRegistered(ch)) return;
+      setAssistant(`${elapsed()}\n${meshSearchResultMarkdown(result, downloaded)}`, true);
+      commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [text]));
+      syncAndPersistSessionRunStatus(sessionKey, 'success');
+    } catch (err) {
+      if (!aiEditRegistered(ch)) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      setAssistant(
+        `${elapsed()} · 失败\n✗ 在线模型库搜索失败: ${msg}\n\n请检查网络，或在项目设置 > 模型库中配置账号 API Key 后重试。`,
         true,
       );
       syncAndPersistSessionRunStatus(sessionKey, 'error');

@@ -112,6 +112,21 @@ export const FREE_CHANNELS: FreeChannel[] = [
     note: 'Routes through the best currently available configured free channel and automatically skips channels that hit rate limits or upstream errors.',
   },
   {
+    // Agnes AI (Sapiens AI) — 6/1 起无限期免费开放的全模态模型平台。文本模型
+    // agnes-2.0-flash 走 OpenAI 兼容接口 https://apihub.agnes-ai.com/v1，适合
+    // 编程 / Agent 工作流；图片模型在「设置 → 图片生成」里单独接入。在
+    // https://platform.agnes-ai.com 注册登录后即可创建免费 API Key。
+    id: 'agnes',
+    label: 'Agnes AI',
+    transport: 'openai',
+    upstreamBaseUrl: 'https://apihub.agnes-ai.com/v1',
+    defaultModel: 'agnes-2.0-flash',
+    credentialUrl: 'https://platform.agnes-ai.com',
+    local: false,
+    needsKey: true,
+    note: 'Agnes AI 无限期免费开放的全模态文本模型，OpenAI 兼容接口。agnes-2.0-flash 适合编程 / Agent 工作流，正在灰度升级至 1M 超长上下文。',
+  },
+  {
     id: 'nvidia_nim',
     label: 'NVIDIA NIM',
     transport: 'openai',

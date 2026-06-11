@@ -1,4 +1,4 @@
-export type PluginStoreKind = 'skill' | 'plugin' | 'mcp' | 'index';
+export type PluginStoreKind = 'skill' | 'plugin' | 'index';
 export type PluginStoreTrust = 'official' | 'curated' | 'community' | 'registry';
 export type PluginStoreInstallKind =
   | 'skill'
@@ -73,36 +73,6 @@ interface AwesomeCodexPluginCatalog {
   plugins?: AwesomeCodexPlugin[];
 }
 
-interface McpRegistryRemote {
-  type?: string;
-  url?: string;
-}
-
-interface McpRegistryRepository {
-  url?: string;
-  source?: string;
-  subfolder?: string;
-}
-
-interface McpRegistryServer {
-  name?: string;
-  title?: string;
-  description?: string;
-  version?: string;
-  websiteUrl?: string;
-  repository?: McpRegistryRepository;
-  remotes?: McpRegistryRemote[];
-}
-
-interface McpRegistryEntry {
-  server?: McpRegistryServer;
-  _meta?: Record<string, { isLatest?: boolean; updatedAt?: string; publishedAt?: string }>;
-}
-
-interface McpRegistryResponse {
-  servers?: McpRegistryEntry[];
-}
-
 const OPENAI_SKILL_ROOTS = ['skills/.curated', 'skills/.system'];
 const OPENAI_REPO_RAW = 'https://raw.githubusercontent.com/openai/skills/main';
 const OPENAI_REPO_API = 'https://api.github.com/repos/openai/skills/contents';
@@ -153,6 +123,118 @@ const BUILT_IN_PLUGIN_STORE_ITEMS: PluginStoreItem[] = [
     installKind: 'none',
     category: '索引',
     tags: ['skills', 'official', 'catalog'],
+    trust: 'curated',
+  },
+  {
+    id: 'index:renderdoc',
+    name: 'renderdoc',
+    title: 'RenderDoc 图形调试',
+    description:
+      'RenderDoc 帧捕获与图形调试参考：抓帧、检查 Draw Call、纹理/缓冲、管线状态与着色器调试，并可通过其 Python API 做自动化分析。',
+    kind: 'index',
+    sourceId: 'built-in',
+    sourceName: '内置精选',
+    sourceUrl: 'https://renderdoc.org/docs/python_api/index.html',
+    installKind: 'external',
+    category: '图形调试',
+    author: 'Baldur Karlsson',
+    tags: ['renderdoc', 'gpu', 'graphics', 'frame-capture', 'shader', 'debug', 'game'],
+    trust: 'curated',
+  },
+  {
+    id: 'index:nsight-graphics',
+    name: 'nsight-graphics',
+    title: 'NVIDIA Nsight Graphics',
+    description:
+      'NVIDIA Nsight Graphics 帧分析与 GPU 性能调优参考：帧调试、GPU Trace、管线状态检查与 Ray Tracing 分析，适合 D3D12 / Vulkan 游戏渲染优化。',
+    kind: 'index',
+    sourceId: 'built-in',
+    sourceName: '内置精选',
+    sourceUrl: 'https://developer.nvidia.com/nsight-graphics',
+    installKind: 'external',
+    category: '图形调试',
+    author: 'NVIDIA',
+    tags: ['nsight', 'nvidia', 'gpu', 'graphics', 'vulkan', 'd3d12', 'profiling', 'game'],
+    trust: 'curated',
+  },
+  {
+    id: 'index:perfetto',
+    name: 'perfetto',
+    title: 'Android Perfetto 性能追踪',
+    description:
+      'Perfetto 系统级追踪与性能分析参考：抓取 Android / Linux trace，分析 CPU 调度、帧渲染、卡顿与功耗，并支持用 SQL（Trace Processor）查询 trace 数据。',
+    kind: 'index',
+    sourceId: 'built-in',
+    sourceName: '内置精选',
+    sourceUrl: 'https://perfetto.dev/docs/',
+    installKind: 'external',
+    category: '性能分析',
+    author: 'Google',
+    tags: ['perfetto', 'android', 'tracing', 'profiling', 'performance', 'cpu', 'frame', 'game'],
+    trust: 'curated',
+  },
+  {
+    id: 'index:pix-on-windows',
+    name: 'pix-on-windows',
+    title: 'PIX on Windows',
+    description:
+      'Microsoft PIX 性能与图形调试参考：D3D12 GPU 抓帧、Timing Capture、CPU/GPU 性能分析，适合 Windows / Xbox 游戏渲染调优。',
+    kind: 'index',
+    sourceId: 'built-in',
+    sourceName: '内置精选',
+    sourceUrl: 'https://devblogs.microsoft.com/pix/documentation/',
+    installKind: 'external',
+    category: '图形调试',
+    author: 'Microsoft',
+    tags: ['pix', 'd3d12', 'gpu', 'graphics', 'profiling', 'xbox', 'windows', 'game'],
+    trust: 'curated',
+  },
+  {
+    id: 'index:android-gpu-inspector',
+    name: 'android-gpu-inspector',
+    title: 'Android GPU Inspector (AGI)',
+    description:
+      'AGI 帧分析与 GPU 性能参考：在 Android 设备上抓取系统 profile 与帧捕获，分析 Vulkan/OpenGL ES 渲染、Draw Call 与 GPU 计数器。',
+    kind: 'index',
+    sourceId: 'built-in',
+    sourceName: '内置精选',
+    sourceUrl: 'https://gpuinspector.dev/docs/',
+    installKind: 'external',
+    category: '图形调试',
+    author: 'Google',
+    tags: ['agi', 'android', 'gpu', 'graphics', 'vulkan', 'opengl', 'profiling', 'game'],
+    trust: 'curated',
+  },
+  {
+    id: 'index:unity-profiler',
+    name: 'unity-profiler',
+    title: 'Unity Profiler 性能分析',
+    description:
+      'Unity Profiler 与 Memory Profiler 参考：分析 CPU/GPU/内存/渲染瓶颈，定位 GC 分配、Draw Call 与帧时间问题。',
+    kind: 'index',
+    sourceId: 'built-in',
+    sourceName: '内置精选',
+    sourceUrl: 'https://docs.unity3d.com/Manual/Profiler.html',
+    installKind: 'external',
+    category: '性能分析',
+    author: 'Unity Technologies',
+    tags: ['unity', 'profiler', 'performance', 'memory', 'gpu', 'game', 'engine'],
+    trust: 'curated',
+  },
+  {
+    id: 'index:unreal-insights',
+    name: 'unreal-insights',
+    title: 'Unreal Insights 性能分析',
+    description:
+      'Unreal Insights 追踪与性能分析参考：用 Trace 系统抓取 CPU/GPU/帧/加载数据，分析 Hitch、渲染线程与 Stat 命令。',
+    kind: 'index',
+    sourceId: 'built-in',
+    sourceName: '内置精选',
+    sourceUrl: 'https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-insights-in-unreal-engine',
+    installKind: 'external',
+    category: '性能分析',
+    author: 'Epic Games',
+    tags: ['unreal', 'ue5', 'insights', 'trace', 'performance', 'gpu', 'game', 'engine'],
     trust: 'curated',
   },
 ];
@@ -418,67 +500,6 @@ async function fetchAwesomeCodexPlugins(
     .filter((item): item is PluginStoreItem => Boolean(item));
 }
 
-function mcpMeta(entry: McpRegistryEntry): {
-  isLatest: boolean;
-  updatedAt?: string;
-} {
-  const official = entry._meta?.['io.modelcontextprotocol.registry/official'];
-  return {
-    isLatest: official?.isLatest === true,
-    updatedAt: official?.updatedAt || official?.publishedAt,
-  };
-}
-
-async function fetchMcpRegistry(signal?: AbortSignal): Promise<PluginStoreItem[]> {
-  const catalog = await fetchJson<McpRegistryResponse>(
-    'https://registry.modelcontextprotocol.io/v0/servers?limit=80',
-    signal,
-  );
-  const byName = new Map<string, McpRegistryEntry>();
-  for (const entry of catalog.servers ?? []) {
-    const name = compactText(entry.server?.name);
-    if (!name) continue;
-    const existing = byName.get(name);
-    if (!existing || mcpMeta(entry).isLatest) {
-      byName.set(name, entry);
-    }
-  }
-
-  return Array.from(byName.values()).map((entry) => {
-    const server = entry.server ?? {};
-    const name = compactText(server.name);
-    const remoteUrl = compactText(server.remotes?.find((remote) => remote.url)?.url);
-    const sourceUrl =
-      compactText(server.websiteUrl) ||
-      compactText(server.repository?.url) ||
-      remoteUrl ||
-      'https://registry.modelcontextprotocol.io';
-    const meta = mcpMeta(entry);
-    return {
-      id: `mcp:${name}:${compactText(server.version)}`,
-      name: slugFromName(name),
-      title: compactText(server.title) || name,
-      description: compactText(server.description) || 'MCP server.',
-      kind: 'mcp',
-      sourceId: 'mcp-registry',
-      sourceName: 'MCP Registry',
-      sourceUrl,
-      installUrl: remoteUrl || sourceUrl,
-      installKind: 'external',
-      category: 'MCP',
-      author: compactText(server.repository?.source),
-      version: compactText(server.version),
-      updatedAt: meta.updatedAt,
-      tags: [
-        'mcp',
-        compactText(server.repository?.source),
-        compactText(server.remotes?.[0]?.type),
-      ].filter(Boolean),
-      trust: 'registry',
-    };
-  });
-}
-
 function dedupePluginStoreItems(items: PluginStoreItem[]): PluginStoreItem[] {
   const seen = new Set<string>();
   const out: PluginStoreItem[] = [];
@@ -501,8 +522,7 @@ function sortPluginStoreItems(items: PluginStoreItem[]): PluginStoreItem[] {
   const kindRank: Record<PluginStoreKind, number> = {
     skill: 0,
     plugin: 1,
-    mcp: 2,
-    index: 3,
+    index: 2,
   };
   return [...items].sort(
     (a, b) =>
@@ -530,11 +550,6 @@ export async function loadPluginStoreCatalog(
       sourceId: 'awesome-codex-plugins',
       sourceName: 'Awesome Codex Plugins',
       load: fetchAwesomeCodexPlugins,
-    },
-    {
-      sourceId: 'mcp-registry',
-      sourceName: 'MCP Registry',
-      load: fetchMcpRegistry,
     },
   ];
 

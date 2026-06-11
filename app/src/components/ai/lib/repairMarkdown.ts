@@ -11,15 +11,29 @@
  * Pure + synchronous so it can run on every render of the streaming bubble.
  */
 
+/**
+ * Balance an odd number of ``` fences only.
+ *
+ * Applied on EVERY render (streaming and final), not just live bubbles: a
+ * finalized message can still carry an unbalanced fence (the CLI was
+ * interrupted/truncated, or the prose mentions a stray ```), and an open fence
+ * swallows the rest of the document into one code block. With `rehype-highlight`
+ * on for final renders, that makes the whole message render as a garbled wall of
+ * syntax-highlighted text. Closing the fence is purely corrective — balanced
+ * input is returned unchanged.
+ */
+export function repairFences(md: string): string {
+  const fences = (md.match(/```/g) ?? []).length;
+  if (fences % 2 === 1) {
+    return md + (md.endsWith('\n') ? '' : '\n') + '```';
+  }
+  return md;
+}
+
 /** Balance an odd number of ``` fences and a trailing inline backtick. */
 export function repairMarkdown(md: string): string {
-  let out = md;
-
   // 1. Close a dangling triple-fence (``` count is odd).
-  const fences = (out.match(/```/g) ?? []).length;
-  if (fences % 2 === 1) {
-    out += (out.endsWith('\n') ? '' : '\n') + '```';
-  }
+  let out = repairFences(md);
 
   // 2. Close a dangling single inline backtick. Strip complete fenced blocks
   // first (step 1 guarantees fences are now balanced) so their inner backticks

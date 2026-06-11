@@ -360,7 +360,7 @@ describe('PromptPanel running lock', () => {
       const selector = channelButton(view.container);
 
       expect(selector.textContent).toContain('Claude Code · 系统默认');
-      expect(selector.textContent).toContain('Claude Code · 默认渠道');
+      expect(selector.textContent).not.toContain('Claude Code · 默认渠道');
 
       await act(async () => {
         selector.click();

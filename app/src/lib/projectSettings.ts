@@ -6,6 +6,17 @@ import type {
   ProjectMcpServerSuggestion,
 } from '@/lib/tauri';
 import type { HistoryMetadata, WorkspaceSummary } from '@/store/history/types';
+import { uniqueWorkspaceHistory } from '@/lib/workspaceHistory';
+
+export const PREFERRED_UNREAL_MCP_SERVER_ID = 'ue-mcp-for-all-versions';
+
+/**
+ * Normalize a list of workspace-folder paths: trim, drop empties, and dedupe by
+ * platform-aware path key while preserving order.
+ */
+export function dedupeFolders(paths: readonly unknown[]): string[] {
+  return uniqueWorkspaceHistory(paths);
+}
 
 export const PROJECT_SETTINGS_METADATA_KEY = 'projectSettings';
 export const PROJECT_SETTINGS_SCHEMA_VERSION = 1;
@@ -26,6 +37,13 @@ export interface ProjectMcpServerConfig {
   url?: string;
   requiresUserApproval?: boolean;
   lastProbe?: ProjectMcpProbeResult;
+  /** Server binary/release version (e.g. Unreal MCP "0.2.0"). */
+  serverVersion?: string;
+  /**
+   * Engine version this server was configured against, when applicable
+   * (e.g. the UE `EngineAssociation` "5.3" detected during one-click setup).
+   */
+  engineAssociation?: string;
 }
 
 export interface ProjectSkillSettings {
@@ -69,6 +87,13 @@ export interface ProjectAutomationSettings {
 export interface ProjectSettings {
   schemaVersion: 1;
   engine: ProjectEngineKind | 'auto';
+  /**
+   * Additional workspace folders attached to this project, beyond the
+   * workspace's own primary path. New chat sessions inherit these folders as
+   * their composer workspace folders (the primary path is the first cwd, these
+   * become extra allowed directories passed to the CLI adapters).
+   */
+  folders: string[];
   mcp: {
     enabled: boolean;
     servers: ProjectMcpServerConfig[];
@@ -160,6 +185,14 @@ function normalizeServer(value: unknown): ProjectMcpServerConfig | null {
     lastProbe: isRecord(value.lastProbe)
       ? (value.lastProbe as unknown as ProjectMcpProbeResult)
       : undefined,
+    serverVersion:
+      typeof value.serverVersion === 'string' && value.serverVersion.trim()
+        ? value.serverVersion.trim()
+        : undefined,
+    engineAssociation:
+      typeof value.engineAssociation === 'string' && value.engineAssociation.trim()
+        ? value.engineAssociation.trim()
+        : undefined,
   };
 }
 
@@ -183,8 +216,9 @@ export function emptyProjectSettings(): ProjectSettings {
   return {
     schemaVersion: PROJECT_SETTINGS_SCHEMA_VERSION,
     engine: 'auto',
+    folders: [],
     mcp: {
-      enabled: true,
+      enabled: false,
       servers: [],
     },
     skills: {
@@ -193,7 +227,7 @@ export function emptyProjectSettings(): ProjectSettings {
       recommendedSkillIds: [],
     },
     lsp: {
-      enabled: true,
+      enabled: false,
       servers: [],
     },
     gameFeatures: gameFeatureDefaultsForEngine('unknown'),
@@ -217,6 +251,16 @@ export function projectSettingsFromMetadata(
   const lsp = isRecord(raw.lsp) ? raw.lsp : {};
   const gameFeatures = isRecord(raw.gameFeatures) ? raw.gameFeatures : {};
   const automation = isRecord(raw.automation) ? raw.automation : {};
+  const mcpServers = Array.isArray(mcp.servers)
+    ? mcp.servers
+        .map(normalizeServer)
+        .filter((server): server is ProjectMcpServerConfig => server != null)
+    : [];
+  const lspServers = Array.isArray(lsp.servers)
+    ? lsp.servers
+        .map(normalizeLspServer)
+        .filter((server): server is ProjectLspServerConfig => server != null)
+    : [];
   return {
     schemaVersion: PROJECT_SETTINGS_SCHEMA_VERSION,
     engine:
@@ -226,13 +270,11 @@ export function projectSettingsFromMetadata(
       raw.engine === 'unknown'
         ? raw.engine
         : 'auto',
+    folders: dedupeFolders(stringArray(raw.folders)),
     mcp: {
-      enabled: mcp.enabled !== false,
-      servers: Array.isArray(mcp.servers)
-        ? mcp.servers
-            .map(normalizeServer)
-            .filter((server): server is ProjectMcpServerConfig => server != null)
-        : [],
+      enabled:
+        typeof mcp.enabled === 'boolean' ? mcp.enabled : mcpServers.length > 0,
+      servers: mcpServers,
     },
     skills: {
       enabledRootIds: stringArray(skills.enabledRootIds).length
@@ -242,12 +284,9 @@ export function projectSettingsFromMetadata(
       recommendedSkillIds: stringArray(skills.recommendedSkillIds),
     },
     lsp: {
-      enabled: lsp.enabled !== false,
-      servers: Array.isArray(lsp.servers)
-        ? lsp.servers
-            .map(normalizeLspServer)
-            .filter((server): server is ProjectLspServerConfig => server != null)
-        : [],
+      enabled:
+        typeof lsp.enabled === 'boolean' ? lsp.enabled : lspServers.length > 0,
+      servers: lspServers,
     },
     gameFeatures: {
       meshGeneration: gameFeatures.meshGeneration === true,
@@ -296,10 +335,108 @@ export function serverFromSuggestion(
   };
 }
 
+function compactId(value: string): string {
+  return value.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function mcpServerSearchText(server: ProjectMcpServerConfig): string {
+  return [
+    server.id,
+    server.label,
+    server.description ?? '',
+    server.command ?? '',
+    server.args.join(' '),
+    Object.entries(server.env)
+      .map(([key, value]) => `${key}=${value}`)
+      .join(' '),
+  ]
+    .join(' ')
+    .toLowerCase();
+}
+
+export function isConflictingUnrealMcpServer(
+  server: ProjectMcpServerConfig,
+): boolean {
+  if (server.id === PREFERRED_UNREAL_MCP_SERVER_ID) return false;
+
+  const id = compactId(server.id);
+  if (
+    new Set([
+      'ue',
+      'uemcp',
+      'unreal',
+      'unrealmcp',
+      'unrealengine',
+      'unrealenginemcp',
+      'ue5mcp',
+      'ue4mcp',
+    ]).has(id)
+  ) {
+    return true;
+  }
+
+  const text = mcpServerSearchText(server);
+  const looksLikeUnrealMcp =
+    (text.includes('unreal') && text.includes('mcp')) ||
+    /\bue[-_\s]?mcp\b/.test(text);
+  const controlsEditor =
+    text.includes('remotecontrol') ||
+    text.includes('editor') ||
+    text.includes('python') ||
+    text.includes('blueprint') ||
+    text.includes('uproject') ||
+    text.includes('unrealengine');
+
+  return looksLikeUnrealMcp && controlsEditor;
+}
+
+export function preferUnrealMcpServer(
+  settings: ProjectSettings,
+  preferred: ProjectMcpServerConfig,
+): ProjectSettings {
+  const preferredServer = {
+    ...preferred,
+    id: PREFERRED_UNREAL_MCP_SERVER_ID,
+    enabled: true,
+  };
+  let mergedPreferred: ProjectMcpServerConfig | null = null;
+  const others: ProjectMcpServerConfig[] = [];
+
+  for (const server of settings.mcp.servers) {
+    if (server.id === PREFERRED_UNREAL_MCP_SERVER_ID) {
+      mergedPreferred = { ...server, ...preferredServer };
+      continue;
+    }
+    others.push(
+      isConflictingUnrealMcpServer(server) ? { ...server, enabled: false } : server,
+    );
+  }
+
+  return {
+    ...settings,
+    engine: 'unreal',
+    mcp: {
+      ...settings.mcp,
+      enabled: true,
+      servers: [mergedPreferred ?? preferredServer, ...others],
+    },
+  };
+}
+
 export function mergeRecommendedMcpServers(
   settings: ProjectSettings,
   scan: ProjectEnvironmentScan,
 ): ProjectSettings {
+  const preferredUnrealSuggestion = scan.suggestedMcpServers.find(
+    (server) => server.id === PREFERRED_UNREAL_MCP_SERVER_ID,
+  );
+  if (scan.engine.engine === 'unreal' && preferredUnrealSuggestion) {
+    return settingsWithDetectedGameFeatures(
+      preferUnrealMcpServer(settings, serverFromSuggestion(preferredUnrealSuggestion)),
+      scan,
+    );
+  }
+
   const existingIds = new Set(settings.mcp.servers.map((server) => server.id));
   const additions = scan.suggestedMcpServers
     .filter((server) => !existingIds.has(server.id))

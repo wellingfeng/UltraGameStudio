@@ -72,6 +72,26 @@ export interface Message {
    * rendered above the message's log text. See runtime/ultracodeProgress.ts.
    */
   runProgress?: UltracodeRunProgress;
+  /**
+   * Per-turn token usage for an assistant message: the snapshot delta across the
+   * turn that produced it (a turn may issue several model sub-calls). Persisted
+   * with the message so the chat history keeps the numbers after reload. Absent
+   * on user/system messages and on assistant turns that recorded no usage.
+   */
+  usage?: MessageUsage;
+}
+
+/**
+ * Token usage attached to a single assistant message. `cachePercent` is only
+ * meaningful when `estimated` is false (a real, server-reported turn).
+ */
+export interface MessageUsage {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cachedInputTokens: number;
+  cachePercent: number;
+  estimated: boolean;
 }
 
 export interface Session {

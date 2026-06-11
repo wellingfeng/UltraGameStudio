@@ -16,21 +16,25 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
+  Eye,
   File,
   Folder,
   GitBranch,
+  Hash,
   Languages,
+  ListChecks,
   Loader2,
   Plus,
   RotateCcw,
   Search,
+  ShieldAlert,
   ShieldQuestionMark,
   Square,
   Trash2,
   X,
+  Zap,
 } from 'lucide-react';
 import Select from '@/components/Select';
-import WorkspaceSelect from '@/components/WorkspaceSelect';
 import { summarizeAnswer, type InteractionAnswer } from '@/core/interaction';
 import { readStartUserInputs } from '@/core/startInputs';
 import {
@@ -127,6 +131,7 @@ import {
   isNativeTextareaNewlineShortcut,
   loadShortcutSettings,
   matchesShortcut,
+  shortcutParts,
   subscribeShortcutSettings,
 } from '@/lib/keyboardShortcuts';
 import { shouldRefocusComposerAfterAppend } from '@/lib/composerEntryPolicy';
@@ -161,11 +166,7 @@ import {
   refreshFreeChannelModels,
   refreshProviderModels,
 } from '@/lib/modelLists';
-import {
-  estimateContextUsage,
-  formatCompactTokenCount,
-  type ContextUsageTone,
-} from '@/lib/contextUsage';
+import { formatCompactTokenCount } from '@/lib/contextUsage';
 import LazyMessageContent from '@/components/ai/LazyMessageContent';
 import CopyButton from '@/components/ai/CopyButton';
 import {
@@ -604,17 +605,42 @@ function previousUserText(messages: Message[], messageId: string): string {
   return '';
 }
 
-function contextUsageFillColor(tone: ContextUsageTone): string {
-  if (tone === 'danger') return 'var(--status-error)';
-  if (tone === 'warn') return 'var(--status-running)';
-  return 'var(--status-success)';
+/**
+ * Flat segmented permission control (replaces the old dropdown). Each of our
+ * three permission modes maps to an icon + a tone borrowed from the reference
+ * mockup but expressed through our own status tokens:
+ *   - readonly  → 安全（蓝）  : 只读，不会改动磁盘
+ *   - ask       → 谨慎（琥珀）: 逐步确认
+ *   - full      → 危险（红）  : 完全读写，激活时整组高亮
+ * Returns the lucide icon and the CSS color variable used for text/active fill.
+ */
+type PermissionTone = 'safe' | 'caution' | 'danger';
+
+function permissionVisual(id: string): {
+  Icon: typeof Eye;
+  tone: PermissionTone;
+  color: string;
+} {
+  if (id === 'readonly') {
+    return { Icon: Eye, tone: 'safe', color: 'var(--status-ai-edit)' };
+  }
+  if (id === 'ask') {
+    return { Icon: ListChecks, tone: 'caution', color: 'var(--accent-3)' };
+  }
+  // 'full' (and any unknown id) → most permissive, treat as the danger segment.
+  return { Icon: ShieldAlert, tone: 'danger', color: 'var(--status-error)' };
 }
 
-function contextUsagePieBackground(percent: number, tone: ContextUsageTone): string {
-  const degrees = Math.min(360, Math.max(0, percent * 3.6));
-  const fill = contextUsageFillColor(tone);
-  const track = 'color-mix(in oklab, var(--panel-2) 78%, var(--border))';
-  return `conic-gradient(from -90deg, ${fill} 0deg ${degrees}deg, ${track} ${degrees}deg 360deg)`;
+/**
+ * Display rank for the permission segments — left→right means increasing
+ * privilege, so the most permissive ("full") sits at the far right. The store
+ * array order is independent of this (it still drives the default), so we sort
+ * a copy at render time using this rank.
+ */
+function permissionRank(id: string): number {
+  if (id === 'readonly') return 0; // 只读 — 最低
+  if (id === 'ask') return 1; // 每次询问 — 居中
+  return 2; // 完全访问 — 最高，置于最右
 }
 
 function assistantHeaderLabel(message: Message): string {
@@ -669,6 +695,7 @@ function MessageActionToolbar({
   modelOptions,
   modelValue,
   canRegenerate,
+  usage,
   onToggleMenu,
   onRegenerate,
   onRegenerateWithModel,
@@ -683,6 +710,7 @@ function MessageActionToolbar({
   modelOptions: SelectOption[];
   modelValue: string;
   canRegenerate: boolean;
+  usage?: Message['usage'];
   onToggleMenu: (kind: 'model' | 'translate') => void;
   onRegenerate: () => void;
   onRegenerateWithModel: (model: string) => void;
@@ -821,6 +849,27 @@ function MessageActionToolbar({
       >
         <Trash2 size={14} />
       </button>
+      {usage && usage.totalTokens > 0 && (
+        <span
+          className="ml-auto inline-flex shrink-0 items-center gap-2 pl-2 font-mono text-[10px] text-fg-faint"
+          title={
+            usage.estimated
+              ? `本轮 tokens（本地估算）：输入 ${usage.inputTokens} · 输出 ${usage.outputTokens}`
+              : `本轮 tokens：输入 ${usage.inputTokens} · 输出 ${usage.outputTokens} · 缓存命中 ${usage.cachedInputTokens}`
+          }
+        >
+          <span className="inline-flex items-center gap-1">
+            <Hash size={11} />
+            {formatCompactTokenCount(usage.totalTokens)}
+          </span>
+          <span className="inline-flex items-center gap-1">
+            <Zap size={11} className="text-[var(--accent-3)]" />
+            {usage.estimated
+              ? '--'
+              : `${Math.min(999, Math.round(usage.cachePercent))}%`}
+          </span>
+        </span>
+      )}
     </div>
   );
 }
@@ -1497,6 +1546,7 @@ export default function AIDock({
   const generateImagePrompt = useStore((s) => s.generateImagePrompt);
   const generateMusicPrompt = useStore((s) => s.generateMusicPrompt);
   const generateThreeDPrompt = useStore((s) => s.generateThreeDPrompt);
+  const searchMeshLibraryPrompt = useStore((s) => s.searchMeshLibraryPrompt);
   const runUltracodePrompt = useStore((s) => s.runUltracodePrompt);
   const appendChatNote = useStore((s) => s.appendChatNote);
   const stopChat = useStore((s) => s.stopChat);
@@ -1523,13 +1573,8 @@ export default function AIDock({
   const gameExpertSettings = useStore((s) => s.gameExpertSettings);
   const setComposer = useStore((s) => s.setComposer);
   const setComposerDraft = useStore((s) => s.setComposerDraft);
-  const setWorkspace = useStore((s) => s.setWorkspace);
-  const addWorkspaceFolder = useStore((s) => s.addWorkspaceFolder);
-  const removeWorkspaceFolder = useStore((s) => s.removeWorkspaceFolder);
-  const removeWorkspace = useStore((s) => s.removeWorkspace);
   const permissionOptions = useStore((s) => s.permissionOptions);
   const composerModelOptions = useStore((s) => s.modelOptions);
-  const workspaceHistory = useStore((s) => s.workspaceHistory);
   const mode = useStore((s) => s.mode);
   const activeAiEditing = useStore((s) => isActiveAiEditingSession(s));
   const activeChatting = useStore((s) =>
@@ -1575,6 +1620,10 @@ export default function AIDock({
   const answerInteraction = useStore((s) => s.answerInteraction);
   const dismissInteraction = useStore((s) => s.dismissInteraction);
   const streamRef = useRef<HTMLDivElement>(null);
+  // The inner message list. We observe its size (not just the scroll
+  // container's) so appended messages and streaming tokens — which grow this
+  // node while the container keeps its fixed height — still trigger auto-scroll.
+  const streamContentRef = useRef<HTMLUListElement>(null);
   // Session long-screenshot (`/screenshot`). While capturing we force every
   // message to render its rich content (off-screen ones are otherwise plain-text
   // placeholders, see LazyMessageContent) so the image is faithful, then restore.
@@ -2293,26 +2342,6 @@ export default function AIDock({
             runSelection.modelClass ||
             'default')
       : runSelection.modelClass || 'default';
-  const contextUsage = useMemo(
-    () =>
-      estimateContextUsage({
-        messages,
-        draft,
-        adapter: selectedAdapter,
-        model: modelSelectValue,
-        simpleChatMode,
-      }),
-    [messages, draft, selectedAdapter, modelSelectValue, simpleChatMode],
-  );
-  const contextUsageTitle = useMemo(
-    () =>
-      t(locale, 'dock.contextUsageTitle')
-        .replace('{used}', formatCompactTokenCount(contextUsage.usedTokens))
-        .replace('{limit}', formatCompactTokenCount(contextUsage.limitTokens)),
-    [contextUsage.limitTokens, contextUsage.usedTokens, locale],
-  );
-  const showContextUsage =
-    !composer.imageMode && !composer.musicMode && !composer.threeDMode;
   const [keyModalChannel, setKeyModalChannel] = useState<FreeChannel | null>(null);
   const [keyModalValue, setKeyModalValue] = useState('');
   const [localSetupChannel, setLocalSetupChannel] =
@@ -2753,6 +2782,25 @@ export default function AIDock({
     });
   }, []);
 
+  // Re-pin the active stream to the bottom. Called when the user sends a
+  // message so the new entry is guaranteed to scroll into view, even if the
+  // stored snapshot recorded a non-bottom position (line auto-scroll prefers
+  // the snapshot's atBottom over stickToBottomRef, so we must clear it too).
+  const pinActiveStreamToBottom = useCallback(() => {
+    stickToBottomRef.current = true;
+    const key = activeStreamScrollKeyRef.current;
+    const snapshot = streamScrollSnapshotsRef.current.get(key);
+    if (snapshot) {
+      streamScrollSnapshotsRef.current.set(key, {
+        ...snapshot,
+        atBottom: true,
+        anchorMessageId: null,
+      });
+    }
+    const stream = streamRef.current;
+    if (stream) scrollStreamToBottom(stream);
+  }, []);
+
   const rememberStreamScrollSnapshot = useCallback((key?: string) => {
     if (normalizedSearchRef.current) return;
     if (searchScrollTopRef.current !== null) return;
@@ -3025,6 +3073,28 @@ export default function AIDock({
     window.requestAnimationFrame(() => syncComposerSuggestions(inputRef.current));
   }, [insertComposerText, isReadOnly, syncComposerSuggestions]);
 
+  const startSlashCommand = useCallback(() => {
+    if (isReadOnly) return;
+    const current = draftRef.current;
+    const start = clampSelection(selectionRef.current.start, current.length);
+    const prefix = start > 0 && !/\s/.test(current[start - 1] ?? '') ? ' ' : '';
+    const triggerStart = start + prefix.length;
+    const nextTrigger: SlashTrigger = {
+      start: triggerStart,
+      end: triggerStart + 1,
+      query: '',
+    };
+    const openSlashMenu = () => {
+      slashTriggerRef.current = nextTrigger;
+      setSlashTrigger(nextTrigger);
+      setActiveSlashIndex(0);
+    };
+    insertComposerText(`${prefix}/`);
+    closeFileMentionSuggestions();
+    openSlashMenu();
+    window.requestAnimationFrame(openSlashMenu);
+  }, [closeFileMentionSuggestions, insertComposerText, isReadOnly]);
+
   const handlePaste = useCallback(
     (event: ReactClipboardEvent<HTMLTextAreaElement>) => {
       if (isReadOnly || !tauriAvailable()) return;
@@ -3285,8 +3355,14 @@ export default function AIDock({
     }
     const ro = new ResizeObserver(syncScrollAfterLayout);
     ro.observe(el);
+    // Also watch the inner list: the container has a fixed height, so only its
+    // content grows when messages are appended or stream tokens arrive. Without
+    // this the observer never fires on new content and the newest message stays
+    // hidden below the fold.
+    const content = streamContentRef.current;
+    if (content) ro.observe(content);
     return () => ro.disconnect();
-  }, [rememberStreamScrollSnapshot]);
+  }, [rememberStreamScrollSnapshot, messages.length]);
 
   useEffect(() => {
     if (!normalizedSearch || !activeSearchMatchId || !activeSearchMatchMessageId) {
@@ -3704,6 +3780,11 @@ export default function AIDock({
     const text = (overrideText ?? draft).trim();
     if (!text) return;
     closeComposerSuggestions();
+    // The user is sending something — always follow the new content to the
+    // bottom regardless of where they had scrolled. The actual scroll happens
+    // once the message renders (ResizeObserver-driven sync), but we pin intent
+    // here so a stale non-bottom snapshot can't suppress it.
+    pinActiveStreamToBottom();
     const clearDraftIfNeeded = () => {
       if (overrideText === undefined || options.clearDraft) {
         setComposerDraft('');
@@ -3842,6 +3923,17 @@ export default function AIDock({
       clearDraftIfNeeded();
       return;
     }
+    const meshSearchMatch =
+      /^\/(?:mesh-search|model-search|asset-search|搜模型|搜索模型|找模型)(?:\s+([\s\S]*))?$/iu.exec(
+        text,
+      );
+    if (meshSearchMatch) {
+      const query = (meshSearchMatch[1] ?? '').trim();
+      if (!query) return;
+      searchMeshLibraryPrompt(text);
+      clearDraftIfNeeded();
+      return;
+    }
     const deepResearchMatch = /^\/deep-research(?:\s+([\s\S]*))?$/i.exec(text);
     if (deepResearchMatch) {
       const question = (deepResearchMatch[1] ?? '').trim();
@@ -3956,6 +4048,8 @@ export default function AIDock({
   );
   const streamNavButtonClass =
     'fuc-stream-nav-button flex h-7 w-7 items-center justify-center rounded-md text-fg-dim transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-35';
+  const composerToolButtonClass =
+    'flex h-7 shrink-0 items-center justify-center rounded-md border border-transparent bg-transparent px-2 text-xs text-fg-dim transition-colors hover:bg-border-soft/55 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40';
   const streamNavigation = isChat && messages.length > 0 && (
     <div
       className="fuc-stream-nav absolute right-2 top-1/2 z-20 flex -translate-y-1/2 flex-col gap-1 rounded-lg p-1"
@@ -4312,7 +4406,7 @@ export default function AIDock({
                 {t(locale, isChat ? 'dock.chatEmpty' : 'dock.empty')}
               </div>
             ) : (
-              <ul className="flex flex-col gap-3">
+              <ul ref={streamContentRef} className="flex flex-col gap-3">
                 {messages.map((m) => {
                   const isUser = m.role === 'user';
                   const isChatUser = isChat && isUser;
@@ -4485,6 +4579,7 @@ export default function AIDock({
                           modelOptions={modelOptionsForMode}
                           modelValue={modelValueForMode}
                           canRegenerate={canRegenerate}
+                          usage={m.usage}
                           onToggleMenu={(kind) =>
                             setMessageActionMenu((current) =>
                               current?.messageId === m.id &&
@@ -4536,7 +4631,7 @@ export default function AIDock({
         <div
           onMouseDown={onChatSplitStart}
           title={t(locale, 'common.resizeHeight')}
-          className="group relative z-20 flex h-1.5 shrink-0 cursor-row-resize items-stretch justify-center border-t border-border-soft"
+          className="group relative z-20 flex h-1.5 shrink-0 cursor-row-resize items-stretch justify-center"
         >
           <div className="h-0.5 w-full bg-transparent transition-colors group-hover:bg-accent/40" />
         </div>
@@ -4548,7 +4643,7 @@ export default function AIDock({
           read as one big input area, with controls anchored at the bottom edge:
           left = + (add file), permission, workspace; right = runtime + send. */}
       <section
-        className="relative flex shrink-0 flex-col bg-panel p-3"
+        className="relative flex shrink-0 flex-col bg-transparent p-3"
         style={isChat ? { height: chatInputHeight } : { width: renderedInputWidth }}
         aria-label={t(locale, 'dock.aiInput') + (isReadOnly ? t(locale, 'dock.readonlySuffix') : '')}
       >
@@ -4690,13 +4785,121 @@ export default function AIDock({
           </div>
         )}
 
+        {/* Hint/permission row — floats above the input card (over the return
+            stream), as its own line rather than inside the card. Left: composer
+            input hints with the user's real shortcuts. Right: flat segmented
+            permission control (ordered low→high privilege, left→right) plus
+            send/newline shortcut hints. */}
+        <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] leading-none text-fg-faint">
+          <div className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1">
+            <span className="inline-flex items-center gap-1">
+              <span className="font-mono text-fg-dim">/</span>
+              {t(locale, 'dock.hintSlash')}
+            </span>
+            <span className="text-border">·</span>
+            <span className="inline-flex items-center gap-1">
+              <span className="font-mono text-fg-dim">@</span>
+              {t(locale, 'dock.hintMention')}
+            </span>
+            <span className="text-border">·</span>
+            <span className="inline-flex items-center gap-1">
+              {shortcutParts(shortcutSettings['return-search']).map((part) => (
+                <kbd
+                  key={part}
+                  className="rounded border border-border bg-panel-2 px-1 py-0.5 font-mono text-[10px] leading-none text-fg-dim"
+                >
+                  {part}
+                </kbd>
+              ))}
+              <span>{t(locale, 'dock.hintSearch')}</span>
+            </span>
+          </div>
+
+          <div className="ml-auto flex flex-wrap items-center gap-x-3 gap-y-1.5">
+            <div
+              role="radiogroup"
+              aria-label={t(locale, 'dock.permissionTitle')}
+              className={
+                'flex shrink-0 items-center gap-0.5 rounded-md border p-0.5 transition-colors ' +
+                (permissionVisual(composer.permission).tone === 'danger'
+                  ? 'border-status-error/60 bg-status-error/10'
+                  : 'border-border bg-panel-2')
+              }
+            >
+              {[...permissionOptions]
+                .sort((a, b) => permissionRank(a.id) - permissionRank(b.id))
+                .map((opt) => {
+                  const localized = localizeSelectOption(opt, locale);
+                  const { Icon, tone, color } = permissionVisual(opt.id);
+                  const active = composer.permission === opt.id;
+                  // The most permissive ("danger") segment, when active, fills
+                  // solid like the mockup's yolo state; safer segments just tint
+                  // their label with the tone color on a neutral chip.
+                  const activeDanger = active && tone === 'danger';
+                  return (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={active}
+                      disabled={isReadOnly}
+                      title={`${localized.label}${
+                        localized.hint ? ` · ${localized.hint}` : ''
+                      }`}
+                      onClick={() => setComposer({ permission: opt.id })}
+                      className={
+                        'flex items-center gap-1 rounded px-1.5 py-1 text-[11px] font-medium leading-none transition-colors disabled:cursor-not-allowed disabled:opacity-50 ' +
+                        (activeDanger
+                          ? 'bg-status-error text-status-error-contrast'
+                          : active
+                            ? 'bg-bg'
+                            : 'text-fg-faint hover:text-fg-dim')
+                      }
+                      style={active && !activeDanger ? { color } : undefined}
+                    >
+                      <Icon size={12} strokeWidth={2.2} />
+                      <span>{localized.label}</span>
+                    </button>
+                  );
+                })}
+            </div>
+
+            <div className="hidden shrink-0 items-center gap-2 sm:flex">
+              <span className="inline-flex items-center gap-1">
+                {shortcutParts(shortcutSettings['composer-send']).map((part) => (
+                  <kbd
+                    key={part}
+                    className="rounded border border-border bg-panel-2 px-1 py-0.5 font-mono text-[10px] leading-none text-fg-dim"
+                  >
+                    {part}
+                  </kbd>
+                ))}
+                <span>{t(locale, 'dock.sendShortcutAction')}</span>
+              </span>
+              <span className="inline-flex items-center gap-1">
+                {shortcutParts(shortcutSettings['composer-newline']).map(
+                  (part) => (
+                    <kbd
+                      key={part}
+                      className="rounded border border-border bg-panel-2 px-1 py-0.5 font-mono text-[10px] leading-none text-fg-dim"
+                    >
+                      {part}
+                    </kbd>
+                  ),
+                )}
+                <span>{t(locale, 'dock.newlineShortcutAction')}</span>
+              </span>
+            </div>
+          </div>
+        </div>
+
         <div
           ref={inputDropRef}
           onDragOver={handleComposerDragOver}
           onDragLeave={handleComposerDragLeave}
           onDrop={handleComposerDrop}
           className={
-            'fuc-ai-input-card relative flex min-h-0 flex-1 flex-col rounded-lg border bg-bg transition-colors focus-within:border-accent ' +
+            'fuc-ai-input-card relative flex min-h-0 flex-1 flex-col rounded-lg border transition-colors focus-within:border-accent ' +
             (dropActive
               ? 'fuc-ai-input--drop border-accent '
               : isChat
@@ -4863,32 +5066,22 @@ export default function AIDock({
           )}
 
           {/* Tool row pinned to the bottom edge of the card. Left cluster groups
-              channel/file/permission/workspace; the send button stays
+              file/workspace tools; channel/model stay near the send button
               aligned to the right.
               rounded-b-lg: parent has no overflow-hidden so dropdown menus can
               extend above the card; this keeps the toolbar visually flush with
               the parent's rounded bottom corners. */}
           <div
             className={
-              'flex flex-wrap items-center gap-2 rounded-b-lg px-2 py-2 ' +
-              (generationMode ? 'bg-transparent' : 'bg-bg')
+              'fuc-ai-input-toolbar flex flex-wrap items-center gap-2 rounded-b-lg px-2 py-2'
             }
           >
-            <Select
-              title={t(locale, 'dock.channelTitle')}
-              options={channelOptions}
-              value={channelValue}
-              onChange={handleChannelChange}
-              disabled={isReadOnly}
-              className="min-w-0"
-              icon="✦"
-            />
             {!generationMode && !simpleChatMode && activeSessionIsWorkflow && (
               <button
                 type="button"
                 title={t(locale, 'dock.modelStrategyTitle')}
                 onClick={() => setModelStrategyOpen((v) => !v)}
-                className="flex items-center gap-1 rounded-md border border-border bg-panel-2 px-2 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+                className={cn(composerToolButtonClass, 'gap-1')}
               >
                 <span className="text-fg-faint">◇</span>
                 <span className="truncate">
@@ -4925,17 +5118,6 @@ export default function AIDock({
                 </ul>
               </div>
             )}
-            {modelOptionsForMode.length > 0 && (
-              <Select
-                title={modelTitleForMode}
-                options={modelOptionsForMode}
-                value={modelValueForMode}
-                onChange={handleModelChange}
-                disabled={isReadOnly}
-                className="min-w-0 max-w-[14rem]"
-                icon={!generationMode && loadingChannelModels ? '↻' : '◇'}
-              />
-            )}
             <button
               type="button"
               onMouseDown={(e) => e.preventDefault()}
@@ -4949,9 +5131,21 @@ export default function AIDock({
                   : t(locale, 'dock.addFileTitle')
               }
               aria-label={t(locale, 'dock.addFileTitle')}
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+              className={cn(composerToolButtonClass, 'w-7 px-0')}
             >
               <Plus size={15} strokeWidth={2} />
+            </button>
+            <button
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={startSlashCommand}
+              disabled={isReadOnly}
+              title={t(locale, 'dock.hintSlash')}
+              aria-label={t(locale, 'dock.hintSlash')}
+              className={cn(composerToolButtonClass, 'gap-1 font-medium')}
+            >
+              <span className="font-mono text-sm font-semibold">/</span>
+              <span>{t(locale, 'dock.hintSlash')}</span>
             </button>
             <button
               type="button"
@@ -4960,45 +5154,35 @@ export default function AIDock({
               disabled={isReadOnly}
               title="提及工作区文件"
               aria-label="提及工作区文件"
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 font-mono text-sm font-semibold text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+              className={cn(composerToolButtonClass, 'gap-1 font-medium')}
             >
-              @
+              <span className="font-mono text-sm font-semibold">@</span>
+              <span>提及</span>
             </button>
-            <Select
-              title={t(locale, 'dock.permissionTitle')}
-              options={permissionOptions.map((opt) => localizeSelectOption(opt, locale))}
-              value={composer.permission}
-              onChange={(id) => setComposer({ permission: id })}
-              disabled={isReadOnly}
-              icon="⚠"
-            />
-            <WorkspaceSelect
-              value={composer.workspace}
-              extraFolders={composer.workspaceFolders}
-              history={workspaceHistory}
-              onSelect={setWorkspace}
-              onAddFolder={addWorkspaceFolder}
-              onRemoveFolder={removeWorkspaceFolder}
-              onRemove={removeWorkspace}
-              disabled={activeAiEditing}
-              className="min-w-0"
-            />
 
             <div className="ml-auto flex items-center gap-2">
-              {showContextUsage && (
-                <span
-                  title={contextUsageTitle}
-                  aria-label={contextUsageTitle}
-                  className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-border text-[9px] font-bold leading-none text-fg shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)] [text-shadow:0_1px_2px_rgba(0,0,0,0.75)]"
-                  style={{
-                    background: contextUsagePieBackground(
-                      contextUsage.percent,
-                      contextUsage.tone,
-                    ),
-                  }}
-                >
-                  <span className="tabular-nums">{contextUsage.displayPercent}</span>
-                </span>
+              <Select
+                title={t(locale, 'dock.channelTitle')}
+                options={channelOptions}
+                value={channelValue}
+                onChange={handleChannelChange}
+                disabled={isReadOnly}
+                className="min-w-0 max-w-[13rem]"
+                icon="✦"
+                variant="ghost"
+                showSelectedHint={false}
+              />
+              {modelOptionsForMode.length > 0 && (
+                <Select
+                  title={modelTitleForMode}
+                  options={modelOptionsForMode}
+                  value={modelValueForMode}
+                  onChange={handleModelChange}
+                  disabled={isReadOnly}
+                  className="min-w-0 max-w-[14rem]"
+                  icon={!generationMode && loadingChannelModels ? '↻' : '◇'}
+                  variant="ghost"
+                />
               )}
               <button
                 type="button"

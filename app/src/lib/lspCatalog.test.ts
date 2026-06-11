@@ -63,4 +63,17 @@ describe('lsp catalog language detection', () => {
     );
     expect(installCommandText(pyright.installCommands![0])).toBe('npm install -g pyright');
   });
+
+  it('offers shader language servers for game/graphics work', () => {
+    const languages = detectProjectLanguagesFromPaths([
+      'Shaders/Lit.hlsl',
+      'Shaders/Compute.wgsl',
+      'Shaders/Post.glsl',
+    ]);
+    const ranked = rankLspServers(languages, 'shader');
+    const ids = ranked.map((server) => server.id);
+    expect(ids).toEqual(
+      expect.arrayContaining(['glsl-analyzer', 'wgsl-analyzer', 'shader-language-server']),
+    );
+  });
 });

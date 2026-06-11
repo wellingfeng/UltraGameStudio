@@ -31,8 +31,30 @@ export interface UsageMeterSnapshot {
     outputTokens: number;
     totalTokens: number;
     cachedInputTokens: number;
+    /**
+     * Input / cached tokens accumulated from *real* (server-reported) calls
+     * only. The session cache-hit percentage is computed from these so that
+     * estimated turns (cached = 0) don't dilute the ratio. See
+     * {@link sessionCachePercent}.
+     */
+    realInputTokens: number;
+    realCachedInputTokens: number;
   };
   lastCall: UsageMeterCall;
+}
+
+/**
+ * Per-turn token usage stamped onto an assistant message. Computed as the delta
+ * of the session snapshot across a single chat turn (a turn may issue several
+ * model sub-calls), so it survives reloads alongside the message itself.
+ */
+export interface UsageTurnDelta {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  cachedInputTokens: number;
+  cachePercent: number;
+  estimated: boolean;
 }
 
 export interface UsageMeterContext {
@@ -81,6 +103,8 @@ const EMPTY_SNAPSHOT: UsageMeterSnapshot = {
     outputTokens: 0,
     totalTokens: 0,
     cachedInputTokens: 0,
+    realInputTokens: 0,
+    realCachedInputTokens: 0,
   },
   lastCall: ZERO_CALL,
 };
@@ -143,6 +167,10 @@ function parseSnapshot(value: unknown): UsageMeterSnapshot {
       outputTokens: numberFrom(totals.outputTokens) ?? 0,
       totalTokens: numberFrom(totals.totalTokens) ?? 0,
       cachedInputTokens: numberFrom(totals.cachedInputTokens) ?? 0,
+      // Legacy snapshots predate the real-only fields; default them to 0 so the
+      // session cache % simply stays `--` until the next real call lands.
+      realInputTokens: numberFrom(totals.realInputTokens) ?? 0,
+      realCachedInputTokens: numberFrom(totals.realCachedInputTokens) ?? 0,
     },
     lastCall: {
       inputTokens: numberFrom(last.inputTokens) ?? 0,
@@ -446,6 +474,7 @@ export function recordModelUsageForRoute(
     updatedAt,
   };
   const current = readUsageMeterSnapshot(options.context);
+  const isReal = call.estimated === false;
   const next: UsageMeterSnapshot = {
     version: 1,
     totals: {
@@ -454,6 +483,11 @@ export function recordModelUsageForRoute(
       outputTokens: current.totals.outputTokens + call.outputTokens,
       totalTokens: current.totals.totalTokens + call.totalTokens,
       cachedInputTokens: current.totals.cachedInputTokens + call.cachedInputTokens,
+      realInputTokens:
+        current.totals.realInputTokens + (isReal ? call.inputTokens : 0),
+      realCachedInputTokens:
+        current.totals.realCachedInputTokens +
+        (isReal ? call.cachedInputTokens : 0),
     },
     lastCall: call,
   };
@@ -473,4 +507,66 @@ export function recordEstimatedModelUsageForSelection(
     estimateUsageForText(prompt, outputText),
     { estimated: true, context: options.context },
   );
+}
+
+/**
+ * Session-wide cache-hit percentage, computed from *real* (server-reported)
+ * calls only. Returns null when no real usage has been recorded yet, so callers
+ * can render a `--` placeholder instead of a misleading 0%.
+ */
+export function sessionCachePercent(
+  snapshot: UsageMeterSnapshot,
+): number | null {
+  const input = snapshot.totals.realInputTokens;
+  if (input <= 0) return null;
+  const cached = Math.min(input, snapshot.totals.realCachedInputTokens);
+  return (cached / input) * 100;
+}
+
+/**
+ * Per-turn token usage as the delta between the session snapshot before and
+ * after a chat turn. A turn may issue several model sub-calls (research lenses,
+ * candidate generation, the final answer); summing the delta captures the whole
+ * turn. `estimated` is true when no real (server-reported) input landed during
+ * the turn, in which case the cache percentage is meaningless and reported as 0.
+ */
+export function usageTurnFromSnapshots(
+  before: UsageMeterSnapshot,
+  after: UsageMeterSnapshot,
+): UsageTurnDelta {
+  const inputTokens = Math.max(
+    0,
+    after.totals.inputTokens - before.totals.inputTokens,
+  );
+  const outputTokens = Math.max(
+    0,
+    after.totals.outputTokens - before.totals.outputTokens,
+  );
+  const totalTokens = Math.max(
+    0,
+    after.totals.totalTokens - before.totals.totalTokens,
+  );
+  const cachedInputTokens = Math.max(
+    0,
+    after.totals.cachedInputTokens - before.totals.cachedInputTokens,
+  );
+  const realInput = Math.max(
+    0,
+    after.totals.realInputTokens - before.totals.realInputTokens,
+  );
+  const realCached = Math.max(
+    0,
+    after.totals.realCachedInputTokens - before.totals.realCachedInputTokens,
+  );
+  const estimated = realInput <= 0;
+  return {
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    cachedInputTokens,
+    cachePercent: estimated
+      ? 0
+      : (Math.min(realInput, realCached) / realInput) * 100,
+    estimated,
+  };
 }

@@ -133,6 +133,12 @@ async function triggerResizeObservers(): Promise<void> {
   });
 }
 
+async function appendMessage(message: Message): Promise<void> {
+  await act(async () => {
+    useStore.setState((state) => ({ messages: [...state.messages, message] }));
+  });
+}
+
 describe('AIDock stream scroll state', () => {
   it('restores each session scroll instead of carrying the previous session position', async () => {
     resetChatSession('s1', chatMessages('s1'));
@@ -169,6 +175,52 @@ describe('AIDock stream scroll state', () => {
       expect(stream.scrollTop).toBe(1000);
 
       setScrollMetrics(stream, { scrollHeight: 1400, clientHeight: 200 });
+      await triggerResizeObservers();
+
+      expect(stream.scrollTop).toBe(1400);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('observes the inner list so appended content can drive auto-scroll', async () => {
+    resetChatSession('s1', chatMessages('s1'));
+    const view = await renderChatDock();
+
+    try {
+      const stream = streamElement(view.container);
+      const list = stream.querySelector('ul');
+      expect(list).not.toBeNull();
+      // Both the scroll container and its inner list must be observed: the
+      // container has a fixed height, so only the list grows when a message is
+      // appended. Observing only the container would never fire on new content.
+      const observed = ResizeObserverStub.instances.flatMap((instance) =>
+        instance.observe.mock.calls.map((call) => call[0]),
+      );
+      expect(observed).toContain(stream);
+      expect(observed).toContain(list);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('follows an appended message to the bottom while pinned', async () => {
+    resetChatSession('s1', chatMessages('s1'));
+    const view = await renderChatDock();
+
+    try {
+      const stream = streamElement(view.container);
+      setScrollMetrics(stream, { scrollHeight: 1000, clientHeight: 200 });
+
+      // User sits at the bottom, then a new message arrives and grows content.
+      await userScrollTo(stream, 800);
+      setScrollMetrics(stream, { scrollHeight: 1400, clientHeight: 200 });
+      await appendMessage({
+        id: 's1_new',
+        role: 'assistant',
+        text: 'fresh reply',
+        createdAt: 99,
+      } as Message);
       await triggerResizeObservers();
 
       expect(stream.scrollTop).toBe(1400);

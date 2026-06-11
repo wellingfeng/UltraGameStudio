@@ -2,6 +2,9 @@ import { describe, expect, it } from 'vitest';
 import {
   emptyProjectSettings,
   gameFeatureDefaultsForEngine,
+  mergeRecommendedMcpServers,
+  PREFERRED_UNREAL_MCP_SERVER_ID,
+  preferUnrealMcpServer,
   projectSettingsFromMetadata,
   settingsWithDetectedGameFeatures,
 } from './projectSettings';
@@ -35,8 +38,12 @@ describe('project settings game features', () => {
       gameExperts: false,
       gameExpertEngine: 'auto',
     });
+    expect(emptyProjectSettings().mcp).toEqual({
+      enabled: false,
+      servers: [],
+    });
     expect(emptyProjectSettings().lsp).toEqual({
-      enabled: true,
+      enabled: false,
       servers: [],
     });
     expect(gameFeatureDefaultsForEngine('unknown')).toEqual(
@@ -157,6 +164,143 @@ describe('project settings game features', () => {
           checkedAtMs: 1,
         },
       },
+    ]);
+  });
+
+  it('only enables MCP/LSP by default when legacy metadata has configured servers', () => {
+    const empty = projectSettingsFromMetadata({ projectSettings: {} });
+    expect(empty.mcp.enabled).toBe(false);
+    expect(empty.lsp.enabled).toBe(false);
+
+    const legacy = projectSettingsFromMetadata({
+      projectSettings: {
+        mcp: {
+          servers: [
+            {
+              id: 'custom-mcp',
+              label: 'Custom MCP',
+              enabled: true,
+              args: [],
+              env: {},
+            },
+          ],
+        },
+        lsp: {
+          servers: [{ id: 'clangd', enabled: true, args: [] }],
+        },
+      },
+    });
+    expect(legacy.mcp.enabled).toBe(true);
+    expect(legacy.lsp.enabled).toBe(true);
+
+    const explicitlyDisabled = projectSettingsFromMetadata({
+      projectSettings: {
+        mcp: {
+          enabled: false,
+          servers: [{ id: 'custom-mcp', label: 'Custom MCP', enabled: true }],
+        },
+        lsp: {
+          enabled: false,
+          servers: [{ id: 'clangd', enabled: true }],
+        },
+      },
+    });
+    expect(explicitlyDisabled.mcp.enabled).toBe(false);
+    expect(explicitlyDisabled.lsp.enabled).toBe(false);
+  });
+
+  it('prefers ue-mcp-for-all-versions over older Unreal MCP servers', () => {
+    const current = {
+      ...emptyProjectSettings(),
+      mcp: {
+        enabled: true,
+        servers: [
+          {
+            id: 'unreal-mcp',
+            label: 'Unreal Engine MCP',
+            description: 'Built-in Unreal editor MCP',
+            source: 'custom' as const,
+            enabled: true,
+            transport: 'stdio',
+            command: 'unreal-mcp',
+            args: [],
+            env: {},
+          },
+          {
+            id: 'filesystem',
+            label: 'Filesystem',
+            source: 'custom' as const,
+            enabled: true,
+            transport: 'stdio',
+            command: 'mcp-server-filesystem',
+            args: ['{workspace}'],
+            env: {},
+          },
+        ],
+      },
+    };
+
+    const next = preferUnrealMcpServer(current, {
+      id: PREFERRED_UNREAL_MCP_SERVER_ID,
+      label: 'Unreal MCP (全版本)',
+      source: 'suggested',
+      enabled: true,
+      transport: 'stdio',
+      command: 'C:\\tools\\ue-mcp-for-all-versions.exe',
+      args: [],
+      env: {},
+    });
+
+    expect(next.mcp.servers[0].id).toBe(PREFERRED_UNREAL_MCP_SERVER_ID);
+    expect(next.mcp.servers.find((server) => server.id === 'unreal-mcp')?.enabled).toBe(false);
+    expect(next.mcp.servers.find((server) => server.id === 'filesystem')?.enabled).toBe(true);
+  });
+
+  it('applies the same Unreal MCP preference when merging recommendations', () => {
+    const current = {
+      ...emptyProjectSettings(),
+      mcp: {
+        enabled: true,
+        servers: [
+          {
+            id: 'unreal',
+            label: 'UE MCP',
+            source: 'custom' as const,
+            enabled: true,
+            transport: 'stdio',
+            command: 'ue-mcp',
+            args: [],
+            env: {},
+          },
+        ],
+      },
+    };
+    const scan: ProjectEnvironmentScan = {
+      rootPath: 'E:\\Game',
+      scannedAtMs: 1,
+      skillRoots: [],
+      engine: scanForEngine('unreal').engine,
+      suggestedMcpServers: [
+        {
+          id: PREFERRED_UNREAL_MCP_SERVER_ID,
+          label: 'Unreal MCP (全版本)',
+          description: '版本无关的 Unreal RemoteControl MCP',
+          transport: 'stdio',
+          command: 'C:\\tools\\ue-mcp-for-all-versions.exe',
+          args: [],
+          env: {},
+          available: true,
+          availabilityNote: 'ok',
+          requiresUserApproval: true,
+        },
+      ],
+    };
+
+    const next = mergeRecommendedMcpServers(current, scan);
+
+    expect(next.mcp.servers.map((server) => [server.id, server.enabled])).toEqual([
+      [PREFERRED_UNREAL_MCP_SERVER_ID, true],
+      ['unreal', false],
     ]);
   });
 });

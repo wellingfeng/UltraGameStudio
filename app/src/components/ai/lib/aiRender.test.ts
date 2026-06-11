@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { segmentMessage, hasReasoning } from './segmenter';
 import { parseFileRef, looksLikePath } from './filePath';
-import { repairMarkdown } from './repairMarkdown';
+import { repairMarkdown, repairFences } from './repairMarkdown';
 
 describe('segmentMessage', () => {
   it('returns a single answer segment for plain text', () => {
@@ -208,5 +208,21 @@ describe('repairMarkdown', () => {
   it('ignores ticks inside a closed fence', () => {
     const src = '```\na ` b\n```';
     expect(repairMarkdown(src)).toBe(src);
+  });
+});
+
+describe('repairFences', () => {
+  it('closes a dangling fence so it cannot swallow trailing prose', () => {
+    expect(repairFences('```ts\nconst a = 1')).toBe('```ts\nconst a = 1\n```');
+  });
+
+  it('leaves balanced fences and inline ticks untouched', () => {
+    const src = '```ts\nconst a = 1\n```\nuse `foo` here';
+    expect(repairFences(src)).toBe(src);
+  });
+
+  it('does not append a stray inline backtick on final render', () => {
+    // A finalized line that legitimately ends in a backtick must stay as-is.
+    expect(repairFences('count is `n')).toBe('count is `n');
   });
 });

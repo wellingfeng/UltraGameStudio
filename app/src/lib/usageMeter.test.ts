@@ -3,9 +3,11 @@ import {
   readUsageMeterSnapshot,
   recordModelUsageForRoute,
   recordEstimatedModelUsageForSelection,
+  sessionCachePercent,
   usageReportFromCliUsage,
   usageReportFromCodex,
   usageReportFromOpenAI,
+  usageTurnFromSnapshots,
 } from './usageMeter';
 
 const selection = {
@@ -145,5 +147,85 @@ describe('usage meter', () => {
     expect(usageReportFromCliUsage(null)).toBeNull();
     expect(usageReportFromCliUsage({})).toBeNull();
     expect(usageReportFromCliUsage({ some: 'thing' })).toBeNull();
+  });
+
+  it('computes the session cache percent from real calls only', () => {
+    const ctx = { workspaceId: 'w1', sessionId: 's1' };
+
+    // An estimated turn first: it must not pollute the session cache ratio.
+    recordEstimatedModelUsageForSelection(
+      selection,
+      'estimate me '.repeat(50),
+      'reply',
+      { providerName: 'DeepSeek', model: 'deepseek-chat' },
+      { context: ctx },
+    );
+    expect(sessionCachePercent(readUsageMeterSnapshot(ctx))).toBeNull();
+
+    // Then a real call with a known cache hit.
+    recordModelUsageForRoute(
+      { providerName: 'OpenAI', model: 'gpt-5.1' },
+      usageReportFromOpenAI({
+        prompt_tokens: 200,
+        completion_tokens: 20,
+        total_tokens: 220,
+        prompt_tokens_details: { cached_tokens: 150 },
+      })!,
+      { estimated: false, context: ctx },
+    );
+
+    // 150 / 200 = 75%, unaffected by the earlier estimated turn.
+    expect(sessionCachePercent(readUsageMeterSnapshot(ctx))).toBeCloseTo(75, 5);
+  });
+
+  it('derives per-turn token usage from the snapshot delta', () => {
+    const ctx = { workspaceId: 'w1', sessionId: 's1' };
+    const before = readUsageMeterSnapshot(ctx);
+
+    recordModelUsageForRoute(
+      { providerName: 'OpenAI', model: 'gpt-5.1' },
+      usageReportFromOpenAI({
+        prompt_tokens: 100,
+        completion_tokens: 30,
+        total_tokens: 130,
+        prompt_tokens_details: { cached_tokens: 40 },
+      })!,
+      { estimated: false, context: ctx },
+    );
+    // A second sub-call in the same turn (e.g. a follow-up generation).
+    recordModelUsageForRoute(
+      { providerName: 'OpenAI', model: 'gpt-5.1' },
+      usageReportFromOpenAI({
+        prompt_tokens: 100,
+        completion_tokens: 10,
+        total_tokens: 110,
+        prompt_tokens_details: { cached_tokens: 60 },
+      })!,
+      { estimated: false, context: ctx },
+    );
+
+    const delta = usageTurnFromSnapshots(before, readUsageMeterSnapshot(ctx));
+    expect(delta.inputTokens).toBe(200);
+    expect(delta.outputTokens).toBe(40);
+    expect(delta.totalTokens).toBe(240);
+    expect(delta.cachedInputTokens).toBe(100);
+    expect(delta.cachePercent).toBeCloseTo(50, 5);
+    expect(delta.estimated).toBe(false);
+  });
+
+  it('flags an estimated-only turn delta as estimated', () => {
+    const ctx = { workspaceId: 'w1', sessionId: 's1' };
+    const before = readUsageMeterSnapshot(ctx);
+    recordEstimatedModelUsageForSelection(
+      selection,
+      'just an estimate',
+      'reply text',
+      { providerName: 'DeepSeek', model: 'deepseek-chat' },
+      { context: ctx },
+    );
+    const delta = usageTurnFromSnapshots(before, readUsageMeterSnapshot(ctx));
+    expect(delta.totalTokens).toBeGreaterThan(0);
+    expect(delta.estimated).toBe(true);
+    expect(delta.cachePercent).toBe(0);
   });
 });

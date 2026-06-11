@@ -449,9 +449,16 @@ pre,
   background: var(--fg-faint);
 }
 
-.fuc-ai-input {
-  background: var(--bg);
+.fuc-ai-input,
+.fuc-ai-input-card {
+  background: color-mix(in oklab, var(--bg) 74%, transparent);
   border-color: var(--border);
+  backdrop-filter: blur(10px);
+}
+
+.fuc-ai-input-toolbar {
+  background: color-mix(in oklab, var(--bg) 42%, transparent);
+  backdrop-filter: blur(8px);
 }
 
 .fuc-ai-input--chat {
@@ -566,6 +573,27 @@ pre,
 @keyframes fuc-status-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* Indeterminate thin progress bar used by the background VCS scan indicator. */
+@keyframes vcs-scan-indeterminate {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(320%);
+  }
+}
+
+.vcs-scan-indeterminate {
+  animation: vcs-scan-indeterminate 1.2s ease-in-out infinite;
+  will-change: transform;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .vcs-scan-indeterminate {
+    animation-duration: 2.4s;
   }
 }
 

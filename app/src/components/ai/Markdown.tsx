@@ -18,7 +18,7 @@ import rehypeKatex from 'rehype-katex';
 import rehypeHighlight from 'rehype-highlight';
 import 'katex/dist/katex.min.css';
 import { HL_LANGUAGES, HL_ALIASES } from './lib/highlight';
-import { repairMarkdown } from './lib/repairMarkdown';
+import { repairMarkdown, repairFences } from './lib/repairMarkdown';
 import { normalizeMath } from './lib/normalizeMath';
 import { protectWindowsPaths } from './lib/protectWindowsPaths';
 import { scanFileRefs } from './lib/fileScan';
@@ -80,8 +80,13 @@ function MarkdownImpl({
     () => protectWindowsPaths(normalizeMath(text)),
     [text],
   );
+  // An unbalanced ``` fence must be closed even on the final render: otherwise
+  // the open fence swallows the rest of the message into one code block, which
+  // `rehype-highlight` then paints as a garbled multicolor wall. While
+  // streaming we additionally repair dangling inline backticks so a half-typed
+  // token doesn't briefly flip the subtree to a code span.
   const src = useMemo(
-    () => (streaming ? repairMarkdown(normalized) : normalized),
+    () => (streaming ? repairMarkdown(normalized) : repairFences(normalized)),
     [normalized, streaming],
   );
   const defaultModelAnimations = useMemo(

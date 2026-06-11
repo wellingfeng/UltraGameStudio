@@ -317,8 +317,10 @@ function workspaceButton(
   container: HTMLElement,
   title: string,
 ): HTMLButtonElement {
-  const button = Array.from(container.querySelectorAll('button')).find((item) =>
-    item.textContent?.includes(title),
+  const button = Array.from(container.querySelectorAll('button')).find(
+    (item) =>
+      item.getAttribute('aria-haspopup') !== 'listbox' &&
+      item.textContent?.includes(title),
   );
   expect(button).toBeInstanceOf(HTMLButtonElement);
   return button as HTMLButtonElement;
@@ -2039,7 +2041,9 @@ describe('Sidebar session search', () => {
     const view = await renderSidebar();
     const workspaceHeader = () => {
       const button = Array.from(view.container.querySelectorAll('button')).find(
-        (item) => item.textContent?.includes(WORKSPACE.name),
+        (item) =>
+          item.getAttribute('aria-haspopup') !== 'listbox' &&
+          item.textContent?.includes(WORKSPACE.name),
       );
       expect(button).toBeInstanceOf(HTMLButtonElement);
       return button as HTMLButtonElement;

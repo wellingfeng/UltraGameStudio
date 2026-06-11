@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use tauri::Emitter;
 use tauri::{
@@ -32,6 +33,7 @@ const SINGLE_INSTANCE_WARNING_EVENT: &str = "single-instance-warning";
 const SINGLE_INSTANCE_WARNING_MESSAGE: &str = "只能同时运行一个进程";
 const SESSION_NOTIFICATION_CLICKED_EVENT: &str = "session-notification-clicked";
 const SLASH_CATALOG_UPDATED_EVENT: &str = "slash-catalog-updated";
+const WORKSPACE_VCS_SCAN_PROGRESS_EVENT: &str = "workspace-vcs-scan-progress";
 const MAX_SLASH_ENTRIES: usize = 800;
 const MAX_COMMAND_SCAN_DEPTH: usize = 4;
 const MAX_SKILL_SCAN_DEPTH: usize = 8;
@@ -454,6 +456,24 @@ struct WorkspaceChanges {
     scan_scope: Option<String>,
 }
 
+/// Progress event emitted while a workspace VCS scan runs in the background.
+///
+/// `phase` is one of `scanning` / `done` / `error`. Counts are best-effort: we
+/// can't know the true total file count up front for P4/full scans, so the UI
+/// shows an indeterminate thin progress bar plus a live "scanned N items" text
+/// rather than a precise percentage.
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceVcsScanProgress {
+    root_path: String,
+    phase: String,
+    scanned_specs: usize,
+    found_items: usize,
+    truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    message: Option<String>,
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WorkspaceChangeSnapshotFile {
@@ -521,7 +541,10 @@ struct SkillInstallTarget {
     path: String,
     exists: bool,
     skill_count: usize,
+    skills: Vec<String>,
     is_default: bool,
+    /// "project" for the active workspace's skill dirs, "global" otherwise.
+    scope: String,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -1812,7 +1835,26 @@ async fn refresh_slash_catalog(app: AppHandle) -> Result<SlashCatalogSnapshot, S
     refresh_slash_catalog_async(app).await
 }
 
-fn skill_install_root(target_id: &str) -> Result<(String, String, PathBuf, bool), String> {
+fn skill_install_root(
+    target_id: &str,
+    project_root: Option<&Path>,
+) -> Result<(String, String, PathBuf, bool), String> {
+    if let Some(rel) = target_id.strip_prefix("project-") {
+        let root = project_root.ok_or_else(|| "缺少项目路径，无法安装到项目。".to_string())?;
+        let (label, sub): (&str, [&str; 2]) = match rel {
+            "codex" => ("Codex 项目 Skill (.codex/skills)", [".codex", "skills"]),
+            "agents" => ("Agents 项目 Skill (.agents/skills)", [".agents", "skills"]),
+            "claude" => ("Claude 项目 Skill (.claude/skills)", [".claude", "skills"]),
+            _ => return Err("未知安装目标。".to_string()),
+        };
+        return Ok((
+            target_id.to_string(),
+            label.to_string(),
+            root.join(sub[0]).join(sub[1]),
+            false,
+        ));
+    }
+
     let home = user_home_dir().ok_or_else(|| "未找到用户主目录。".to_string())?;
     let target = match target_id {
         "global-agents" => (
@@ -1862,35 +1904,88 @@ fn count_installed_skills(root: &Path, depth: usize) -> usize {
         .sum()
 }
 
-fn skill_install_targets_blocking() -> Result<Vec<SkillInstallTarget>, String> {
+fn collect_installed_skill_names(root: &Path) -> Vec<String> {
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let Ok(read_dir) = std::fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut names = Vec::new();
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        if path.is_dir() && path.join("SKILL.md").is_file() {
+            if let Some(name) = path.file_name().and_then(|value| value.to_str()) {
+                names.push(name.to_string());
+            }
+        }
+    }
+    names.sort();
+    names
+}
+
+fn skill_install_target_entry(
+    target_id: &str,
+    project_root: Option<&Path>,
+    scope: &str,
+) -> Result<SkillInstallTarget, String> {
+    let (id, label, path, is_default) = skill_install_root(target_id, project_root)?;
+    let exists = path.is_dir();
+    let skills = if exists {
+        collect_installed_skill_names(&path)
+    } else {
+        Vec::new()
+    };
+    Ok(SkillInstallTarget {
+        id,
+        label,
+        path: display_preview_path(&path),
+        exists,
+        skill_count: if exists {
+            count_installed_skills(&path, 0)
+        } else {
+            0
+        },
+        skills,
+        is_default,
+        scope: scope.to_string(),
+    })
+}
+
+fn skill_install_targets_blocking(
+    project_root: Option<String>,
+) -> Result<Vec<SkillInstallTarget>, String> {
     let mut out = Vec::new();
+
+    // Project-scoped targets come first so the workspace's own skill dirs are
+    // the natural default when installing from within a project.
+    if let Some(raw) = project_root
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        if let Ok(root) = project_scan_root(raw) {
+            for id in ["project-codex", "project-agents", "project-claude"] {
+                out.push(skill_install_target_entry(id, Some(&root), "project")?);
+            }
+        }
+    }
+
     for id in [
         "global-agents",
         "global-codex",
         "global-claude",
         "global-gemini",
     ] {
-        let (id, label, path, is_default) = skill_install_root(id)?;
-        let exists = path.is_dir();
-        out.push(SkillInstallTarget {
-            id,
-            label,
-            path: display_preview_path(&path),
-            exists,
-            skill_count: if exists {
-                count_installed_skills(&path, 0)
-            } else {
-                0
-            },
-            is_default,
-        });
+        out.push(skill_install_target_entry(id, None, "global")?);
     }
     Ok(out)
 }
 
 #[tauri::command]
-async fn skill_install_targets() -> Result<Vec<SkillInstallTarget>, String> {
-    tauri::async_runtime::spawn_blocking(skill_install_targets_blocking)
+async fn skill_install_targets(
+    project_root: Option<String>,
+) -> Result<Vec<SkillInstallTarget>, String> {
+    tauri::async_runtime::spawn_blocking(move || skill_install_targets_blocking(project_root))
         .await
         .map_err(|e| format!("读取安装目标失败: {e}"))?
 }
@@ -1987,9 +2082,18 @@ fn install_skill_from_url_blocking(
     target_id: String,
     overwrite: bool,
     source_url: Option<String>,
+    project_root: Option<String>,
 ) -> Result<InstalledSkill, String> {
     let text = download_skill_text(&url)?;
-    let (target_id, _label, root, _is_default) = skill_install_root(&target_id)?;
+    let project_root = match project_root
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(raw) => Some(project_scan_root(raw)?),
+        None => None,
+    };
+    let (target_id, _label, root, _is_default) =
+        skill_install_root(&target_id, project_root.as_deref())?;
     let slug = sanitize_skill_install_slug(if slug.trim().is_empty() { &name } else { &slug });
     std::fs::create_dir_all(&root).map_err(|e| format!("创建技能目录失败: {e}"))?;
     let root = std::fs::canonicalize(&root).map_err(|e| format!("读取技能目录失败: {e}"))?;
@@ -2041,6 +2145,7 @@ async fn install_skill_from_url(
     target_id: String,
     overwrite: Option<bool>,
     source_url: Option<String>,
+    project_root: Option<String>,
 ) -> Result<InstalledSkill, String> {
     let installed = tauri::async_runtime::spawn_blocking(move || {
         install_skill_from_url_blocking(
@@ -2050,6 +2155,7 @@ async fn install_skill_from_url(
             target_id,
             overwrite.unwrap_or(false),
             source_url,
+            project_root,
         )
     })
     .await
@@ -3877,6 +3983,7 @@ async fn project_lsp_install(
 
 /// Stable server id used in project settings so one-click + "apply recommended" converge.
 const UE_MCP_SERVER_ID: &str = "ue-mcp-for-all-versions";
+const UE_MCP_DISABLED_ARCHIVE_KEY: &str = "freeultracodeDisabledMcpServers";
 const UE_MCP_RELEASE_VERSION: &str = "v0.2.0";
 const UE_MCP_ASSET_NAME: &str = "ue-mcp-for-all-versions-v0.2.0-win64.exe";
 const UE_MCP_DOWNLOAD_URL: &str = "https://github.com/wellingfeng/ue-mcp-for-all-versions/releases/download/v0.2.0/ue-mcp-for-all-versions-v0.2.0-win64.exe";
@@ -4341,9 +4448,70 @@ fn ue_mcp_write_remote_control_config(
     Ok(changed)
 }
 
+fn ue_mcp_compact_id(value: &str) -> String {
+    value
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(|ch| ch.to_lowercase())
+        .collect()
+}
+
+fn ue_mcp_append_json_search_text(value: &serde_json::Value, out: &mut String) {
+    match value {
+        serde_json::Value::String(text) => {
+            out.push(' ');
+            out.push_str(&text.to_ascii_lowercase());
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                ue_mcp_append_json_search_text(item, out);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            for (key, item) in map {
+                out.push(' ');
+                out.push_str(&key.to_ascii_lowercase());
+                ue_mcp_append_json_search_text(item, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn ue_mcp_conflicts_with_preferred_server(id: &str, server: &serde_json::Value) -> bool {
+    if id == UE_MCP_SERVER_ID {
+        return false;
+    }
+    if matches!(
+        ue_mcp_compact_id(id).as_str(),
+        "ue" | "uemcp"
+            | "unreal"
+            | "unrealmcp"
+            | "unrealengine"
+            | "unrealenginemcp"
+            | "ue5mcp"
+            | "ue4mcp"
+    ) {
+        return true;
+    }
+
+    let mut text = id.to_ascii_lowercase();
+    ue_mcp_append_json_search_text(server, &mut text);
+    let looks_like_unreal_mcp =
+        (text.contains("unreal") && text.contains("mcp")) || text.contains("ue-mcp");
+    let controls_editor = text.contains("remotecontrol")
+        || text.contains("editor")
+        || text.contains("python")
+        || text.contains("blueprint")
+        || text.contains("uproject")
+        || text.contains("unrealengine");
+    looks_like_unreal_mcp && controls_editor
+}
+
 /// Merge the MCP server entry into the project `.mcp.json` (Claude Code format:
 /// `{ "mcpServers": { "<id>": { "command": ..., "args": [] } } }`). Preserves
-/// any other servers. Returns Some(marker) when the file changed.
+/// non-UE servers, and archives conflicting UE MCP entries outside `mcpServers`
+/// so they no longer compete with `ue-mcp-for-all-versions`.
 fn ue_mcp_write_project_mcp_json(
     root: &Path,
     server_command: &str,
@@ -4356,29 +4524,56 @@ fn ue_mcp_write_project_mcp_json(
     if !doc.is_object() {
         doc = serde_json::json!({});
     }
+    let before = doc.clone();
 
-    let servers = doc
-        .as_object_mut()
-        .unwrap()
-        .entry("mcpServers")
-        .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
-    if !servers.is_object() {
-        *servers = serde_json::Value::Object(serde_json::Map::new());
-    }
-    let servers_obj = servers.as_object_mut().unwrap();
-
+    let mut archived_conflicts = serde_json::Map::new();
     let desired = serde_json::json!({
         "command": server_command,
         "args": [],
     });
-    let already = servers_obj
-        .get(UE_MCP_SERVER_ID)
-        .map(|existing| existing == &desired)
-        .unwrap_or(false);
-    if already {
+
+    {
+        let root_obj = doc.as_object_mut().unwrap();
+        let servers = root_obj
+            .entry("mcpServers")
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !servers.is_object() {
+            *servers = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let servers_obj = servers.as_object_mut().unwrap();
+        let existing_servers = std::mem::take(servers_obj);
+
+        servers_obj.insert(UE_MCP_SERVER_ID.to_string(), desired);
+        for (id, server) in existing_servers {
+            if id == UE_MCP_SERVER_ID {
+                continue;
+            }
+            if ue_mcp_conflicts_with_preferred_server(&id, &server) {
+                archived_conflicts.insert(id, server);
+            } else {
+                servers_obj.insert(id, server);
+            }
+        }
+    }
+
+    if !archived_conflicts.is_empty() {
+        let archive = doc
+            .as_object_mut()
+            .unwrap()
+            .entry(UE_MCP_DISABLED_ARCHIVE_KEY)
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if !archive.is_object() {
+            *archive = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let archive_obj = archive.as_object_mut().unwrap();
+        for (id, server) in archived_conflicts {
+            archive_obj.insert(id, server);
+        }
+    }
+
+    if doc == before {
         return Ok(None);
     }
-    servers_obj.insert(UE_MCP_SERVER_ID.to_string(), desired);
 
     let serialized =
         serde_json::to_string_pretty(&doc).map_err(|e| format!("序列化 .mcp.json 失败：{e}"))?;
@@ -4628,6 +4823,250 @@ fn write_json_cache<T: serde::Serialize>(path: &Path, value: &T) -> Result<(), S
             std::fs::rename(&tmp, path)
         })
         .map_err(|e| format!("替换会话改动缓存失败: {e}"))
+}
+
+// --- Background workspace VCS scan service -------------------------------
+//
+// A single shared worker drains a queue of scan requests so large projects
+// (e.g. MoonEngine) scan slowly in the background instead of blocking the UI.
+// Results are cached to disk so switching back to a workspace shows the last
+// snapshot instantly while a fresh scan runs. Progress is reported via a
+// thread-local counter that the worker reads and emits as events.
+
+/// Per-scan progress shared between the scanning thread and the emitter.
+#[derive(Default)]
+struct VcsScanProgressState {
+    scanned_specs: AtomicUsize,
+    found_items: AtomicUsize,
+    cancelled: AtomicBool,
+}
+
+thread_local! {
+    static VCS_SCAN_PROGRESS: std::cell::RefCell<Option<Arc<VcsScanProgressState>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Bind a progress state to the current scanning thread for the duration of `f`.
+fn vcs_scan_with_progress<T>(state: Arc<VcsScanProgressState>, f: impl FnOnce() -> T) -> T {
+    VCS_SCAN_PROGRESS.with(|cell| {
+        *cell.borrow_mut() = Some(state);
+    });
+    let result = f();
+    VCS_SCAN_PROGRESS.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+    result
+}
+
+/// Advance the current thread's scan progress counters, if any are bound.
+fn vcs_scan_progress_advance(specs: usize, items: usize) {
+    VCS_SCAN_PROGRESS.with(|cell| {
+        if let Some(state) = cell.borrow().as_ref() {
+            state.scanned_specs.fetch_add(specs, Ordering::Relaxed);
+            state.found_items.fetch_add(items, Ordering::Relaxed);
+        }
+    });
+}
+
+/// Whether the current thread's scan has been asked to cancel (superseded).
+fn vcs_scan_is_cancelled() -> bool {
+    VCS_SCAN_PROGRESS.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|state| state.cancelled.load(Ordering::Relaxed))
+            .unwrap_or(false)
+    })
+}
+
+struct VcsScanJob {
+    root_path: String,
+    cache_key: String,
+    progress: Arc<VcsScanProgressState>,
+}
+
+#[derive(Default)]
+struct VcsScanQueue {
+    pending: VecDeque<VcsScanJob>,
+    // Most recent progress state per root, used to cancel superseded scans.
+    active_by_root: HashMap<String, Arc<VcsScanProgressState>>,
+    worker_started: bool,
+}
+
+fn vcs_scan_queue() -> &'static Mutex<VcsScanQueue> {
+    static QUEUE: OnceLock<Mutex<VcsScanQueue>> = OnceLock::new();
+    QUEUE.get_or_init(|| Mutex::new(VcsScanQueue::default()))
+}
+
+fn vcs_scan_app_handle() -> &'static Mutex<Option<AppHandle>> {
+    static HANDLE: OnceLock<Mutex<Option<AppHandle>>> = OnceLock::new();
+    HANDLE.get_or_init(|| Mutex::new(None))
+}
+
+/// Register the app handle so the scan worker can emit progress events.
+/// Called once during setup; starts the worker the first time it's invoked.
+fn init_vcs_scan_service(app: AppHandle) {
+    if let Ok(mut guard) = vcs_scan_app_handle().lock() {
+        *guard = Some(app);
+    }
+    let mut queue = match vcs_scan_queue().lock() {
+        Ok(q) => q,
+        Err(e) => e.into_inner(),
+    };
+    if !queue.worker_started {
+        queue.worker_started = true;
+        std::thread::spawn(vcs_scan_worker_loop);
+    }
+}
+
+fn vcs_scan_emit(progress: WorkspaceVcsScanProgress) {
+    if let Ok(guard) = vcs_scan_app_handle().lock() {
+        if let Some(app) = guard.as_ref() {
+            let _ = app.emit(WORKSPACE_VCS_SCAN_PROGRESS_EVENT, progress);
+        }
+    }
+}
+
+/// Enqueue a background scan for `root_path`. Any in-flight scan for the same
+/// root is cancelled so we never run duplicate work when the user switches
+/// back and forth between workspaces.
+fn enqueue_vcs_scan(root_path: String, cache_key: String) {
+    let progress = Arc::new(VcsScanProgressState::default());
+    let mut queue = match vcs_scan_queue().lock() {
+        Ok(q) => q,
+        Err(e) => e.into_inner(),
+    };
+    if let Some(prev) = queue.active_by_root.get(&root_path) {
+        prev.cancelled.store(true, Ordering::Relaxed);
+    }
+    queue.pending.retain(|job| job.root_path != root_path);
+    queue
+        .active_by_root
+        .insert(root_path.clone(), progress.clone());
+    queue.pending.push_back(VcsScanJob {
+        root_path,
+        cache_key,
+        progress,
+    });
+}
+
+fn vcs_scan_worker_loop() {
+    loop {
+        let job = {
+            let mut queue = match vcs_scan_queue().lock() {
+                Ok(q) => q,
+                Err(e) => e.into_inner(),
+            };
+            queue.pending.pop_front()
+        };
+        let Some(job) = job else {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            continue;
+        };
+        if job.progress.cancelled.load(Ordering::Relaxed) {
+            continue;
+        }
+        run_vcs_scan_job(job);
+    }
+}
+
+fn run_vcs_scan_job(job: VcsScanJob) {
+    let VcsScanJob {
+        root_path,
+        cache_key,
+        progress,
+    } = job;
+
+    vcs_scan_emit(WorkspaceVcsScanProgress {
+        root_path: root_path.clone(),
+        phase: "scanning".to_string(),
+        scanned_specs: 0,
+        found_items: 0,
+        truncated: false,
+        message: None,
+    });
+
+    // Emit periodic progress while the (potentially long) scan runs.
+    let ticker_progress = progress.clone();
+    let ticker_root = root_path.clone();
+    let ticker_done = Arc::new(AtomicBool::new(false));
+    let ticker_flag = ticker_done.clone();
+    let ticker = std::thread::spawn(move || {
+        while !ticker_flag.load(Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            if ticker_flag.load(Ordering::Relaxed) {
+                break;
+            }
+            vcs_scan_emit(WorkspaceVcsScanProgress {
+                root_path: ticker_root.clone(),
+                phase: "scanning".to_string(),
+                scanned_specs: ticker_progress.scanned_specs.load(Ordering::Relaxed),
+                found_items: ticker_progress.found_items.load(Ordering::Relaxed),
+                truncated: false,
+                message: None,
+            });
+        }
+    });
+
+    let scan_progress = progress.clone();
+    let scan_root = root_path.clone();
+    let result = vcs_scan_with_progress(scan_progress, || workspace_vcs_status_blocking(scan_root));
+
+    ticker_done.store(true, Ordering::Relaxed);
+    let _ = ticker.join();
+
+    // Clear ourselves from the active map only if we are still the current scan.
+    {
+        let mut queue = match vcs_scan_queue().lock() {
+            Ok(q) => q,
+            Err(e) => e.into_inner(),
+        };
+        if let Some(active) = queue.active_by_root.get(&root_path) {
+            if Arc::ptr_eq(active, &progress) {
+                queue.active_by_root.remove(&root_path);
+            }
+        }
+    }
+
+    if progress.cancelled.load(Ordering::Relaxed) {
+        return;
+    }
+
+    match result {
+        Ok(changes) => {
+            let cache_file = workspace_vcs_status_cache_file(&root_path, &cache_key);
+            let _ = write_json_cache(&cache_file, &changes);
+            vcs_scan_emit(WorkspaceVcsScanProgress {
+                root_path,
+                phase: "done".to_string(),
+                scanned_specs: progress.scanned_specs.load(Ordering::Relaxed),
+                found_items: changes.files.len(),
+                truncated: changes.truncated,
+                message: None,
+            });
+        }
+        Err(err) => {
+            vcs_scan_emit(WorkspaceVcsScanProgress {
+                root_path,
+                phase: "error".to_string(),
+                scanned_specs: progress.scanned_specs.load(Ordering::Relaxed),
+                found_items: progress.found_items.load(Ordering::Relaxed),
+                truncated: false,
+                message: Some(err),
+            });
+        }
+    }
+}
+
+fn workspace_vcs_status_cache_file(root_path: &str, cache_key: &str) -> PathBuf {
+    let key = if cache_key.is_empty() {
+        "default"
+    } else {
+        cache_key
+    };
+    storage_paths::managed_artifact_dir(Some(root_path), "session-changes").join(format!(
+        "{}.vcsstatus.json",
+        workspace_change_safe_cache_key(key)
+    ))
 }
 
 fn mark_replacement_hunk(hunk: &mut [WorkspaceChangeLine]) {
@@ -4979,7 +5418,6 @@ fn truncate_workspace_changes(files: &mut Vec<WorkspaceChangeFile>) -> bool {
 }
 
 const WORKSPACE_STATUS_COMMAND_TIMEOUT_MS: u64 = 6_000;
-const P4_STATUS_TOTAL_TIMEOUT_MS: u64 = 12_000;
 const P4_STATUS_SPEC_BATCH_SIZE: usize = 6;
 const P4_STATUS_MAX_SPEC_VISITS: usize = 2048;
 const P4_STATUS_BATCH_PAUSE_MS: u64 = 15;
@@ -6009,23 +6447,16 @@ fn p4_push_spec_batches(queue: &mut VecDeque<Vec<String>>, specs: Vec<String>) {
     }
 }
 
-fn p4_status_command_timeout_for_elapsed(
-    elapsed: std::time::Duration,
-) -> Option<std::time::Duration> {
-    let total = std::time::Duration::from_millis(P4_STATUS_TOTAL_TIMEOUT_MS);
-    if elapsed >= total {
-        return None;
-    }
-    let remaining = total.saturating_sub(elapsed);
-    if remaining.is_zero() {
-        return None;
-    }
-    let command = std::time::Duration::from_millis(WORKSPACE_STATUS_COMMAND_TIMEOUT_MS);
-    Some(if remaining < command {
-        remaining
-    } else {
-        command
-    })
+/// Per-command timeout for a single P4 status invocation.
+///
+/// Intentionally has no total scan budget: large projects (e.g. MoonEngine) can
+/// take a long time to fully scan, and truncating at a fixed wall-clock budget
+/// would hide real changes behind a default icon. Instead we keep a per-command
+/// timeout so a single hung `p4` call can't stall the whole pass, and any
+/// timed-out spec is split into child directories and retried until the scan
+/// completes naturally.
+fn p4_status_command_timeout() -> std::time::Duration {
+    std::time::Duration::from_millis(WORKSPACE_STATUS_COMMAND_TIMEOUT_MS)
 }
 
 fn p4_split_or_mark_truncated(
@@ -6063,12 +6494,15 @@ fn p4_collect_command_changes(
     let mut truncated = false;
     let mut spec_visits = 0_usize;
     let mut queue: VecDeque<Vec<String>> = VecDeque::new();
-    let started_at = std::time::Instant::now();
     p4_push_spec_batches(&mut queue, initial_specs.to_vec());
 
     while let Some(specs) = queue.pop_front() {
         if specs.is_empty() {
             continue;
+        }
+        if vcs_scan_is_cancelled() {
+            truncated = true;
+            break;
         }
         if spec_visits >= P4_STATUS_MAX_SPEC_VISITS {
             truncated = true;
@@ -6077,11 +6511,7 @@ fn p4_collect_command_changes(
         spec_visits = spec_visits.saturating_add(specs.len());
 
         let args = p4_status_args(base_args, &specs);
-        let Some(command_timeout) = p4_status_command_timeout_for_elapsed(started_at.elapsed())
-        else {
-            truncated = true;
-            break;
-        };
+        let command_timeout = p4_status_command_timeout();
         let output = match run_workspace_status_command_owned_with_timeout(
             root,
             "p4",
@@ -6093,10 +6523,8 @@ fn p4_collect_command_changes(
         };
 
         if output.timed_out {
-            if p4_status_command_timeout_for_elapsed(started_at.elapsed()).is_none() {
-                truncated = true;
-                break;
-            }
+            // No total budget: keep splitting the timed-out spec into child
+            // directories and retry until it scans cleanly or has no children.
             truncated |= p4_split_or_mark_truncated(root, &mut queue, specs);
             continue;
         }
@@ -6123,7 +6551,9 @@ fn p4_collect_command_changes(
             ));
         }
 
-        files.extend(parse_p4_workspace_changes(root, &output.stdout, mappings));
+        let parsed = parse_p4_workspace_changes(root, &output.stdout, mappings);
+        vcs_scan_progress_advance(specs.len(), parsed.len());
+        files.extend(parsed);
         if P4_STATUS_BATCH_PAUSE_MS > 0 && !queue.is_empty() {
             std::thread::sleep(std::time::Duration::from_millis(P4_STATUS_BATCH_PAUSE_MS));
         }
@@ -6631,6 +7061,28 @@ async fn workspace_vcs_status_shallow(root_path: String) -> Result<WorkspaceChan
     tauri::async_runtime::spawn_blocking(move || workspace_vcs_status_shallow_blocking(root_path))
         .await
         .map_err(|e| format!("VCS 状态读取任务失败: {e}"))?
+}
+
+/// Return the last cached full VCS status snapshot for a workspace, if any.
+/// Lets the UI render icons instantly on workspace switch before a fresh scan.
+#[tauri::command]
+async fn workspace_vcs_status_cached(
+    root_path: String,
+    cache_key: String,
+) -> Result<Option<WorkspaceChanges>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let cache_file = workspace_vcs_status_cache_file(&root_path, &cache_key);
+        Ok(read_json_cache::<WorkspaceChanges>(&cache_file))
+    })
+    .await
+    .map_err(|e| format!("VCS 状态缓存读取任务失败: {e}"))?
+}
+
+/// Enqueue a background full VCS scan. Results are cached and progress is
+/// emitted via the `workspace-vcs-scan-progress` event. Returns immediately.
+#[tauri::command]
+fn workspace_vcs_status_scan(root_path: String, cache_key: String) {
+    enqueue_vcs_scan(root_path, cache_key);
 }
 
 #[tauri::command]
@@ -9042,14 +9494,25 @@ fn project_mcp_settings_json(cwd: Option<&str>) -> Option<serde_json::Value> {
     Some(serde_json::Value::Object(root))
 }
 
-fn write_project_mcp_settings(cwd: Option<&str>) -> Result<Option<TempFileGuard>, String> {
-    let Some(settings) = project_mcp_settings_json(cwd) else {
-        return Ok(None);
-    };
+fn project_mcp_settings_prefers_unreal_mcp(settings: &serde_json::Value) -> bool {
+    settings
+        .get("mcpServers")
+        .and_then(|value| value.as_object())
+        .and_then(|servers| servers.get(UE_MCP_SERVER_ID))
+        .and_then(|server| server.get("command"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .is_some_and(|command| !command.is_empty())
+}
+
+fn write_project_mcp_settings_value(
+    cwd: Option<&str>,
+    settings: &serde_json::Value,
+) -> Result<TempFileGuard, String> {
     let path = temp_output_path_for_cwd(cwd, "freeultracode-project-mcp", "json");
-    let bytes = serde_json::to_vec(&settings).map_err(|e| format!("生成项目 MCP 配置失败: {e}"))?;
+    let bytes = serde_json::to_vec(settings).map_err(|e| format!("生成项目 MCP 配置失败: {e}"))?;
     std::fs::write(&path, bytes).map_err(|e| format!("写入项目 MCP 配置失败: {e}"))?;
-    Ok(Some(TempFileGuard::new(path)))
+    Ok(TempFileGuard::new(path))
 }
 
 fn gemini_project_mcp_settings_json(cwd: Option<&str>) -> Option<serde_json::Value> {
@@ -9112,6 +9575,11 @@ fn append_codex_project_mcp_config_args_from_settings(
     else {
         return;
     };
+
+    if project_mcp_settings_prefers_unreal_mcp(settings) {
+        args.push("-c".into());
+        args.push("mcp_servers={}".into());
+    }
 
     for (id, server) in servers {
         let Some(command) = server
@@ -9949,15 +10417,22 @@ async fn ai_cli(
 
             // MCP is loaded for each node by default so workflow nodes share
             // the same MCP tools as a hand-run `claude` (e.g. pencil
-            // `mcp__pencil__...`). `--strict-mcp-config` with no `--mcp-config`
-            // means "use only servers from the (absent) config", i.e. none —
-            // we add it only when MCP is explicitly disabled
-            // (FREEULTRACODE_ENABLE_MCP=0) to skip the ~2-4s cold-start MCP
-            // init per node.
+            // `mcp__pencil__...`). For UE projects configured with
+            // `ue-mcp-for-all-versions`, use the project MCP config strictly so
+            // global/engine UE MCP servers cannot compete with the preferred one.
+            // With no `--mcp-config`, `--strict-mcp-config` means "none", so that
+            // flag remains the explicit-disable path below.
             if mcp_enabled() {
-                if let Some(project_mcp_file) = write_project_mcp_settings(cwd.as_deref())? {
+                if let Some(project_mcp_settings) = project_mcp_settings_json(cwd.as_deref()) {
+                    let prefer_unreal_mcp =
+                        project_mcp_settings_prefers_unreal_mcp(&project_mcp_settings);
+                    let project_mcp_file =
+                        write_project_mcp_settings_value(cwd.as_deref(), &project_mcp_settings)?;
                     args.push("--mcp-config".into());
                     args.push(project_mcp_file.path().to_string_lossy().to_string());
+                    if prefer_unreal_mcp {
+                        args.push("--strict-mcp-config".into());
+                    }
                     temp_files.push(project_mcp_file);
                 }
             } else {
@@ -10070,6 +10545,14 @@ async fn ai_cli(
         let codex_streamed_output = Arc::new(Mutex::new(String::new()));
         let codex_streamed_output_reader = Arc::clone(&codex_streamed_output);
         let stdout_activity = Arc::clone(&last_activity);
+        // Claude/Gemini stream-json emit a terminal `result` event once the turn
+        // is logically done. The process itself can linger afterward (lingering
+        // MCP servers / child processes), so polling `try_wait` alone can spin
+        // until the global timeout even though the answer is fully streamed.
+        // The reader sets this flag on the terminal event so the wait loop can
+        // break early and gracefully terminate the (already finished) process.
+        let stream_result_seen = Arc::new(AtomicBool::new(false));
+        let stream_result_seen_reader = Arc::clone(&stream_result_seen);
         let partial_streaming = partial_enabled();
         let out_handle = std::thread::spawn(move || -> String {
             let mut result = String::new();
@@ -10452,6 +10935,9 @@ async fn ai_cli(
                                 }
                                 emit_usage(&app2, &run2, &usage);
                             }
+                            // Signal the wait loop that the turn is logically
+                            // complete so it needn't wait on a lingering process.
+                            stream_result_seen_reader.store(true, Ordering::Relaxed);
                         }
                         _ => {}
                     }
@@ -10491,6 +10977,9 @@ async fn ai_cli(
             Exited(std::process::ExitStatus),
             CodexTurnCompleted(String),
             CodexLastMessageReady,
+            // claude/gemini emitted their terminal `result` event but the process
+            // is lingering; treat the turn as successfully completed.
+            StreamCompleted,
         }
 
         let timeout_secs = ai_cli_timeout_secs(timeout_seconds);
@@ -10502,6 +10991,12 @@ async fn ai_cli(
         let mut last_sidecar_modified: Option<std::time::SystemTime> = None;
         let run_started_at = std::time::Instant::now();
         let mut last_heartbeat = run_started_at;
+        // When the stream's terminal `result` event arrives, give the process a
+        // short grace period to exit on its own (preferring the normal Exited
+        // path). If it lingers past the grace window, break early so a hung
+        // child (e.g. an MCP server that never exits) can't stall the turn.
+        let stream_complete_grace = std::time::Duration::from_secs(3);
+        let mut stream_complete_at: Option<std::time::Instant> = None;
         let wait_result = loop {
             if is_codex {
                 let status = codex_turn_status
@@ -10533,6 +11028,17 @@ async fn ai_cli(
             match child.try_wait() {
                 Ok(Some(status)) => break Ok(WaitOutcome::Exited(status)),
                 Ok(None) => {
+                    // Stream-json (claude/gemini) signalled its terminal result.
+                    // Allow a short grace for a clean self-exit, then break early
+                    // so a lingering child process can't stall the finished turn.
+                    if !is_codex && stream_result_seen.load(Ordering::Relaxed) {
+                        let since = stream_complete_at
+                            .get_or_insert_with(std::time::Instant::now);
+                        if since.elapsed() >= stream_complete_grace {
+                            terminate_child_tree(&mut child);
+                            break Ok(WaitOutcome::StreamCompleted);
+                        }
+                    }
                     if std::time::Instant::now() >= deadline {
                         terminate_child_tree(&mut child);
                         break Err(format!("CLI \"{binary}\" 超时（{timeout_secs}s）已终止。"));
@@ -10674,6 +11180,16 @@ async fn ai_cli(
                 Err(format!("CLI \"{binary}\" turn status {status}: {detail}"))
             }
             Ok(WaitOutcome::CodexLastMessageReady) => Ok(ai_cli_result(output, &codex_usage)),
+            Ok(WaitOutcome::StreamCompleted) => {
+                // Terminal `result` event already arrived; the lingering process
+                // was force-terminated. Prefer the claude usage snapshot.
+                let usage = if claude_usage.lock().ok().is_some_and(|u| u.is_some()) {
+                    &claude_usage
+                } else {
+                    &codex_usage
+                };
+                Ok(ai_cli_result(output, usage))
+            }
         }
     })
     .await
@@ -10874,12 +11390,56 @@ mod tests {
     }
 
     #[test]
+    fn ue_mcp_project_mcp_json_archives_conflicting_unreal_servers() {
+        let dir = std::env::temp_dir().join(format!(
+            "fuc-ue-mcpjson-conflict-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join(".mcp.json"),
+            r#"{ "mcpServers": { "unreal-mcp": { "command": "unreal-mcp", "args": [] }, "other": { "command": "x", "args": [] } } }"#,
+        )
+        .unwrap();
+
+        let marker = ue_mcp_write_project_mcp_json(&dir, "C:/tools/ue-mcp.exe").unwrap();
+        assert!(marker.is_some());
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join(".mcp.json")).unwrap()).unwrap();
+
+        assert!(doc["mcpServers"][UE_MCP_SERVER_ID].is_object());
+        assert!(doc["mcpServers"]["other"].is_object());
+        assert!(doc["mcpServers"]["unreal-mcp"].is_null());
+        assert_eq!(
+            doc[UE_MCP_DISABLED_ARCHIVE_KEY]["unreal-mcp"]["command"].as_str(),
+            Some("unreal-mcp")
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn ue_mcp_suggestion_uses_stable_server_id() {
         let servers = project_suggested_mcp_servers("unreal");
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].id, UE_MCP_SERVER_ID);
         assert_eq!(servers[0].transport, "stdio");
         assert!(servers[0].requires_user_approval);
+    }
+
+    #[test]
+    fn project_mcp_settings_prefers_unreal_mcp_when_enabled_server_present() {
+        let settings = serde_json::json!({
+            "mcpServers": {
+                "ue-mcp-for-all-versions": {
+                    "command": "C:\\Users\\fengwei\\.freeultracode\\tools\\ue-mcp.exe",
+                    "args": []
+                }
+            }
+        });
+
+        assert!(project_mcp_settings_prefers_unreal_mcp(&settings));
     }
 
     #[test]
@@ -10898,18 +11458,20 @@ mod tests {
         append_codex_project_mcp_config_args_from_settings(&mut args, &settings);
 
         assert_eq!(args[0], "-c");
-        assert_eq!(
-            args[1],
-            "mcp_servers.ue-mcp-for-all-versions.command=\"C:\\\\Users\\\\fengwei\\\\.freeultracode\\\\tools\\\\ue-mcp.exe\""
-        );
+        assert_eq!(args[1], "mcp_servers={}");
         assert_eq!(args[2], "-c");
         assert_eq!(
             args[3],
-            "mcp_servers.ue-mcp-for-all-versions.args=[\"--host\",\"127.0.0.1\"]"
+            "mcp_servers.ue-mcp-for-all-versions.command=\"C:\\\\Users\\\\fengwei\\\\.freeultracode\\\\tools\\\\ue-mcp.exe\""
         );
         assert_eq!(args[4], "-c");
         assert_eq!(
             args[5],
+            "mcp_servers.ue-mcp-for-all-versions.args=[\"--host\",\"127.0.0.1\"]"
+        );
+        assert_eq!(args[6], "-c");
+        assert_eq!(
+            args[7],
             "mcp_servers.ue-mcp-for-all-versions.env.UE_PROJECT=\"Game\""
         );
     }
@@ -11684,24 +12246,63 @@ mod tests {
     }
 
     #[test]
-    fn p4_status_command_timeout_respects_total_budget() {
-        let command_timeout = std::time::Duration::from_millis(WORKSPACE_STATUS_COMMAND_TIMEOUT_MS);
+    fn p4_status_command_timeout_is_per_command_without_total_budget() {
+        // No total scan budget: every command uses the same per-command timeout
+        // regardless of how long the overall scan has been running.
         assert_eq!(
-            p4_status_command_timeout_for_elapsed(std::time::Duration::from_millis(0)),
-            Some(command_timeout)
+            p4_status_command_timeout(),
+            std::time::Duration::from_millis(WORKSPACE_STATUS_COMMAND_TIMEOUT_MS)
         );
-        assert_eq!(
-            p4_status_command_timeout_for_elapsed(std::time::Duration::from_millis(
-                P4_STATUS_TOTAL_TIMEOUT_MS - 5
-            )),
-            Some(std::time::Duration::from_millis(5))
+    }
+
+    #[test]
+    fn vcs_scan_progress_advances_and_respects_cancellation() {
+        let state = Arc::new(VcsScanProgressState::default());
+        vcs_scan_with_progress(state.clone(), || {
+            assert!(!vcs_scan_is_cancelled());
+            vcs_scan_progress_advance(3, 5);
+            vcs_scan_progress_advance(1, 2);
+        });
+        assert_eq!(state.scanned_specs.load(Ordering::Relaxed), 4);
+        assert_eq!(state.found_items.load(Ordering::Relaxed), 7);
+
+        state.cancelled.store(true, Ordering::Relaxed);
+        vcs_scan_with_progress(state.clone(), || {
+            assert!(vcs_scan_is_cancelled());
+        });
+
+        // Outside of a bound scan, advancing/cancellation are no-ops.
+        vcs_scan_progress_advance(10, 10);
+        assert!(!vcs_scan_is_cancelled());
+    }
+
+    #[test]
+    fn enqueue_vcs_scan_cancels_previous_scan_for_same_root() {
+        let root = format!("freeultracode-scan-test-{}", now_ms());
+        enqueue_vcs_scan(root.clone(), "k1".to_string());
+        let first = {
+            let queue = vcs_scan_queue().lock().unwrap();
+            queue.active_by_root.get(&root).cloned()
+        };
+        let first = first.expect("first scan registered");
+        assert!(!first.cancelled.load(Ordering::Relaxed));
+
+        enqueue_vcs_scan(root.clone(), "k2".to_string());
+        assert!(
+            first.cancelled.load(Ordering::Relaxed),
+            "superseded scan must be cancelled"
         );
-        assert_eq!(
-            p4_status_command_timeout_for_elapsed(std::time::Duration::from_millis(
-                P4_STATUS_TOTAL_TIMEOUT_MS
-            )),
-            None
-        );
+
+        // Only one pending job should remain for this root.
+        let pending_for_root = {
+            let queue = vcs_scan_queue().lock().unwrap();
+            queue
+                .pending
+                .iter()
+                .filter(|job| job.root_path == root)
+                .count()
+        };
+        assert_eq!(pending_for_root, 1);
     }
 
     #[test]
@@ -11795,6 +12396,7 @@ pub fn run() {
             }
 
             start_slash_catalog_scan(app.handle().clone());
+            init_vcs_scan_service(app.handle().clone());
 
             if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
                 let window_to_hide = window.clone();
@@ -11876,6 +12478,8 @@ pub fn run() {
             workspace_changes,
             workspace_vcs_status,
             workspace_vcs_status_shallow,
+            workspace_vcs_status_cached,
+            workspace_vcs_status_scan,
             workspace_changes_cached,
             preview_local_file,
             save_clipboard_image,

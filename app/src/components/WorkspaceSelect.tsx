@@ -33,6 +33,7 @@ export interface WorkspaceSelectProps {
   /** Remove a folder from history (optional). */
   onRemove?: (path: string) => void;
   disabled?: boolean;
+  variant?: 'default' | 'ghost';
   className?: string;
 }
 
@@ -45,6 +46,7 @@ export default function WorkspaceSelect({
   onRemoveFolder,
   onRemove,
   disabled = false,
+  variant = 'default',
   className,
 }: WorkspaceSelectProps) {
   const [open, setOpen] = useState(false);
@@ -83,7 +85,7 @@ export default function WorkspaceSelect({
   const activeFolders = uniqueWorkspaceHistory([value, ...extraFolders]);
   const extraCount = Math.max(0, activeFolders.length - 1);
   const label = value
-    ? `${basename(value)}${extraCount > 0 ? ` +${extraCount}` : ''}`
+    ? `${t(locale, 'workspace.labelPrefix')} ${basename(value)}${extraCount > 0 ? ` +${extraCount}` : ''}`
     : t(locale, 'workspace.choose');
   const historyOptions = uniqueWorkspaceHistory(history);
   const valueKey = value ? workspacePathKey(value) : '';
@@ -102,9 +104,13 @@ export default function WorkspaceSelect({
         onClick={() => setOpen((v) => !v)}
         className={cn(
           'flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs transition-colors',
-          open
-            ? 'border-accent bg-border-soft text-fg'
-            : 'border-border bg-panel-2 text-fg-dim hover:border-accent hover:text-fg',
+          variant === 'ghost'
+            ? open
+              ? 'border-transparent bg-border-soft/70 text-fg'
+              : 'border-transparent bg-transparent text-fg-dim hover:bg-border-soft/55 hover:text-fg'
+            : open
+              ? 'border-accent bg-border-soft text-fg'
+              : 'border-border bg-panel-2 text-fg-dim hover:border-accent hover:text-fg',
           'disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:border-border disabled:hover:text-fg-dim',
         )}
       >

@@ -22,6 +22,7 @@ vi.mock('@/lib/tauri', async () => {
     openExternal: vi.fn(),
     probeProjectMcpServer: vi.fn(),
     probeProjectLspServer: vi.fn(),
+    skillInstallTargets: vi.fn(async () => []),
     tauriAvailable: vi.fn(() => false),
     scanProjectEnvironment: vi.fn(),
   };
@@ -78,6 +79,7 @@ async function settle(): Promise<void> {
 
 async function renderProjectSettingsModal(
   scan: ProjectEnvironmentScan = unrealScan(),
+  targetWorkspace: WorkspaceSummary = workspace,
 ): Promise<{
   container: HTMLDivElement;
   cleanup: () => Promise<void>;
@@ -93,7 +95,7 @@ async function renderProjectSettingsModal(
   const root: Root = createRoot(container);
 
   await act(async () => {
-    root.render(<ProjectSettingsModal workspace={workspace} onClose={vi.fn()} />);
+    root.render(<ProjectSettingsModal workspace={targetWorkspace} onClose={vi.fn()} />);
   });
   await settle();
 
@@ -126,12 +128,13 @@ describe('ProjectSettingsModal game project tabs', () => {
       expect(tabText).toEqual([
         '概览',
         'Mesh 渠道',
+        '模型库',
         '绑定渠道',
         '游戏专家',
         '命令',
-        'MCP配置',
+        'MCP',
         'LSP',
-        'Skill',
+        'Skills',
         '权限/自动化',
       ]);
       expect(tabText).not.toContain('游戏功能');
@@ -150,15 +153,77 @@ describe('ProjectSettingsModal game project tabs', () => {
 
       expect(tabText).toEqual([
         '概览',
-        'MCP配置',
+        'MCP',
         'LSP',
-        'Skill',
+        'Skills',
         '权限/自动化',
       ]);
       expect(tabText).not.toContain('Mesh 渠道');
       expect(tabText).not.toContain('绑定渠道');
       expect(tabText).not.toContain('游戏专家');
       expect(tabText).not.toContain('命令');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('summarizes empty project skill roots without showing paths', async () => {
+    const scan: ProjectEnvironmentScan = {
+      ...unknownScan(),
+      skillRoots: [
+        {
+          id: 'codex',
+          label: 'Codex 项目 Skill',
+          path: 'E:\\OpenWorkflows\\.codex\\skills',
+          exists: false,
+          skillCount: 0,
+          skills: [],
+        },
+        {
+          id: 'agents',
+          label: 'Agents 项目 Skill',
+          path: 'E:\\OpenWorkflows\\.agents\\skills',
+          exists: false,
+          skillCount: 0,
+          skills: [],
+        },
+        {
+          id: 'claude',
+          label: 'Claude 项目 Skill',
+          path: 'E:\\OpenWorkflows\\.claude\\skills',
+          exists: false,
+          skillCount: 0,
+          skills: [],
+        },
+      ],
+    };
+    const view = await renderProjectSettingsModal(scan, {
+      ...workspace,
+      path: 'E:\\OpenWorkflows',
+      name: 'OpenWorkflows',
+    });
+
+    try {
+      const skillsTab = Array.from(
+        view.container.querySelectorAll('nav [role="tab"]'),
+      ).find((tab) => tab.textContent?.trim() === 'Skills');
+
+      await act(async () => {
+        (skillsTab as HTMLButtonElement).click();
+      });
+
+      expect(view.container.textContent).toContain(
+        '项目中 Codex Skill 数目是 0',
+      );
+      expect(view.container.textContent).toContain(
+        '项目中 Agents Skill 数目是 0',
+      );
+      expect(view.container.textContent).toContain(
+        '项目中 Claude Skill 数目是 0',
+      );
+      expect(view.container.textContent).not.toContain('.codex\\skills');
+      expect(view.container.textContent).not.toContain('.agents\\skills');
+      expect(view.container.textContent).not.toContain('.claude\\skills');
     } finally {
       await view.cleanup();
     }
@@ -183,6 +248,7 @@ describe('ProjectSettingsModal game project tabs', () => {
         '/game',
         '/mesh-mode-start',
         '/mesh-mode-end',
+        '/mesh-search',
       ]);
     } finally {
       await view.cleanup();
@@ -201,9 +267,84 @@ describe('ProjectSettingsModal game project tabs', () => {
         (lspTab as HTMLButtonElement).click();
       });
 
+      const registrySubTab = Array.from(
+        view.container.querySelectorAll('button'),
+      ).find((button) => button.textContent?.trim().startsWith('仓库'));
+      await act(async () => {
+        (registrySubTab as HTMLButtonElement).click();
+      });
+
       expect(view.container.textContent).toContain('clangd');
       expect(view.container.textContent).toContain('推荐');
       expect(view.container.textContent).toContain('一键安装');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('keeps MCP and LSP project switches off for unconfigured projects', async () => {
+    const view = await renderProjectSettingsModal(unknownScan());
+
+    try {
+      const mcpTab = Array.from(
+        view.container.querySelectorAll('nav [role="tab"]'),
+      ).find((tab) => tab.textContent?.trim() === 'MCP');
+
+      await act(async () => {
+        (mcpTab as HTMLButtonElement).click();
+      });
+
+      const mcpSwitch = view.container.querySelector(
+        'input[type="checkbox"]',
+      ) as HTMLInputElement | null;
+      expect(mcpSwitch?.checked).toBe(false);
+
+      const lspTab = Array.from(
+        view.container.querySelectorAll('nav [role="tab"]'),
+      ).find((tab) => tab.textContent?.trim() === 'LSP');
+
+      await act(async () => {
+        (lspTab as HTMLButtonElement).click();
+      });
+
+      const lspSwitch = view.container.querySelector(
+        'input[type="checkbox"]',
+      ) as HTMLInputElement | null;
+      expect(lspSwitch?.checked).toBe(false);
+      expect(view.container.textContent).toMatch(/已启用\s*0/);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('shows zero effective LSP servers when the project LSP switch is off', async () => {
+    const configuredWorkspace: WorkspaceSummary = {
+      ...workspace,
+      metadata: {
+        projectSettings: {
+          lsp: {
+            enabled: false,
+            servers: [{ id: 'clangd', enabled: true, args: [] }],
+          },
+        },
+      },
+    };
+    const view = await renderProjectSettingsModal(unrealScan(), configuredWorkspace);
+
+    try {
+      const lspTab = Array.from(
+        view.container.querySelectorAll('nav [role="tab"]'),
+      ).find((tab) => tab.textContent?.trim() === 'LSP');
+
+      await act(async () => {
+        (lspTab as HTMLButtonElement).click();
+      });
+
+      expect(view.container.textContent).toMatch(/已启用\s*0/);
+      const checkboxes = Array.from(
+        view.container.querySelectorAll('input[type="checkbox"]'),
+      ) as HTMLInputElement[];
+      expect(checkboxes.every((checkbox) => !checkbox.checked)).toBe(true);
     } finally {
       await view.cleanup();
     }
@@ -229,6 +370,14 @@ describe('ProjectSettingsModal game project tabs', () => {
 
       await act(async () => {
         (lspTab as HTMLButtonElement).click();
+      });
+      await settle();
+
+      const registrySubTab = Array.from(
+        view.container.querySelectorAll('button'),
+      ).find((button) => button.textContent?.trim().startsWith('仓库'));
+      await act(async () => {
+        (registrySubTab as HTMLButtonElement).click();
       });
       await settle();
 

@@ -7,7 +7,6 @@ import {
   useState,
   type ChangeEvent,
   type KeyboardEvent as ReactKeyboardEvent,
-  type RefObject,
   type ReactNode,
 } from 'react';
 import {
@@ -98,12 +97,8 @@ import {
 import { importCcSwitchProviders } from '@/lib/ccSwitchAutoImport';
 import {
   isTauri,
-  installSkillFromUrl,
   localModelStatus,
   openExternal,
-  refreshSlashCatalog,
-  skillInstallTargets,
-  type SkillInstallTarget,
   type LocalModelRuntimeStatus,
   validateShellPath,
 } from '@/lib/tauri';
@@ -259,24 +254,9 @@ import {
 } from '@/lib/modelGateway/resolver';
 import { getActiveGatewaySelection } from '@/lib/gatewayConfig';
 import {
-  filterPluginStoreItems,
-  loadPluginStoreCatalog,
-  pluginStoreSources,
-  slugFromName,
-  type PluginStoreItem,
-  type PluginStoreKind,
-  type PluginStoreLoadResult,
-} from '@/lib/pluginStore';
-import {
-  cachedPluginDescriptionTranslation,
-  shouldTranslatePluginDescription,
-  translatePluginDescriptionCached,
-} from '@/lib/pluginStoreTranslation';
-import {
   loadTranslationSettings,
   saveTranslationSettings,
   subscribeTranslationSettings,
-  translationSettingsCacheKey,
   type TranslationProviderId,
   type TranslationSettings,
 } from '@/lib/translationSettings';
@@ -291,7 +271,6 @@ type SettingsTab =
   | 'rigging'
   | 'gameExperts'
   | 'consensus'
-  | 'pluginStore'
   | 'commands'
   | 'shortcuts'
   | 'appearance'
@@ -309,7 +288,6 @@ const tabs: { id: SettingsTab; labelKey: TranslationKey; Icon: LucideIcon }[] = 
   { id: 'models', labelKey: 'settings.tabs.models', Icon: Cpu },
   { id: 'imageGeneration', labelKey: 'settings.tabs.imageGeneration', Icon: Sparkles },
   { id: 'musicGeneration', labelKey: 'settings.tabs.musicGeneration', Icon: Music },
-  { id: 'pluginStore', labelKey: 'settings.tabs.pluginStore', Icon: Globe },
   { id: 'commands', labelKey: 'settings.tabs.commands', Icon: SlashSquare },
   { id: 'shortcuts', labelKey: 'settings.tabs.shortcuts', Icon: Keyboard },
   { id: 'appearance', labelKey: 'settings.tabs.appearance', Icon: Palette },
@@ -630,8 +608,6 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 />
               ) : tab === 'consensus' ? (
                 <ConsensusSettings locale={locale} />
-              ) : tab === 'pluginStore' ? (
-                <PluginStoreSettings locale={locale} />
               ) : tab === 'commands' ? (
                 <CommandsSettings locale={locale} />
               ) : tab === 'shortcuts' ? (
@@ -1432,9 +1408,9 @@ const MODEL_DEFAULT_OPTION_ID = '__default_model__';
 const CLAUDE_MODEL_CLASS_OPTIONS = ['sonnet', 'opus', 'haiku'];
 const SETTINGS_CONTENT_MAX_WIDTH_CLASS = 'w-full max-w-[1180px]';
 const SETTINGS_INNER_TABLIST_CLASS =
-  'flex w-full min-w-0 flex-wrap gap-1 rounded-lg border border-border-soft bg-bg p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]';
+  'flex w-full min-w-0 flex-wrap items-center gap-1 border-b border-border';
 const SETTINGS_INNER_TAB_CLASS =
-  'min-h-11 min-w-[7rem] flex-1 basis-[8.5rem] rounded-md border px-5 py-2.5 text-sm font-semibold outline-none transition-[background-color,border-color,color,box-shadow] focus-visible:ring-1 focus-visible:ring-accent';
+  'px-4 py-2 text-xs font-medium outline-none transition-colors focus-visible:ring-1 focus-visible:ring-accent';
 const SETTINGS_PROVIDER_GRID_CLASS = 'grid gap-2.5 xl:grid-cols-2';
 
 function defaultProviderOptionId(providerId: string): string {
@@ -1551,8 +1527,8 @@ function ChannelsSettings({
                 className={cn(
                   SETTINGS_INNER_TAB_CLASS,
                   active
-                    ? 'border-accent bg-accent text-bg shadow-[0_8px_18px_-14px_rgba(124,140,255,0.9)]'
-                    : 'border-transparent text-fg-faint hover:border-border-soft hover:bg-panel hover:text-fg',
+                    ? '-mb-px border-b-2 border-accent text-fg'
+                    : 'text-fg-faint hover:text-fg',
                 )}
               >
                 {item.label}
@@ -2508,40 +2484,22 @@ function DefaultChannelRow({
               {t(locale, 'settings.models.fetchModels')}
             </button>
           </div>
-          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(10rem,14rem)]">
-            <input
-              type="text"
-              value={modelValue}
-              onChange={(event) => {
-                setModelValue(event.target.value);
-                setDuplicateError(null);
-              }}
-              onBlur={() => commitProvider({ model: modelValue })}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter') event.currentTarget.blur();
-              }}
-              placeholder={providerModelPlaceholder(provider.kind, locale)}
-              autoComplete="off"
-              spellCheck={false}
-              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
-            />
-            <select
-              value={modelSelectValue}
-              onChange={(event) => {
-                if (!event.target.value) return;
-                setModelValue(event.target.value);
-                commitProvider({ model: event.target.value });
-              }}
-              className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
-            >
-              <option value="">{t(locale, 'settings.models.selectModel')}</option>
-              {modelOptions.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
-          </div>
+          <select
+            value={modelSelectValue}
+            onChange={(event) => {
+              if (!event.target.value) return;
+              setModelValue(event.target.value);
+              commitProvider({ model: event.target.value });
+            }}
+            className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+          >
+            <option value="">{t(locale, 'settings.models.selectModel')}</option>
+            {modelOptions.map((model) => (
+              <option key={model} value={model}>
+                {model}
+              </option>
+            ))}
+          </select>
           {modelRefresh.error && (
             <p className="text-[11px] leading-relaxed text-amber-300">
               {modelRefresh.error}
@@ -2564,11 +2522,6 @@ function providerBaseUrlPlaceholder(kind: Provider['kind']): string {
     return 'https://generativelanguage.googleapis.com/v1beta/openai';
   }
   return 'https://api.example.com/v1';
-}
-
-function providerModelPlaceholder(kind: Provider['kind'], locale: Locale): string {
-  if (kind === 'anthropic') return DEFAULT_MODEL;
-  return t(locale, 'settings.models.modelComposerSelected');
 }
 
 function ProviderGroupHeader({
@@ -3282,8 +3235,8 @@ function ImageGenerationSettingsPanel({ locale }: { locale: Locale }) {
                 className={cn(
                   SETTINGS_INNER_TAB_CLASS,
                   active
-                    ? 'border-accent bg-accent text-bg shadow-[0_8px_18px_-14px_rgba(124,140,255,0.9)]'
-                    : 'border-transparent text-fg-faint hover:border-border-soft hover:bg-panel hover:text-fg',
+                    ? '-mb-px border-b-2 border-accent text-fg'
+                    : 'text-fg-faint hover:text-fg',
                 )}
               >
                 {t(locale, imageProviderCategoryTitleKey(item))}
@@ -3677,8 +3630,8 @@ function MusicGenerationSettingsPanel({ locale }: { locale: Locale }) {
                 className={cn(
                   SETTINGS_INNER_TAB_CLASS,
                   active
-                    ? 'border-accent bg-accent text-bg shadow-[0_8px_18px_-14px_rgba(124,140,255,0.9)]'
-                    : 'border-transparent text-fg-faint hover:border-border-soft hover:bg-panel hover:text-fg',
+                    ? '-mb-px border-b-2 border-accent text-fg'
+                    : 'text-fg-faint hover:text-fg',
                 )}
               >
                 {t(locale, musicProviderCategoryTitleKey(item))}
@@ -4057,8 +4010,8 @@ export function ThreeDGenerationSettingsPanel({
                 className={cn(
                   SETTINGS_INNER_TAB_CLASS,
                   active
-                    ? 'border-accent bg-accent text-bg shadow-[0_8px_18px_-14px_rgba(124,140,255,0.9)]'
-                    : 'border-transparent text-fg-faint hover:border-border-soft hover:bg-panel hover:text-fg',
+                    ? '-mb-px border-b-2 border-accent text-fg'
+                    : 'text-fg-faint hover:text-fg',
                 )}
               >
                 {t(locale, threeDProviderCategoryTitleKey(item))}
@@ -4247,8 +4200,28 @@ function ThreeDProviderSettingsRow({
       </div>
 
       <div className="grid gap-3 md:grid-cols-2">
+        {provider.supportsBaseUrl && (
+          <label className="block space-y-1 md:col-span-2">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.models.baseUrl')}
+            </span>
+            <input
+              type="text"
+              value={baseUrl}
+              onChange={(event) => patchProvider({ baseUrl: event.target.value })}
+              placeholder={
+                threeDProviderBaseUrl(provider.id, settings) ||
+                provider.endpointPlaceholder
+              }
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+            />
+          </label>
+        )}
+
         {provider.needsKey && (
-          <label className="block space-y-1">
+          <label className="block space-y-1 md:col-span-2">
             <span className="text-[11px] font-medium text-fg-dim">
               {provider.keyLabel ?? t(locale, 'settings.models.apiKey')}
             </span>
@@ -4293,54 +4266,23 @@ function ThreeDProviderSettingsRow({
           <span className="text-[11px] font-medium text-fg-dim">
             {t(locale, 'settings.freeChannels.modelLabel')}
           </span>
-          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(9rem,13rem)]">
-            <input
-              type="text"
-              value={model}
-              onChange={(event) => patchProvider({ model: event.target.value })}
-              placeholder={provider.defaultModel}
-              autoComplete="off"
-              spellCheck={false}
-              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
-            />
-            <select
-              value={provider.models.includes(model) ? model : ''}
-              onChange={(event) => {
-                if (event.target.value) {
-                  patchProvider({ model: event.target.value });
-                }
-              }}
-              className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
-            >
-              <option value="">{t(locale, 'settings.models.selectModel')}</option>
-              {provider.models.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
-              ))}
-            </select>
-          </div>
-        </label>
-
-        {provider.supportsBaseUrl && (
-          <label className="block space-y-1 md:col-span-2">
-            <span className="text-[11px] font-medium text-fg-dim">
-              {t(locale, 'settings.models.baseUrl')}
-            </span>
-            <input
-              type="text"
-              value={baseUrl}
-              onChange={(event) => patchProvider({ baseUrl: event.target.value })}
-              placeholder={
-                threeDProviderBaseUrl(provider.id, settings) ||
-                provider.endpointPlaceholder
+          <select
+            value={provider.models.includes(model) ? model : ''}
+            onChange={(event) => {
+              if (event.target.value) {
+                patchProvider({ model: event.target.value });
               }
-              autoComplete="off"
-              spellCheck={false}
-              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
-            />
-          </label>
-        )}
+            }}
+            className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+          >
+            <option value="">{t(locale, 'settings.models.selectModel')}</option>
+            {provider.models.map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
+        </label>
       </div>
     </div>
   );
@@ -4447,8 +4389,8 @@ export function RiggingSettingsPanel({
                 className={cn(
                   SETTINGS_INNER_TAB_CLASS,
                   active
-                    ? 'border-accent bg-accent text-bg shadow-[0_8px_18px_-14px_rgba(124,140,255,0.9)]'
-                    : 'border-transparent text-fg-faint hover:border-border-soft hover:bg-panel hover:text-fg',
+                    ? '-mb-px border-b-2 border-accent text-fg'
+                    : 'text-fg-faint hover:text-fg',
                 )}
               >
                 {t(locale, riggingChannelTitleKey(item))}
@@ -4655,8 +4597,28 @@ function RiggingProviderSettingsRow({
       </div>
 
       <div className="grid gap-3 md:grid-cols-2">
+        {provider.supportsBaseUrl && (
+          <label className="block space-y-1 md:col-span-2">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.models.baseUrl')}
+            </span>
+            <input
+              type="text"
+              value={baseUrl}
+              onChange={(event) => patchProvider({ baseUrl: event.target.value })}
+              placeholder={
+                threeDRiggingProviderBaseUrl(provider.id, settings) ||
+                provider.endpointPlaceholder
+              }
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+            />
+          </label>
+        )}
+
         {provider.needsKey && (
-          <label className="block space-y-1">
+          <label className="block space-y-1 md:col-span-2">
             <span className="text-[11px] font-medium text-fg-dim">
               {provider.keyLabel ?? t(locale, 'settings.models.apiKey')}
             </span>
@@ -4713,54 +4675,23 @@ function RiggingProviderSettingsRow({
           <span className="text-[11px] font-medium text-fg-dim">
             {t(locale, 'settings.freeChannels.modelLabel')}
           </span>
-          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(9rem,13rem)]">
-            <input
-              type="text"
-              value={model}
-              onChange={(event) => patchProvider({ model: event.target.value })}
-              placeholder={provider.defaultModel}
-              autoComplete="off"
-              spellCheck={false}
-              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
-            />
-            <select
-              value={provider.models.includes(model) ? model : ''}
-              onChange={(event) => {
-                if (event.target.value) {
-                  patchProvider({ model: event.target.value });
-                }
-              }}
-              className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
-            >
-              <option value="">{t(locale, 'settings.models.selectModel')}</option>
-              {provider.models.map((item) => (
-                <option key={item} value={item}>
-                  {item}
-                </option>
-              ))}
-            </select>
-          </div>
-        </label>
-
-        {provider.supportsBaseUrl && (
-          <label className="block space-y-1 md:col-span-2">
-            <span className="text-[11px] font-medium text-fg-dim">
-              {t(locale, 'settings.models.baseUrl')}
-            </span>
-            <input
-              type="text"
-              value={baseUrl}
-              onChange={(event) => patchProvider({ baseUrl: event.target.value })}
-              placeholder={
-                threeDRiggingProviderBaseUrl(provider.id, settings) ||
-                provider.endpointPlaceholder
+          <select
+            value={provider.models.includes(model) ? model : ''}
+            onChange={(event) => {
+              if (event.target.value) {
+                patchProvider({ model: event.target.value });
               }
-              autoComplete="off"
-              spellCheck={false}
-              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
-            />
-          </label>
-        )}
+            }}
+            className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+          >
+            <option value="">{t(locale, 'settings.models.selectModel')}</option>
+            {provider.models.map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
+        </label>
 
         {provider.supportsCommand && (
           <label className="block space-y-1 md:col-span-2">
@@ -4803,511 +4734,6 @@ function ReadonlyField({
   );
 }
 
-const PLUGIN_STORE_KIND_FILTERS: Array<{
-  id: PluginStoreKind | 'all';
-  label: string;
-}> = [
-  { id: 'all', label: '全部' },
-  { id: 'skill', label: 'Skills' },
-  { id: 'plugin', label: '插件' },
-  { id: 'mcp', label: 'MCP' },
-  { id: 'index', label: '索引' },
-];
-
-function pluginStoreKindLabel(kind: PluginStoreKind): string {
-  switch (kind) {
-    case 'skill':
-      return 'Skill';
-    case 'plugin':
-      return '插件';
-    case 'mcp':
-      return 'MCP';
-    case 'index':
-      return '索引';
-  }
-}
-
-function pluginStoreTrustLabel(item: PluginStoreItem): string {
-  switch (item.trust) {
-    case 'official':
-      return '官方';
-    case 'curated':
-      return '精选';
-    case 'registry':
-      return 'Registry';
-    case 'community':
-      return '社区';
-  }
-}
-
-function pluginStoreActionLabel(item: PluginStoreItem): string {
-  if (item.installKind === 'skill') return '安装';
-  if (item.installKind === 'pluginManifest') return '复制清单';
-  if (item.installKind === 'external') return '复制地址';
-  return '打开来源';
-}
-
-function PluginStoreSettings({ locale }: { locale: Locale }) {
-  const [translationSettings] = useTranslationSettingsState();
-  const translationKey = translationSettingsCacheKey(translationSettings);
-  const [catalog, setCatalog] = useState<PluginStoreLoadResult>(() => ({
-    loadedAtMs: 0,
-    items: [],
-    errors: [],
-  }));
-  const [loading, setLoading] = useState(true);
-  const [query, setQuery] = useState('');
-  const [kind, setKind] = useState<PluginStoreKind | 'all'>('all');
-  const [sourceId, setSourceId] = useState('all');
-  const [targets, setTargets] = useState<SkillInstallTarget[]>([]);
-  const [targetId, setTargetId] = useState('');
-  const [installingId, setInstallingId] = useState<string | null>(null);
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [status, setStatus] = useState<{ tone: 'ok' | 'err'; msg: string } | null>(
-    null,
-  );
-
-  const loadCatalog = useCallback(async (signal?: AbortSignal) => {
-    setLoading(true);
-    setStatus(null);
-    try {
-      const next = await loadPluginStoreCatalog(signal);
-      if (signal?.aborted) return;
-      setCatalog(next);
-    } catch (err) {
-      if (signal?.aborted) return;
-      setStatus({ tone: 'err', msg: `在线仓库加载失败: ${describeError(err)}` });
-    } finally {
-      if (!signal?.aborted) setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    void loadCatalog(controller.signal);
-    return () => controller.abort();
-  }, [loadCatalog]);
-
-  const loadTargets = useCallback(async () => {
-    const next = await skillInstallTargets();
-    setTargets(next);
-    setTargetId((current) => {
-      if (current && next.some((target) => target.id === current)) return current;
-      return next.find((target) => target.isDefault)?.id ?? next[0]?.id ?? '';
-    });
-  }, []);
-
-  useEffect(() => {
-    void loadTargets();
-  }, [loadTargets]);
-
-  const sourceOptions = useMemo(
-    () => pluginStoreSources(catalog.items),
-    [catalog.items],
-  );
-  const filtered = useMemo(
-    () => filterPluginStoreItems(catalog.items, query, kind, sourceId),
-    [catalog.items, kind, query, sourceId],
-  );
-  const kindCounts = useMemo(() => {
-    const counts = new Map<PluginStoreKind | 'all', number>([['all', catalog.items.length]]);
-    for (const item of catalog.items) {
-      counts.set(item.kind, (counts.get(item.kind) ?? 0) + 1);
-    }
-    return counts;
-  }, [catalog.items]);
-
-  const selectedTargetId =
-    targetId || targets.find((target) => target.isDefault)?.id || targets[0]?.id || '';
-
-  const copyText = async (item: PluginStoreItem, text: string, msg: string) => {
-    await navigator.clipboard?.writeText(text);
-    setCopiedId(item.id);
-    setStatus({ tone: 'ok', msg });
-    window.setTimeout(() => {
-      setCopiedId((current) => (current === item.id ? null : current));
-    }, 1500);
-  };
-
-  const handleAction = async (item: PluginStoreItem) => {
-    if (item.installKind === 'skill' && item.installUrl) {
-      await handleInstall(item, false);
-      return;
-    }
-    if (item.installKind === 'none') {
-      if (item.sourceUrl) void openExternal(item.sourceUrl);
-      return;
-    }
-    const text = item.installUrl || item.sourceUrl;
-    if (text) {
-      await copyText(item, text, '已复制安装地址。');
-      return;
-    }
-    if (item.sourceUrl) void openExternal(item.sourceUrl);
-  };
-
-  const handleInstall = async (item: PluginStoreItem, overwrite: boolean) => {
-    if (!item.installUrl) return;
-    if (!selectedTargetId) {
-      setStatus({ tone: 'err', msg: '未找到可用安装目标。' });
-      return;
-    }
-    setInstallingId(item.id);
-    setStatus(null);
-    try {
-      const installed = await installSkillFromUrl({
-        url: item.installUrl,
-        name: item.title,
-        slug: item.name || slugFromName(item.title),
-        targetId: selectedTargetId,
-        overwrite,
-        sourceUrl: item.sourceUrl ?? null,
-      });
-      await refreshSlashCatalog();
-      await loadTargets();
-      setStatus({
-        tone: 'ok',
-        msg: installed.overwritten
-          ? `已覆盖安装 ${installed.name}。`
-          : `已安装 ${installed.name}。`,
-      });
-    } catch (err) {
-      const msg = describeError(err);
-      if (!overwrite && msg.includes('已存在')) {
-        setInstallingId(null);
-        if (window.confirm(`目标 skill 已存在，覆盖安装「${item.title}」？`)) {
-          await handleInstall(item, true);
-        }
-        return;
-      }
-      setStatus({ tone: 'err', msg: `安装失败: ${msg}` });
-    } finally {
-      setInstallingId((current) => (current === item.id ? null : current));
-    }
-  };
-
-  const handleRefreshLocal = async () => {
-    setStatus(null);
-    try {
-      await refreshSlashCatalog();
-      await loadTargets();
-      setStatus({ tone: 'ok', msg: '本地命令/技能目录已刷新。' });
-    } catch (err) {
-      setStatus({ tone: 'err', msg: `刷新失败: ${describeError(err)}` });
-    }
-  };
-
-  return (
-    <div className="space-y-5">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h3 className="text-lg font-semibold text-fg">
-            {t(locale, 'settings.pluginStoreTitle')}
-          </h3>
-          <p className="mt-1 text-xs leading-relaxed text-fg-faint">
-            {t(locale, 'settings.pluginStoreDescription')}
-          </p>
-        </div>
-        <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">
-          <button
-            type="button"
-            onClick={() => void loadCatalog()}
-            disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-wait disabled:opacity-60"
-          >
-            <RefreshCw size={13} strokeWidth={2.2} className={loading ? 'animate-spin' : ''} />
-            刷新在线仓库
-          </button>
-          <button
-            type="button"
-            onClick={() => void handleRefreshLocal()}
-            className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
-          >
-            <RefreshCw size={13} strokeWidth={2.2} />
-            刷新本地目录
-          </button>
-        </div>
-      </div>
-
-      {status && (
-        <p
-          className={cn(
-            'text-[11px] leading-relaxed',
-            status.tone === 'ok' ? 'text-emerald-300' : 'text-rose-300',
-          )}
-        >
-          {status.msg}
-        </p>
-      )}
-
-      <div className="grid gap-3 rounded-lg border border-border-soft bg-bg-alt p-3 lg:grid-cols-[minmax(14rem,1fr)_12rem_15rem]">
-        <div className="relative">
-          <Search
-            size={14}
-            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg-faint"
-          />
-          <input
-            type="text"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="搜索 skill、插件、MCP、来源…"
-            className="w-full rounded-lg border border-border bg-bg py-2 pl-9 pr-3 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
-          />
-        </div>
-
-        <select
-          value={sourceId}
-          onChange={(event) => setSourceId(event.target.value)}
-          className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-fg outline-none focus:border-accent"
-        >
-          <option value="all">全部来源</option>
-          {sourceOptions.map((source) => (
-            <option key={source.id} value={source.id}>
-              {source.name} ({source.count})
-            </option>
-          ))}
-        </select>
-
-        <select
-          value={selectedTargetId}
-          onChange={(event) => setTargetId(event.target.value)}
-          disabled={targets.length === 0}
-          className="w-full rounded-lg border border-border bg-bg px-3 py-2 text-sm text-fg outline-none focus:border-accent disabled:opacity-60"
-        >
-          {targets.length === 0 ? (
-            <option value="">桌面版可安装</option>
-          ) : (
-            targets.map((target) => (
-              <option key={target.id} value={target.id}>
-                {target.label} ({target.skillCount})
-              </option>
-            ))
-          )}
-        </select>
-      </div>
-
-      <div className={SETTINGS_INNER_TABLIST_CLASS}>
-        {PLUGIN_STORE_KIND_FILTERS.map((item) => {
-          const active = kind === item.id;
-          return (
-            <button
-              key={item.id}
-              type="button"
-              onClick={() => setKind(item.id)}
-              className={cn(
-                SETTINGS_INNER_TAB_CLASS,
-                active
-                  ? 'border-accent bg-accent/15 text-fg shadow-[0_0_0_1px_color-mix(in_oklab,var(--accent)_32%,transparent)]'
-                  : 'border-transparent text-fg-dim hover:bg-panel hover:text-fg',
-              )}
-            >
-              {item.label}
-              <span className="ml-1 text-[11px] font-normal text-fg-faint">
-                {kindCounts.get(item.id) ?? 0}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-
-      {catalog.errors.length > 0 && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-100">
-          部分来源加载失败：
-          {catalog.errors.map((error) => `${error.sourceName}: ${error.message}`).join('；')}
-        </div>
-      )}
-
-      <div className="flex items-center justify-between gap-3 text-[11px] text-fg-faint">
-        <span>
-          共 {catalog.items.length} 项，当前显示 {filtered.length} 项
-        </span>
-        {catalog.loadedAtMs > 0 && (
-          <span>{new Date(catalog.loadedAtMs).toLocaleString()}</span>
-        )}
-      </div>
-
-      {loading && catalog.items.length === 0 ? (
-        <p className="rounded-lg border border-border bg-bg-alt px-4 py-8 text-center text-xs text-fg-faint">
-          正在加载在线仓库…
-        </p>
-      ) : filtered.length === 0 ? (
-        <p className="rounded-lg border border-border bg-bg-alt px-4 py-8 text-center text-xs text-fg-faint">
-          没有匹配的条目。
-        </p>
-      ) : (
-        <div className="grid gap-3 xl:grid-cols-2">
-          {filtered.map((item) => (
-            <PluginStoreItemCard
-              key={item.id}
-              item={item}
-              locale={locale}
-              translationKey={translationKey}
-              desktop={isTauri()}
-              installing={installingId === item.id}
-              copied={copiedId === item.id}
-              onAction={() => void handleAction(item)}
-              onOpen={() => item.sourceUrl && void openExternal(item.sourceUrl)}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function PluginStoreItemCard({
-  item,
-  locale,
-  translationKey,
-  desktop,
-  installing,
-  copied,
-  onAction,
-  onOpen,
-}: {
-  item: PluginStoreItem;
-  locale: Locale;
-  translationKey: string;
-  desktop: boolean;
-  installing: boolean;
-  copied: boolean;
-  onAction: () => void;
-  onOpen: () => void;
-}) {
-  const canInstallSkill = item.installKind === 'skill' && desktop;
-  const primaryDisabled = item.installKind === 'skill' && !canInstallSkill;
-  const actionLabel = primaryDisabled ? '桌面版安装' : pluginStoreActionLabel(item);
-  const { descriptionRef, description } = useVisiblePluginDescription(
-    item,
-    locale,
-    translationKey,
-  );
-
-  return (
-    <div className="flex min-h-[13rem] flex-col rounded-lg border border-border bg-bg-alt px-4 py-3">
-      <div className="flex flex-wrap items-center gap-1.5">
-        <span className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
-          {pluginStoreKindLabel(item.kind)}
-        </span>
-        <span className="rounded border border-border bg-panel px-1.5 py-0.5 text-[10px] text-fg-faint">
-          {pluginStoreTrustLabel(item)}
-        </span>
-        {item.category && (
-          <span className="rounded border border-border bg-panel px-1.5 py-0.5 text-[10px] text-fg-faint">
-            {item.category}
-          </span>
-        )}
-      </div>
-
-      <div className="mt-3 min-w-0 flex-1">
-        <h4 className="truncate text-sm font-semibold text-fg">{item.title}</h4>
-        <p
-          ref={descriptionRef}
-          className="mt-1 line-clamp-3 text-xs leading-relaxed text-fg-dim"
-        >
-          {description}
-        </p>
-        <div className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-fg-faint">
-          <span>{item.sourceName}</span>
-          {item.author && <span>{item.author}</span>}
-          {item.version && <span>v{item.version}</span>}
-        </div>
-      </div>
-
-      <div className="mt-4 flex flex-wrap items-center justify-between gap-2">
-        <button
-          type="button"
-          onClick={onAction}
-          disabled={installing || primaryDisabled}
-          className="inline-flex items-center gap-1.5 rounded border border-accent bg-accent/15 px-2.5 py-1 text-xs font-medium text-fg transition-colors hover:bg-accent/25 disabled:cursor-not-allowed disabled:border-border disabled:bg-panel disabled:text-fg-faint"
-        >
-          {copied ? <Check size={13} /> : <DownloadCloud size={13} />}
-          {installing ? '安装中…' : copied ? '已复制' : actionLabel}
-        </button>
-        {item.sourceUrl && (
-          <button
-            type="button"
-            onClick={onOpen}
-            className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
-          >
-            <ExternalLink size={13} />
-            来源
-          </button>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function useVisiblePluginDescription(
-  item: PluginStoreItem,
-  locale: Locale,
-  translationKey: string,
-): {
-  descriptionRef: RefObject<HTMLParagraphElement>;
-  description: string;
-} {
-  const descriptionRef = useRef<HTMLParagraphElement>(null);
-  const shouldTranslate = shouldTranslatePluginDescription(item.description, locale);
-  const [visible, setVisible] = useState(false);
-  const [description, setDescription] = useState(() => {
-    if (!shouldTranslate) return item.description;
-    return (
-      cachedPluginDescriptionTranslation(item.id, item.description, locale) ??
-      item.description
-    );
-  });
-
-  useEffect(() => {
-    if (!shouldTranslate) {
-      setDescription(item.description);
-      return;
-    }
-    setDescription(
-      cachedPluginDescriptionTranslation(item.id, item.description, locale) ??
-        item.description,
-    );
-  }, [item.description, item.id, locale, shouldTranslate, translationKey]);
-
-  useEffect(() => {
-    if (!shouldTranslate) return;
-    if (visible) return;
-
-    const node = descriptionRef.current;
-    if (!node || typeof IntersectionObserver === 'undefined') {
-      setVisible(true);
-      return;
-    }
-
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (!entries.some((entry) => entry.isIntersecting)) return;
-        setVisible(true);
-        observer.disconnect();
-      },
-      { rootMargin: '120px 0px', threshold: 0.01 },
-    );
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [item.description, item.id, locale, shouldTranslate, translationKey, visible]);
-
-  useEffect(() => {
-    if (!shouldTranslate || !visible) return;
-    let active = true;
-
-    void translatePluginDescriptionCached(item.id, item.description, locale).then(
-      (translated) => {
-        if (active) setDescription(translated);
-      },
-    );
-
-    return () => {
-      active = false;
-    };
-  }, [item.description, item.id, locale, shouldTranslate, translationKey, visible]);
-
-  return { descriptionRef, description };
-}
 
 function CommandsSettings({ locale }: { locale: Locale }) {
   const [query, setQuery] = useState('');
@@ -6240,41 +5666,21 @@ function FreeChannelRow({
               {t(locale, 'settings.models.fetchModels')}
             </button>
           </div>
-          <input
-            type="text"
-            value={modelValue}
-            onChange={(event) => setModelValue(event.target.value)}
-            onBlur={() => {
-              if (commitModel(modelValue)) reproxy();
+          <select
+            value={modelSelectValue}
+            onChange={(event) => {
+              if (!event.target.value) return;
+              if (commitModel(event.target.value)) reproxy();
             }}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') event.currentTarget.blur();
-            }}
-            placeholder={
-              channel.defaultModel ||
-              t(locale, 'settings.freeChannels.modelPlaceholderLocal')
-            }
-            autoComplete="off"
-            spellCheck={false}
-            className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 text-sm text-fg outline-none transition-colors focus:border-accent"
-          />
-          {modelOptions.length > 0 && (
-            <select
-              value={modelSelectValue}
-              onChange={(event) => {
-                if (!event.target.value) return;
-                if (commitModel(event.target.value)) reproxy();
-              }}
-              className="h-8 w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
-            >
-              <option value="">{t(locale, 'settings.models.selectModel')}</option>
-              {modelOptions.map((model) => (
-                <option key={model} value={model}>
-                  {model}
-                </option>
-              ))}
-            </select>
-          )}
+            className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+          >
+            <option value="">{t(locale, 'settings.models.selectModel')}</option>
+            {modelOptions.map((model) => (
+              <option key={model} value={model}>
+                {model}
+              </option>
+            ))}
+          </select>
           {modelRefresh.error && (
             <p className="text-[11px] leading-relaxed text-amber-300">
               {modelRefresh.error}

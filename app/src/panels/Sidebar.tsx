@@ -18,7 +18,10 @@ import {
   X,
 } from 'lucide-react';
 import StatusIndicator, { type StatusTone } from '@/components/StatusIndicator';
+import WorkspaceListSelect from '@/components/WorkspaceListSelect';
 import { cn } from '@/lib/cn';
+import { pickFolder } from '@/lib/folderPicker';
+import { workspacePathKey } from '@/lib/workspaceHistory';
 import {
   sessionLiveStatus,
   useStore,
@@ -282,6 +285,11 @@ export default function Sidebar() {
   const workspaces = useStore((s) => s.workspaces);
   const sessionTree = useStore((s) => s.sessionTree);
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
+  const selectedWorkspaceIdRaw = useStore((s) => s.selectedWorkspaceId);
+  // The top switcher and workspace ordering follow an explicit, navigation-only
+  // selection that does NOT change when the user opens a session in another
+  // workspace. Fall back to the active workspace before history init populates it.
+  const selectedWorkspaceId = selectedWorkspaceIdRaw ?? activeWorkspaceId;
   const activeSessionId = useStore((s) => s.activeSessionId);
   const runningSessions = useStore((s) => s.runningSessions);
   const runningSessionProgress = useStore((s) => s.runningSessionProgress);
@@ -754,6 +762,27 @@ export default function Sidebar() {
     [],
   );
 
+  const handleBrowseLocalWorkspace = useCallback(async () => {
+    const path = await pickFolder(t(locale, 'workspace.chooseFolder'));
+    if (!path) return;
+    const key = workspacePathKey(path);
+    const existing = useStore
+      .getState()
+      .workspaces.find(
+        (workspace) =>
+          workspace.path && workspacePathKey(workspace.path) === key,
+      );
+    if (existing) {
+      window.alert(
+        t(locale, 'workspaceList.alreadyExists').replace(
+          '{name}',
+          existing.name,
+        ),
+      );
+    }
+    setWorkspace(path);
+  }, [locale, setWorkspace]);
+
   const loadMoreWorkspace = useCallback((workspaceId: string) => {
     setWorkspaceLimits((prev) => ({
       ...prev,
@@ -880,13 +909,24 @@ export default function Sidebar() {
           return group.tabSessions.length > 0;
         })
         .sort((a, b) => {
+          const activeDiff =
+            (a.workspace.id === selectedWorkspaceId ? 0 : 1) -
+            (b.workspace.id === selectedWorkspaceId ? 0 : 1);
+          if (activeDiff !== 0) return activeDiff;
           const liveDiff =
             workspaceLiveRank(a.sessions, a.workspace.id, sidebarLiveState) -
             workspaceLiveRank(b.sessions, b.workspace.id, sidebarLiveState);
           if (liveDiff !== 0) return liveDiff;
           return b.workspace.updatedAt - a.workspace.updatedAt;
         }),
-    [activeTab, normalizedQuery, sessionTree, sidebarLiveState, workspaces],
+    [
+      activeTab,
+      selectedWorkspaceId,
+      normalizedQuery,
+      sessionTree,
+      sidebarLiveState,
+      workspaces,
+    ],
   );
 
   const filteredFlatSessions = useMemo(
@@ -980,6 +1020,19 @@ export default function Sidebar() {
         <span className="text-sm font-semibold tracking-tight text-fg">
           FreeUltraCode
         </span>
+      </div>
+
+      {/* Workspace switcher */}
+      <div className="border-b border-border-soft px-3 py-2.5">
+        <WorkspaceListSelect
+          workspaces={workspaces}
+          activeWorkspaceId={selectedWorkspaceId}
+          locale={locale}
+          onSelect={setWorkspace}
+          onBrowseLocal={() => {
+            void handleBrowseLocalWorkspace();
+          }}
+        />
       </div>
 
       {/* Primary actions */}

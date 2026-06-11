@@ -10,11 +10,15 @@ import {
 import {
   Bone,
   Box,
+  Boxes,
   Check,
   Copy,
   Download,
   ExternalLink,
   FileText,
+  Folder,
+  FolderOpen,
+  FolderPlus,
   Gamepad2,
   Info,
   Languages,
@@ -29,15 +33,20 @@ import {
   Trash2,
   TriangleAlert,
   X,
+  Zap,
   type LucideIcon,
 } from 'lucide-react';
 import { cn } from '@/lib/cn';
+import { basename, pickFolder } from '@/lib/folderPicker';
+import { uniqueWorkspaceHistory, workspacePathKey } from '@/lib/workspaceHistory';
 import {
+  dedupeFolders,
   mergeRecommendedMcpServers,
   projectEngineLabel,
   projectHealth,
   projectSettingsFromMetadata,
   projectSettingsPatch,
+  preferUnrealMcpServer,
   isGameProjectEngine,
   settingsWithDetectedGameFeatures,
   type ProjectLspServerConfig,
@@ -61,12 +70,33 @@ import {
   GAME_PROJECT_COMMAND_NAMES,
   buildSlashSuggestions,
   isGameProjectCommandName,
+  slashText,
   type SlashSuggestion,
 } from '@/lib/slashCommands';
+import {
+  MCP_CATEGORY_LABELS,
+  loadMcpRegistryServers,
+  mcpCommandText,
+  rankMcpServers,
+  type McpServerDefinition,
+  type RankedMcpServerDefinition,
+} from '@/lib/mcpCatalog';
 import {
   loadThreeDGenerationSettings,
   saveThreeDGenerationSettings,
 } from '@/lib/threeDGeneration';
+import {
+  MESH_LIBRARIES,
+  MESH_LIBRARY_CATEGORY_LABELS,
+  loadMeshLibrarySettings,
+  meshLibraryReady,
+  meshLibraryUsability,
+  meshLibraryUsable,
+  saveMeshLibrarySettings,
+  type MeshLibraryAccountSettings,
+  type MeshLibraryDefinition,
+  type MeshLibraryId,
+} from '@/lib/meshLibrary';
 import {
   listWorkspaceDirectory,
   installProjectLspServer,
@@ -79,15 +109,27 @@ import {
   ueMcpSetupProject,
   tauriAvailable,
   UE_MCP_SERVER_ID,
+  skillInstallTargets,
+  slashCatalog,
+  onSlashCatalogUpdated,
   type ProjectEnvironmentScan,
   type ProjectLspInstallResult,
   type ProjectLspProbeResult,
   type ProjectMcpProbeResult,
+  type SkillInstallTarget,
+  type SlashCatalogEntry,
   type UeMcpSetupResult,
 } from '@/lib/tauri';
 import { historyStore } from '@/store/history/store';
 import type { WorkspaceRecord, WorkspaceSummary } from '@/store/history/types';
 import { useStore } from '@/store/useStore';
+import { PluginStorePanel } from '@/panels/PluginStorePanel';
+import { type Locale } from '@/lib/i18n';
+import {
+  cachedPluginDescriptionTranslation,
+  shouldTranslatePluginDescription,
+  translatePluginDescriptionCached,
+} from '@/lib/pluginStoreTranslation';
 import {
   ThreeDGenerationSettingsPanel,
   RiggingSettingsPanel,
@@ -97,6 +139,7 @@ import {
 type ProjectSettingsTab =
   | 'overview'
   | 'mesh'
+  | 'meshLibrary'
   | 'rigging'
   | 'gameExperts'
   | 'commands'
@@ -108,12 +151,13 @@ type ProjectSettingsTab =
 const tabs: { id: ProjectSettingsTab; label: string; Icon: LucideIcon }[] = [
   { id: 'overview', label: '概览', Icon: Info },
   { id: 'mesh', label: 'Mesh 渠道', Icon: Box },
+  { id: 'meshLibrary', label: '模型库', Icon: Boxes },
   { id: 'rigging', label: '绑定渠道', Icon: Bone },
   { id: 'gameExperts', label: '游戏专家', Icon: Gamepad2 },
   { id: 'commands', label: '命令', Icon: SlashSquare },
-  { id: 'mcp', label: 'MCP配置', Icon: Terminal },
+  { id: 'mcp', label: 'MCP', Icon: Terminal },
   { id: 'lsp', label: 'LSP', Icon: Languages },
-  { id: 'skills', label: 'Skill', Icon: Box },
+  { id: 'skills', label: 'Skills', Icon: Box },
   { id: 'automation', label: '权限/自动化', Icon: SlidersHorizontal },
 ];
 
@@ -184,6 +228,7 @@ function shouldShowGameFeatures(
 
 const GAME_FEATURE_TABS: ReadonlySet<ProjectSettingsTab> = new Set([
   'mesh',
+  'meshLibrary',
   'rigging',
   'gameExperts',
   'commands',
@@ -286,6 +331,181 @@ function ToggleRow({
         className="mt-0.5 h-4 w-4 shrink-0 accent-accent"
       />
     </label>
+  );
+}
+
+type ProjectSubTabId = 'installed' | 'registry';
+
+const PROJECT_SUB_TAB_LABELS: Record<ProjectSubTabId, string> = {
+  installed: '已安装',
+  registry: '仓库',
+};
+
+/** Append a skill folder name to its root path, picking the right separator. */
+function joinSkillPath(root: string, skill: string): string {
+  const sep = root.includes('\\') && !root.includes('/') ? '\\' : '/';
+  const trimmed = root.replace(/[\\/]+$/, '');
+  return `${trimmed}${sep}${skill}`;
+}
+
+function projectSkillEmptyText(label: string): string {
+  const family = label.replace(/\s*项目\s*Skill\s*$/, '').trim() || label;
+  return `项目中 ${family} Skill 数目是 0`;
+}
+
+/**
+ * Auto-translating description for an installed skill. Mirrors the plugin store
+ * card behaviour: cached translation shown immediately, async refresh on view.
+ */
+function useTranslatedSkillDescription(
+  id: string,
+  description: string,
+  locale: Locale,
+): string {
+  const shouldTranslate = shouldTranslatePluginDescription(description, locale);
+  const [text, setText] = useState(() => {
+    if (!shouldTranslate) return description;
+    return cachedPluginDescriptionTranslation(id, description, locale) ?? description;
+  });
+
+  useEffect(() => {
+    if (!shouldTranslate) {
+      setText(description);
+      return;
+    }
+    setText(
+      cachedPluginDescriptionTranslation(id, description, locale) ?? description,
+    );
+    let active = true;
+    void translatePluginDescriptionCached(id, description, locale).then(
+      (translated) => {
+        if (active) setText(translated);
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [id, description, locale, shouldTranslate]);
+
+  return text;
+}
+
+/**
+ * Single installed-skill card. Matches the MCP / LSP card layout so the Skills
+ * tab reads the same way: slash name, scope badge, translated summary, path.
+ */
+function InstalledSkillCard({
+  name,
+  scope,
+  enabled,
+  description,
+  path,
+  locale,
+}: {
+  name: string;
+  scope: 'project' | 'global';
+  enabled: boolean;
+  description: string;
+  path: string;
+  locale: Locale;
+}) {
+  const translated = useTranslatedSkillDescription(
+    `skill-card:${scope}:${name}`,
+    description,
+    locale,
+  );
+  const scopeLabel = scope === 'project' ? '项目' : '全局';
+  const scopeClass =
+    scope === 'project'
+      ? 'border-sky-500/40 bg-sky-500/10 text-sky-300'
+      : 'border-violet-500/40 bg-violet-500/10 text-violet-300';
+
+  return (
+    <div
+      className={cn(
+        'flex min-h-[6.5rem] flex-col gap-2 rounded-md border border-border bg-bg-alt p-3',
+        !enabled && 'opacity-60',
+      )}
+    >
+      <div className="flex min-w-0 items-center gap-2">
+        <Zap size={13} className="shrink-0 text-[var(--accent-3)]" />
+        <code className="truncate font-mono text-sm font-semibold text-accent">
+          /{name}
+        </code>
+        <span
+          className={cn(
+            'ml-auto shrink-0 rounded border px-1.5 py-0.5 text-[10px]',
+            scopeClass,
+          )}
+        >
+          {scopeLabel}
+        </span>
+      </div>
+      {translated.trim() ? (
+        <p className="line-clamp-3 text-xs leading-relaxed text-fg-dim">
+          {translated}
+        </p>
+      ) : null}
+      <div
+        className="mt-auto truncate font-mono text-[10px] text-fg-faint"
+        title={path}
+      >
+        {path}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Shared underline-style sub-tab bar used by the MCP / LSP / Skills panels so
+ * every project capability page looks and reads the same way.
+ */
+function ProjectSubTabBar({
+  active,
+  onChange,
+  installedCount,
+  registryCount,
+}: {
+  active: ProjectSubTabId;
+  onChange: (id: ProjectSubTabId) => void;
+  installedCount: number;
+  registryCount?: number;
+}) {
+  const items: { id: ProjectSubTabId; count?: number }[] = [
+    { id: 'installed', count: installedCount },
+    { id: 'registry', count: registryCount },
+  ];
+  return (
+    <div className="flex items-center gap-1 border-b border-border">
+      {items.map((item) => {
+        const isActive = active === item.id;
+        return (
+          <button
+            key={item.id}
+            type="button"
+            onClick={() => onChange(item.id)}
+            className={cn(
+              'px-4 py-2 text-xs font-medium transition-colors',
+              isActive
+                ? '-mb-px border-b-2 border-accent text-fg'
+                : 'text-fg-faint hover:text-fg',
+            )}
+          >
+            {PROJECT_SUB_TAB_LABELS[item.id]}
+            {typeof item.count === 'number' ? (
+              <span
+                className={cn(
+                  'ml-1.5 rounded-full px-1.5 py-0.5 text-[10px]',
+                  isActive ? 'bg-accent/20 text-accent' : 'bg-bg-alt text-fg-faint',
+                )}
+              >
+                {item.count}
+              </span>
+            ) : null}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
@@ -410,6 +630,425 @@ function ProjectCommandRow({
   );
 }
 
+function MeshLibraryCard({
+  library,
+  settings,
+  onToggle,
+  onKeyChange,
+}: {
+  library: MeshLibraryDefinition;
+  settings: MeshLibraryAccountSettings;
+  onToggle: (enabled: boolean) => void;
+  onKeyChange: (value: string) => void;
+}) {
+  const enabled = settings.enabledIds.includes(library.id);
+  const ready = meshLibraryReady(library.id, settings);
+  const usability = meshLibraryUsability(library.id, settings);
+  const keyValue = settings.apiKeys[library.id] ?? '';
+  const searchKindLabel =
+    library.searchKind === 'public-api'
+      ? '免费 API'
+      : library.searchKind === 'api-key'
+        ? 'API Key 搜索'
+        : '深链搜索页';
+  return (
+    <section className="flex flex-col gap-2.5 rounded-md border border-border bg-panel-2 p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-1.5">
+            <span className="truncate text-sm font-semibold text-fg">{library.label}</span>
+            <span className="shrink-0 rounded border border-border-soft bg-bg-alt px-1.5 py-0.5 text-[10px] text-fg-faint">
+              {MESH_LIBRARY_CATEGORY_LABELS[library.category]}
+            </span>
+          </div>
+          <span className="mt-1 block max-h-12 overflow-hidden text-xs leading-snug text-fg-faint">
+            {library.note}
+          </span>
+        </div>
+        <button
+          type="button"
+          onClick={() => void openExternal(library.homepageUrl)}
+          title="打开来源"
+          aria-label="打开来源"
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-border-soft bg-bg-alt text-fg-faint hover:border-accent hover:text-fg"
+        >
+          <ExternalLink size={13} />
+        </button>
+      </div>
+
+      <div className="flex flex-wrap items-center gap-1">
+        <span className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">
+          {searchKindLabel}
+        </span>
+        {usability === 'usable' ? (
+          <span className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300">
+            真正可用
+          </span>
+        ) : usability === 'needs-key' ? (
+          <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300">
+            待配置 Key
+          </span>
+        ) : (
+          <span className="rounded border border-border-soft bg-bg-alt px-1.5 py-0.5 text-[10px] text-fg-faint">
+            仅深链浏览
+          </span>
+        )}
+        {library.supportsDownload ? (
+          <span className="rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300">
+            可直接下载
+          </span>
+        ) : (
+          <span className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300">
+            账号内下载
+          </span>
+        )}
+        {library.needsKey ? (
+          <span
+            className={cn(
+              'rounded border px-1.5 py-0.5 text-[10px]',
+              ready
+                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                : 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+            )}
+          >
+            {ready ? '已配置 Key' : '需 API Key'}
+          </span>
+        ) : null}
+      </div>
+
+      {(library.needsKey || library.keyLabel) && (
+        <label className="grid gap-1">
+          <span className="text-[11px] font-semibold text-fg-dim">
+            {library.keyLabel ?? 'API Key'}
+          </span>
+          <input
+            type="password"
+            value={keyValue}
+            placeholder={library.keyPlaceholder ?? '粘贴 API Key / Token'}
+            onChange={(event) => onKeyChange(event.currentTarget.value)}
+            className="w-full rounded-md border border-border bg-bg-alt px-2.5 py-1.5 text-xs text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
+          />
+          {library.credentialUrl ? (
+            <button
+              type="button"
+              onClick={() => void openExternal(library.credentialUrl!)}
+              className="justify-self-start text-[11px] text-accent hover:underline"
+            >
+              获取 / 管理凭据
+            </button>
+          ) : null}
+        </label>
+      )}
+
+      <label className="mt-auto flex items-center justify-between gap-2 rounded border border-border-soft bg-bg-alt px-2.5 py-2">
+        <span className="text-xs font-semibold text-fg">在 /mesh-search 中启用</span>
+        <input
+          type="checkbox"
+          checked={enabled}
+          onChange={(event) => onToggle(event.currentTarget.checked)}
+          className="h-4 w-4 shrink-0 accent-accent"
+        />
+      </label>
+    </section>
+  );
+}
+
+function MeshLibrarySettings() {
+  const [settings, setSettings] = useState<MeshLibraryAccountSettings>(() =>
+    loadMeshLibrarySettings(),
+  );
+  const [query, setQuery] = useState('');
+  const [innerTab, setInnerTab] = useState<'enabled' | 'repository'>('enabled');
+
+  const persist = useCallback((next: MeshLibraryAccountSettings) => {
+    setSettings(next);
+    saveMeshLibrarySettings(next);
+  }, []);
+
+  const toggleLibrary = useCallback(
+    (id: MeshLibraryId, enabled: boolean) => {
+      persist({
+        ...settings,
+        enabledIds: enabled
+          ? Array.from(new Set([...settings.enabledIds, id]))
+          : settings.enabledIds.filter((value) => value !== id),
+      });
+    },
+    [persist, settings],
+  );
+
+  const setKey = useCallback(
+    (id: MeshLibraryId, value: string) => {
+      const apiKeys = { ...settings.apiKeys };
+      const trimmed = value.trim();
+      if (trimmed) apiKeys[id] = value;
+      else delete apiKeys[id];
+      persist({ ...settings, apiKeys });
+    },
+    [persist, settings],
+  );
+
+  // "已启用" only lists libraries that genuinely work end to end: toggled on AND
+  // actually able to run an in-app search/download (key configured where the API
+  // requires one). Toggling a library on without its key keeps it out of here.
+  const usableLibraries = useMemo(
+    () =>
+      MESH_LIBRARIES.filter(
+        (library) =>
+          settings.enabledIds.includes(library.id) &&
+          meshLibraryUsable(library.id, settings),
+      ),
+    [settings],
+  );
+
+  // Enabled-but-not-yet-usable libraries (e.g. toggled on but missing API key)
+  // so the user understands why they are not in the working set.
+  const pendingLibraries = useMemo(
+    () =>
+      MESH_LIBRARIES.filter(
+        (library) =>
+          settings.enabledIds.includes(library.id) &&
+          !meshLibraryUsable(library.id, settings),
+      ),
+    [settings],
+  );
+
+  const filteredRepository = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return MESH_LIBRARIES;
+    return MESH_LIBRARIES.filter((library) =>
+      `${library.label} ${library.note} ${MESH_LIBRARY_CATEGORY_LABELS[library.category]}`
+        .toLowerCase()
+        .includes(q),
+    );
+  }, [query]);
+
+  const usableCount = usableLibraries.length;
+  const enabledCount = settings.enabledIds.length;
+
+  return (
+    <div className="grid gap-4">
+      <section className="rounded-md border border-border bg-panel-2 p-4">
+        <div className="text-sm font-semibold text-fg">在线模型库</div>
+        <div className="mt-1 text-xs leading-relaxed text-fg-faint">
+          配置 /mesh-search 使用的在线 3D 模型库。在 AI 输入框发送
+          <code className="mx-1 rounded bg-bg-alt px-1 py-0.5 font-mono text-accent">
+            /mesh-search 关键字
+          </code>
+          会按关键字搜索「已启用」中真正可用的库；可直接下载的结果会下载到工作区并在会话中预览。
+        </div>
+        <div className="mt-2 text-[11px] text-fg-faint">
+          可用 {usableCount} 个 · 已开启 {enabledCount} 个 · 仓库共 {MESH_LIBRARIES.length} 个
+        </div>
+      </section>
+
+      <div className="flex gap-1 rounded-lg border border-border bg-panel-2 p-1">
+        {(
+          [
+            { id: 'enabled' as const, label: '已启用', count: usableCount },
+            { id: 'repository' as const, label: '仓库', count: MESH_LIBRARIES.length },
+          ]
+        ).map((tab) => (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => setInnerTab(tab.id)}
+            className={cn(
+              'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors',
+              innerTab === tab.id
+                ? 'bg-accent/15 text-accent'
+                : 'text-fg-faint hover:text-fg',
+            )}
+          >
+            <span>{tab.label}</span>
+            <span
+              className={cn(
+                'rounded px-1.5 py-0.5 text-[10px]',
+                innerTab === tab.id
+                  ? 'bg-accent/20 text-accent'
+                  : 'bg-bg-alt text-fg-faint',
+              )}
+            >
+              {tab.count}
+            </span>
+          </button>
+        ))}
+      </div>
+
+      {innerTab === 'enabled' ? (
+        <MeshLibraryEnabledTab
+          usableLibraries={usableLibraries}
+          pendingLibraries={pendingLibraries}
+          settings={settings}
+          onToggle={toggleLibrary}
+          onKeyChange={setKey}
+          onBrowseRepository={() => setInnerTab('repository')}
+        />
+      ) : (
+        <MeshLibraryRepositoryTab
+          libraries={filteredRepository}
+          settings={settings}
+          query={query}
+          onQueryChange={setQuery}
+          onToggle={toggleLibrary}
+          onKeyChange={setKey}
+        />
+      )}
+
+      <div className="grid gap-2 rounded-md border border-border bg-panel-2 p-3 sm:grid-cols-2">
+        <label className="flex items-center justify-between gap-2 rounded border border-border-soft bg-bg-alt px-3 py-2">
+          <span className="text-xs font-semibold text-fg">自动下载可下载结果</span>
+          <input
+            type="checkbox"
+            checked={settings.autoDownload}
+            onChange={(event) =>
+              persist({ ...settings, autoDownload: event.currentTarget.checked })
+            }
+            className="h-4 w-4 shrink-0 accent-accent"
+          />
+        </label>
+        <label className="flex items-center justify-between gap-2 rounded border border-border-soft bg-bg-alt px-3 py-2">
+          <span className="text-xs font-semibold text-fg">每个库返回上限</span>
+          <input
+            type="number"
+            min={1}
+            max={24}
+            value={settings.perLibraryLimit}
+            onChange={(event) =>
+              persist({
+                ...settings,
+                perLibraryLimit: Number(event.currentTarget.value) || 6,
+              })
+            }
+            className="w-16 rounded-md border border-border bg-bg px-2 py-1 text-xs text-fg focus:border-accent focus:outline-none"
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function MeshLibraryEnabledTab({
+  usableLibraries,
+  pendingLibraries,
+  settings,
+  onToggle,
+  onKeyChange,
+  onBrowseRepository,
+}: {
+  usableLibraries: MeshLibraryDefinition[];
+  pendingLibraries: MeshLibraryDefinition[];
+  settings: MeshLibraryAccountSettings;
+  onToggle: (id: MeshLibraryId, enabled: boolean) => void;
+  onKeyChange: (id: MeshLibraryId, value: string) => void;
+  onBrowseRepository: () => void;
+}) {
+  if (usableLibraries.length === 0 && pendingLibraries.length === 0) {
+    return (
+      <div className="grid gap-2 rounded-lg border border-border bg-bg-alt px-4 py-8 text-center">
+        <p className="text-xs text-fg-faint">
+          还没有真正可用的模型库。前往「仓库」开启并配置好 API Key 后，能真正搜索 / 下载的库会出现在这里。
+        </p>
+        <button
+          type="button"
+          onClick={onBrowseRepository}
+          className="justify-self-center rounded-md border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs font-semibold text-accent hover:bg-accent/20"
+        >
+          去仓库添加
+        </button>
+      </div>
+    );
+  }
+  return (
+    <div className="grid gap-3">
+      {usableLibraries.length > 0 ? (
+        <div className="grid gap-2.5 lg:grid-cols-2 2xl:grid-cols-3">
+          {usableLibraries.map((library) => (
+            <MeshLibraryCard
+              key={library.id}
+              library={library}
+              settings={settings}
+              onToggle={(enabled) => onToggle(library.id, enabled)}
+              onKeyChange={(value) => onKeyChange(library.id, value)}
+            />
+          ))}
+        </div>
+      ) : null}
+
+      {pendingLibraries.length > 0 ? (
+        <section className="grid gap-2 rounded-md border border-amber-500/30 bg-amber-500/5 p-3">
+          <div className="text-[11px] font-semibold text-amber-300">
+            已开启但还不能用（需补全 API Key）
+          </div>
+          <div className="grid gap-2.5 lg:grid-cols-2 2xl:grid-cols-3">
+            {pendingLibraries.map((library) => (
+              <MeshLibraryCard
+                key={library.id}
+                library={library}
+                settings={settings}
+                onToggle={(enabled) => onToggle(library.id, enabled)}
+                onKeyChange={(value) => onKeyChange(library.id, value)}
+              />
+            ))}
+          </div>
+        </section>
+      ) : null}
+    </div>
+  );
+}
+
+function MeshLibraryRepositoryTab({
+  libraries,
+  settings,
+  query,
+  onQueryChange,
+  onToggle,
+  onKeyChange,
+}: {
+  libraries: MeshLibraryDefinition[];
+  settings: MeshLibraryAccountSettings;
+  query: string;
+  onQueryChange: (value: string) => void;
+  onToggle: (id: MeshLibraryId, enabled: boolean) => void;
+  onKeyChange: (id: MeshLibraryId, value: string) => void;
+}) {
+  return (
+    <div className="grid gap-3">
+      <div className="relative">
+        <Search
+          size={14}
+          className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg-faint"
+        />
+        <input
+          type="text"
+          value={query}
+          onChange={(event) => onQueryChange(event.currentTarget.value)}
+          placeholder="搜索模型库名称、用途..."
+          className="w-full rounded-lg border border-border bg-bg-alt py-2 pl-9 pr-3 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
+        />
+      </div>
+
+      {libraries.length === 0 ? (
+        <p className="rounded-lg border border-border bg-bg-alt px-4 py-6 text-center text-xs text-fg-faint">
+          没有匹配的模型库。
+        </p>
+      ) : (
+        <div className="grid gap-2.5 lg:grid-cols-2 2xl:grid-cols-3">
+          {libraries.map((library) => (
+            <MeshLibraryCard
+              key={library.id}
+              library={library}
+              settings={settings}
+              onToggle={(enabled) => onToggle(library.id, enabled)}
+              onKeyChange={(value) => onKeyChange(library.id, value)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ProbeBadge({ result }: { result?: ProjectMcpProbeResult }) {
   if (!result) {
     return (
@@ -454,6 +1093,216 @@ function LspProbeBadge({ result }: { result?: ProjectLspProbeResult }) {
       {result.ok ? '命令可用' : '未找到'}
     </span>
   );
+}
+
+function McpTrustBadge({ trust }: { trust: McpServerDefinition['trust'] }) {
+  return (
+    <span className="shrink-0 rounded border border-border-soft bg-bg-alt px-1.5 py-0.5 text-[10px] text-fg-faint">
+      {trust === 'official'
+        ? '官方'
+        : trust === 'curated'
+          ? '精选'
+          : trust === 'registry'
+            ? 'Registry'
+            : '社区'}
+    </span>
+  );
+}
+
+function McpRegistryView({
+  servers,
+  query,
+  onQueryChange,
+  configuredIds,
+  loading,
+  error,
+  onRefresh,
+  onInstall,
+  onUninstall,
+}: {
+  servers: RankedMcpServerDefinition[];
+  query: string;
+  onQueryChange: (value: string) => void;
+  configuredIds: Set<string>;
+  loading: boolean;
+  error: string | null;
+  onRefresh: () => void;
+  onInstall: (definition: McpServerDefinition) => void;
+  onUninstall: (id: string) => void;
+}) {
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+  const copyConnection = async (server: McpServerDefinition, text: string) => {
+    await navigator.clipboard?.writeText(text);
+    setCopiedId(server.id);
+    window.setTimeout(() => {
+      setCopiedId((current) => (current === server.id ? null : current));
+    }, 1500);
+  };
+
+  return (
+    <div className="grid gap-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <div className="relative min-w-[16rem] flex-1">
+          <Search
+            size={14}
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg-faint"
+          />
+          <input
+            type="text"
+            value={query}
+            onChange={(event) => onQueryChange(event.currentTarget.value)}
+            placeholder="搜索 MCP 名称、用途、命令、URL 或分类..."
+            className="w-full rounded-lg border border-border bg-bg-alt py-2 pl-9 pr-3 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
+          />
+        </div>
+        <button
+          type="button"
+          onClick={onRefresh}
+          disabled={loading}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-alt px-3 py-2 text-xs text-fg-dim hover:border-accent hover:text-fg disabled:cursor-wait disabled:opacity-60"
+        >
+          <RefreshCw size={13} className={loading ? 'animate-spin' : ''} />
+          刷新在线 MCP
+        </button>
+      </div>
+
+      {error ? (
+        <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-100">
+          在线 MCP Registry 加载失败：{error}
+        </div>
+      ) : null}
+
+      {loading ? (
+        <div className="rounded-lg border border-border-soft bg-bg-alt px-3 py-2 text-[11px] text-fg-faint">
+          正在加载在线 MCP Registry...
+        </div>
+      ) : null}
+
+      {servers.length === 0 ? (
+        <p className="rounded-lg border border-border bg-bg-alt px-4 py-6 text-center text-xs text-fg-faint">
+          没有匹配的 MCP。
+        </p>
+      ) : (
+        <div className="grid gap-2.5 lg:grid-cols-2 2xl:grid-cols-3">
+          {servers.map((server) => {
+            const installed = configuredIds.has(server.id);
+            const installable =
+              server.installable !== false &&
+              server.transport === 'stdio' &&
+              server.command.trim().length > 0;
+            const connectionText = installable
+              ? mcpCommandText(server)
+              : server.connectionUrl ?? server.url ?? server.sourceUrl;
+            const copied = copiedId === server.id;
+            return (
+              <section
+                key={server.id}
+                className="flex min-h-[190px] flex-col gap-2.5 rounded-md border border-border bg-panel-2 p-3"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="flex min-w-0 items-center gap-1.5">
+                      <span className="truncate text-sm font-semibold text-fg">
+                        {server.title}
+                      </span>
+                      <McpTrustBadge trust={server.trust} />
+                    </div>
+                    <span className="mt-1 block max-h-12 overflow-hidden text-xs leading-snug text-fg-faint">
+                      {server.description}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => void openExternal(server.sourceUrl)}
+                    title="打开来源"
+                    aria-label="打开来源"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded border border-border-soft bg-bg-alt text-fg-faint hover:border-accent hover:text-fg"
+                  >
+                    <ExternalLink size={13} />
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap gap-1">
+                  <span className="rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">
+                    {MCP_CATEGORY_LABELS[server.category]}
+                  </span>
+                  {!installable ? (
+                    <span className="rounded border border-sky-500/30 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-300">
+                      远程 {server.transport}
+                    </span>
+                  ) : null}
+                  {server.version ? (
+                    <span className="rounded border border-border-soft bg-bg-alt px-1.5 py-0.5 text-[10px] text-fg-faint">
+                      v{server.version}
+                    </span>
+                  ) : null}
+                  {requiredEnv(server).map((spec) => (
+                    <span
+                      key={spec.key}
+                      className="rounded border border-amber-500/40 bg-amber-500/10 px-1.5 py-0.5 text-[10px] text-amber-300"
+                      title={`需要配置 ${spec.label}`}
+                    >
+                      需 {spec.label}
+                    </span>
+                  ))}
+                </div>
+
+                <div className="mt-auto grid gap-2">
+                  <div
+                    className="truncate rounded border border-border-soft bg-bg-alt px-2 py-1 font-mono text-[11px] text-fg-dim"
+                    title={connectionText}
+                  >
+                    {connectionText}
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {installed ? (
+                      <>
+                        <span className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/10 px-2 py-1 text-[11px] font-semibold text-emerald-300">
+                          <Check size={12} />
+                          已安装
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => onUninstall(server.id)}
+                          className="inline-flex items-center gap-1 rounded-md border border-border bg-bg-alt px-2 py-1 text-[11px] text-fg-dim hover:border-red-400 hover:text-red-300"
+                        >
+                          <Trash2 size={12} />
+                          卸载
+                        </button>
+                      </>
+                    ) : installable ? (
+                      <button
+                        type="button"
+                        onClick={() => onInstall(server)}
+                        className="inline-flex items-center gap-1 rounded-md border border-accent/60 bg-accent/10 px-2 py-1 text-[11px] font-semibold text-fg hover:bg-accent/20"
+                      >
+                        <Download size={12} />
+                        安装
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => void copyConnection(server, connectionText)}
+                        className="inline-flex items-center gap-1 rounded-md border border-accent/60 bg-accent/10 px-2 py-1 text-[11px] font-semibold text-fg hover:bg-accent/20"
+                      >
+                        {copied ? <Check size={12} /> : <Copy size={12} />}
+                        {copied ? '已复制' : '复制地址'}
+                      </button>
+                    )}
+                  </div>
+                  <div className="text-[11px] leading-snug text-fg-faint">{server.install}</div>
+                </div>
+              </section>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function requiredEnv(server: McpServerDefinition) {
+  return server.requiredEnv ?? [];
 }
 
 function UnrealMcpQuickSetup({
@@ -604,6 +1453,59 @@ export default function ProjectSettingsModal({
   const locale = useStore((s) => s.locale);
   const gameExpertSettings = useStore((s) => s.gameExpertSettings);
   const setGameExpertSettings = useStore((s) => s.setGameExpertSettings);
+
+  const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
+  const dragState = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    originX: number;
+    originY: number;
+  } | null>(null);
+
+  const handleHeaderPointerDown = useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      // Ignore drags that start on interactive controls (e.g. the close button).
+      if (event.button !== 0) return;
+      if ((event.target as HTMLElement).closest('button, a, input, [role="button"]')) {
+        return;
+      }
+      event.preventDefault();
+      dragState.current = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        originX: dragOffset.x,
+        originY: dragOffset.y,
+      };
+      event.currentTarget.setPointerCapture(event.pointerId);
+    },
+    [dragOffset.x, dragOffset.y],
+  );
+
+  const handleHeaderPointerMove = useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      const state = dragState.current;
+      if (!state || state.pointerId !== event.pointerId) return;
+      setDragOffset({
+        x: state.originX + (event.clientX - state.startX),
+        y: state.originY + (event.clientY - state.startY),
+      });
+    },
+    [],
+  );
+
+  const handleHeaderPointerUp = useCallback(
+    (event: React.PointerEvent<HTMLElement>) => {
+      const state = dragState.current;
+      if (!state || state.pointerId !== event.pointerId) return;
+      dragState.current = null;
+      if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+    },
+    [],
+  );
   const [record, setRecord] = useState<WorkspaceRecord | null>(null);
   const [scan, setScan] = useState<ProjectEnvironmentScan | null>(null);
   const [settings, setSettings] = useState<ProjectSettings>(() =>
@@ -627,6 +1529,23 @@ export default function ProjectSettingsModal({
   const [dirty, setDirty] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const [lspQuery, setLspQuery] = useState('');
+  const [lspSubTab, setLspSubTab] = useState<'installed' | 'registry'>('installed');
+  const [skillSubTab, setSkillSubTab] = useState<'installed' | 'registry'>(
+    'installed',
+  );
+  const [globalSkillTargets, setGlobalSkillTargets] = useState<SkillInstallTarget[]>(
+    [],
+  );
+  const [skillCatalogEntries, setSkillCatalogEntries] = useState<SlashCatalogEntry[]>(
+    [],
+  );
+  const [mcpQuery, setMcpQuery] = useState('');
+  const [mcpSubTab, setMcpSubTab] = useState<'installed' | 'registry'>('installed');
+  const [onlineMcpServers, setOnlineMcpServers] = useState<McpServerDefinition[]>(
+    [],
+  );
+  const [onlineMcpLoading, setOnlineMcpLoading] = useState(false);
+  const [onlineMcpError, setOnlineMcpError] = useState<string | null>(null);
   const [languageScan, setLanguageScan] = useState<ProjectLanguageScan>(() =>
     fallbackLanguageScanForEngine(projectSettingsFromMetadata(workspace.metadata).engine),
   );
@@ -664,6 +1583,29 @@ export default function ProjectSettingsModal({
   const configuredLspById = useMemo(
     () => new Map(settings.lsp.servers.map((server) => [server.id, server])),
     [settings.lsp.servers],
+  );
+  // A configured LSP only counts as "installed" when its command is actually
+  // available on this machine (probe ok). Recommended-but-not-found entries stay
+  // in the registry tab instead of polluting the installed list.
+  const installedLspIds = useMemo(() => {
+    const ids = new Set<string>();
+    for (const server of settings.lsp.servers) {
+      const probe = server.lastProbe ?? lspAvailabilityProbes[server.id];
+      if (probe?.ok === true) ids.add(server.id);
+    }
+    return ids;
+  }, [settings.lsp.servers, lspAvailabilityProbes]);
+  const rankedMcpServers = useMemo(
+    () => rankMcpServers(mcpQuery, onlineMcpServers),
+    [mcpQuery, onlineMcpServers],
+  );
+  const mcpRegistryCount = useMemo(
+    () => rankMcpServers('', onlineMcpServers).length,
+    [onlineMcpServers],
+  );
+  const configuredMcpIds = useMemo(
+    () => new Set(settings.mcp.servers.map((server) => server.id)),
+    [settings.mcp.servers],
   );
 
   const updateMcp = useCallback(
@@ -742,6 +1684,20 @@ export default function ProjectSettingsModal({
     [],
   );
 
+  const setMcpServerEnabled = useCallback((serverId: string, enabled: boolean) => {
+    setSettings((current) => ({
+      ...current,
+      mcp: {
+        ...current.mcp,
+        enabled: enabled ? true : current.mcp.enabled,
+        servers: current.mcp.servers.map((server) =>
+          server.id === serverId ? { ...server, enabled } : server,
+        ),
+      },
+    }));
+    setDirty(true);
+  }, []);
+
   const refresh = useCallback(async () => {
     setLoading(true);
     setStatus(null);
@@ -791,6 +1747,69 @@ export default function ProjectSettingsModal({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const loadGlobalSkillTargets = useCallback(async () => {
+    if (!tauriAvailable()) {
+      setGlobalSkillTargets([]);
+      return;
+    }
+    try {
+      const targets = await skillInstallTargets();
+      setGlobalSkillTargets(targets.filter((target) => target.scope === 'global'));
+    } catch {
+      setGlobalSkillTargets([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab !== 'skills') return;
+    void loadGlobalSkillTargets();
+  }, [tab, loadGlobalSkillTargets]);
+
+  const loadOnlineMcpServers = useCallback(async (signal?: AbortSignal) => {
+    setOnlineMcpLoading(true);
+    setOnlineMcpError(null);
+    try {
+      const servers = await loadMcpRegistryServers(signal);
+      if (signal?.aborted) return;
+      setOnlineMcpServers(servers);
+    } catch (err) {
+      if (signal?.aborted) return;
+      setOnlineMcpError(describeError(err));
+    } finally {
+      if (!signal?.aborted) setOnlineMcpLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tab !== 'mcp' || mcpSubTab !== 'registry') return;
+    if (onlineMcpServers.length > 0) return;
+    const controller = new AbortController();
+    void loadOnlineMcpServers(controller.signal);
+    return () => controller.abort();
+  }, [loadOnlineMcpServers, mcpSubTab, onlineMcpServers.length, tab]);
+
+  // Skill descriptions come from the backend slash catalog (parsed SKILL.md
+  // frontmatter). We index them by skill folder name so installed-skill cards
+  // can show the same summaries as the `/` menu, with auto-translation.
+  useEffect(() => {
+    if (tab !== 'skills' || !tauriAvailable()) return;
+    let active = true;
+    void slashCatalog().then((snapshot) => {
+      if (active) setSkillCatalogEntries(snapshot.entries);
+    });
+    let unlisten: (() => void) | undefined;
+    void onSlashCatalogUpdated((snapshot) => {
+      setSkillCatalogEntries(snapshot.entries);
+    }).then((fn) => {
+      if (active) unlisten = fn;
+      else fn();
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [tab]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -916,9 +1935,50 @@ export default function ProjectSettingsModal({
     setStatus('推荐 MCP 配置已应用');
   }, [persistSettings, scan, settings]);
 
+  // Persist the project's workspace-folder list and immediately push it onto the
+  // active session's composer (if this workspace is the active one), so the
+  // change takes effect without waiting for a new session. New sessions inherit
+  // these folders from the saved workspace metadata.
+  const persistFolders = useCallback(
+    async (folders: string[]) => {
+      const normalized = dedupeFolders(folders);
+      const next = { ...settings, folders: normalized };
+      setSettings(next);
+      await persistSettings(next);
+      useStore.getState().applyWorkspaceFolders(workspace.id, normalized);
+    },
+    [persistSettings, settings, workspace.id],
+  );
+
+  const addFolder = useCallback(async () => {
+    const picked = await pickFolder('选择要加入项目的文件夹');
+    if (!picked) return;
+    const existingKeys = new Set(
+      [workspacePath, ...settings.folders].map(workspacePathKey),
+    );
+    if (existingKeys.has(workspacePathKey(picked))) {
+      setStatus('该文件夹已在项目中');
+      return;
+    }
+    await persistFolders([...settings.folders, picked]);
+    setStatus('已添加项目文件夹');
+  }, [persistFolders, settings.folders, workspacePath]);
+
+  const removeFolder = useCallback(
+    async (path: string) => {
+      const key = workspacePathKey(path);
+      await persistFolders(
+        settings.folders.filter((item) => workspacePathKey(item) !== key),
+      );
+      setStatus('已移除项目文件夹');
+    },
+    [persistFolders, settings.folders],
+  );
+
   const addCustomServer = useCallback(() => {
     const id = `custom-${Date.now().toString(36)}`;
     updateMcp({
+      enabled: true,
       servers: [
         ...settings.mcp.servers,
         {
@@ -942,6 +2002,48 @@ export default function ProjectSettingsModal({
       });
     },
     [settings.mcp.servers, updateMcp],
+  );
+
+  const installCatalogMcpServer = useCallback(
+    (definition: McpServerDefinition) => {
+      if (
+        definition.installable === false ||
+        definition.transport !== 'stdio' ||
+        !definition.command.trim()
+      ) {
+        setStatus(`${definition.title} 是远程 MCP Registry 条目；已提供地址复制，不写入项目配置。`);
+        return;
+      }
+      if (configuredMcpIds.has(definition.id)) {
+        setStatus(`${definition.title} 已在已安装列表中`);
+        setMcpSubTab('installed');
+        return;
+      }
+      const serverConfig: ProjectMcpServerConfig = {
+        id: definition.id,
+        label: definition.title,
+        description: definition.description,
+        source: 'suggested',
+        enabled: true,
+        transport: definition.transport,
+        command: definition.command,
+        args: [...definition.args],
+        env: { ...definition.env },
+        requiresUserApproval: definition.requiresUserApproval,
+      };
+      updateMcp({
+        enabled: true,
+        servers: [...settings.mcp.servers, serverConfig],
+      });
+      const needsEnv = (definition.requiredEnv ?? []).length > 0;
+      setStatus(
+        needsEnv
+          ? `${definition.title} 已添加；请在「已安装」中填写所需环境变量后再探测。`
+          : `${definition.title} 已添加到已安装列表`,
+      );
+      setMcpSubTab('installed');
+    },
+    [configuredMcpIds, settings.mcp.servers, updateMcp],
   );
 
   const probeEnabledServers = useCallback(async () => {
@@ -1016,7 +2118,7 @@ export default function ProjectSettingsModal({
             server.id === definition.id ? nextServer : server,
           )
         : [...settings.lsp.servers, nextServer];
-      updateLsp({ servers });
+      updateLsp({ ...(enabled ? { enabled: true } : {}), servers });
     },
     [configuredLspById, lspConfigFromDefinition, settings.lsp.servers, updateLsp],
   );
@@ -1261,20 +2363,10 @@ export default function ProjectSettingsModal({
         args: [],
         env: {},
         requiresUserApproval: true,
+        serverVersion: binary.version,
+        engineAssociation: result.engineAssociation ?? undefined,
       };
-      const merged: ProjectSettings = {
-        ...settings,
-        engine: 'unreal',
-        mcp: {
-          ...settings.mcp,
-          enabled: true,
-          servers: settings.mcp.servers.some((s) => s.id === UE_MCP_SERVER_ID)
-            ? settings.mcp.servers.map((s) =>
-                s.id === UE_MCP_SERVER_ID ? { ...s, ...serverConfig } : s,
-              )
-            : [...settings.mcp.servers, serverConfig],
-        },
-      };
+      const merged: ProjectSettings = preferUnrealMcpServer(settings, serverConfig);
       setSettings(merged);
       await persistSettings(merged);
 
@@ -1336,8 +2428,96 @@ export default function ProjectSettingsModal({
   const content = (() => {
     if (tab === 'overview') {
       const detectedEngine = scan?.engine.engine ?? 'unknown';
+      const folderEntries = uniqueWorkspaceHistory([
+        workspacePath,
+        ...settings.folders,
+      ]);
       return (
         <div className="grid gap-4 lg:grid-cols-2 lg:items-start">
+          <section className="rounded-md border border-border bg-panel-2 p-4 lg:col-span-2">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-sm font-semibold text-fg">
+                  <FolderOpen size={16} className="text-accent-2" />
+                  工作区文件夹
+                </div>
+                <div className="mt-1 text-xs leading-relaxed text-fg-faint">
+                  这里管理项目包含的文件夹。第一个为主目录，其余作为附加目录一起授权给
+                  AI。之后新建对话会自动继承这些文件夹。
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => void addFolder()}
+                disabled={saving}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-accent/60 bg-accent/10 px-3 py-1.5 text-xs font-semibold text-fg hover:bg-accent/20 disabled:opacity-50"
+              >
+                <FolderPlus size={14} />
+                添加文件夹
+              </button>
+            </div>
+            <ul className="mt-3 grid gap-2">
+              {folderEntries.length === 0 ? (
+                <li className="rounded-md border border-dashed border-border-soft bg-bg-alt px-3 py-4 text-center text-xs text-fg-faint">
+                  尚未指定文件夹。添加后新建对话会自动使用这些目录。
+                </li>
+              ) : (
+                folderEntries.map((path, index) => {
+                  const isPrimary = index === 0;
+                  // 主目录是工作区本身，不可在此移除；附加文件夹可移除。
+                  const removable = !isPrimary;
+                  return (
+                    <li
+                      key={workspacePathKey(path)}
+                      className="flex items-center gap-2 rounded-md border border-border-soft bg-bg-alt px-3 py-2"
+                    >
+                      {isPrimary ? (
+                        <FolderOpen size={14} className="shrink-0 text-accent-2" />
+                      ) : (
+                        <Folder size={14} className="shrink-0 text-fg-faint" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-xs font-medium text-fg" title={path}>
+                          {basename(path) || path}
+                        </div>
+                        <div
+                          className="truncate font-mono text-[10px] text-fg-faint"
+                          title={path}
+                        >
+                          {path}
+                        </div>
+                      </div>
+                      <span
+                        className={cn(
+                          'shrink-0 rounded border px-1.5 py-0.5 text-[10px] leading-none',
+                          isPrimary
+                            ? 'border-accent/40 bg-accent/10 text-accent'
+                            : 'border-border-soft text-fg-faint',
+                        )}
+                      >
+                        {isPrimary ? '主目录' : '附加'}
+                      </span>
+                      {removable ? (
+                        <button
+                          type="button"
+                          onClick={() => void removeFolder(path)}
+                          disabled={saving}
+                          title="从项目中移除该文件夹"
+                          aria-label="从项目中移除该文件夹"
+                          className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-fg-faint transition-colors hover:bg-border hover:text-fg disabled:opacity-50"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      ) : (
+                        <span className="h-7 w-7 shrink-0" />
+                      )}
+                    </li>
+                  );
+                })
+              )}
+            </ul>
+          </section>
+
           <section className="rounded-md border border-border bg-panel-2 p-4">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
@@ -1406,13 +2586,19 @@ export default function ProjectSettingsModal({
               <div className="rounded border border-border-soft bg-bg-alt p-3">
                 <div className="text-[11px] text-fg-faint">已启用</div>
                 <div className="mt-1 text-lg font-semibold text-fg">
-                  {settings.mcp.servers.filter((server) => server.enabled).length}
+                  {settings.mcp.enabled
+                    ? settings.mcp.servers.filter((server) => server.enabled).length
+                    : 0}
                 </div>
               </div>
               <div className="rounded border border-border-soft bg-bg-alt p-3">
                 <div className="text-[11px] text-fg-faint">已连接</div>
                 <div className="mt-1 text-lg font-semibold text-fg">
-                  {settings.mcp.servers.filter((server) => server.lastProbe?.ok).length}
+                  {settings.mcp.enabled
+                    ? settings.mcp.servers.filter(
+                        (server) => server.enabled && server.lastProbe?.ok,
+                      ).length
+                    : 0}
                 </div>
               </div>
             </div>
@@ -1446,13 +2632,19 @@ export default function ProjectSettingsModal({
               <div className="rounded border border-border-soft bg-bg-alt p-3">
                 <div className="text-[11px] text-fg-faint">已启用</div>
                 <div className="mt-1 text-lg font-semibold text-fg">
-                  {settings.lsp.servers.filter((server) => server.enabled).length}
+                  {settings.lsp.enabled
+                    ? settings.lsp.servers.filter((server) => server.enabled).length
+                    : 0}
                 </div>
               </div>
               <div className="rounded border border-border-soft bg-bg-alt p-3">
                 <div className="text-[11px] text-fg-faint">命令可用</div>
                 <div className="mt-1 text-lg font-semibold text-fg">
-                  {settings.lsp.servers.filter((server) => server.lastProbe?.ok).length}
+                  {settings.lsp.enabled
+                    ? settings.lsp.servers.filter(
+                        (server) => server.enabled && server.lastProbe?.ok,
+                      ).length
+                    : 0}
                 </div>
               </div>
             </div>
@@ -1505,6 +2697,10 @@ export default function ProjectSettingsModal({
           <ThreeDGenerationSettingsPanel locale={locale} embedded />
         </div>
       );
+    }
+
+    if (tab === 'meshLibrary') {
+      return <MeshLibrarySettings />;
     }
 
     if (tab === 'rigging') {
@@ -1650,110 +2846,6 @@ export default function ProjectSettingsModal({
               checked={settings.mcp.enabled}
               onChange={(checked) => updateMcp({ enabled: checked })}
             />
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                onClick={applyRecommended}
-                disabled={!scan || scan.suggestedMcpServers.length === 0 || saving}
-                className="rounded-md border border-border bg-bg-alt px-3 py-1.5 text-xs text-fg-dim hover:border-accent hover:text-fg disabled:opacity-50"
-              >
-                应用推荐配置
-              </button>
-              <button
-                type="button"
-                onClick={addCustomServer}
-                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-alt px-3 py-1.5 text-xs text-fg-dim hover:border-accent hover:text-fg"
-              >
-                <Plus size={13} />
-                新增
-              </button>
-            </div>
-          </div>
-
-          <div className="grid gap-3">
-            {settings.mcp.servers.length === 0 ? (
-              <div className="rounded-md border border-border-soft bg-bg-alt p-4 text-sm text-fg-faint">
-                当前项目未配置 MCP。
-              </div>
-            ) : (
-              settings.mcp.servers.map((server) => {
-                const commandId = fieldId('mcp-command', server.id);
-                const argsId = fieldId('mcp-args', server.id);
-                return (
-                  <section
-                    key={server.id}
-                    className="grid gap-3 rounded-md border border-border bg-panel-2 p-4"
-                  >
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <label className="flex min-w-0 items-center gap-2">
-                        <input
-                          type="checkbox"
-                          checked={server.enabled}
-                          onChange={(event) =>
-                            updateServer(server.id, {
-                              enabled: event.currentTarget.checked,
-                            })
-                          }
-                          className="h-4 w-4 shrink-0 accent-accent"
-                        />
-                        <span className="truncate text-sm font-semibold text-fg">
-                          {server.label}
-                        </span>
-                      </label>
-                      <div className="flex items-center gap-2">
-                        <ProbeBadge result={server.lastProbe} />
-                        <button
-                          type="button"
-                          title="删除"
-                          aria-label="删除"
-                          onClick={() => removeServer(server.id)}
-                          className="flex h-7 w-7 items-center justify-center rounded border border-border-soft bg-bg-alt text-fg-faint hover:border-red-400 hover:text-red-300"
-                        >
-                          <Trash2 size={13} />
-                        </button>
-                      </div>
-                    </div>
-                    {server.description ? (
-                      <div className="text-xs text-fg-faint">{server.description}</div>
-                    ) : null}
-                    <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
-                      <SettingsRow label="命令">
-                        <input
-                          id={commandId}
-                          value={server.command ?? ''}
-                          onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            updateServer(server.id, { command: event.currentTarget.value })
-                          }
-                          className="w-full rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-xs text-fg outline-none focus:border-accent"
-                        />
-                      </SettingsRow>
-                      <SettingsRow label="参数" hint="空格分隔；工作区可用 {workspace}">
-                        <input
-                          id={argsId}
-                          value={server.args.join(' ')}
-                          onChange={(event: ChangeEvent<HTMLInputElement>) =>
-                            updateServer(server.id, {
-                              args: event.currentTarget.value
-                                .split(' ')
-                                .map((item) => item.trim())
-                                .filter(Boolean),
-                            })
-                          }
-                          className="w-full rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-xs text-fg outline-none focus:border-accent"
-                        />
-                      </SettingsRow>
-                    </div>
-                    <div className="text-[11px] text-fg-faint">
-                      最近探测：{formatTime(server.lastProbe?.checkedAtMs)}
-                      {server.lastProbe ? ` · ${server.lastProbe.message}` : ''}
-                    </div>
-                  </section>
-                );
-              })
-            )}
-          </div>
-
-          <div className="flex flex-wrap justify-end gap-2">
             <button
               type="button"
               onClick={probeEnabledServers}
@@ -1764,12 +2856,185 @@ export default function ProjectSettingsModal({
               {probing ? '探测中...' : '探测已启用 MCP'}
             </button>
           </div>
+
+          <ProjectSubTabBar
+            active={mcpSubTab}
+            onChange={setMcpSubTab}
+            installedCount={settings.mcp.servers.length}
+            registryCount={mcpRegistryCount}
+          />
+
+          {mcpSubTab === 'installed' ? (
+            <>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={applyRecommended}
+                    disabled={!scan || scan.suggestedMcpServers.length === 0 || saving}
+                    className="rounded-md border border-border bg-bg-alt px-3 py-1.5 text-xs text-fg-dim hover:border-accent hover:text-fg disabled:opacity-50"
+                  >
+                    应用推荐配置
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMcpSubTab('registry')}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-alt px-3 py-1.5 text-xs text-fg-dim hover:border-accent hover:text-fg"
+                  >
+                    <Search size={13} />
+                    浏览仓库
+                  </button>
+                  <button
+                    type="button"
+                    onClick={addCustomServer}
+                    className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-alt px-3 py-1.5 text-xs text-fg-dim hover:border-accent hover:text-fg"
+                  >
+                    <Plus size={13} />
+                    新增自定义
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid gap-3">
+                {settings.mcp.servers.length === 0 ? (
+                  <div className="rounded-md border border-border-soft bg-bg-alt p-4 text-sm text-fg-faint">
+                    当前项目未配置 MCP。切换到「仓库」浏览并安装。
+                  </div>
+                ) : (
+                  settings.mcp.servers.map((server) => {
+                    const commandId = fieldId('mcp-command', server.id);
+                    const argsId = fieldId('mcp-args', server.id);
+                    return (
+                      <section
+                        key={server.id}
+                        className="grid gap-3 rounded-md border border-border bg-panel-2 p-4"
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <label className="flex min-w-0 items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={settings.mcp.enabled && server.enabled}
+                              onChange={(event) =>
+                                setMcpServerEnabled(
+                                  server.id,
+                                  event.currentTarget.checked,
+                                )
+                              }
+                              className="h-4 w-4 shrink-0 accent-accent"
+                            />
+                            <span className="truncate text-sm font-semibold text-fg">
+                              {server.label}
+                            </span>
+                            {server.serverVersion ? (
+                              <span
+                                className="shrink-0 rounded border border-border-soft bg-bg-alt px-1.5 py-0.5 text-[10px] text-fg-faint"
+                                title={`MCP 版本 ${server.serverVersion}`}
+                              >
+                                v{server.serverVersion}
+                              </span>
+                            ) : null}
+                            {server.engineAssociation ? (
+                              <span
+                                className="shrink-0 rounded border border-accent/30 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent"
+                                title={`已对 Unreal Engine ${server.engineAssociation} 完成配置`}
+                              >
+                                引擎 {server.engineAssociation}
+                              </span>
+                            ) : null}
+                          </label>
+                          <div className="flex items-center gap-2">
+                            <ProbeBadge result={server.lastProbe} />
+                            <button
+                              type="button"
+                              title="卸载"
+                              aria-label="卸载"
+                              onClick={() => removeServer(server.id)}
+                              className="flex h-7 w-7 items-center justify-center rounded border border-border-soft bg-bg-alt text-fg-faint hover:border-red-400 hover:text-red-300"
+                            >
+                              <Trash2 size={13} />
+                            </button>
+                          </div>
+                        </div>
+                        {server.description ? (
+                          <div className="text-xs text-fg-faint">{server.description}</div>
+                        ) : null}
+                        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
+                          <SettingsRow label="命令">
+                            <input
+                              id={commandId}
+                              value={server.command ?? ''}
+                              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                                updateServer(server.id, { command: event.currentTarget.value })
+                              }
+                              className="w-full rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-xs text-fg outline-none focus:border-accent"
+                            />
+                          </SettingsRow>
+                          <SettingsRow label="参数" hint="空格分隔；工作区可用 {workspace}">
+                            <input
+                              id={argsId}
+                              value={server.args.join(' ')}
+                              onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                                updateServer(server.id, {
+                                  args: event.currentTarget.value
+                                    .split(' ')
+                                    .map((item) => item.trim())
+                                    .filter(Boolean),
+                                })
+                              }
+                              className="w-full rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-xs text-fg outline-none focus:border-accent"
+                            />
+                          </SettingsRow>
+                        </div>
+                        {server.env && Object.keys(server.env).length > 0 ? (
+                          <div className="grid gap-2">
+                            {Object.entries(server.env).map(([key, value]) => (
+                              <SettingsRow key={key} label={key}>
+                                <input
+                                  value={value}
+                                  type={/token|key|secret|password/i.test(key) ? 'password' : 'text'}
+                                  placeholder="填写环境变量值"
+                                  onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                                    updateServer(server.id, {
+                                      env: { ...server.env, [key]: event.currentTarget.value },
+                                    })
+                                  }
+                                  className="w-full rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-xs text-fg outline-none focus:border-accent"
+                                />
+                              </SettingsRow>
+                            ))}
+                          </div>
+                        ) : null}
+                        <div className="text-[11px] text-fg-faint">
+                          最近探测：{formatTime(server.lastProbe?.checkedAtMs)}
+                          {server.lastProbe ? ` · ${server.lastProbe.message}` : ''}
+                        </div>
+                      </section>
+                    );
+                  })
+                )}
+              </div>
+            </>
+          ) : (
+            <McpRegistryView
+              servers={rankedMcpServers}
+              query={mcpQuery}
+              onQueryChange={setMcpQuery}
+              configuredIds={configuredMcpIds}
+              loading={onlineMcpLoading}
+              error={onlineMcpError}
+              onRefresh={() => void loadOnlineMcpServers()}
+              onInstall={installCatalogMcpServer}
+              onUninstall={removeServer}
+            />
+          )}
         </div>
       );
     }
 
     if (tab === 'lsp') {
-      const enabledCount = settings.lsp.servers.filter((server) => server.enabled).length;
+      const enabledCount = settings.lsp.enabled
+        ? settings.lsp.servers.filter((server) => server.enabled).length
+        : 0;
       const availableIds = new Set([
         ...settings.lsp.servers
           .filter((server) => server.lastProbe?.ok)
@@ -1826,7 +3091,26 @@ export default function ProjectSettingsModal({
               checked={settings.lsp.enabled}
               onChange={(checked) => updateLsp({ enabled: checked })}
             />
-            <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={probeEnabledLspServers}
+              disabled={lspProbing || saving}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-alt px-3 py-1.5 text-xs text-fg-dim hover:border-accent hover:text-fg disabled:opacity-50"
+            >
+              <Terminal size={13} />
+              {lspProbing ? '检测中...' : '检测已启用 LSP'}
+            </button>
+          </div>
+
+          <ProjectSubTabBar
+            active={lspSubTab}
+            onChange={setLspSubTab}
+            installedCount={installedLspIds.size}
+            registryCount={rankedLspServers.length}
+          />
+
+          {lspSubTab === 'installed' && (
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <button
                 type="button"
                 onClick={applyRecommendedLsp}
@@ -1835,33 +3119,26 @@ export default function ProjectSettingsModal({
               >
                 应用推荐 LSP
               </button>
-              <button
-                type="button"
-                onClick={probeEnabledLspServers}
-                disabled={lspProbing || saving}
-                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-alt px-3 py-1.5 text-xs text-fg-dim hover:border-accent hover:text-fg disabled:opacity-50"
-              >
-                <Terminal size={13} />
-                {lspProbing ? '检测中...' : '检测已启用 LSP'}
-              </button>
             </div>
-          </div>
+          )}
 
-          <div className="relative">
-            <Search
-              size={14}
-              className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg-faint"
-            />
-            <input
-              type="text"
-              value={lspQuery}
-              onChange={(event) => setLspQuery(event.currentTarget.value)}
-              placeholder="搜索语言、LSP、命令或安装方式..."
-              className="w-full rounded-lg border border-border bg-bg-alt py-2 pl-9 pr-3 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
-            />
-          </div>
+          {lspSubTab === 'registry' && (
+            <div className="relative">
+              <Search
+                size={14}
+                className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-fg-faint"
+              />
+              <input
+                type="text"
+                value={lspQuery}
+                onChange={(event) => setLspQuery(event.currentTarget.value)}
+                placeholder="搜索语言、LSP、命令或安装方式..."
+                className="w-full rounded-lg border border-border bg-bg-alt py-2 pl-9 pr-3 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
+              />
+            </div>
+          )}
 
-          {languageScan.languages.length > 0 ? (
+          {lspSubTab === 'registry' && languageScan.languages.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
               {languageScan.languages.slice(0, 18).map((language) => (
                 <span
@@ -1881,7 +3158,174 @@ export default function ProjectSettingsModal({
             </div>
           ) : null}
 
-          {rankedLspServers.length === 0 ? (
+          {lspSubTab === 'installed' ? (
+            installedLspIds.size === 0 ? (
+              <p className="rounded-lg border border-border bg-bg-alt px-4 py-6 text-center text-xs text-fg-faint">
+                暂无已安装的 LSP。切换到「仓库」tab 添加并安装，检测通过后会显示在这里。
+              </p>
+            ) : (
+              <div className="grid gap-2.5 lg:grid-cols-2 2xl:grid-cols-3">
+                {rankedLspServers
+                  .filter((server) => installedLspIds.has(server.id))
+                  .map((server: RankedLspServerDefinition) => {
+                    const config = configuredLspById.get(server.id);
+                    const checked = settings.lsp.enabled && config?.enabled === true;
+                    const recommended =
+                      recommendedLspIds.has(server.id) && server.recommendationScore > 0;
+                    const installResult = lspInstallResults[server.id];
+                    const autoInstallCommand = server.installCommands?.[0];
+                    const installing = lspInstallingId === server.id;
+                    const autoProbing = lspAvailabilityProbingIds.includes(server.id);
+                    const probeResult = config?.lastProbe ?? lspAvailabilityProbes[server.id];
+                    const commandAvailable = probeResult?.ok === true;
+                    const languageLabels = (
+                      server.matchedLanguageIds.length > 0
+                        ? server.matchedLanguageIds
+                        : server.languageIds
+                    ).map((id) => id);
+                    return (
+                      <section
+                        key={server.id}
+                        className={cn(
+                          'flex min-h-[190px] flex-col gap-2.5 rounded-md border p-3',
+                          recommended
+                            ? 'border-accent/50 bg-accent/5'
+                            : 'border-border bg-panel-2',
+                        )}
+                      >
+                        <div className="flex items-start justify-between gap-2">
+                          <label className="flex min-w-0 flex-1 items-start gap-2">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(event) =>
+                                setLspServerEnabled(server, event.currentTarget.checked)
+                              }
+                              className="mt-0.5 h-4 w-4 shrink-0 accent-accent"
+                            />
+                            <span className="min-w-0">
+                              <span className="flex min-w-0 items-center gap-1.5">
+                                <span className="truncate text-sm font-semibold text-fg">
+                                  {server.title}
+                                </span>
+                                {recommended ? (
+                                  <span className="shrink-0 rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
+                                    推荐
+                                  </span>
+                                ) : null}
+                              </span>
+                              <span className="mt-1 block max-h-10 overflow-hidden text-xs leading-snug text-fg-faint">
+                                {server.description}
+                              </span>
+                            </span>
+                          </label>
+                          <div className="flex shrink-0 items-center gap-1.5">
+                            {autoProbing ? (
+                              <span className="inline-flex items-center gap-1 rounded border border-border-soft bg-bg-alt px-2 py-0.5 text-[11px] text-fg-faint">
+                                <RefreshCw size={11} className="animate-spin" />
+                                检测中
+                              </span>
+                            ) : (
+                              <LspProbeBadge result={probeResult} />
+                            )}
+                          </div>
+                        </div>
+                        <div className="flex flex-wrap gap-1">
+                          {languageLabels.slice(0, 6).map((langId) => (
+                            <span
+                              key={langId}
+                              className="rounded bg-bg-alt px-1.5 py-0.5 text-[10px] text-fg-faint"
+                            >
+                              {langId}
+                            </span>
+                          ))}
+                        </div>
+                        <div className="mt-auto flex flex-wrap items-center gap-1.5">
+                          {autoInstallCommand && !commandAvailable ? (
+                            <button
+                              type="button"
+                              disabled={installing || saving}
+                              onClick={() => installLspServer(server)}
+                              className="inline-flex items-center gap-1 rounded-md border border-border bg-bg-alt px-2.5 py-1 text-[11px] text-fg-dim hover:border-accent hover:text-fg disabled:opacity-50"
+                            >
+                              {installing ? (
+                                <RefreshCw size={11} className="animate-spin" />
+                              ) : (
+                                <Download size={11} />
+                              )}
+                              {installing ? '安装中...' : '安装'}
+                            </button>
+                          ) : null}
+                        <button
+                            type="button"
+                            disabled={autoProbing || saving}
+                            onClick={() => probeEnabledLspServers()}
+                            className="inline-flex items-center gap-1 rounded-md border border-border bg-bg-alt px-2.5 py-1 text-[11px] text-fg-dim hover:border-accent hover:text-fg disabled:opacity-50"
+                          >
+                            <Terminal size={11} />
+                            检测
+                          </button>
+                        </div>
+                        <details className="group">
+                          <summary className="cursor-pointer select-none text-[11px] text-fg-faint hover:text-fg">
+                            命令/参数
+                          </summary>
+                          <div className="mt-2 grid gap-2">
+                            <SettingsRow label="命令">
+                              <input
+                                value={config?.command ?? server.command}
+                                onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                                  updateLspServer(server, {
+                                    command: event.currentTarget.value,
+                                  })
+                                }
+                                className="w-full rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-xs text-fg outline-none focus:border-accent"
+                              />
+                            </SettingsRow>
+                            <SettingsRow label="参数" hint="空格分隔；按 LSP stdio 启动参数填写">
+                              <input
+                                value={(config?.args.length ? config.args : server.args).join(' ')}
+                                onChange={(event: ChangeEvent<HTMLInputElement>) =>
+                                  updateLspServer(server, {
+                                    args: event.currentTarget.value
+                                      .split(' ')
+                                      .map((item) => item.trim())
+                                      .filter(Boolean),
+                                  })
+                                }
+                                className="w-full rounded-md border border-border bg-bg px-2 py-1.5 font-mono text-xs text-fg outline-none focus:border-accent"
+                              />
+                            </SettingsRow>
+                          </div>
+                        </details>
+                        <div className="grid gap-1 text-[11px] text-fg-faint">
+                          {installResult ? (
+                            <div
+                              className={cn(
+                                'truncate',
+                                installResult.ok ? 'text-emerald-300' : 'text-red-300',
+                              )}
+                              title={[
+                                installResult.commandLine,
+                                installResult.stderr || installResult.stdout,
+                              ]
+                                .filter(Boolean)
+                                .join('\n\n')}
+                            >
+                              安装：{installResult.ok ? '成功' : '失败'} · {installResult.message}
+                            </div>
+                          ) : null}
+                          <div>
+                            最近检测：{formatTime(probeResult?.checkedAtMs)}
+                            {probeResult ? ` · ${probeResult.message}` : ''}
+                          </div>
+                        </div>
+                      </section>
+                    );
+                  })}
+              </div>
+            )
+          ) : rankedLspServers.length === 0 ? (
             <p className="rounded-lg border border-border bg-bg-alt px-4 py-6 text-center text-xs text-fg-faint">
               没有匹配的 LSP。
             </p>
@@ -1889,7 +3333,7 @@ export default function ProjectSettingsModal({
             <div className="grid gap-2.5 lg:grid-cols-2 2xl:grid-cols-3">
               {rankedLspServers.map((server: RankedLspServerDefinition) => {
                 const config = configuredLspById.get(server.id);
-                const checked = config?.enabled === true;
+                const checked = settings.lsp.enabled && config?.enabled === true;
                 const recommended =
                   recommendedLspIds.has(server.id) && server.recommendationScore > 0;
                 const installResult = lspInstallResults[server.id];
@@ -2095,61 +3539,216 @@ export default function ProjectSettingsModal({
 
     if (tab === 'skills') {
       const enabledRootIds = new Set(settings.skills.enabledRootIds);
+      const projectSkillCount = (scan?.skillRoots ?? []).reduce(
+        (total, root) => total + root.skillCount,
+        0,
+      );
+      const globalSkillCount = globalSkillTargets.reduce(
+        (total, target) => total + target.skillCount,
+        0,
+      );
+      // Index skill summaries (from SKILL.md frontmatter) by skill folder name.
+      // The backend sets each skill entry's `source` to its own directory, so the
+      // trailing segment matches the folder names returned in skill roots/targets.
+      const skillDescByFolder = new Map<string, SlashCatalogEntry>();
+      for (const entry of skillCatalogEntries) {
+        if (entry.kind !== 'skill') continue;
+        const source = entry.source ?? '';
+        const folder = source
+          .replace(/[\\/]+$/, '')
+          .split(/[\\/]/)
+          .pop();
+        if (folder) skillDescByFolder.set(folder.toLowerCase(), entry);
+      }
+      const skillDescriptionFor = (folder: string): string => {
+        const entry = skillDescByFolder.get(folder.toLowerCase());
+        return entry ? slashText(entry.detail, locale) : '';
+      };
       return (
         <div className="grid gap-4">
-          <div className="grid gap-3">
-            {(scan?.skillRoots ?? []).map((root) => (
-              <section
-                key={root.id}
-                className="rounded-md border border-border bg-panel-2 p-4"
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="text-xs leading-relaxed text-fg-faint">
+              项目 Skill 的启用状态随项目配置保存；全局 Skill 对所有项目可见。
+            </div>
+            {tauriAvailable() ? (
+              <button
+                type="button"
+                onClick={() => void loadGlobalSkillTargets()}
+                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-alt px-3 py-1.5 text-xs text-fg-dim hover:border-accent hover:text-fg"
               >
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <label className="flex min-w-0 items-center gap-2">
-                    <input
-                      type="checkbox"
-                      checked={enabledRootIds.has(root.id)}
-                      onChange={(event) => {
-                        const next = new Set(enabledRootIds);
-                        if (event.currentTarget.checked) next.add(root.id);
-                        else next.delete(root.id);
-                        updateSkills({ enabledRootIds: [...next] });
-                      }}
-                      className="h-4 w-4 accent-accent"
-                    />
-                    <span className="text-sm font-semibold text-fg">{root.label}</span>
-                  </label>
-                  <span
-                    className={cn(
-                      'rounded border px-2 py-0.5 text-[11px]',
-                      root.exists
-                        ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
-                        : 'border-border-soft bg-bg-alt text-fg-faint',
-                    )}
-                  >
-                    {root.exists ? `${root.skillCount} 个` : '未创建'}
+                <RefreshCw size={13} />
+                刷新全局
+              </button>
+            ) : null}
+          </div>
+
+          <ProjectSubTabBar
+            active={skillSubTab}
+            onChange={setSkillSubTab}
+            installedCount={projectSkillCount + globalSkillCount}
+          />
+
+          {skillSubTab === 'installed' ? (
+            <div className="grid gap-5">
+              <section className="grid gap-3">
+                <div className="flex items-center gap-2">
+                  <Box size={14} className="text-accent" />
+                  <span className="text-sm font-semibold text-fg">本项目 Skill</span>
+                  <span className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-300">
+                    项目
                   </span>
                 </div>
-                <div className="mt-2 truncate font-mono text-[11px] text-fg-faint" title={root.path}>
-                  {root.path}
-                </div>
-                {root.skills.length > 0 ? (
-                  <div className="mt-3 flex flex-wrap gap-1.5">
-                    {root.skills.map((skill) => (
-                      <span
-                        key={skill}
-                        className="rounded border border-border-soft bg-bg-alt px-2 py-0.5 text-[11px] text-fg-dim"
+                {(scan?.skillRoots ?? []).length === 0 ? (
+                  <p className="rounded-md border border-border-soft bg-bg-alt px-3 py-4 text-center text-xs text-fg-faint">
+                    未检测到项目 Skill 目录。
+                  </p>
+                ) : (
+                  (scan?.skillRoots ?? []).map((root) => {
+                    const enabled = enabledRootIds.has(root.id);
+                    return (
+                      <div
+                        key={root.id}
+                        className="grid gap-3 rounded-md border border-border bg-panel-2 p-4"
                       >
-                        {skill}
-                      </span>
-                    ))}
-                  </div>
-                ) : null}
+                        <div className="flex flex-wrap items-center justify-between gap-3">
+                          <label className="flex min-w-0 items-center gap-2">
+                            <input
+                              type="checkbox"
+                              checked={enabled}
+                              onChange={(event) => {
+                                const next = new Set(enabledRootIds);
+                                if (event.currentTarget.checked) next.add(root.id);
+                                else next.delete(root.id);
+                                updateSkills({ enabledRootIds: [...next] });
+                              }}
+                              className="h-4 w-4 accent-accent"
+                            />
+                            <span className="truncate text-sm font-semibold text-fg">
+                              {root.label}
+                            </span>
+                            <span className="rounded border border-sky-500/40 bg-sky-500/10 px-1.5 py-0.5 text-[10px] text-sky-300">
+                              项目
+                            </span>
+                          </label>
+                          <span
+                            className={cn(
+                              'rounded border px-2 py-0.5 text-[11px]',
+                              root.exists
+                                ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                                : 'border-border-soft bg-bg-alt text-fg-faint',
+                            )}
+                          >
+                            {root.exists ? `${root.skillCount} 个` : '未创建'}
+                          </span>
+                        </div>
+                        {root.skills.length > 0 ? (
+                          <>
+                            <div
+                              className="truncate font-mono text-[11px] text-fg-faint"
+                              title={root.path}
+                            >
+                              {root.path}
+                            </div>
+                            <div className="grid gap-2.5 sm:grid-cols-2 2xl:grid-cols-3">
+                              {root.skills.map((skill) => (
+                                <InstalledSkillCard
+                                  key={skill}
+                                  name={skill}
+                                  scope="project"
+                                  enabled={enabled}
+                                  description={skillDescriptionFor(skill)}
+                                  path={joinSkillPath(root.path, skill)}
+                                  locale={locale}
+                                />
+                              ))}
+                            </div>
+                          </>
+                        ) : (
+                          <p className="rounded-md border border-border-soft bg-bg-alt px-3 py-2 text-xs text-fg-faint">
+                            {projectSkillEmptyText(root.label)}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
               </section>
-            ))}
-          </div>
-          <div className="rounded-md border border-border-soft bg-bg-alt p-3 text-xs text-fg-faint">
-            当前引擎：{scan?.engine.label ?? '未识别'}；推荐 Skill 会跟随项目配置保存。
-          </div>
+
+              <section className="grid gap-3">
+                <div className="flex items-center gap-2">
+                  <Boxes size={14} className="text-accent" />
+                  <span className="text-sm font-semibold text-fg">全局 Skill</span>
+                  <span className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-300">
+                    全局
+                  </span>
+                </div>
+                {!tauriAvailable() ? (
+                  <p className="rounded-md border border-border-soft bg-bg-alt px-3 py-4 text-center text-xs text-fg-faint">
+                    全局 Skill 仅在桌面应用中可见。
+                  </p>
+                ) : globalSkillTargets.length === 0 ? (
+                  <p className="rounded-md border border-border-soft bg-bg-alt px-3 py-4 text-center text-xs text-fg-faint">
+                    未检测到全局 Skill 目录。
+                  </p>
+                ) : (
+                  globalSkillTargets.map((target) => (
+                    <div
+                      key={target.id}
+                      className="grid gap-3 rounded-md border border-border bg-panel-2 p-4"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <div className="flex min-w-0 items-center gap-2">
+                          <span className="truncate text-sm font-semibold text-fg">
+                            {target.label}
+                          </span>
+                          <span className="rounded border border-violet-500/40 bg-violet-500/10 px-1.5 py-0.5 text-[10px] text-violet-300">
+                            全局
+                          </span>
+                        </div>
+                        <span
+                          className={cn(
+                            'rounded border px-2 py-0.5 text-[11px]',
+                            target.exists
+                              ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                              : 'border-border-soft bg-bg-alt text-fg-faint',
+                          )}
+                        >
+                          {target.exists ? `${target.skillCount} 个` : '未创建'}
+                        </span>
+                      </div>
+                      <div
+                        className="truncate font-mono text-[11px] text-fg-faint"
+                        title={target.path}
+                      >
+                        {target.path}
+                      </div>
+                      {target.skills.length > 0 ? (
+                        <div className="grid gap-2.5 sm:grid-cols-2 2xl:grid-cols-3">
+                          {target.skills.map((skill) => (
+                            <InstalledSkillCard
+                              key={skill}
+                              name={skill}
+                              scope="global"
+                              enabled
+                              description={skillDescriptionFor(skill)}
+                              path={joinSkillPath(target.path, skill)}
+                              locale={locale}
+                            />
+                          ))}
+                        </div>
+                      ) : null}
+                    </div>
+                  ))
+                )}
+              </section>
+            </div>
+          ) : (
+            <PluginStorePanel
+              locale={locale}
+              projectRoot={workspacePath || null}
+              onSkillInstalled={() => void loadGlobalSkillTargets()}
+            />
+          )}
         </div>
       );
     }
@@ -2196,9 +3795,16 @@ export default function ProjectSettingsModal({
         aria-modal="true"
         aria-labelledby="project-settings-title"
         className="flex h-[calc(100vh-2.5rem)] w-[calc(100vw-2.5rem)] max-w-[1600px] max-h-[1000px] flex-col overflow-hidden rounded-lg border border-border bg-panel shadow-2xl"
+        style={{ transform: `translate(${dragOffset.x}px, ${dragOffset.y}px)` }}
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="shrink-0 border-b border-border-soft bg-bg-alt px-5 py-4">
+        <header
+          className="shrink-0 cursor-move select-none border-b border-border-soft bg-bg-alt px-5 py-4"
+          onPointerDown={handleHeaderPointerDown}
+          onPointerMove={handleHeaderPointerMove}
+          onPointerUp={handleHeaderPointerUp}
+          onPointerCancel={handleHeaderPointerUp}
+        >
           <div className="flex items-center gap-3">
             <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent text-bg">
               <SettingsIcon size={18} strokeWidth={2.2} />
