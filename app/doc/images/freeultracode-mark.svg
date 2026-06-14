@@ -1,6 +1,6 @@
 <svg width="640" height="220" viewBox="0 0 640 220" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
-  <title id="title">FreeUltraCode app mark</title>
-  <desc id="desc">A muted organic app mark with code brackets and local model channel chips.</desc>
+  <title id="title">FreeUltraCode game development mark</title>
+  <desc id="desc">A game-focused app mark combining code brackets, engine nodes, an asset cube, and a play symbol.</desc>
   <style>
     .cursor {
       animation: blink 1.2s steps(2, start) infinite;
@@ -11,39 +11,43 @@
         opacity: 1;
       }
       45%, 100% {
-        opacity: .28;
+        opacity: .3;
       }
     }
   </style>
   <defs>
     <linearGradient id="markShell" x1="44" y1="28" x2="604" y2="195" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#1B2129"/>
-      <stop offset=".48" stop-color="#17201F"/>
-      <stop offset="1" stop-color="#11161C"/>
+      <stop stop-color="#151C2A"/>
+      <stop offset=".5" stop-color="#10292C"/>
+      <stop offset="1" stop-color="#211926"/>
     </linearGradient>
     <linearGradient id="markRim" x1="62" y1="30" x2="588" y2="194" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#93A39B"/>
-      <stop offset=".58" stop-color="#6F8380"/>
-      <stop offset="1" stop-color="#A0916B"/>
+      <stop stop-color="#7DD3FC"/>
+      <stop offset=".5" stop-color="#45D1B5"/>
+      <stop offset="1" stop-color="#F6C453"/>
     </linearGradient>
-    <linearGradient id="iconStone" x1="66" y1="52" x2="444" y2="462" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#1B2129"/>
-      <stop offset=".48" stop-color="#17201F"/>
-      <stop offset="1" stop-color="#11161C"/>
+    <linearGradient id="iconPlate" x1="68" y1="48" x2="446" y2="462" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#172033"/>
+      <stop offset=".48" stop-color="#0F292B"/>
+      <stop offset="1" stop-color="#17121D"/>
     </linearGradient>
-    <linearGradient id="iconPanel" x1="126" y1="128" x2="393" y2="389" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#101820"/>
-      <stop offset=".58" stop-color="#0E151B"/>
-      <stop offset="1" stop-color="#121817"/>
+    <linearGradient id="iconPanel" x1="126" y1="122" x2="398" y2="390" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#0B1625"/>
+      <stop offset=".58" stop-color="#0D1E23"/>
+      <stop offset="1" stop-color="#17151D"/>
     </linearGradient>
-    <linearGradient id="iconCode" x1="148" y1="185" x2="364" y2="323" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#93A6AD"/>
-      <stop offset=".5" stop-color="#B8C0B7"/>
-      <stop offset="1" stop-color="#82988F"/>
+    <linearGradient id="assetFaceA" x1="218" y1="154" x2="218" y2="300" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#46E0C4"/>
+      <stop offset="1" stop-color="#1C8E93"/>
     </linearGradient>
-    <linearGradient id="iconNeedle" x1="228" y1="342" x2="282" y2="176" gradientUnits="userSpaceOnUse">
-      <stop stop-color="#9B8451"/>
-      <stop offset="1" stop-color="#D0BF88"/>
+    <linearGradient id="assetFaceB" x1="288" y1="167" x2="338" y2="327" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#F6D067"/>
+      <stop offset="1" stop-color="#A67C2B"/>
+    </linearGradient>
+    <linearGradient id="codeStroke" x1="140" y1="188" x2="370" y2="322" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#A8E7F4"/>
+      <stop offset=".52" stop-color="#EAF2EA"/>
+      <stop offset="1" stop-color="#C6B46B"/>
     </linearGradient>
     <filter id="markShadow" x="12" y="-14" width="616" height="262" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
       <feDropShadow dx="0" dy="18" stdDeviation="18" flood-color="#020617" flood-opacity=".38"/>
@@ -51,48 +55,75 @@
     <filter id="iconShadow" x="-24%" y="-24%" width="148%" height="148%" color-interpolation-filters="sRGB">
       <feDropShadow dx="0" dy="16" stdDeviation="18" flood-color="#030712" flood-opacity=".42"/>
     </filter>
+    <filter id="softGlow" x="-40%" y="-40%" width="180%" height="180%" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="6" result="blur"/>
+      <feColorMatrix in="blur" type="matrix" values="0 0 0 0 0.2 0 0 0 0 0.88 0 0 0 0 0.82 0 0 0 0.55 0"/>
+      <feBlend in="SourceGraphic"/>
+    </filter>
   </defs>
 
   <g filter="url(#markShadow)">
     <path d="M58 43 C111 8 183 33 249 25 C327 15 398 20 463 45 C535 72 594 53 610 103 C629 163 571 188 503 191 C426 194 351 207 271 192 C208 181 151 212 92 188 C32 163 20 83 58 43 Z" fill="url(#markShell)"/>
-    <path d="M58 43 C111 8 183 33 249 25 C327 15 398 20 463 45 C535 72 594 53 610 103 C629 163 571 188 503 191 C426 194 351 207 271 192 C208 181 151 212 92 188 C32 163 20 83 58 43 Z" stroke="url(#markRim)" stroke-opacity=".72" stroke-width="3"/>
-    <path d="M79 163 C145 126 188 180 249 146 C321 106 387 130 456 89 C493 67 527 59 557 73" stroke="#7E9189" stroke-opacity=".16" stroke-width="20" stroke-linecap="round"/>
-    <path d="M95 58 C174 34 239 59 289 91 C359 136 443 97 545 50" stroke="#A39165" stroke-opacity=".12" stroke-width="16" stroke-linecap="round"/>
+    <path d="M58 43 C111 8 183 33 249 25 C327 15 398 20 463 45 C535 72 594 53 610 103 C629 163 571 188 503 191 C426 194 351 207 271 192 C208 181 151 212 92 188 C32 163 20 83 58 43 Z" stroke="url(#markRim)" stroke-opacity=".78" stroke-width="3"/>
+    <path d="M75 162 C144 120 190 180 256 142 C328 101 386 133 456 87 C493 63 528 59 558 74" stroke="#45D1B5" stroke-opacity=".14" stroke-width="19" stroke-linecap="round"/>
+    <path d="M95 58 C174 34 239 59 289 91 C359 136 443 97 545 50" stroke="#F6C453" stroke-opacity=".12" stroke-width="16" stroke-linecap="round"/>
+    <g opacity=".18" stroke="#E8F4EF" stroke-width="1">
+      <path d="M105 69 H572"/>
+      <path d="M84 112 H594"/>
+      <path d="M112 162 H548"/>
+      <path d="M214 44 V190"/>
+      <path d="M386 37 V190"/>
+      <path d="M515 62 V181"/>
+    </g>
   </g>
 
   <g transform="translate(58 38) scale(.29)">
-    <path d="M257 34 C317 42 357 20 406 55 C457 91 458 146 470 202 C484 265 501 316 462 373 C424 429 364 418 313 458 C256 502 207 462 147 463 C85 464 62 419 42 368 C19 309 48 270 38 207 C27 138 65 101 116 75 C170 48 201 27 257 34 Z" fill="url(#iconStone)"/>
+    <path d="M257 34 C317 42 357 20 406 55 C457 91 458 146 470 202 C484 265 501 316 462 373 C424 429 364 418 313 458 C256 502 207 462 147 463 C85 464 62 419 42 368 C19 309 48 270 38 207 C27 138 65 101 116 75 C170 48 201 27 257 34 Z" fill="url(#iconPlate)"/>
     <path d="M257 34 C317 42 357 20 406 55 C457 91 458 146 470 202 C484 265 501 316 462 373 C424 429 364 418 313 458 C256 502 207 462 147 463 C85 464 62 419 42 368 C19 309 48 270 38 207 C27 138 65 101 116 75 C170 48 201 27 257 34 Z" stroke="url(#markRim)" stroke-width="5" stroke-opacity=".9"/>
+    <g opacity=".14" stroke="#D8E8E1" stroke-width="2">
+      <path d="M120 122 H402"/>
+      <path d="M91 247 H431"/>
+      <path d="M124 374 H386"/>
+      <path d="M145 96 V418"/>
+      <path d="M263 70 V439"/>
+      <path d="M382 98 V398"/>
+    </g>
     <g filter="url(#iconShadow)">
       <path d="M132 132 C168 115 227 126 276 119 C334 111 385 124 409 164 C434 206 413 255 419 304 C426 356 388 390 334 392 C284 395 236 382 187 392 C138 402 105 371 98 323 C91 276 113 241 102 198 C94 165 108 144 132 132 Z" fill="url(#iconPanel)"/>
       <path d="M132 132 C168 115 227 126 276 119 C334 111 385 124 409 164 C434 206 413 255 419 304 C426 356 388 390 334 392 C284 395 236 382 187 392 C138 402 105 371 98 323 C91 276 113 241 102 198 C94 165 108 144 132 132 Z" stroke="url(#markRim)" stroke-width="5" stroke-opacity=".82"/>
       <path d="M131 164 C170 155 226 163 266 159 C309 155 350 154 388 164" stroke="#C7CEC9" stroke-opacity=".14" stroke-width="29" stroke-linecap="round"/>
-      <circle cx="143" cy="163" r="7" fill="#8DA0A6"/>
-      <circle cx="168" cy="163" r="7" fill="#91A39B"/>
-      <circle cx="193" cy="163" r="7" fill="#B9AC77"/>
-      <path d="M203 194 L151 254 L203 316" stroke="url(#iconCode)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
-      <path d="M309 194 L361 254 L309 316" stroke="url(#iconCode)" stroke-width="32" stroke-linecap="round" stroke-linejoin="round"/>
-      <path d="M278 177 L235 337" stroke="url(#iconNeedle)" stroke-width="28" stroke-linecap="round"/>
-      <path d="M207 367 C226 364 248 365 274 366" stroke="#B8C88F" stroke-width="18" stroke-linecap="round"/>
+      <circle cx="143" cy="163" r="7" fill="#7DD3FC"/>
+      <circle cx="168" cy="163" r="7" fill="#45D1B5"/>
+      <circle cx="193" cy="163" r="7" fill="#F6C453"/>
+      <g stroke-linecap="round" stroke-linejoin="round">
+        <path d="M197 203 L147 257 L197 311" stroke="url(#codeStroke)" stroke-width="28"/>
+        <path d="M316 203 L366 257 L316 311" stroke="url(#codeStroke)" stroke-width="28"/>
+      </g>
+      <g filter="url(#softGlow)">
+        <path d="M257 185 L318 220 V291 L257 328 L196 291 V220 L257 185 Z" fill="#122737" stroke="#DAF7EF" stroke-width="8" stroke-linejoin="round"/>
+        <path d="M257 185 L318 220 L257 256 L196 220 L257 185 Z" fill="url(#assetFaceA)" fill-opacity=".9"/>
+        <path d="M257 256 L318 220 V291 L257 328 V256 Z" fill="url(#assetFaceB)" fill-opacity=".92"/>
+        <path d="M196 220 L257 256 V328 L196 291 V220 Z" fill="#245873" fill-opacity=".92"/>
+        <path d="M250 232 L288 255 L250 278 Z" fill="#F8FAFC"/>
+      </g>
+      <path d="M204 364 C234 358 279 368 328 362" stroke="#45D1B5" stroke-opacity=".52" stroke-width="16" stroke-linecap="round"/>
     </g>
-    <circle cx="256" cy="256" r="17" fill="#D4D8CF"/>
-    <circle cx="256" cy="256" r="8" fill="#7E949D"/>
   </g>
 
-  <text x="245" y="92" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="44" font-weight="800" fill="#F4F7F3">FreeUltraCode</text>
-  <text x="247" y="123" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="17" font-weight="600" fill="#B9C2BC">Coding agents across free and local model channels</text>
+  <text x="245" y="88" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="44" font-weight="800" fill="#F8FAF7">FreeUltraCode</text>
+  <text x="247" y="121" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="17" font-weight="600" fill="#C6D2CF">AI coding agent for game development</text>
 
-  <g font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#EEF1EC">
-    <rect x="247" y="145" width="72" height="28" rx="14" fill="#52665F"/>
-    <circle cx="265" cy="159" r="5" fill="#C6CEC7"/>
-    <text x="278" y="164">FREE</text>
-    <rect x="331" y="145" width="86" height="28" rx="14" fill="#566871"/>
-    <circle cx="350" cy="159" r="5" fill="#C5CFD3"/>
-    <text x="363" y="164">CODE</text>
-    <rect x="429" y="145" width="78" height="28" rx="14" fill="#6E684F"/>
-    <circle cx="448" cy="159" r="5" fill="#D1C18C"/>
-    <text x="461" y="164">LOCAL</text>
-    <rect class="cursor" x="520" y="145" width="44" height="28" rx="14" fill="#5B655E"/>
-    <circle cx="542" cy="159" r="5" fill="#C8D0CB"/>
+  <g font-family="Inter, Segoe UI, Arial, sans-serif" font-size="13" font-weight="700" fill="#F8FAFC">
+    <rect x="247" y="145" width="92" height="28" rx="14" fill="#1F5D68"/>
+    <circle cx="266" cy="159" r="5" fill="#7DD3FC"/>
+    <text x="279" y="164">ENGINE</text>
+    <rect x="351" y="145" width="78" height="28" rx="14" fill="#226458"/>
+    <circle cx="370" cy="159" r="5" fill="#45D1B5"/>
+    <text x="383" y="164">ASSET</text>
+    <rect x="441" y="145" width="74" height="28" rx="14" fill="#755E29"/>
+    <circle cx="460" cy="159" r="5" fill="#F6C453"/>
+    <text x="473" y="164">SHIP</text>
+    <rect class="cursor" x="528" y="145" width="44" height="28" rx="14" fill="#314153"/>
+    <circle cx="550" cy="159" r="5" fill="#DCE9E4"/>
   </g>
 </svg>

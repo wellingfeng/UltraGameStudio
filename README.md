@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="app/doc/images/freeultracode-mark.svg" alt="FreeUltraCode app mark" width="560">
+  <img src="app/doc/images/freeultracode-mark.svg" alt="FreeUltraCode game development mark" width="560">
 </p>
 
 <h1 align="center">FreeUltraCode</h1>
@@ -45,7 +45,7 @@
 </p>
 
 <p align="center">
-  <a href="app/package.json"><img src="https://img.shields.io/badge/version-0.3.7-2F6FED?style=flat-square&labelColor=161b22" alt="version 0.3.7"></a>
+  <a href="app/package.json"><img src="https://img.shields.io/badge/version-0.4.0-2F6FED?style=flat-square&labelColor=161b22" alt="version 0.4.0"></a>
   <a href="app/src-tauri/tauri.conf.json"><img src="https://img.shields.io/badge/Tauri-2.11-24C8DB?style=flat-square&labelColor=161b22&logo=tauri&logoColor=white" alt="Tauri 2.11"></a>
   <a href="app/package.json"><img src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&labelColor=161b22&logo=react&logoColor=white" alt="React 18"></a>
   <a href="app/package.json"><img src="https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square&labelColor=161b22&logo=typescript&logoColor=white" alt="TypeScript 5.6"></a>
@@ -374,4 +374,4 @@ Pull requests should describe the behavior change, list verification commands, l
 
 ## License
 
-No license has been specified yet.
+MIT. See [LICENSE](LICENSE).
