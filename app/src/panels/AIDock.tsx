@@ -102,8 +102,35 @@ import {
   type ThreeDGenerationSettings,
   type ThreeDProviderId,
 } from '@/lib/threeDGeneration';
+import {
+  VIDEO_PROVIDERS,
+  loadVideoGenerationSettings,
+  saveVideoGenerationSettings,
+  videoProviderModel,
+  videoProviderReady,
+  type VideoGenerationSettings,
+  type VideoProviderId,
+} from '@/lib/videoGeneration';
+import {
+  SPEECH_PROVIDERS,
+  loadSpeechGenerationSettings,
+  saveSpeechGenerationSettings,
+  speechProviderModel,
+  speechProviderReady,
+  type SpeechGenerationSettings,
+  type SpeechProviderId,
+} from '@/lib/speechGeneration';
+import {
+  SPRITE_PROVIDERS,
+  loadSpriteGenerationSettings,
+  saveSpriteGenerationSettings,
+  spriteProviderModel,
+  spriteProviderReady,
+  type SpriteGenerationSettings,
+  type SpriteProviderId,
+} from '@/lib/spriteGeneration';
 import type { SelectOption } from '@/store/types';
-import { cacheTtlOptions } from '@/store/sampleSessions';
+import { cacheTtlOptions, startupModeOptions } from '@/store/sampleSessions';
 import {
   LANGUAGE_SELECT_OPTIONS,
   localizeSelectOption,
@@ -1544,9 +1571,17 @@ export default function AIDock({
   const isChat = layout === 'chat';
   const messages = useStore((s) => s.messages);
   const sendPrompt = useStore((s) => s.sendPrompt);
+  const ensureSessionStartupWorkspace = useStore(
+    (s) => s.ensureSessionStartupWorkspace,
+  );
   const generateImagePrompt = useStore((s) => s.generateImagePrompt);
   const generateMusicPrompt = useStore((s) => s.generateMusicPrompt);
   const generateThreeDPrompt = useStore((s) => s.generateThreeDPrompt);
+  const generateVideoPrompt = useStore((s) => s.generateVideoPrompt);
+  const generateSpeechPrompt = useStore((s) => s.generateSpeechPrompt);
+  const generateSpritePrompt = useStore((s) => s.generateSpritePrompt);
+  const generateComfyPrompt = useStore((s) => s.generateComfyPrompt);
+  const generateUiPrompt = useStore((s) => s.generateUiPrompt);
   const searchMeshLibraryPrompt = useStore((s) => s.searchMeshLibraryPrompt);
   const runUltracodePrompt = useStore((s) => s.runUltracodePrompt);
   const appendChatNote = useStore((s) => s.appendChatNote);
@@ -1665,6 +1700,15 @@ export default function AIDock({
   // message lands. Once the conversation has any messages (or the dock is
   // read-only because a run is in flight) the selector locks.
   const cacheTtlLocked = isReadOnly || messages.length > 0;
+  // Startup mode (本地 / 新工作树) shares the cache-TTL lock: it only affects how
+  // a brand-new session prepares its working directory, so it locks once the
+  // conversation starts. Only meaningful for chat/simple sessions with a cwd.
+  const startupModeLocked = isReadOnly || messages.length > 0;
+  // New-session layout: in the chat surface, before any message lands, the input
+  // box floats in the vertical center (just under the hero prompt) instead of
+  // being pinned to the bottom. Once the conversation starts it returns to the
+  // bottom so the transcript can grow above it.
+  const centerInput = isChat && messages.length === 0;
   const sendShortcutHint = useMemo(
     () =>
       `${describeShortcutBinding(shortcutSettings['composer-send'])} ${t(
@@ -2170,6 +2214,204 @@ export default function AIDock({
       const current = loadThreeDGenerationSettings();
       const providerId = current.preferredProviderId;
       saveThreeDGenerationSettings({
+        ...current,
+        providerModels: { ...current.providerModels, [providerId]: selected },
+      });
+    },
+    [],
+  );
+  const [videoSettings, setVideoSettings] = useState<VideoGenerationSettings>(
+    () => loadVideoGenerationSettings(),
+  );
+  useEffect(() => {
+    const refresh = () => setVideoSettings(loadVideoGenerationSettings());
+    window.addEventListener('fuc:video-generation-settings-changed', refresh);
+    return () =>
+      window.removeEventListener(
+        'fuc:video-generation-settings-changed',
+        refresh,
+      );
+  }, []);
+  const videoChannelOptions = useMemo<SelectOption[]>(
+    () =>
+      VIDEO_PROVIDERS.map((provider) => ({
+        id: provider.id,
+        label:
+          provider.label +
+          (videoProviderReady(provider.id, videoSettings) ? '' : ' ⚠'),
+        hint: t(
+          locale,
+          provider.category === 'commercial'
+            ? 'settings.videoGeneration.categoryCommercial'
+            : 'settings.videoGeneration.categoryFree',
+        ),
+        group: t(
+          locale,
+          provider.category === 'commercial'
+            ? 'settings.videoGeneration.commercialProviders'
+            : 'settings.videoGeneration.freeProviders',
+        ),
+      })),
+    [videoSettings, locale],
+  );
+  const videoChannelValue = videoSettings.preferredProviderId;
+  const videoModelOptions = useMemo<SelectOption[]>(() => {
+    const provider = VIDEO_PROVIDERS.find(
+      (item) => item.id === videoSettings.preferredProviderId,
+    );
+    if (!provider) return [];
+    const current = videoProviderModel(provider.id, videoSettings);
+    return uniqueModelSelectOptions([current, ...provider.models]);
+  }, [videoSettings]);
+  const videoModelValue = videoProviderModel(
+    videoSettings.preferredProviderId,
+    videoSettings,
+  );
+  const onVideoChannelChange = useCallback((id: string) => {
+    saveVideoGenerationSettings({
+      ...loadVideoGenerationSettings(),
+      preferredProviderId: id as VideoProviderId,
+    });
+  }, []);
+  const onVideoModelChange = useCallback(
+    (model: string) => {
+      const selected = model.trim();
+      if (!selected) return;
+      const current = loadVideoGenerationSettings();
+      const providerId = current.preferredProviderId;
+      saveVideoGenerationSettings({
+        ...current,
+        providerModels: { ...current.providerModels, [providerId]: selected },
+      });
+    },
+    [],
+  );
+  const [speechSettings, setSpeechSettings] = useState<SpeechGenerationSettings>(
+    () => loadSpeechGenerationSettings(),
+  );
+  useEffect(() => {
+    const refresh = () => setSpeechSettings(loadSpeechGenerationSettings());
+    window.addEventListener('fuc:speech-generation-settings-changed', refresh);
+    return () =>
+      window.removeEventListener(
+        'fuc:speech-generation-settings-changed',
+        refresh,
+      );
+  }, []);
+  const speechChannelOptions = useMemo<SelectOption[]>(
+    () =>
+      SPEECH_PROVIDERS.map((provider) => ({
+        id: provider.id,
+        label:
+          provider.label +
+          (speechProviderReady(provider.id, speechSettings) ? '' : ' ⚠'),
+        hint: t(
+          locale,
+          provider.category === 'commercial'
+            ? 'settings.speechGeneration.categoryCommercial'
+            : 'settings.speechGeneration.categoryFree',
+        ),
+        group: t(
+          locale,
+          provider.category === 'commercial'
+            ? 'settings.speechGeneration.commercialProviders'
+            : 'settings.speechGeneration.freeProviders',
+        ),
+      })),
+    [speechSettings, locale],
+  );
+  const speechChannelValue = speechSettings.preferredProviderId;
+  const speechModelOptions = useMemo<SelectOption[]>(() => {
+    const provider = SPEECH_PROVIDERS.find(
+      (item) => item.id === speechSettings.preferredProviderId,
+    );
+    if (!provider) return [];
+    const current = speechProviderModel(provider.id, speechSettings);
+    return uniqueModelSelectOptions([current, ...provider.models]);
+  }, [speechSettings]);
+  const speechModelValue = speechProviderModel(
+    speechSettings.preferredProviderId,
+    speechSettings,
+  );
+  const onSpeechChannelChange = useCallback((id: string) => {
+    saveSpeechGenerationSettings({
+      ...loadSpeechGenerationSettings(),
+      preferredProviderId: id as SpeechProviderId,
+    });
+  }, []);
+  const onSpeechModelChange = useCallback(
+    (model: string) => {
+      const selected = model.trim();
+      if (!selected) return;
+      const current = loadSpeechGenerationSettings();
+      const providerId = current.preferredProviderId;
+      saveSpeechGenerationSettings({
+        ...current,
+        providerModels: { ...current.providerModels, [providerId]: selected },
+      });
+    },
+    [],
+  );
+  const [spriteSettings, setSpriteSettings] = useState<SpriteGenerationSettings>(
+    () => loadSpriteGenerationSettings(),
+  );
+  useEffect(() => {
+    const refresh = () => setSpriteSettings(loadSpriteGenerationSettings());
+    window.addEventListener('fuc:sprite-generation-settings-changed', refresh);
+    return () =>
+      window.removeEventListener(
+        'fuc:sprite-generation-settings-changed',
+        refresh,
+      );
+  }, []);
+  const spriteChannelOptions = useMemo<SelectOption[]>(
+    () =>
+      SPRITE_PROVIDERS.map((provider) => ({
+        id: provider.id,
+        label:
+          provider.label +
+          (spriteProviderReady(provider.id, spriteSettings) ? '' : ' ⚠'),
+        hint: t(
+          locale,
+          provider.category === 'commercial'
+            ? 'settings.spriteGeneration.categoryCommercial'
+            : 'settings.spriteGeneration.categoryLocalOpen',
+        ),
+        group: t(
+          locale,
+          provider.category === 'commercial'
+            ? 'settings.spriteGeneration.commercialProviders'
+            : 'settings.spriteGeneration.localOpenProviders',
+        ),
+      })),
+    [spriteSettings, locale],
+  );
+  const spriteChannelValue = spriteSettings.preferredProviderId;
+  const spriteModelOptions = useMemo<SelectOption[]>(() => {
+    const provider = SPRITE_PROVIDERS.find(
+      (item) => item.id === spriteSettings.preferredProviderId,
+    );
+    if (!provider) return [];
+    const current = spriteProviderModel(provider.id, spriteSettings);
+    return uniqueModelSelectOptions([current, ...provider.models]);
+  }, [spriteSettings]);
+  const spriteModelValue = spriteProviderModel(
+    spriteSettings.preferredProviderId,
+    spriteSettings,
+  );
+  const onSpriteChannelChange = useCallback((id: string) => {
+    saveSpriteGenerationSettings({
+      ...loadSpriteGenerationSettings(),
+      preferredProviderId: id as SpriteProviderId,
+    });
+  }, []);
+  const onSpriteModelChange = useCallback(
+    (model: string) => {
+      const selected = model.trim();
+      if (!selected) return;
+      const current = loadSpriteGenerationSettings();
+      const providerId = current.preferredProviderId;
+      saveSpriteGenerationSettings({
         ...current,
         providerModels: { ...current.providerModels, [providerId]: selected },
       });
@@ -3836,6 +4078,14 @@ export default function AIDock({
         musicModeStartedAt: null,
         threeDMode: false,
         threeDModeStartedAt: null,
+        videoMode: false,
+        videoModeStartedAt: null,
+        spriteMode: false,
+        spriteModeStartedAt: null,
+        speechMode: false,
+        speechModeStartedAt: null,
+        uiMode: false,
+        uiModeStartedAt: null,
       });
       clearDraftIfNeeded();
       if (!wasImageMode) {
@@ -3868,6 +4118,14 @@ export default function AIDock({
         musicModeStartedAt: startedAt,
         threeDMode: false,
         threeDModeStartedAt: null,
+        videoMode: false,
+        videoModeStartedAt: null,
+        spriteMode: false,
+        spriteModeStartedAt: null,
+        speechMode: false,
+        speechModeStartedAt: null,
+        uiMode: false,
+        uiModeStartedAt: null,
       });
       clearDraftIfNeeded();
       if (!wasMusicMode) {
@@ -3895,6 +4153,156 @@ export default function AIDock({
       clearDraftIfNeeded();
       return;
     }
+    const videoModeStart = /^\/video-mode-start(?:\s+([\s\S]*))?$/i.exec(text);
+    if (videoModeStart) {
+      const wasVideoMode = composer.videoMode;
+      const startedAt = wasVideoMode
+        ? composer.videoModeStartedAt ?? Date.now()
+        : Date.now();
+      setComposer({
+        imageMode: false,
+        imageModeStartedAt: null,
+        musicMode: false,
+        musicModeStartedAt: null,
+        threeDMode: false,
+        threeDModeStartedAt: null,
+        comfyMode: false,
+        comfyModeStartedAt: null,
+        videoMode: true,
+        videoModeStartedAt: startedAt,
+        spriteMode: false,
+        spriteModeStartedAt: null,
+        speechMode: false,
+        speechModeStartedAt: null,
+        uiMode: false,
+        uiModeStartedAt: null,
+      });
+      clearDraftIfNeeded();
+      if (!wasVideoMode) {
+        appendChatNote(t(locale, 'dock.videoModeEntered'), 'system');
+      }
+      const prompt = (videoModeStart[1] ?? '').trim();
+      if (prompt) generateVideoPrompt(prompt);
+      return;
+    }
+    const videoModeEnd = /^\/video-mode-end(?:\s+([\s\S]*))?$/i.exec(text);
+    if (videoModeEnd) {
+      const wasVideoMode = composer.videoMode;
+      setComposer({ videoMode: false, videoModeStartedAt: null });
+      clearDraftIfNeeded();
+      if (wasVideoMode) {
+        appendChatNote(t(locale, 'dock.videoModeExited'), 'system');
+      }
+      return;
+    }
+    const videoMatch = /^\/(?:video|movie|film|clip|视频|生成视频|短片)(?:\s+([\s\S]*))?$/iu.exec(text);
+    if (videoMatch) {
+      const prompt = (videoMatch[1] ?? '').trim();
+      if (!prompt) return;
+      generateVideoPrompt(text);
+      clearDraftIfNeeded();
+      return;
+    }
+    const speechModeStart = /^\/speech-mode-start(?:\s+([\s\S]*))?$/i.exec(text);
+    if (speechModeStart) {
+      const wasSpeechMode = composer.speechMode;
+      const startedAt = wasSpeechMode
+        ? composer.speechModeStartedAt ?? Date.now()
+        : Date.now();
+      setComposer({
+        imageMode: false,
+        imageModeStartedAt: null,
+        musicMode: false,
+        musicModeStartedAt: null,
+        threeDMode: false,
+        threeDModeStartedAt: null,
+        comfyMode: false,
+        comfyModeStartedAt: null,
+        videoMode: false,
+        videoModeStartedAt: null,
+        spriteMode: false,
+        spriteModeStartedAt: null,
+        speechMode: true,
+        speechModeStartedAt: startedAt,
+        uiMode: false,
+        uiModeStartedAt: null,
+      });
+      clearDraftIfNeeded();
+      if (!wasSpeechMode) {
+        appendChatNote(t(locale, 'dock.speechModeEntered'), 'system');
+      }
+      const prompt = (speechModeStart[1] ?? '').trim();
+      if (prompt) generateSpeechPrompt(prompt);
+      return;
+    }
+    const speechModeEnd = /^\/speech-mode-end(?:\s+([\s\S]*))?$/i.exec(text);
+    if (speechModeEnd) {
+      const wasSpeechMode = composer.speechMode;
+      setComposer({ speechMode: false, speechModeStartedAt: null });
+      clearDraftIfNeeded();
+      if (wasSpeechMode) {
+        appendChatNote(t(locale, 'dock.speechModeExited'), 'system');
+      }
+      return;
+    }
+    const speechMatch = /^\/(?:tts|speak|speech|say|voice|配音|朗读|语音|念)(?:\s+([\s\S]*))?$/iu.exec(text);
+    if (speechMatch) {
+      const prompt = (speechMatch[1] ?? '').trim();
+      if (!prompt) return;
+      generateSpeechPrompt(text);
+      clearDraftIfNeeded();
+      return;
+    }
+    const spriteModeStart = /^\/sprite-mode-start(?:\s+([\s\S]*))?$/i.exec(text);
+    if (spriteModeStart) {
+      const wasSpriteMode = composer.spriteMode;
+      const startedAt = wasSpriteMode
+        ? composer.spriteModeStartedAt ?? Date.now()
+        : Date.now();
+      setComposer({
+        imageMode: false,
+        imageModeStartedAt: null,
+        musicMode: false,
+        musicModeStartedAt: null,
+        threeDMode: false,
+        threeDModeStartedAt: null,
+        comfyMode: false,
+        comfyModeStartedAt: null,
+        videoMode: false,
+        videoModeStartedAt: null,
+        spriteMode: true,
+        spriteModeStartedAt: startedAt,
+        speechMode: false,
+        speechModeStartedAt: null,
+        uiMode: false,
+        uiModeStartedAt: null,
+      });
+      clearDraftIfNeeded();
+      if (!wasSpriteMode) {
+        appendChatNote(t(locale, 'dock.spriteModeEntered'), 'system');
+      }
+      const prompt = (spriteModeStart[1] ?? '').trim();
+      if (prompt) generateSpritePrompt(prompt);
+      return;
+    }
+    const spriteModeEnd = /^\/sprite-mode-end(?:\s+([\s\S]*))?$/i.exec(text);
+    if (spriteModeEnd) {
+      const wasSpriteMode = composer.spriteMode;
+      setComposer({ spriteMode: false, spriteModeStartedAt: null });
+      clearDraftIfNeeded();
+      if (wasSpriteMode) {
+        appendChatNote(t(locale, 'dock.spriteModeExited'), 'system');
+      }
+      return;
+    }
+    const spriteMatch = /^\/(?:sprite|spritesheet|sprite-sheet|精灵|精灵图|序列帧)(?:\s+([\s\S]*))?$/iu.exec(text);
+    if (spriteMatch) {
+      const prompt = (spriteMatch[1] ?? '').trim();
+      if (!prompt) return;
+      generateSpritePrompt(text);
+      clearDraftIfNeeded();
+      return;
+    }
     const threeDModeStart = /^\/mesh-mode-start(?:\s+([\s\S]*))?$/i.exec(text);
     if (threeDModeStart) {
       const wasThreeDMode = composer.threeDMode;
@@ -3908,6 +4316,14 @@ export default function AIDock({
         musicModeStartedAt: null,
         threeDMode: true,
         threeDModeStartedAt: startedAt,
+        videoMode: false,
+        videoModeStartedAt: null,
+        spriteMode: false,
+        spriteModeStartedAt: null,
+        speechMode: false,
+        speechModeStartedAt: null,
+        uiMode: false,
+        uiModeStartedAt: null,
       });
       clearDraftIfNeeded();
       if (!wasThreeDMode) {
@@ -3924,6 +4340,90 @@ export default function AIDock({
       clearDraftIfNeeded();
       if (wasThreeDMode) {
         appendChatNote(t(locale, 'dock.threeDModeExited'), 'system');
+      }
+      return;
+    }
+    const comfyModeStart = /^\/comfyui-mode-start(?:\s+([\s\S]*))?$/i.exec(text);
+    if (comfyModeStart) {
+      const wasComfyMode = composer.comfyMode;
+      const startedAt = wasComfyMode
+        ? composer.comfyModeStartedAt ?? Date.now()
+        : Date.now();
+      setComposer({
+        imageMode: false,
+        imageModeStartedAt: null,
+        musicMode: false,
+        musicModeStartedAt: null,
+        threeDMode: false,
+        threeDModeStartedAt: null,
+        comfyMode: true,
+        comfyModeStartedAt: startedAt,
+        videoMode: false,
+        videoModeStartedAt: null,
+        spriteMode: false,
+        spriteModeStartedAt: null,
+        speechMode: false,
+        speechModeStartedAt: null,
+        uiMode: false,
+        uiModeStartedAt: null,
+      });
+      clearDraftIfNeeded();
+      if (!wasComfyMode) {
+        appendChatNote(t(locale, 'dock.comfyModeEntered'), 'system');
+      }
+      const prompt = (comfyModeStart[1] ?? '').trim();
+      if (prompt) generateComfyPrompt(prompt);
+      return;
+    }
+    const comfyModeEnd = /^\/comfyui-mode-end(?:\s+([\s\S]*))?$/i.exec(text);
+    if (comfyModeEnd) {
+      const wasComfyMode = composer.comfyMode;
+      setComposer({ comfyMode: false, comfyModeStartedAt: null });
+      clearDraftIfNeeded();
+      if (wasComfyMode) {
+        appendChatNote(t(locale, 'dock.comfyModeExited'), 'system');
+      }
+      return;
+    }
+    const uiModeStart = /^\/ui-mode-start(?:\s+([\s\S]*))?$/i.exec(text);
+    if (uiModeStart) {
+      const wasUiMode = composer.uiMode;
+      const startedAt = wasUiMode
+        ? composer.uiModeStartedAt ?? Date.now()
+        : Date.now();
+      setComposer({
+        imageMode: false,
+        imageModeStartedAt: null,
+        musicMode: false,
+        musicModeStartedAt: null,
+        threeDMode: false,
+        threeDModeStartedAt: null,
+        comfyMode: false,
+        comfyModeStartedAt: null,
+        videoMode: false,
+        videoModeStartedAt: null,
+        spriteMode: false,
+        spriteModeStartedAt: null,
+        speechMode: false,
+        speechModeStartedAt: null,
+        uiMode: true,
+        uiModeStartedAt: startedAt,
+      });
+      clearDraftIfNeeded();
+      if (!wasUiMode) {
+        appendChatNote(t(locale, 'dock.uiModeEntered'), 'system');
+      }
+      const prompt = (uiModeStart[1] ?? '').trim();
+      if (prompt) generateUiPrompt(prompt);
+      return;
+    }
+    const uiModeEnd = /^\/ui-mode-end(?:\s+([\s\S]*))?$/i.exec(text);
+    if (uiModeEnd) {
+      const wasUiMode = composer.uiMode;
+      setComposer({ uiMode: false, uiModeStartedAt: null });
+      clearDraftIfNeeded();
+      if (wasUiMode) {
+        appendChatNote(t(locale, 'dock.uiModeExited'), 'system');
       }
       return;
     }
@@ -3993,6 +4493,31 @@ export default function AIDock({
       clearDraftIfNeeded();
       return;
     }
+    if (composer.videoMode && !text.startsWith('/')) {
+      generateVideoPrompt(text);
+      clearDraftIfNeeded();
+      return;
+    }
+    if (composer.speechMode && !text.startsWith('/')) {
+      generateSpeechPrompt(text);
+      clearDraftIfNeeded();
+      return;
+    }
+    if (composer.spriteMode && !text.startsWith('/')) {
+      generateSpritePrompt(text);
+      clearDraftIfNeeded();
+      return;
+    }
+    if (composer.comfyMode && !text.startsWith('/')) {
+      generateComfyPrompt(text);
+      clearDraftIfNeeded();
+      return;
+    }
+    if (composer.uiMode && !text.startsWith('/')) {
+      generateUiPrompt(text);
+      clearDraftIfNeeded();
+      return;
+    }
     // Explicit game-expert / producer invocation. Supports both whole-team
     // routing via a root alias (`/game`, `/游戏专家`, multilingual) and
     // hierarchical drill-down by `/`-separated levels — `/游戏专家/编程/引擎程序`
@@ -4016,6 +4541,10 @@ export default function AIDock({
     const promptText = expandSlashRequest(text, activeAdapterSlashSuggestions);
     void (async () => {
       if (!(await ensureSelectedLocalChannelReady())) return;
+      // Worktree startup mode: before the very first message, prepare an
+      // isolated working directory and repoint the session cwd at it. No-op for
+      // 'local' mode or once the conversation has started.
+      await ensureSessionStartupWorkspace();
       sendPrompt(promptText);
       if (overrideText === undefined || options.clearDraft) {
         setComposerDraft('');
@@ -4107,13 +4636,19 @@ export default function AIDock({
       </button>
     </div>
   );
-  const generationMode: 'image' | 'music' | 'threeD' | null = composer.imageMode
+  const generationMode: 'image' | 'music' | 'threeD' | 'video' | 'sprite' | 'speech' | null = composer.imageMode
     ? 'image'
     : composer.musicMode
       ? 'music'
       : composer.threeDMode
         ? 'threeD'
-        : null;
+        : composer.videoMode
+          ? 'video'
+          : composer.spriteMode
+            ? 'sprite'
+            : composer.speechMode
+              ? 'speech'
+              : null;
   const channelOptions =
     generationMode === 'image'
       ? imageChannelOptions
@@ -4121,7 +4656,13 @@ export default function AIDock({
         ? musicChannelOptions
         : generationMode === 'threeD'
           ? threeDChannelOptions
-          : channelSelectOptions;
+          : generationMode === 'video'
+            ? videoChannelOptions
+            : generationMode === 'sprite'
+              ? spriteChannelOptions
+              : generationMode === 'speech'
+                ? speechChannelOptions
+                : channelSelectOptions;
   const channelValue =
     generationMode === 'image'
       ? imageChannelValue
@@ -4129,7 +4670,13 @@ export default function AIDock({
         ? musicChannelValue
         : generationMode === 'threeD'
           ? threeDChannelValue
-          : channelSelectValue;
+          : generationMode === 'video'
+            ? videoChannelValue
+            : generationMode === 'sprite'
+              ? spriteChannelValue
+              : generationMode === 'speech'
+                ? speechChannelValue
+                : channelSelectValue;
   const handleChannelChange =
     generationMode === 'image'
       ? onImageChannelChange
@@ -4137,7 +4684,13 @@ export default function AIDock({
         ? onMusicChannelChange
         : generationMode === 'threeD'
           ? onThreeDChannelChange
-          : onChannelChange;
+          : generationMode === 'video'
+            ? onVideoChannelChange
+            : generationMode === 'sprite'
+              ? onSpriteChannelChange
+              : generationMode === 'speech'
+                ? onSpeechChannelChange
+                : onChannelChange;
   const modelOptionsForMode =
     generationMode === 'image'
       ? imageModelOptions
@@ -4145,7 +4698,13 @@ export default function AIDock({
         ? musicModelOptions
         : generationMode === 'threeD'
           ? threeDModelOptions
-          : modelSelectOptions;
+          : generationMode === 'video'
+            ? videoModelOptions
+            : generationMode === 'sprite'
+              ? spriteModelOptions
+              : generationMode === 'speech'
+                ? speechModelOptions
+                : modelSelectOptions;
   const modelValueForMode =
     generationMode === 'image'
       ? imageModelValue
@@ -4153,7 +4712,13 @@ export default function AIDock({
         ? musicModelValue
         : generationMode === 'threeD'
           ? threeDModelValue
-          : modelSelectValue;
+          : generationMode === 'video'
+            ? videoModelValue
+            : generationMode === 'sprite'
+              ? spriteModelValue
+              : generationMode === 'speech'
+                ? speechModelValue
+                : modelSelectValue;
   const handleModelChange =
     generationMode === 'image'
       ? onImageModelChange
@@ -4161,17 +4726,29 @@ export default function AIDock({
         ? onMusicModelChange
         : generationMode === 'threeD'
           ? onThreeDModelChange
-          : onModelChange;
+          : generationMode === 'video'
+            ? onVideoModelChange
+            : generationMode === 'sprite'
+              ? onSpriteModelChange
+              : generationMode === 'speech'
+                ? onSpeechModelChange
+                : onModelChange;
   const modelTitleForMode =
     generationMode === 'threeD'
       ? t(locale, 'dock.threeDModelTitle')
       : generationMode === 'music'
       ? t(locale, 'dock.musicModelTitle')
-      : generationMode === 'image'
-        ? t(locale, 'dock.imageModelTitle')
-        : loadingChannelModels
-          ? t(locale, 'dock.modelVersionLoading')
-          : t(locale, 'dock.modelVersionTitle');
+      : generationMode === 'video'
+        ? t(locale, 'dock.videoModelTitle')
+        : generationMode === 'sprite'
+          ? t(locale, 'dock.spriteModelTitle')
+          : generationMode === 'speech'
+            ? t(locale, 'dock.speechModelTitle')
+            : generationMode === 'image'
+              ? t(locale, 'dock.imageModelTitle')
+              : loadingChannelModels
+                ? t(locale, 'dock.modelVersionLoading')
+                : t(locale, 'dock.modelVersionTitle');
   const composerModeClass =
     composer.imageMode && !dropActive
       ? 'fuc-ai-input--image '
@@ -4179,7 +4756,13 @@ export default function AIDock({
         ? 'fuc-ai-input--music '
         : composer.threeDMode && !dropActive
           ? 'fuc-ai-input--three-d '
-          : '';
+          : composer.videoMode && !dropActive
+            ? 'fuc-ai-input--video '
+            : composer.spriteMode && !dropActive
+              ? 'fuc-ai-input--sprite '
+              : composer.speechMode && !dropActive
+                ? 'fuc-ai-input--speech '
+                : '';
   const regenerateMessage = useCallback(
     (messageId: string) => {
       if (aiBusy) return;
@@ -4208,10 +4791,18 @@ export default function AIDock({
         try {
           const translated = await translatePublicText(text, target, locale);
           if (!translated) return;
-          appendChatNote(`${translatedAnswerTitle(target, locale)}\n\n${translated}`);
+          // The translation is a UI-only convenience for the reader. Mark it
+          // localOnly so it is never replayed into the model transcript —
+          // translating an assistant answer also rewrites its tool-call markup
+          // (e.g. <invoke> → <调用>), which would corrupt the next turn's context.
+          appendChatNote(
+            `${translatedAnswerTitle(target, locale)}\n\n${translated}`,
+            'assistant',
+            { localOnly: true },
+          );
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          appendChatNote(`✗ 翻译失败：${message}`);
+          appendChatNote(`✗ 翻译失败：${message}`, 'assistant', { localOnly: true });
         }
       })();
     },
@@ -4224,7 +4815,8 @@ export default function AIDock({
       className={
         'relative ' +
         (isChat
-          ? 'flex h-full min-h-0 flex-col bg-bg'
+          ? 'flex h-full min-h-0 flex-col bg-bg' +
+            (centerInput ? ' justify-center' : '')
           : 'flex shrink-0 border-t border-border bg-panel')
       }
       style={isChat ? undefined : { height }}
@@ -4241,7 +4833,13 @@ export default function AIDock({
         </div>
       )}
       {/* AI return stream */}
-      <section className="fuc-ai-return-pane flex min-h-0 min-w-0 flex-1 flex-col">
+      <section
+        className={
+          'fuc-ai-return-pane flex min-h-0 min-w-0 flex-col ' +
+          (centerInput ? 'shrink-0' : 'flex-1')
+        }
+      >
+        {!centerInput && (
         <header className="fuc-ai-return-header relative flex flex-wrap items-center gap-2 border-b border-border-soft px-3 py-2">
           {isChat && searchToggleButton}
           {isChat ? (
@@ -4385,7 +4983,8 @@ export default function AIDock({
             </div>
           )}
         </header>
-        <div className="relative min-h-0 flex-1">
+        )}
+        <div className={'relative min-h-0 ' + (centerInput ? '' : 'flex-1')}>
           {captureStatus && (
             <div
               className={
@@ -4405,13 +5004,17 @@ export default function AIDock({
           <div
             ref={streamRef}
             onScroll={handleStreamScroll}
-            className="fuc-ai-return-stream h-full min-h-0 overflow-y-auto p-3"
+            className={
+              'fuc-ai-return-stream min-h-0 overflow-y-auto p-3 ' +
+              (centerInput ? '' : 'h-full')
+            }
           >
             {messages.length === 0 ? (
               <div
                 className={
                   isChat
-                    ? 'fuc-ai-return-empty flex h-full items-center justify-center px-4 text-center text-xl font-medium text-fg-dim'
+                    ? 'fuc-ai-return-empty flex items-center justify-center px-4 pb-6 text-center text-xl font-medium text-fg-dim' +
+                      (centerInput ? '' : ' h-full')
                     : 'fuc-ai-return-empty text-xs text-fg-faint'
                 }
               >
@@ -4512,7 +5115,9 @@ export default function AIDock({
                           locale={locale}
                           active={
                             (m.interactionStatus ?? 'pending') === 'pending' &&
-                            (mode === 'running' || activeAiEditing)
+                            (mode === 'running' ||
+                              activeAiEditing ||
+                              activeChatting)
                           }
                           onAnswer={(answer) => answerInteraction(m.id, answer)}
                           onDismiss={() => dismissInteraction(m.id)}
@@ -4638,8 +5243,9 @@ export default function AIDock({
       )}
 
       {/* Horizontal divider (chat layout only) — drag to re-split AI 返回 (top) /
-          AI 输入 (bottom). */}
-      {isChat && (
+          AI 输入 (bottom). Hidden on a fresh session where the input floats in
+          the vertical center (no transcript to size against yet). */}
+      {isChat && !centerInput && (
         <div
           onMouseDown={onChatSplitStart}
           title={t(locale, 'common.resizeHeight')}
@@ -4655,8 +5261,17 @@ export default function AIDock({
           read as one big input area, with controls anchored at the bottom edge:
           left = + (add file), permission, workspace; right = runtime + send. */}
       <section
-        className="relative flex shrink-0 flex-col bg-transparent p-3"
-        style={isChat ? { height: chatInputHeight } : { width: renderedInputWidth }}
+        className={
+          'relative flex shrink-0 flex-col bg-transparent p-3 ' +
+          (centerInput ? 'mx-auto w-full max-w-3xl px-4 sm:px-6' : '')
+        }
+        style={
+          isChat
+            ? centerInput
+              ? undefined
+              : { height: chatInputHeight }
+            : { width: renderedInputWidth }
+        }
         aria-label={t(locale, 'dock.aiInput') + (isReadOnly ? t(locale, 'dock.readonlySuffix') : '')}
       >
         {slashOpen && (
@@ -4912,6 +5527,7 @@ export default function AIDock({
           onDrop={handleComposerDrop}
           className={
             'fuc-ai-input-card relative flex min-h-0 flex-1 flex-col rounded-lg border transition-colors focus-within:border-accent ' +
+            (centerInput ? 'min-h-[11rem] ' : '') +
             (dropActive
               ? 'fuc-ai-input--drop border-accent '
               : isChat
@@ -5042,8 +5658,16 @@ export default function AIDock({
                   : composer.musicMode
                     ? t(locale, 'dock.musicModePlaceholder')
                     : composer.threeDMode
-                      ? t(locale, 'dock.threeDModePlaceholder')
-                      : t(locale, 'dock.placeholder')
+                    ? t(locale, 'dock.threeDModePlaceholder')
+                    : composer.videoMode
+                      ? t(locale, 'dock.videoModePlaceholder')
+                      : composer.spriteMode
+                        ? t(locale, 'dock.spriteModePlaceholder')
+                        : composer.speechMode
+                          ? t(locale, 'dock.speechModePlaceholder')
+                          : composer.uiMode
+                            ? t(locale, 'dock.uiModePlaceholder')
+                            : t(locale, 'dock.placeholder')
             }
             aria-expanded={slashOpen || fileMentionOpen}
             aria-controls={
@@ -5190,6 +5814,30 @@ export default function AIDock({
               disabled={cacheTtlLocked}
               className="min-w-0 max-w-[8rem]"
               icon="⏱"
+              variant="ghost"
+              showSelectedHint={false}
+            />
+
+            {/* Session startup mode — choose whether a new session runs in the
+                workspace directly (本地) or in an isolated git worktree / copy
+                (新工作树). Like cache TTL it only affects brand-new sessions and
+                locks once the first message is sent. */}
+            <Select
+              title={
+                startupModeLocked
+                  ? t(locale, 'dock.startupModeLocked')
+                  : t(locale, 'dock.startupModeTitle')
+              }
+              options={startupModeOptions}
+              value={composer.startupMode}
+              onChange={(id) =>
+                setComposer({
+                  startupMode: id === 'worktree' ? 'worktree' : 'local',
+                })
+              }
+              disabled={startupModeLocked}
+              className="min-w-0 max-w-[9rem]"
+              icon="⎇"
               variant="ghost"
               showSelectedHint={false}
             />

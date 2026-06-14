@@ -79,6 +79,15 @@ export interface Message {
    * on user/system messages and on assistant turns that recorded no usage.
    */
   usage?: MessageUsage;
+  /**
+   * UI-only note that must never be replayed back to the model as conversation
+   * context. Set on bubbles produced for the user's benefit rather than as part
+   * of the actual dialogue — e.g. the "🌐 翻译为…" on-demand translation of an
+   * answer (whose translated text would otherwise corrupt the transcript, since
+   * translating an assistant turn also rewrites its tool-call markup). History
+   * builders MUST drop messages with this flag before sending to the LLM.
+   */
+  localOnly?: boolean;
 }
 
 /**
@@ -169,6 +178,15 @@ export interface SelectOption {
 export type ModelStrategy = 'inherit' | 'smart' | 'prefer-better' | 'prefer-cheaper';
 
 /**
+ * 会话启动模式。决定新会话首次发消息时如何准备工作目录:
+ * - 'local'：在本地处理 — 直接在所选工作区目录中运行(默认)。
+ * - 'worktree'：新工作树 — 首次发送前先准备一个隔离工作目录(git 仓库用
+ *   `git worktree` 新建分支,非 git 目录复制一份),之后会话在隔离目录中运行,
+ *   原工作区不受影响。与缓存时间(TTL)一样,仅在会话开启前可改,开启后锁定。
+ */
+export type StartupMode = 'local' | 'worktree';
+
+/**
  * AI-input composer settings. Pure UI state — never enters the IRGraph.
  * Each field holds the id of the selected option in its respective list.
  */
@@ -183,6 +201,12 @@ export interface ComposerSettings {
    * 默认 5。会话开启(发出首条消息)后锁定，不再可改。
    */
   cacheTtlMinutes: number;
+  /**
+   * 会话启动模式 ('local' | 'worktree')。决定新会话首次发消息时是否准备隔离
+   * 工作目录。仅在会话开启(发出首条消息)前可改,开启后锁定,不再可改。默认
+   * 'local'。
+   */
+  startupMode: StartupMode;
   /** absolute path of the selected workspace folder ('' = none chosen yet) */
   workspace: string;
   /** Additional workspace folders attached to the current session. */
@@ -210,6 +234,44 @@ export interface ComposerSettings {
   threeDMode: boolean;
   /** Epoch ms when sticky mesh mode started; used to merge mode-local prompts. */
   threeDModeStartedAt?: number | null;
+  /**
+   * 粘性生视频模式。true 时输入框里的裸文本(无 slash 命令)走视频生成而非
+   * AI 编程;由 /video-mode-start 开启、/video-mode-end 关闭。
+   */
+  videoMode: boolean;
+  /** Epoch ms when sticky video mode started; used to merge mode-local prompts. */
+  videoModeStartedAt?: number | null;
+  /**
+   * 粘性文本转语音模式。true 时输入框里的裸文本(无 slash 命令)走语音合成而非
+   * AI 编程;由 /speech-mode-start 开启、/speech-mode-end 关闭。
+   */
+  speechMode: boolean;
+  /** Epoch ms when sticky speech mode started; used to merge mode-local prompts. */
+  speechModeStartedAt?: number | null;
+  /**
+   * 粘性 Sprite 动画模式。true 时输入框里的裸文本(无 slash 命令)走 sprite
+   * 生成而非 AI 编程;由 /sprite-mode-start 开启、/sprite-mode-end 关闭。
+   */
+  spriteMode: boolean;
+  /** Epoch ms when sticky sprite mode started; used to merge mode-local prompts. */
+  spriteModeStartedAt?: number | null;
+  /**
+   * 粘性 ComfyUI 模式。true 时输入框里的裸文本(无 slash 命令)走 ComfyUI 节点图
+   * 生成而非 AI 编程;由 /comfyui-mode-start 开启、/comfyui-mode-end 关闭。
+   * 编程模型被要求输出一个 ```comfyui 代码块(ComfyUI prompt graph JSON),
+   * 信息流将其渲染为可展开的内嵌节点图。
+   */
+  comfyMode: boolean;
+  /** Epoch ms when sticky ComfyUI mode started; used to merge mode-local prompts. */
+  comfyModeStartedAt?: number | null;
+  /**
+   * 粘性 UI 设计模式。true 时输入框里的裸文本(无 slash 命令)走游戏 UI 设计流程而非
+   * 普通 AI 编程;由 /ui-mode-start 开启、/ui-mode-end 关闭。编程模型被要求按默认
+   * UI 渠道产出界面设计稿与可交付资产。
+   */
+  uiMode: boolean;
+  /** Epoch ms when sticky UI mode started; used to merge mode-local prompts. */
+  uiModeStartedAt?: number | null;
 }
 
 export interface SessionComposerSettings {

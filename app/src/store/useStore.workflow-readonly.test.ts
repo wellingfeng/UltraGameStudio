@@ -293,6 +293,36 @@ describe('workflow read-only guard', () => {
     ).toBe('running');
   });
 
+  it('reports waiting status when a live turn is parked on an interaction', () => {
+    // A parked turn still appears in chatting/running, but waiting wins so the
+    // sidebar shows a static "waiting" badge instead of the running spinner.
+    expect(
+      sessionLiveStatus(ACTIVE_SESSION_KEY, {
+        runningSessions: [],
+        aiEditingSessions: [],
+        chattingSessions: [ACTIVE_SESSION_KEY],
+        waitingInputSessions: [ACTIVE_SESSION_KEY],
+      }),
+    ).toBe('waiting');
+    expect(
+      sessionLiveStatus(ACTIVE_SESSION_KEY, {
+        runningSessions: [ACTIVE_SESSION_KEY],
+        aiEditingSessions: [ACTIVE_SESSION_KEY],
+        chattingSessions: [ACTIVE_SESSION_KEY],
+        waitingInputSessions: [ACTIVE_SESSION_KEY],
+      }),
+    ).toBe('waiting');
+    // A different session parked does not affect this one.
+    expect(
+      sessionLiveStatus(ACTIVE_SESSION_KEY, {
+        runningSessions: [],
+        aiEditingSessions: [],
+        chattingSessions: [ACTIVE_SESSION_KEY],
+        waitingInputSessions: [{ workspaceId: null, sessionId: 's_other' }],
+      }),
+    ).toBe('running');
+  });
+
   it('converts an agent to consensus in place', () => {
     resetStore('design', false);
     const before = cloneGraph(useStore.getState().workflow);
@@ -738,12 +768,18 @@ describe('workflow read-only guard', () => {
         permission: 'full',
         model: 'claude-sonnet-4',
         cacheTtlMinutes: 5,
+        startupMode: 'local',
         workspace: '',
         workspaceFolders: [],
         modelStrategy: 'inherit',
         imageMode: false,
         musicMode: false,
         threeDMode: false,
+        videoMode: false,
+        speechMode: false,
+        spriteMode: false,
+        comfyMode: false,
+        uiMode: false,
       },
     });
 

@@ -1,0 +1,19 @@
+{
+  "name": "fuc-remote-runner",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "description": "FreeUltraCode Remote Runner — self-hosted cloud execution backend (Route B).",
+  "bin": {
+    "fuc-runner": "./src/server.mjs"
+  },
+  "scripts": {
+    "start": "node src/server.mjs",
+    "dev": "node --watch src/server.mjs",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

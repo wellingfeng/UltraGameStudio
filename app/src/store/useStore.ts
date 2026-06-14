@@ -125,11 +125,50 @@ import {
   threeDProviderModel,
   type ThreeDProviderId,
 } from '@/lib/threeDGeneration';
+import { stripComfyCommand } from '@/lib/comfyui';
+import {
+  loadUiDesignChannelSettings,
+  uiDesignChannelById,
+  uiDesignChannelExportFormat,
+} from '@/lib/uiDesignChannels';
+import {
+  generateVideo,
+  loadVideoGenerationSettings,
+  preferredReadyVideoProviderId,
+  stripVideoCommand,
+  videoDurationSecondsFromPrompt,
+  videoProviderById,
+  videoProviderModel,
+  type VideoProviderId,
+} from '@/lib/videoGeneration';
+import {
+  generateSpeech,
+  loadSpeechGenerationSettings,
+  preferredReadySpeechProviderId,
+  stripSpeechCommand,
+  speechProviderById,
+  speechProviderModel,
+  speechProviderVoice,
+  type SpeechProviderId,
+} from '@/lib/speechGeneration';
+import {
+  generateSprite,
+  loadSpriteGenerationSettings,
+  preferredReadySpriteProviderId,
+  spriteProviderById,
+  spriteProviderModel,
+  stripSpriteCommand,
+  type SpriteProviderId,
+} from '@/lib/spriteGeneration';
 import {
   loadMeshLibrarySettings,
   meshLibraryById,
+  meshSearchQueryNeedsEnglish,
+  resolveMeshSearchQuery,
   searchMeshLibraries,
   stripMeshSearchCommand,
+  type MeshLibraryAccountSettings,
+  type MeshSearchQueryResolution,
   type MeshSearchResult,
 } from '@/lib/meshLibrary';
 import {
@@ -153,14 +192,17 @@ import {
 } from '@/lib/modelGateway/resolver';
 import { shortId } from '@/lib/id';
 import { translatePromptFields } from '@/lib/promptTranslation';
+import { translatePublicText } from '@/lib/publicTranslation';
 import {
   aiEditViaCli,
   cancelAiCli,
   downloadModelAsset,
   ensureDefaultWorkspaceDir,
   isTauri,
+  prepareIsolatedWorkspace,
   runUltracode,
 } from '@/lib/tauri';
+import { captureGeneratedAssets } from '@/lib/assetCapture';
 import {
   parseUltracodePrompt,
   summarizeUltracodeResult,
@@ -180,6 +222,7 @@ import {
   SIMPLE_CHAT_SYSTEM,
   extractJsonObject,
   modelStrategyGuidance,
+  buildAssetCapabilityBlock,
 } from '@/lib/anthropic';
 import {
   INTERACTION_PROTOCOL,
@@ -410,6 +453,14 @@ export interface StoreState {
    * blueprint editing), so consecutive chat messages aren't blocked.
    */
   chattingSessions: WorkflowSessionKey[];
+  /**
+   * Sessions whose in-flight turn is parked on a user interaction (a FUC_ASK
+   * select/input/confirm). The turn is still "live" (its channel stays open),
+   * but it is *paused* waiting on the user rather than streaming — so the
+   * Sidebar shows a static "waiting" badge instead of the running spinner, and
+   * the composer accepts the answer instead of treating the box as locked.
+   */
+  waitingInputSessions: WorkflowSessionKey[];
   /** Short-lived composer tip when a send is rejected by chat concurrency rules. */
   blockedSendTip: BlockedSendTip | null;
 
@@ -565,6 +616,33 @@ export interface StoreState {
     text: string,
     options?: { providerId?: ThreeDProviderId; model?: string },
   ) => void;
+  generateVideoPrompt: (
+    text: string,
+    options?: { providerId?: VideoProviderId; model?: string },
+  ) => void;
+  generateSpeechPrompt: (
+    text: string,
+    options?: { providerId?: SpeechProviderId; model?: string; voice?: string },
+  ) => void;
+  generateSpritePrompt: (
+    text: string,
+    options?: { providerId?: SpriteProviderId; model?: string },
+  ) => void;
+  /**
+   * ComfyUI mode turn: ask the selected coding model to author a ComfyUI prompt
+   * graph and emit it as a ```comfyui fenced block, which the chat stream then
+   * renders as an embedded, expandable node graph. Wired to the
+   * /comfyui-mode-start command and sticky comfyMode in AIDock.
+   */
+  generateComfyPrompt: (text: string) => void;
+  /**
+   * UI mode turn: ask the selected coding model to design a game UI deliverable
+   * for the project's default UI channel (Project Settings > UI 渠道). Front-loads
+   * a UI-design instruction so the model produces interface specs/assets instead
+   * of editing the workflow blueprint. Wired to /ui-mode-start and sticky uiMode
+   * in AIDock.
+   */
+  generateUiPrompt: (text: string) => void;
   /**
    * Search the enabled online 3D model libraries (Project Settings > 模型库) for
    * the given query and render thumbnails / previews / downloads into the active
@@ -578,7 +656,11 @@ export interface StoreState {
    * /screenshot and /screenshot-gif export commands echoing the user's command
    * and surfacing their saved path + an inline preview). Returns the message id.
    */
-  appendChatNote: (text: string, role?: 'user' | 'assistant' | 'system') => string;
+  appendChatNote: (
+    text: string,
+    role?: 'user' | 'assistant' | 'system',
+    options?: { localOnly?: boolean },
+  ) => string;
   /** Delete one message from the active conversation and persist the transcript. */
   deleteMessage: (messageId: string) => void;
   /** Create a new chat session containing messages up to the chosen assistant reply. */
@@ -597,6 +679,14 @@ export interface StoreState {
    */
   dismissInteraction: (messageId: string) => void;
   setComposer: (patch: Partial<ComposerSettings>) => void;
+  /**
+   * If the active session was started in "worktree" mode and has not begun yet
+   * (no messages), prepare an isolated working directory (git worktree or copy)
+   * and repoint the composer cwd at it. Idempotent and a no-op for 'local' mode,
+   * web (no backend), or once the conversation has started. Resolves before the
+   * caller sends the first message so the CLI runs in the isolated directory.
+   */
+  ensureSessionStartupWorkspace: () => Promise<void>;
   setComposerDraft: (text: string) => void;
   appendComposerDraft: (text: string) => void;
   setWorkspace: (path: string) => void;
@@ -678,7 +768,7 @@ export interface StoreState {
 }
 
 export type WorkflowReadOnlyReason = 'running' | 'aiEditing';
-export type SessionLiveStatus = 'running' | 'aiEditing' | null;
+export type SessionLiveStatus = 'running' | 'waiting' | 'aiEditing' | null;
 
 type WorkflowWriteSource = 'user' | 'ai';
 type WorkflowSessionState = Pick<
@@ -705,7 +795,7 @@ type SessionLiveStatusState = Pick<
   StoreState,
   'runningSessions' | 'aiEditingSessions'
 > &
-  Partial<Pick<StoreState, 'chattingSessions'>>;
+  Partial<Pick<StoreState, 'chattingSessions' | 'waitingInputSessions'>>;
 
 function activeWorkflowSessionKey(
   state: WorkflowSessionState,
@@ -1068,6 +1158,8 @@ function normalizeComposerSettings(value: Partial<ComposerSettings> | undefined)
     ...source,
     workspace,
     cacheTtlMinutes: normalizeCacheTtlMinutes(source.cacheTtlMinutes),
+    startupMode:
+      source.startupMode === 'worktree' ? 'worktree' : defaultComposer.startupMode,
     workspaceFolders: normalizeWorkspaceFolderList(
       source.workspaceFolders,
       workspace,
@@ -1082,6 +1174,21 @@ function normalizeComposerSettings(value: Partial<ComposerSettings> | undefined)
     threeDMode: source.threeDMode ?? defaultComposer.threeDMode,
     threeDModeStartedAt:
       source.threeDModeStartedAt ?? defaultComposer.threeDModeStartedAt,
+    videoMode: source.videoMode ?? defaultComposer.videoMode,
+    videoModeStartedAt:
+      source.videoModeStartedAt ?? defaultComposer.videoModeStartedAt,
+    speechMode: source.speechMode ?? defaultComposer.speechMode,
+    speechModeStartedAt:
+      source.speechModeStartedAt ?? defaultComposer.speechModeStartedAt,
+    spriteMode: source.spriteMode ?? defaultComposer.spriteMode,
+    spriteModeStartedAt:
+      source.spriteModeStartedAt ?? defaultComposer.spriteModeStartedAt,
+    comfyMode: source.comfyMode ?? defaultComposer.comfyMode,
+    comfyModeStartedAt:
+      source.comfyModeStartedAt ?? defaultComposer.comfyModeStartedAt,
+    uiMode: source.uiMode ?? defaultComposer.uiMode,
+    uiModeStartedAt:
+      source.uiModeStartedAt ?? defaultComposer.uiModeStartedAt,
   };
 }
 
@@ -1198,6 +1305,12 @@ export function sessionLiveStatus(
   sessionKey: WorkflowSessionKey,
   state: SessionLiveStatusState,
 ): SessionLiveStatus {
+  // A turn parked on a user interaction is still "live" (its channel is open
+  // and it also appears in running/chatting), but it is *paused* on the user —
+  // surface that first so the badge shows a static "waiting" dot, not a spinner.
+  if (hasSessionKey(state.waitingInputSessions ?? [], sessionKey)) {
+    return 'waiting';
+  }
   if (hasSessionKey(state.runningSessions, sessionKey)) return 'running';
   if (hasSessionKey(state.chattingSessions ?? [], sessionKey)) return 'running';
   if (hasSessionKey(state.aiEditingSessions, sessionKey)) return 'aiEditing';
@@ -1358,6 +1471,74 @@ function musicResultMarkdown(result: {
   return `${routeLine}\n✓ 音乐生成完成\n\n提示词：${result.prompt}\n\n${audioLines}`;
 }
 
+function videoResultMarkdown(result: {
+  providerLabel: string;
+  model: string;
+  prompt: string;
+  videos: string[];
+}): string {
+  const routeLine = `⚙ 路由：${result.providerLabel} · 模型：${result.model}`;
+  const videoLines = result.videos
+    .map((src, index) => `[播放视频 ${index + 1}](${src})`)
+    .join('\n\n');
+  return `${routeLine}\n✓ 视频生成完成\n\n提示词：${result.prompt}\n\n${videoLines}`;
+}
+
+function speechResultMarkdown(result: {
+  providerLabel: string;
+  model: string;
+  voice: string;
+  prompt: string;
+  audios: string[];
+}): string {
+  const voicePart = result.voice ? ` · 音色：${result.voice}` : '';
+  const routeLine = `⚙ 路由：${result.providerLabel} · 模型：${result.model}${voicePart}`;
+  const audioLines = result.audios
+    .map((src, index) => `[播放语音 ${index + 1}](${src})`)
+    .join('\n\n');
+  return `${routeLine}\n✓ 语音合成完成\n\n文本：${result.prompt}\n\n${audioLines}`;
+}
+
+function spriteResultMarkdown(result: {
+  providerLabel: string;
+  model: string;
+  prompt: string;
+  mode: string;
+  frameCount: number;
+  frameSize: number;
+  spritesheets: string[];
+  frames: string[];
+  gifs: string[];
+  videos: string[];
+  metadata: string[];
+}): string {
+  const routeLine = `⚙ 路由：${result.providerLabel} · 模型：${result.model}`;
+  const metaLine = `模式：${result.mode} · 帧数：${result.frameCount} · 帧尺寸：${result.frameSize}px`;
+  const sheetLines = result.spritesheets
+    .map((src, index) => `![Sprite Sheet ${index + 1}](${src})`)
+    .join('\n\n');
+  const gifLines = result.gifs
+    .map((src, index) => `![GIF 预览 ${index + 1}](${src})`)
+    .join('\n\n');
+  const frameLines = result.frames
+    .map((src, index) => `[序列帧 ${index + 1}](${src})`)
+    .join('\n\n');
+  const videoLines = result.videos
+    .map((src, index) => `[播放视频 ${index + 1}](${src})`)
+    .join('\n\n');
+  const metadataLines = result.metadata
+    .map((src, index) => `[元数据 ${index + 1}](${src})`)
+    .join('\n\n');
+  const assets = [
+    sheetLines,
+    gifLines,
+    frameLines ? `序列帧：\n\n${frameLines}` : '',
+    videoLines ? `视频：\n\n${videoLines}` : '',
+    metadataLines ? `元数据：\n\n${metadataLines}` : '',
+  ].filter(Boolean);
+  return `${routeLine}\n✓ Sprite 动画生成完成\n${metaLine}\n\n提示词：${result.prompt}\n\n${assets.join('\n\n')}`;
+}
+
 function modelAssetHref(src: string): string {
   if (/^(?:https?:|data:|file:\/\/)/i.test(src)) return src;
   const normalized = src.replace(/\\/g, '/');
@@ -1475,9 +1656,26 @@ async function downloadThreeDAssets(
 function meshSearchResultMarkdown(
   result: MeshSearchResult,
   downloaded: Map<string, string>,
+  settings: MeshLibraryAccountSettings,
+  queryResolution?: MeshSearchQueryResolution,
 ): string {
   const lines: string[] = [];
-  lines.push(`🔎 在线模型库搜索：${result.query}`);
+  lines.push(
+    queryResolution?.translated && queryResolution.sourceQuery !== result.query
+      ? `🔎 在线模型库搜索：${queryResolution.sourceQuery}`
+      : `🔎 在线模型库搜索：${result.query}`,
+  );
+  if (queryResolution?.translated && queryResolution.sourceQuery !== result.query) {
+    lines.push(`英文搜索词：${result.query}`);
+  } else if (queryResolution?.translationError) {
+    lines.push(`英文化搜索词失败，已改用原词：${queryResolution.translationError}`);
+  }
+  const enabledLabels = settings.enabledIds
+    .map((id) => meshLibraryById(id)?.label)
+    .filter((label): label is string => !!label);
+  if (enabledLabels.length > 0) {
+    lines.push(`已搜索：${enabledLabels.join('、')}`);
+  }
   if (result.items.length > 0) {
     lines.push(`\n找到 ${result.items.length} 个可预览结果：`);
     for (const item of result.items) {
@@ -1518,7 +1716,11 @@ function meshSearchResultMarkdown(
     }
   }
   if (result.items.length === 0 && result.linkOuts.length === 0) {
-    lines.push('\n没有启用任何在线模型库。请在项目设置 > 模型库中启用并配置账号。');
+    if (settings.enabledIds.length === 0) {
+      lines.push('\n没有启用任何在线模型库。请在项目设置 > 模型库中启用并配置账号。');
+    } else {
+      lines.push('\n未找到匹配的在线模型结果。可以换成更通用的关键词再试，例如 `cartoon bear`、`low poly bear` 或 `teddy bear`。');
+    }
   }
   return lines.join('\n');
 }
@@ -4178,6 +4380,7 @@ export const useStore = create<StoreState>((set, get) => ({
   aiStreaming: false,
   aiEditingSessions: [],
   chattingSessions: [],
+  waitingInputSessions: [],
   blockedSendTip: null,
 
   // Seed session-domain state from the sample module so the dev UI renders
@@ -4823,16 +5026,49 @@ export const useStore = create<StoreState>((set, get) => ({
     startThreeDGenerationTurn(text, options);
   },
 
+  generateVideoPrompt: (text, options = {}) => {
+    startVideoGenerationTurn(text, options);
+  },
+
+  generateSpeechPrompt: (text, options = {}) => {
+    startSpeechGenerationTurn(text, options);
+  },
+
+  generateSpritePrompt: (text, options = {}) => {
+    startSpriteGenerationTurn(text, options);
+  },
+
+  generateComfyPrompt: (text) => {
+    const prompt = stripComfyCommand(text);
+    if (!prompt) return;
+    // Route through the normal coding-model turn, but front-load the ComfyUI
+    // authoring instruction so the model emits a ```comfyui block instead of
+    // editing the workflow blueprint. This reuses all channel/persistence logic
+    // and renders the result as an embedded node graph in the chat stream.
+    get().sendPrompt(`${COMFY_PROMPT_SYSTEM}\n\n用户需求：\n${prompt}`);
+  },
+
+  generateUiPrompt: (text) => {
+    const prompt = stripUiModeCommand(text);
+    if (!prompt) return;
+    // Route through the normal coding-model turn, but front-load a game-UI
+    // design instruction tied to the project's default UI channel so the model
+    // produces interface specs / deliverables instead of editing the workflow
+    // blueprint. Reuses all channel/persistence logic.
+    get().sendPrompt(`${uiDesignPromptSystem()}\n\n用户需求：\n${prompt}`);
+  },
+
   searchMeshLibraryPrompt: (text) => {
     startMeshSearchTurn(text);
   },
 
-  appendChatNote: (text, role = 'assistant') => {
+  appendChatNote: (text, role = 'assistant', options) => {
     const msg: Message = {
       id: shortId('m'),
       role,
       text,
       createdAt: Date.now(),
+      ...(options?.localOnly ? { localOnly: true } : {}),
     };
     set((state) => ({ messages: [...state.messages, msg] }));
     void persistMessage(msg);
@@ -5224,7 +5460,7 @@ ${previousReply.slice(0, 4000)}
     // chat history keeps each turn's tokens/cache even after reload.
     const usageMeterContext = {
       workspaceId: ch.workspaceId,
-      sessionId: ch.sessionId,
+      sessionId: ch.sessionId ?? undefined,
     };
     const stampUsageOnMessage = (
       messageId: string,
@@ -5527,6 +5763,18 @@ ${previousReply.slice(0, 4000)}
       music: preferredReadyMusicProviderId() != null,
       threeD: preferredReadyThreeDProviderId() != null,
     };
+    // Capability awareness for EVERY path (blueprint + simple chat): tell the
+    // model which built-in generation channels are configured + ready so it
+    // routes asset needs to /image, /music, /mesh-mode-start, etc. instead of
+    // fabricating images with PIL / audio with ffmpeg / meshes with code.
+    const assetCapabilityBlock = buildAssetCapabilityBlock({
+      image: gameAssetChannels.image,
+      music: gameAssetChannels.music,
+      threeD: gameAssetChannels.threeD,
+      video: preferredReadyVideoProviderId() != null,
+      speech: preferredReadySpeechProviderId() != null,
+      sprite: preferredReadySpriteProviderId() != null,
+    });
     // Explicit-only routing (方案 A 之上的收紧)：游戏专家 / 制作人总控不再从
     // 聊天文本自动触发，只有用户通过 /game（或分层路径）显式调用时才注入。
     // - 指定了具体专家(分层路径命中) → 直接用专家融合，固定为这些专家。
@@ -5552,6 +5800,7 @@ ${previousReply.slice(0, 4000)}
       languageAdaptationPrompt(state.locale) +
       personalBlock +
       gameExpertBlock +
+      assetCapabilityBlock +
       projectMcpGuidance;
     const clarifyingSystem =
       `${unifiedBase}\n\n${INTERACTION_PROTOCOL}\n` +
@@ -5777,14 +6026,39 @@ ${previousReply.slice(0, 4000)}
           languageAdaptationPrompt(state.locale),
           personalBlock,
           gameExpertBlock,
+          assetCapabilityBlock,
           useCli ? projectMcpGuidance : '',
         ].join('');
         // Multi-turn context: the gateway/CLI takes a single string, so fold the
         // prior conversation (text messages only, skipping system notices) into
         // the prompt as a transcript, then the current question. Keeps a bounded
         // tail so very long chats don't blow the context window.
-        const priorMessages = baseMessages
-          .filter((m) => m.role !== 'system' && m.text.trim());
+        //
+        // Recompute the history at EXECUTION time, not at enqueue time. An
+        // interjection ("插话") queued behind an in-flight turn must see that
+        // turn's REAL answer once it lands — not the stale "⟳ 生成中…" placeholder
+        // that was live when the follow-up was typed (baseMessages is captured
+        // synchronously in sendPrompt and its placeholder bubble never mutates in
+        // place). Read the live session view (front-most) or fall back to this
+        // turn's channel snapshot, cut at this turn's own user message, and drop
+        // any still-streaming placeholder bubble so it can't poison the prompt.
+        const liveSessionMessages = aiEditViewActive(ch)
+          ? useStore.getState().messages
+          : ch.messages;
+        const selfUserIndex = liveSessionMessages.findIndex(
+          (m) => m.id === userMsg.id,
+        );
+        const historyBeforeThisTurn =
+          selfUserIndex >= 0
+            ? liveSessionMessages.slice(0, selfUserIndex)
+            : liveSessionMessages;
+        const priorMessages = historyBeforeThisTurn.filter(
+          (m) =>
+            m.role !== 'system' &&
+            !m.localOnly &&
+            m.text.trim() &&
+            !(m.role === 'assistant' && m.text.trimStart().startsWith('⟳')),
+        );
         const chatTranscript = (messages: Message[]): string =>
           messages
             .slice(-SIMPLE_CHAT_HISTORY_TURNS)
@@ -5846,19 +6120,46 @@ ${previousReply.slice(0, 4000)}
               // the full prompt body.
               const promptBody = continuation || basePromptBody;
               let live = '';
-              answer = await aiEditViaCliWithSpeed(`${chatSystem}\n\n${promptBody}`, cli, {
-                permission: chatPermission,
-                model: cli.model,
-                cliCommand: cli.cliCommand,
-                env: cli.env,
-                ...aiEditCliWorkspaceOptions(ch, state.composer),
-                sessionId: nativeSession?.sessionId,
-                resume: nativeSession ? nativeResume : undefined,
-                onProgress: (chunk) => {
-                  live += chunk;
-                  setActive(withAiTiming(routedBody(routeLine, liveProse(live) || '⟳ 生成中…')));
-                },
-              });
+              const callNativeCli = async (
+                body: string,
+                session: ChatNativeSession | null,
+                resume: boolean,
+              ) =>
+                aiEditViaCliWithSpeed(`${chatSystem}\n\n${body}`, cli, {
+                  permission: chatPermission,
+                  model: cli.model,
+                  cliCommand: cli.cliCommand,
+                  env: cli.env,
+                  ...aiEditCliWorkspaceOptions(ch, state.composer),
+                  sessionId: session?.sessionId,
+                  resume: session ? resume : undefined,
+                  onProgress: (chunk) => {
+                    live += chunk;
+                    setActive(
+                      withAiTiming(routedBody(routeLine, liveProse(live) || '⟳ 生成中…')),
+                    );
+                  },
+                });
+              try {
+                answer = await callNativeCli(promptBody, nativeSession, nativeResume);
+              } catch (err) {
+                if (
+                  nativeSession &&
+                  nativeResume &&
+                  isMissingClaudeConversationError(err)
+                ) {
+                  forgetChatNativeSession(nativeSession);
+                  nativeSession = chatNativeSessionFor(ch, cli);
+                  const fallbackPromptBody = continuation
+                    ? `${chatPrompt}\n\n${continuation}`
+                    : chatPrompt;
+                  live = '';
+                  setActive(withAiTiming(routedBody(routeLine, '⟳ 生成中…')));
+                  answer = await callNativeCli(fallbackPromptBody, nativeSession, false);
+                } else {
+                  throw err;
+                }
+              }
               if (nativeSession) nativeSession.started = true;
               if (!answer.trim() && live.trim()) answer = live;
             } else {
@@ -5941,12 +6242,16 @@ ${previousReply.slice(0, 4000)}
           removeAiEditChannel(ch);
         }
       };
-      // CLI turns share one native --session-id per chat session, so a follow-up
-      // sent mid-stream must queue behind the in-flight turn and then --resume it
-      // (otherwise claude rejects the duplicate id with "already in use"). API
-      // turns have no such constraint and stay concurrent. Favorite reruns mint a
+      // Interjection ("插话") is the default for every simple-chat turn: a
+      // follow-up sent while a turn is still streaming queues behind the in-flight
+      // turn and then runs once it finishes — so it always continues the SAME
+      // conversation with the prior answer folded into context (and, for CLI,
+      // --resume onto the warm native session instead of colliding on the shared
+      // --session-id). This applies to BOTH CLI and direct-API turns; serializing
+      // the API path too is what makes an interjection merge into the running
+      // chat rather than racing it as a parallel turn. Favorite reruns mint a
       // fresh session per turn, so they never queue.
-      if (useCli && !replayFavoriteSimpleChat) {
+      if (!replayFavoriteSimpleChat) {
         void enqueueChatTurn(chSessionKey, runChatTurn);
       } else {
         void runChatTurn();
@@ -6156,6 +6461,7 @@ ${previousReply.slice(0, 4000)}
     }
     if (resolver) {
       pendingInteractionResolvers.delete(messageId);
+      syncWaitingInputSessions();
       resolver.resolve(answer);
     }
   },
@@ -6184,6 +6490,7 @@ ${previousReply.slice(0, 4000)}
     }
     if (resolver) {
       pendingInteractionResolvers.delete(messageId);
+      syncWaitingInputSessions();
       resolver.resolve(null);
     }
   },
@@ -6210,6 +6517,43 @@ ${previousReply.slice(0, 4000)}
       });
       return { composer, composerBySession };
     }),
+
+  ensureSessionStartupWorkspace: async () => {
+    const state = useStore.getState();
+    // Worktree isolation is a session-open-time action: only meaningful before
+    // the conversation starts (no messages) and only in 'worktree' mode. Mirror
+    // the cacheTtl lock so an already-started session is never re-pointed.
+    if (state.composer.startupMode !== 'worktree') return;
+    if (state.messages.length > 0) return;
+    if (!isTauri()) return;
+    const { cwd } = composerCliWorkspaceOptions(state.composer);
+    const root = cwd?.trim();
+    if (!root) return;
+    // A stable session id keeps the preparation idempotent across retries.
+    const sessionKey = activeWorkflowSessionKey(state);
+    const sessionId = sessionKey.sessionId ?? state.activeSessionId ?? 'session';
+    try {
+      const isolated = await prepareIsolatedWorkspace(root, sessionId);
+      const isolatedPath = isolated.path?.trim();
+      if (!isolatedPath || isolatedPath === root) return;
+      // Re-check the lock: a turn may have started while we awaited the backend.
+      const latest = useStore.getState();
+      if (latest.messages.length > 0) return;
+      if (latest.composer.startupMode !== 'worktree') return;
+      // Repoint only this session's composer cwd at the isolated directory —
+      // never switch the active workspace or add a sidebar entry. Keep the
+      // primary folder isolated while preserving any extra workspace folders.
+      useStore.getState().setComposer({
+        workspace: isolatedPath,
+        workspaceFolders: latest.composer.workspaceFolders.filter(
+          (folder) => folder !== root,
+        ),
+      });
+    } catch {
+      // No backend / git failure: fall back to running in the original
+      // workspace rather than blocking the send.
+    }
+  },
 
   setComposerDraft: (text) =>
     set((state) => {
@@ -7082,6 +7426,22 @@ function enqueueChatTurn(
   return next;
 }
 
+function clearChatTurnQueue(sessionKey: string): void {
+  chatTurnQueues.delete(sessionKey);
+}
+
+/**
+ * Test-only: drop every queued/in-flight simple-chat turn and the native CLI
+ * session map. The chat-turn queue is module-level and keyed by session, so a
+ * turn left pending by one test (e.g. a mock that never resolves) would block
+ * the next test that reuses the same session key now that ALL simple-chat turns
+ * serialize through it. Call from afterEach to keep tests isolated.
+ */
+export function __resetSimpleChatRuntimeForTests(): void {
+  chatTurnQueues.clear();
+  chatNativeSessions.clear();
+}
+
 function chatNativeSessionKey(
   ch: Pick<AiEditChannel, 'sessionKey' | 'sessionId'>,
   route: Awaited<ReturnType<typeof resolveCliGatewayRoute>>,
@@ -7129,6 +7489,11 @@ function forgetChatNativeSession(session: ChatNativeSession): void {
       return;
     }
   }
+}
+
+function isMissingClaudeConversationError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err ?? '');
+  return /No conversation found with session ID/i.test(message);
 }
 
 function runKey(workspaceId: string | null, sessionId: string | null): string {
@@ -7388,6 +7753,8 @@ function stopActiveChat(): void {
   const stoppedAt = Date.now();
   for (const ch of channels) {
     ch.abortController.abort();
+    clearChatTurnQueue(ch.sessionKey);
+    resolvePendingAiEditInteractions(ch);
     void cancelActiveAiEditRuns(ch);
   }
   const ch = channels[0];
@@ -7439,7 +7806,67 @@ const THREE_D_PROMPT_SYSTEM = `你是专业的"3D模型生成提示词工程师"
 - 与用户输入语言保持一致（中文需求输出中文提示词，英文需求输出英文提示词）。
 - 只描述要生成什么 3D 模型，不要写"请生成/帮我建模"之类的指令性措辞。`;
 
-type GenerationPromptMode = 'image' | 'music' | 'threeD';
+const VIDEO_PROMPT_SYSTEM = `你是专业的"视频生成提示词工程师"。用户会给出一句关于想要生成的视频、短片、镜头或动画的描述，你要把它扩写成一段高质量、可直接喂给文生视频模型的提示词。
+要求：
+- 直接输出最终提示词正文，不要任何解释、前后缀、标题、引号或代码块。
+- 补全画面主体、动作、镜头运动（推拉摇移）、景别、构图、光线、色调、风格、节奏和时长意图等关键要素，让镜头连贯可拍。
+- 让模型聚焦一个连贯的镜头或短片；避免一次塞入互相冲突的多个场景。
+- 保留用户明确指定的内容；用户没提到的细节由你做合理且不喧宾夺主的补充。
+- 不要要求模仿在世真人、受版权角色或受保护影片；用可授权的风格描述替代。
+- 与用户输入语言保持一致（中文需求输出中文提示词，英文需求输出英文提示词）。
+- 只描述要生成什么视频，不要写"请生成/帮我拍"之类的指令性措辞。`;
+
+const SPRITE_PROMPT_SYSTEM = `你是专业的"Sprite 动画提示词工程师"。用户会给出一句关于想要生成的 sprite、spritesheet、像素角色、技能特效或动作帧的描述，你要把它扩写成一段高质量、可直接喂给 sprite 动画生成模型的提示词。
+要求：
+- 直接输出最终提示词正文，不要任何解释、前后缀、标题、引号或代码块。
+- 补全主体、视角、动作、风格、帧数意图、循环方式、透明背景、裁切、安全边距、角色一致性和导出用途。
+- 优先生成单个主体；除非用户明确要求，不要多角色、复杂背景、文字、UI 或相机移动。
+- 动画需求要说明动作阶段，例如 idle/walk/run/attack/jump/hit/death 或 VFX loop，并强调主体大小、朝向和中心位置稳定。
+- Sprite sheet 要强调 transparent background、clean silhouette、consistent proportions、even frame spacing、game-ready sprite sheet。
+- 保留用户明确指定的内容；用户没提到的细节由你做合理且不喧宾夺主的补充。
+- 不要要求模仿在世真人、受版权角色或受保护 IP；用可授权的风格描述替代。
+- 与用户输入语言保持一致（中文需求输出中文提示词，英文需求输出英文提示词）。`;
+
+// ComfyUI authoring instruction. Unlike the image/music/3D prompt refiners
+// (which produce a plain prompt string), this asks the coding model to emit a
+// full ComfyUI prompt-graph as a ```comfyui fenced block, which the chat stream
+// renders as an embedded, expandable node graph (ComfyGraphBlock).
+const COMFY_PROMPT_SYSTEM = `你是 ComfyUI 工作流工程师。用户会描述想要生成的图片或想要的工作流，你要输出一个可直接提交给本地 ComfyUI 服务器(POST /prompt)的 prompt graph。
+严格要求：
+- 只输出一个 \`\`\`comfyui 代码块，块内是合法 JSON；代码块之外不要写任何解释、标题或多余文字。
+- JSON 结构为 ComfyUI 的 prompt 格式：顶层是 {"<节点id>": {"class_type": "<节点类型>", "inputs": {...}}} 的扁平映射。
+- 节点之间的连线用 inputs 里的 ["<来源节点id>", <输出序号>] 表示;字面量(数字/字符串/布尔)直接写值。
+- 只使用 ComfyUI 标准节点(如 CheckpointLoaderSimple、CLIPTextEncode、KSampler、EmptyLatentImage、VAEDecode、SaveImage 等),不要编造不存在的节点类型。
+- 至少包含一条到 SaveImage(或等价输出节点)的完整通路,保证能真正出图。
+- 可选地为每个节点加 "_meta": {"title": "..."} 以便阅读。
+- JSON 内的文本提示词与用户输入语言保持一致。`;
+
+/** Strip the /ui-mode-start|/ui-mode-end command prefix from a chat line. */
+function stripUiModeCommand(text: string): string {
+  return text
+    .trim()
+    .replace(/^\/ui(?:-mode-(?:start|end))?\s*/iu, '')
+    .trim();
+}
+
+// Game-UI design instruction for /ui-mode. Front-loaded before the coding-model
+// turn so the model produces interface design specs and deliverables tailored to
+// the project's configured default UI channel (Project Settings > UI 渠道),
+// instead of editing the workflow blueprint.
+function uiDesignPromptSystem(): string {
+  const settings = loadUiDesignChannelSettings();
+  const channel = uiDesignChannelById(settings.preferredChannelId);
+  const exportFormat = uiDesignChannelExportFormat(channel.id, settings);
+  return `你是资深游戏 UI/UX 设计师。用户会描述想要的游戏界面，你要围绕当前项目选定的默认 UI 渠道「${channel.label}」产出可交付的界面设计方案。
+要求：
+- 紧扣「${channel.label}」这个设计工具/协作平台的能力来组织产物，默认导出格式为 ${exportFormat}。
+- 给出清晰的界面结构：布局与分区、控件清单与状态、信息层级、交互流程、配色与字体规范、栅格与间距。
+- 按游戏 UI 习惯覆盖 HUD、菜单、弹窗、按钮状态、图标规范等必要部分；说明可复用组件与设计系统约定。
+- 如需资产，给出文件命名、切图尺寸/分辨率与导出清单；适配多分辨率时说明缩放策略。
+- 与用户输入语言保持一致；只产出界面设计内容，不要修改工作流蓝图。`;
+}
+
+type GenerationPromptMode = 'image' | 'music' | 'threeD' | 'video' | 'sprite' | 'speech';
 
 function generationModeStartedAt(
   composer: ComposerSettings,
@@ -7450,7 +7877,13 @@ function generationModeStartedAt(
       ? composer.imageModeStartedAt
       : mode === 'music'
         ? composer.musicModeStartedAt
-        : composer.threeDModeStartedAt;
+        : mode === 'threeD'
+          ? composer.threeDModeStartedAt
+          : mode === 'video'
+            ? composer.videoModeStartedAt
+            : mode === 'speech'
+              ? composer.speechModeStartedAt
+              : composer.spriteModeStartedAt;
   return typeof value === 'number' && Number.isFinite(value) ? value : null;
 }
 
@@ -7462,18 +7895,30 @@ function generationModeActive(
     ? composer.imageMode
     : mode === 'music'
       ? composer.musicMode
-      : composer.threeDMode;
+      : mode === 'threeD'
+        ? composer.threeDMode
+        : mode === 'video'
+          ? composer.videoMode
+          : mode === 'speech'
+            ? composer.speechMode
+            : composer.spriteMode;
 }
 
 function generationModeEnteredText(mode: GenerationPromptMode, text: string): boolean {
   if (mode === 'image') return /已进入生图模式|image mode on/i.test(text);
   if (mode === 'music') return /已进入音乐模式|music mode on/i.test(text);
+  if (mode === 'video') return /已进入视频模式|video mode on/i.test(text);
+  if (mode === 'speech') return /已进入语音模式|speech mode on/i.test(text);
+  if (mode === 'sprite') return /已进入\s*Sprite\s*模式|sprite mode on/i.test(text);
   return /已进入\s*Mesh\s*模式|mesh mode on/i.test(text);
 }
 
 function generationModeExitedText(mode: GenerationPromptMode, text: string): boolean {
   if (mode === 'image') return /已退出生图模式|image mode off/i.test(text);
   if (mode === 'music') return /已退出音乐模式|music mode off/i.test(text);
+  if (mode === 'video') return /已退出视频模式|video mode off/i.test(text);
+  if (mode === 'speech') return /已退出语音模式|speech mode off/i.test(text);
+  if (mode === 'sprite') return /已退出\s*Sprite\s*模式|sprite mode off/i.test(text);
   return /已退出\s*Mesh\s*模式|mesh mode off/i.test(text);
 }
 
@@ -7499,6 +7944,9 @@ function stripGenerationCommand(
 ): string {
   if (mode === 'image') return stripImageCommand(text);
   if (mode === 'music') return stripMusicCommand(text);
+  if (mode === 'video') return stripVideoCommand(text);
+  if (mode === 'speech') return stripSpeechCommand(text);
+  if (mode === 'sprite') return stripSpriteCommand(text);
   return stripThreeDCommand(text);
 }
 
@@ -7576,6 +8024,30 @@ function cleanGeneratedThreeDPrompt(raw: string): string {
   if (fence) text = fence[1].trim();
   text = text
     .replace(/^(?:3d\s*模型提示词|三维模型提示词|建模提示词|提示词|prompt)\s*[:：]\s*/iu, '')
+    .trim();
+  const quoted = /^["'「『]([\s\S]+)["'」』]$/u.exec(text);
+  if (quoted) text = quoted[1].trim();
+  return text;
+}
+
+function cleanGeneratedVideoPrompt(raw: string): string {
+  let text = raw.trim();
+  const fence = /^```[^\n]*\n([\s\S]*?)\n```$/.exec(text);
+  if (fence) text = fence[1].trim();
+  text = text
+    .replace(/^(?:视频提示词|分镜提示词|镜头提示词|提示词|prompt)\s*[:：]\s*/iu, '')
+    .trim();
+  const quoted = /^["'「『]([\s\S]+)["'」』]$/u.exec(text);
+  if (quoted) text = quoted[1].trim();
+  return text;
+}
+
+function cleanGeneratedSpritePrompt(raw: string): string {
+  let text = raw.trim();
+  const fence = /^```[^\n]*\n([\s\S]*?)\n```$/.exec(text);
+  if (fence) text = fence[1].trim();
+  text = text
+    .replace(/^(?:sprite\s*提示词|精灵图提示词|序列帧提示词|提示词|prompt)\s*[:：]\s*/iu, '')
     .trim();
   const quoted = /^["'「『]([\s\S]+)["'」』]$/u.exec(text);
   if (quoted) text = quoted[1].trim();
@@ -7815,6 +8287,154 @@ ${userText}`;
   return null;
 }
 
+async function refineVideoPromptViaModel(
+  ch: AiEditChannel,
+  userText: string,
+  codingSelection: GatewaySelection,
+  permission: string,
+  onProgress: (live: string) => void,
+): Promise<{ prompt: string; routeLine: string; routeHeader: string } | null> {
+  const userContent = `请把下面的视频需求改写成一段高质量的文生视频提示词：\n\n${userText}`;
+  const projectMcpGuidance = projectMcpGuidanceForState(useStore.getState(), {
+    workspaceId: ch.workspaceId,
+    sessionId: ch.sessionId,
+  });
+  const preferCliForProjectMcp = isTauri() && !!projectMcpGuidance;
+  const system = `${VIDEO_PROMPT_SYSTEM}${projectMcpGuidance}`;
+  const direct = resolveDirectGatewayRoute(codingSelection);
+  if (direct && !preferCliForProjectMcp) {
+    let full = '';
+    const text = await completeGatewayText({
+      route: direct,
+      system,
+      userContent,
+      maxTokens: 1024,
+      signal: ch.abortController.signal,
+      usageContext: { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
+      permission,
+      cwd: ch.workspaceRootPath ?? undefined,
+      onDelta: (chunk) => {
+        full += chunk;
+        onProgress(full);
+      },
+    });
+    return {
+      prompt: cleanGeneratedVideoPrompt(full || text),
+      routeLine: gatewayRouteLine(direct),
+      routeHeader: gatewayRouteHeader(direct),
+    };
+  }
+  if (isTauri()) {
+    if (isFreeChannelSelection(codingSelection)) {
+      await ensureFreeProxy(freeProxyOptionsForSelection(codingSelection));
+    }
+    const cli = await resolveCliGatewayRoute(codingSelection);
+    const runId = makeCliRunId();
+    ch.cliRunIds.add(runId);
+    try {
+      let live = '';
+      const text = await aiEditViaCli(
+        `${system}\n\n${userContent}`,
+        cli.adapter,
+        {
+          permission,
+          model: cli.model,
+          cliCommand: cli.cliCommand,
+          env: cli.env,
+          cwd: ch.workspaceRootPath ?? undefined,
+          runId,
+          onProgress: (chunk) => {
+            live += chunk;
+            onProgress(live);
+          },
+        },
+      );
+      return {
+        prompt: cleanGeneratedVideoPrompt(text || live),
+        routeLine: gatewayRouteLine(cli),
+        routeHeader: gatewayRouteHeader(cli),
+      };
+    } finally {
+      ch.cliRunIds.delete(runId);
+    }
+  }
+  return null;
+}
+
+async function refineSpritePromptViaModel(
+  ch: AiEditChannel,
+  userText: string,
+  codingSelection: GatewaySelection,
+  permission: string,
+  onProgress: (live: string) => void,
+): Promise<{ prompt: string; routeLine: string; routeHeader: string } | null> {
+  const userContent = `请把下面的 Sprite / spritesheet 动画需求改写成一段高质量的生成提示词：\n\n${userText}`;
+  const projectMcpGuidance = projectMcpGuidanceForState(useStore.getState(), {
+    workspaceId: ch.workspaceId,
+    sessionId: ch.sessionId,
+  });
+  const preferCliForProjectMcp = isTauri() && !!projectMcpGuidance;
+  const system = `${SPRITE_PROMPT_SYSTEM}${projectMcpGuidance}`;
+  const direct = resolveDirectGatewayRoute(codingSelection);
+  if (direct && !preferCliForProjectMcp) {
+    let full = '';
+    const text = await completeGatewayText({
+      route: direct,
+      system,
+      userContent,
+      maxTokens: 1024,
+      signal: ch.abortController.signal,
+      usageContext: { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
+      permission,
+      cwd: ch.workspaceRootPath ?? undefined,
+      onDelta: (chunk) => {
+        full += chunk;
+        onProgress(full);
+      },
+    });
+    return {
+      prompt: cleanGeneratedSpritePrompt(full || text),
+      routeLine: gatewayRouteLine(direct),
+      routeHeader: gatewayRouteHeader(direct),
+    };
+  }
+  if (isTauri()) {
+    if (isFreeChannelSelection(codingSelection)) {
+      await ensureFreeProxy(freeProxyOptionsForSelection(codingSelection));
+    }
+    const cli = await resolveCliGatewayRoute(codingSelection);
+    const runId = makeCliRunId();
+    ch.cliRunIds.add(runId);
+    try {
+      let live = '';
+      const text = await aiEditViaCli(
+        `${system}\n\n${userContent}`,
+        cli.adapter,
+        {
+          permission,
+          model: cli.model,
+          cliCommand: cli.cliCommand,
+          env: cli.env,
+          cwd: ch.workspaceRootPath ?? undefined,
+          runId,
+          onProgress: (chunk) => {
+            live += chunk;
+            onProgress(live);
+          },
+        },
+      );
+      return {
+        prompt: cleanGeneratedSpritePrompt(text || live),
+        routeLine: gatewayRouteLine(cli),
+        routeHeader: gatewayRouteHeader(cli),
+      };
+    } finally {
+      ch.cliRunIds.delete(runId);
+    }
+  }
+  return null;
+}
+
 function startImageGenerationTurn(
   text: string,
   options: { providerId?: ImageProviderId; model?: string } = {},
@@ -7978,6 +8598,17 @@ function startImageGenerationTurn(
       );
       const body = imageResultMarkdown(result);
       setAssistant(`${elapsed()}\n${promptModelLine}${body}`, true);
+      void captureGeneratedAssets({
+        kind: 'image',
+        sources: result.images,
+        origin: imageProviderById(result.providerId).local ? 'local' : 'remote',
+        provider: result.providerLabel,
+        model: result.model,
+        prompt: result.prompt,
+        sessionId: ch.sessionId ?? undefined,
+        cwd: ch.workspaceRootPath ?? undefined,
+        titlePrefix: 'image',
+      });
       commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [text]));
       syncAndPersistSessionRunStatus(sessionKey, 'success');
     } catch (err) {
@@ -8146,6 +8777,17 @@ function startMusicGenerationTurn(
         settings,
       );
       setAssistant(`${elapsed()}\n${promptModelLine}${musicResultMarkdown(result)}`, true);
+      void captureGeneratedAssets({
+        kind: 'music',
+        sources: result.audios,
+        origin: musicProviderById(result.providerId).local ? 'local' : 'remote',
+        provider: result.providerLabel,
+        model: result.model,
+        prompt: result.prompt,
+        sessionId: ch.sessionId ?? undefined,
+        cwd: ch.workspaceRootPath ?? undefined,
+        titlePrefix: 'music',
+      });
       commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [text]));
       syncAndPersistSessionRunStatus(sessionKey, 'success');
     } catch (err) {
@@ -8353,6 +8995,534 @@ function startThreeDGenerationTurn(
   })();
 }
 
+function startVideoGenerationTurn(
+  text: string,
+  options: { providerId?: VideoProviderId; model?: string } = {},
+): void {
+  const prompt = stripVideoCommand(text);
+  if (!prompt) return;
+  const state = useStore.getState();
+  if (isWorkflowReadOnly(state)) return;
+  const generationPrompt = modeContextPrompt(state, 'video', prompt);
+  const sessionKey = activeWorkflowSessionKey(state);
+  const settings = loadVideoGenerationSettings();
+  if (!settings.enabled) return;
+  const providerId = options.providerId ?? preferredReadyVideoProviderId(settings);
+  const codingSelection = workflowDefaultGatewaySelection(
+    state.workflow,
+    state.composer.model,
+  );
+  const codingPermission = state.composer.permission || 'full';
+
+  if (state.blockedSendTip) useStore.setState({ blockedSendTip: null });
+
+  const now = Date.now();
+  const providerLabel = providerId
+    ? videoProviderById(providerId).label
+    : 'Video generation';
+  const provider = providerId ? videoProviderById(providerId) : null;
+  const model = providerId
+    ? options.model?.trim() || videoProviderModel(providerId, settings)
+    : options.model?.trim() || '';
+  const userMsg: Message = {
+    id: shortId('m'),
+    role: 'user',
+    text,
+    createdAt: now,
+  };
+  const assistantId = shortId('m');
+  const assistantMsg: Message = {
+    id: assistantId,
+    role: 'assistant',
+    text: `⚙ 生视频：${providerLabel}${model ? ` · 模型：${model}` : ''}\n① 正在让模型撰写视频提示词…`,
+    routeLabel: model ? `${providerLabel} · ${model}` : providerLabel,
+    createdAt: now + 1,
+  };
+  const promptUpdate = applyPromptTitle(state, prompt, now);
+  const activeSession = sessionForKey(state, sessionKey);
+  const simpleMode = promptUpdate.workflow.meta?.simple === true;
+  const baseMessages = state.messages;
+  const chSessionKey = runKey(sessionKey.workspaceId, sessionKey.sessionId);
+  const workspaceRootPath = sessionChangesRootPathForSession(state, sessionKey);
+  const ch: AiEditChannel = {
+    key: chatTurnKey(chSessionKey, userMsg.id),
+    sessionKey: chSessionKey,
+    workspaceId: sessionKey.workspaceId,
+    sessionId: sessionKey.sessionId,
+    workspaceRootPath,
+    workflow: promptUpdate.workflow,
+    messages: [...baseMessages, userMsg, assistantMsg],
+    cliRunIds: new Set<string>(),
+    abortController: new AbortController(),
+    workflowSession: activeSession?.isWorkflow ?? !simpleMode,
+    chat: true,
+    ownedMessageIds: new Set<string>([userMsg.id, assistantId]),
+  };
+
+  const setAssistant = (textValue: string, persist: boolean) => {
+    if (!aiEditRegistered(ch)) return;
+    ch.messages = ch.messages.map((message) =>
+      message.id === assistantId
+        ? {
+            ...message,
+            text: textValue,
+            routeLabel: model ? `${providerLabel} · ${model}` : providerLabel,
+          }
+        : message,
+    );
+    aiEditCommitMessages(ch, persist);
+  };
+
+  addAiEditChannel(ch);
+  if (aiEditViewActive(ch)) {
+    useStore.setState({
+      messages: ch.messages,
+      sessions: promptUpdate.sessions,
+      sessionTree: promptUpdate.sessionTree,
+      workflow: ch.workflow,
+    });
+  }
+  updateAiEditSessionSummary(ch);
+  if (ch.workspaceId && ch.sessionId) {
+    void historyStore
+      .updateSession(ch.workspaceId, ch.sessionId, {
+        messages: ch.messages,
+        ...(ch.workflowSession ? { workflow: ch.workflow } : {}),
+        meta: { runStatus: 'running' },
+      })
+      .catch(() => {});
+  }
+  syncAndPersistSessionRunStatus(sessionKey, 'running');
+
+  void (async () => {
+    const startedAt = Date.now();
+    const elapsed = () =>
+      `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(
+        Date.now() - startedAt,
+      )}`;
+    try {
+      let videoPrompt = generationPrompt;
+      let refineHeader = '';
+      try {
+        const refined = await refineVideoPromptViaModel(
+          ch,
+          generationPrompt,
+          codingSelection,
+          codingPermission,
+          (live) => {
+            if (!aiEditRegistered(ch)) return;
+            setAssistant(
+              `${elapsed()}\n① 撰写视频提示词中…\n\n${live.trim() || '⟳ 生成中…'}`,
+              false,
+            );
+          },
+        );
+        if (refined && refined.prompt) {
+          videoPrompt = refined.prompt;
+          refineHeader = refined.routeHeader;
+        }
+      } catch (err) {
+        if (ch.abortController.signal.aborted || !aiEditRegistered(ch)) return;
+        videoPrompt = generationPrompt;
+      }
+      if (!aiEditRegistered(ch)) return;
+      const promptModelLine = refineHeader
+        ? `✎ 提示词模型：${refineHeader}\n`
+        : '';
+      setAssistant(
+        `${elapsed()}\n${promptModelLine}② 已生成提示词，正在调用${
+          provider?.local ? '本地视频模型' : '视频 API'
+        }（视频生成耗时较长，请耐心等待）…\n\n视频提示词：${videoPrompt}`,
+        false,
+      );
+      const result = await generateVideo(
+        {
+          prompt: videoPrompt,
+          providerId: options.providerId,
+          model: options.model,
+          targetDurationSeconds:
+            videoDurationSecondsFromPrompt(videoPrompt) ?? undefined,
+          signal: ch.abortController.signal,
+        },
+        settings,
+      );
+      setAssistant(`${elapsed()}\n${promptModelLine}${videoResultMarkdown(result)}`, true);
+      void captureGeneratedAssets({
+        kind: 'video',
+        sources: result.videos,
+        origin: videoProviderById(result.providerId).local ? 'local' : 'remote',
+        provider: result.providerLabel,
+        model: result.model,
+        prompt: result.prompt,
+        sessionId: ch.sessionId ?? undefined,
+        cwd: ch.workspaceRootPath ?? undefined,
+        titlePrefix: 'video',
+      });
+      commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [text]));
+      syncAndPersistSessionRunStatus(sessionKey, 'success');
+    } catch (err) {
+      if (!aiEditRegistered(ch)) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      setAssistant(
+        `${elapsed()} · 失败\n✗ 视频生成失败: ${msg}\n\n请在设置 > 视频渠道中配置可用的商用或免费 Provider。`,
+        true,
+      );
+      syncAndPersistSessionRunStatus(sessionKey, 'error');
+    } finally {
+      removeAiEditChannel(ch);
+    }
+  })();
+}
+
+function startSpeechGenerationTurn(
+  text: string,
+  options: { providerId?: SpeechProviderId; model?: string; voice?: string } = {},
+): void {
+  const prompt = stripSpeechCommand(text);
+  if (!prompt) return;
+  const state = useStore.getState();
+  if (isWorkflowReadOnly(state)) return;
+  const generationPrompt = modeContextPrompt(state, 'speech', prompt);
+  const sessionKey = activeWorkflowSessionKey(state);
+  const settings = loadSpeechGenerationSettings();
+  if (!settings.enabled) return;
+  const providerId = options.providerId ?? preferredReadySpeechProviderId(settings);
+
+  if (state.blockedSendTip) useStore.setState({ blockedSendTip: null });
+
+  const now = Date.now();
+  const providerLabel = providerId
+    ? speechProviderById(providerId).label
+    : 'Speech generation';
+  const provider = providerId ? speechProviderById(providerId) : null;
+  const model = providerId
+    ? options.model?.trim() || speechProviderModel(providerId, settings)
+    : options.model?.trim() || '';
+  const voice = providerId
+    ? options.voice?.trim() || speechProviderVoice(providerId, settings)
+    : options.voice?.trim() || '';
+  const userMsg: Message = {
+    id: shortId('m'),
+    role: 'user',
+    text,
+    createdAt: now,
+  };
+  const assistantId = shortId('m');
+  const assistantMsg: Message = {
+    id: assistantId,
+    role: 'assistant',
+    text: `⚙ 文本转语音：${providerLabel}${model ? ` · 模型：${model}` : ''}${
+      voice ? ` · 音色：${voice}` : ''
+    }\n① 正在合成语音…`,
+    routeLabel: model ? `${providerLabel} · ${model}` : providerLabel,
+    createdAt: now + 1,
+  };
+  const promptUpdate = applyPromptTitle(state, prompt, now);
+  const activeSession = sessionForKey(state, sessionKey);
+  const simpleMode = promptUpdate.workflow.meta?.simple === true;
+  const baseMessages = state.messages;
+  const chSessionKey = runKey(sessionKey.workspaceId, sessionKey.sessionId);
+  const workspaceRootPath = sessionChangesRootPathForSession(state, sessionKey);
+  const ch: AiEditChannel = {
+    key: chatTurnKey(chSessionKey, userMsg.id),
+    sessionKey: chSessionKey,
+    workspaceId: sessionKey.workspaceId,
+    sessionId: sessionKey.sessionId,
+    workspaceRootPath,
+    workflow: promptUpdate.workflow,
+    messages: [...baseMessages, userMsg, assistantMsg],
+    cliRunIds: new Set<string>(),
+    abortController: new AbortController(),
+    workflowSession: activeSession?.isWorkflow ?? !simpleMode,
+    chat: true,
+    ownedMessageIds: new Set<string>([userMsg.id, assistantId]),
+  };
+
+  const setAssistant = (textValue: string, persist: boolean) => {
+    if (!aiEditRegistered(ch)) return;
+    ch.messages = ch.messages.map((message) =>
+      message.id === assistantId
+        ? {
+            ...message,
+            text: textValue,
+            routeLabel: model ? `${providerLabel} · ${model}` : providerLabel,
+          }
+        : message,
+    );
+    aiEditCommitMessages(ch, persist);
+  };
+
+  addAiEditChannel(ch);
+  if (aiEditViewActive(ch)) {
+    useStore.setState({
+      messages: ch.messages,
+      sessions: promptUpdate.sessions,
+      sessionTree: promptUpdate.sessionTree,
+      workflow: ch.workflow,
+    });
+  }
+  updateAiEditSessionSummary(ch);
+  if (ch.workspaceId && ch.sessionId) {
+    void historyStore
+      .updateSession(ch.workspaceId, ch.sessionId, {
+        messages: ch.messages,
+        ...(ch.workflowSession ? { workflow: ch.workflow } : {}),
+        meta: { runStatus: 'running' },
+      })
+      .catch(() => {});
+  }
+  syncAndPersistSessionRunStatus(sessionKey, 'running');
+
+  void (async () => {
+    const startedAt = Date.now();
+    const elapsed = () =>
+      `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(
+        Date.now() - startedAt,
+      )}`;
+    try {
+      setAssistant(
+        `${elapsed()}\n② 正在调用${
+          provider?.local ? '本地语音模型' : '语音 API'
+        }合成…\n\n文本：${generationPrompt}`,
+        false,
+      );
+      const result = await generateSpeech(
+        {
+          prompt: generationPrompt,
+          providerId: options.providerId,
+          model: options.model,
+          voice: options.voice,
+          signal: ch.abortController.signal,
+        },
+        settings,
+      );
+      setAssistant(`${elapsed()}\n${speechResultMarkdown(result)}`, true);
+      void captureGeneratedAssets({
+        kind: 'speech',
+        sources: result.audios,
+        origin: speechProviderById(result.providerId).local ? 'local' : 'remote',
+        provider: result.providerLabel,
+        model: result.model,
+        prompt: result.prompt,
+        sessionId: ch.sessionId ?? undefined,
+        cwd: ch.workspaceRootPath ?? undefined,
+        titlePrefix: 'speech',
+      });
+      commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [text]));
+      syncAndPersistSessionRunStatus(sessionKey, 'success');
+    } catch (err) {
+      if (!aiEditRegistered(ch)) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      setAssistant(
+        `${elapsed()} · 失败\n✗ 语音合成失败: ${msg}\n\n请在设置 > 语音渠道中配置可用的商用或免费 Provider。`,
+        true,
+      );
+      syncAndPersistSessionRunStatus(sessionKey, 'error');
+    } finally {
+      removeAiEditChannel(ch);
+    }
+  })();
+}
+
+function startSpriteGenerationTurn(
+  text: string,
+  options: { providerId?: SpriteProviderId; model?: string } = {},
+): void {
+  const prompt = stripSpriteCommand(text);
+  if (!prompt) return;
+  const state = useStore.getState();
+  if (isWorkflowReadOnly(state)) return;
+  const generationPrompt = modeContextPrompt(state, 'sprite', prompt);
+  const sessionKey = activeWorkflowSessionKey(state);
+  const settings = loadSpriteGenerationSettings();
+  if (!settings.enabled) return;
+  const providerId = options.providerId ?? preferredReadySpriteProviderId(settings);
+  const codingSelection = workflowDefaultGatewaySelection(
+    state.workflow,
+    state.composer.model,
+  );
+  const codingPermission = state.composer.permission || 'full';
+
+  if (state.blockedSendTip) useStore.setState({ blockedSendTip: null });
+
+  const now = Date.now();
+  const providerLabel = providerId
+    ? spriteProviderById(providerId).label
+    : 'Sprite generation';
+  const provider = providerId ? spriteProviderById(providerId) : null;
+  const model = providerId
+    ? options.model?.trim() || spriteProviderModel(providerId, settings)
+    : options.model?.trim() || '';
+  const userMsg: Message = {
+    id: shortId('m'),
+    role: 'user',
+    text,
+    createdAt: now,
+  };
+  const assistantId = shortId('m');
+  const assistantMsg: Message = {
+    id: assistantId,
+    role: 'assistant',
+    text: `⚙ Sprite 动画：${providerLabel}${model ? ` · 模型：${model}` : ''}\n① 正在让模型撰写 Sprite 提示词…`,
+    routeLabel: model ? `${providerLabel} · ${model}` : providerLabel,
+    createdAt: now + 1,
+  };
+  const promptUpdate = applyPromptTitle(state, prompt, now);
+  const activeSession = sessionForKey(state, sessionKey);
+  const simpleMode = promptUpdate.workflow.meta?.simple === true;
+  const baseMessages = state.messages;
+  const chSessionKey = runKey(sessionKey.workspaceId, sessionKey.sessionId);
+  const workspaceRootPath = sessionChangesRootPathForSession(state, sessionKey);
+  const ch: AiEditChannel = {
+    key: chatTurnKey(chSessionKey, userMsg.id),
+    sessionKey: chSessionKey,
+    workspaceId: sessionKey.workspaceId,
+    sessionId: sessionKey.sessionId,
+    workspaceRootPath,
+    workflow: promptUpdate.workflow,
+    messages: [...baseMessages, userMsg, assistantMsg],
+    cliRunIds: new Set<string>(),
+    abortController: new AbortController(),
+    workflowSession: activeSession?.isWorkflow ?? !simpleMode,
+    chat: true,
+    ownedMessageIds: new Set<string>([userMsg.id, assistantId]),
+  };
+
+  const setAssistant = (textValue: string, persist: boolean) => {
+    if (!aiEditRegistered(ch)) return;
+    ch.messages = ch.messages.map((message) =>
+      message.id === assistantId
+        ? {
+            ...message,
+            text: textValue,
+            routeLabel: model ? `${providerLabel} · ${model}` : providerLabel,
+          }
+        : message,
+    );
+    aiEditCommitMessages(ch, persist);
+  };
+
+  addAiEditChannel(ch);
+  if (aiEditViewActive(ch)) {
+    useStore.setState({
+      messages: ch.messages,
+      sessions: promptUpdate.sessions,
+      sessionTree: promptUpdate.sessionTree,
+      workflow: ch.workflow,
+    });
+  }
+  updateAiEditSessionSummary(ch);
+  if (ch.workspaceId && ch.sessionId) {
+    void historyStore
+      .updateSession(ch.workspaceId, ch.sessionId, {
+        messages: ch.messages,
+        ...(ch.workflowSession ? { workflow: ch.workflow } : {}),
+        meta: { runStatus: 'running' },
+      })
+      .catch(() => {});
+  }
+  syncAndPersistSessionRunStatus(sessionKey, 'running');
+
+  void (async () => {
+    const startedAt = Date.now();
+    const elapsed = () =>
+      `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(
+        Date.now() - startedAt,
+      )}`;
+    try {
+      let spritePrompt = generationPrompt;
+      let refineHeader = '';
+      try {
+        const refined = await refineSpritePromptViaModel(
+          ch,
+          generationPrompt,
+          codingSelection,
+          codingPermission,
+          (live) => {
+            if (!aiEditRegistered(ch)) return;
+            setAssistant(
+              `${elapsed()}\n① 撰写 Sprite 提示词中…\n\n${live.trim() || '⟳ 生成中…'}`,
+              false,
+            );
+          },
+        );
+        if (refined && refined.prompt) {
+          spritePrompt = refined.prompt;
+          refineHeader = refined.routeHeader;
+        }
+      } catch {
+        if (ch.abortController.signal.aborted || !aiEditRegistered(ch)) return;
+        spritePrompt = generationPrompt;
+      }
+      if (!aiEditRegistered(ch)) return;
+      const promptModelLine = refineHeader
+        ? `✎ 提示词模型：${refineHeader}\n`
+        : '';
+      setAssistant(
+        `${elapsed()}\n${promptModelLine}② 已生成提示词，正在调用${
+          provider?.local ? '本地开源 Sprite 管线' : '商用 Sprite API'
+        }…\n\nSprite 提示词：${spritePrompt}`,
+        false,
+      );
+      const result = await generateSprite(
+        {
+          prompt: spritePrompt,
+          providerId: options.providerId,
+          model: options.model,
+          signal: ch.abortController.signal,
+        },
+        settings,
+      );
+      setAssistant(
+        `${elapsed()}\n${promptModelLine}${spriteResultMarkdown(result)}`,
+        true,
+      );
+      {
+        const spriteOrigin = spriteProviderById(result.providerId).local
+          ? 'local'
+          : 'remote';
+        void captureGeneratedAssets({
+          kind: 'sprite',
+          sources: [...result.spritesheets, ...result.gifs, ...result.frames],
+          origin: spriteOrigin,
+          provider: result.providerLabel,
+          model: result.model,
+          prompt: result.prompt,
+          sessionId: ch.sessionId ?? undefined,
+          cwd: ch.workspaceRootPath ?? undefined,
+          titlePrefix: 'sprite',
+          meta: { mode: result.mode, frameCount: result.frameCount },
+        });
+        if (result.videos.length) {
+          void captureGeneratedAssets({
+            kind: 'video',
+            sources: result.videos,
+            origin: spriteOrigin,
+            provider: result.providerLabel,
+            model: result.model,
+            prompt: result.prompt,
+            sessionId: ch.sessionId ?? undefined,
+            cwd: ch.workspaceRootPath ?? undefined,
+            titlePrefix: 'sprite-video',
+          });
+        }
+      }
+      commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [text]));
+      syncAndPersistSessionRunStatus(sessionKey, 'success');
+    } catch (err) {
+      if (!aiEditRegistered(ch)) return;
+      const msg = err instanceof Error ? err.message : String(err);
+      setAssistant(
+        `${elapsed()} · 失败\n✗ Sprite 动画生成失败: ${msg}\n\n请在设置 > Sprite 中配置商用或本地开源 Provider。`,
+        true,
+      );
+      syncAndPersistSessionRunStatus(sessionKey, 'error');
+    } finally {
+      removeAiEditChannel(ch);
+    }
+  })();
+}
+
 function startMeshSearchTurn(text: string): void {
   const query = stripMeshSearchCommand(text);
   const state = useStore.getState();
@@ -8379,7 +9549,7 @@ function startMeshSearchTurn(text: string): void {
     text: query
       ? `🔎 在线模型库搜索：${query}\n库：${
           enabledLabels.length ? enabledLabels.join('、') : '未启用任何模型库'
-        }\n① 正在搜索…`
+        }\n① ${meshSearchQueryNeedsEnglish(query) ? '正在准备英文搜索词…' : '正在搜索…'}`
       : '🔎 在线模型库搜索\n请在 /mesh-search 后输入要搜索的关键字。',
     routeLabel: '在线模型库',
     createdAt: now + 1,
@@ -8454,7 +9624,33 @@ function startMeshSearchTurn(text: string): void {
         Date.now() - startedAt,
       )}`;
     try {
-      const result = await searchMeshLibraries(query, settings, ch.abortController.signal);
+      if (meshSearchQueryNeedsEnglish(query)) {
+        setAssistant(
+          `${elapsed()}\n① 正在整理成更适合模型库搜索的英文词…`,
+          false,
+        );
+      }
+      const queryResolution = await resolveMeshSearchQuery(query, (sourceQuery) =>
+        translatePublicText(sourceQuery, 'en-US'),
+      );
+      if (!aiEditRegistered(ch)) return;
+      const searchQuery = queryResolution.searchQuery || query;
+      if (queryResolution.translated && searchQuery !== query) {
+        setAssistant(
+          `${elapsed()}\n① 已转成英文搜索词：${searchQuery}\n② 正在搜索…`,
+          false,
+        );
+      } else if (queryResolution.translationError) {
+        setAssistant(
+          `${elapsed()}\n① 英文化搜索词失败，已改用原词搜索。\n② 正在搜索…`,
+          false,
+        );
+      }
+      const result = await searchMeshLibraries(
+        searchQuery,
+        settings,
+        ch.abortController.signal,
+      );
       if (!aiEditRegistered(ch)) return;
       const downloadable = result.items.filter(
         (item) => item.downloadUrl && item.libraryId !== 'sketchfab',
@@ -8473,7 +9669,15 @@ function startMeshSearchTurn(text: string): void {
         state.composer.workspace || undefined,
       );
       if (!aiEditRegistered(ch)) return;
-      setAssistant(`${elapsed()}\n${meshSearchResultMarkdown(result, downloaded)}`, true);
+      setAssistant(
+        `${elapsed()}\n${meshSearchResultMarkdown(
+          result,
+          downloaded,
+          settings,
+          queryResolution,
+        )}`,
+        true,
+      );
       commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [text]));
       syncAndPersistSessionRunStatus(sessionKey, 'success');
     } catch (err) {
@@ -8677,7 +9881,7 @@ function scheduleAiEditPersist(
   const prev = pendingAiEditPersists.get(key);
   pendingAiEditPersists.set(key, {
     workspaceId: ch.workspaceId,
-    sessionId: ch.sessionId,
+    sessionId: ch.sessionId ?? undefined,
     patch: {
       ...(prev?.patch ?? {}),
       ...patch,
@@ -8901,9 +10105,25 @@ const pendingInteractionResolvers = new Map<
   {
     runKey: string | null;
     aiEditKey: string | null;
+    sessionKey: WorkflowSessionKey | null;
     resolve: (answer: InteractionAnswer | null) => void;
   }
 >();
+
+/** Sessions parked on a pending interaction (derived from the resolver map). */
+function syncWaitingInputSessions(): void {
+  const seen = new Set<string>();
+  const waitingInputSessions: WorkflowSessionKey[] = [];
+  for (const entry of pendingInteractionResolvers.values()) {
+    const key = entry.sessionKey;
+    if (!key) continue;
+    const id = workflowSessionKeyId(key);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    waitingInputSessions.push(key);
+  }
+  useStore.setState({ waitingInputSessions });
+}
 
 /** Max times a single node may ask the user before we stop re-invoking it. */
 const MAX_INTERACTION_ROUNDS = 6;
@@ -9027,12 +10247,20 @@ function awaitInteraction(
   } else {
     pushChannelMessage(ch, msg, true);
   }
+  const owner = aiCh ?? ch;
+  const sessionKey: WorkflowSessionKey | null = owner
+    ? { workspaceId: owner.workspaceId, sessionId: owner.sessionId }
+    : null;
   return new Promise((resolve) => {
     pendingInteractionResolvers.set(id, {
       runKey: ch?.key ?? null,
       aiEditKey: aiCh?.key ?? null,
+      sessionKey,
       resolve,
     });
+    // The turn is now parked on the user: flip the session to a static
+    // "waiting" badge (no spinner) and let the composer accept the answer.
+    syncWaitingInputSessions();
   });
 }
 
@@ -9044,12 +10272,34 @@ function resolvePendingInteractions(ch: RunChannel | null): void {
     pendingInteractionResolvers.delete(id);
     entry.resolve(null);
   }
+  syncWaitingInputSessions();
   const mark = (m: Message): Message =>
     m.interaction && m.interactionStatus === 'pending'
       ? { ...m, interactionStatus: 'cancelled' }
       : m;
   ch.messages = ch.messages.map(mark);
   channelCommitMessages(ch, true);
+}
+
+/**
+ * Cancel in-flight interactions parked on an AI-edit/chat channel (chat
+ * stopped): resolve null so the awaiting turn unwinds, and mark the widgets
+ * cancelled. Mirrors resolvePendingInteractions for the aiEdit side.
+ */
+function resolvePendingAiEditInteractions(ch: AiEditChannel | null): void {
+  if (!ch) return;
+  for (const [id, entry] of [...pendingInteractionResolvers]) {
+    if (entry.aiEditKey !== ch.key) continue;
+    pendingInteractionResolvers.delete(id);
+    entry.resolve(null);
+  }
+  syncWaitingInputSessions();
+  const mark = (m: Message): Message =>
+    m.interaction && m.interactionStatus === 'pending'
+      ? { ...m, interactionStatus: 'cancelled' }
+      : m;
+  ch.messages = ch.messages.map(mark);
+  aiEditCommitMessages(ch, true);
 }
 
 /** Append a system log line to the message stream (routed through the run channel). */

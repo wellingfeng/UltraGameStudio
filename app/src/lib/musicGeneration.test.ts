@@ -149,6 +149,8 @@ describe('music generation settings and routing', () => {
       'tempolor-instrumental',
       'mubert',
       'sunoapi-music',
+      'sonauto-song',
+      'sonauto-instrumental',
       'fal-ace-step',
       'fal-stable-audio',
       'minimax-302-music',

@@ -340,6 +340,7 @@ const FREE_CHANNEL_ENV_MAPPINGS: &[(&str, &[&str])] = &[
 
 #[cfg(target_os = "windows")]
 const LOCAL_MODEL_SETUP_PS1: &str = include_str!("../../scripts/setup-local-model.ps1");
+const COMFYUI_SETUP_PS1: &str = include_str!("../../scripts/setup-comfyui.ps1");
 const LOCAL_MODEL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 const REMOTE_MODEL_LIST_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(4);
 const AI_EDIT_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
@@ -509,6 +510,16 @@ struct ModelAssetDownload {
     path: String,
     mime: String,
     size_bytes: usize,
+}
+
+/// Result of persisting a model-generated asset (image/video/audio/sprite/mesh)
+/// into the workspace asset cache. Shared by the unified Asset Hub.
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GeneratedAssetSave {
+    path: String,
+    size_bytes: usize,
+    file_name: String,
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -7276,6 +7287,197 @@ async fn workspace_changes_cached(
     .map_err(|e| format!("会话改动缓存读取任务失败: {e}"))?
 }
 
+/// Result of preparing an isolated workspace for a new session (worktree mode).
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct IsolatedWorkspace {
+    /// Absolute path of the prepared isolated working directory.
+    path: String,
+    /// How the isolation was created: "worktree" (git) or "copy" (non-git).
+    kind: String,
+    /// Branch name created for a git worktree (absent for copies).
+    branch: Option<String>,
+}
+
+/// Directories that are never copied when cloning a non-git workspace. Mirrors
+/// the tree-walk exclusions plus VCS metadata so copies stay lean and never
+/// drag heavy build artifacts or nested isolated worktrees along.
+const ISOLATED_COPY_EXCLUDED_DIRS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    ".freeultracode",
+    ".worktree",
+    ".omc",
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    ".svelte-kit",
+    ".turbo",
+    ".cache",
+];
+
+fn is_inside_git_work_tree(root: &Path) -> bool {
+    match run_workspace_status_command(root, "git", &["rev-parse", "--is-inside-work-tree"]) {
+        Ok(output) => output.success && !output.timed_out && output.stdout.trim() == "true",
+        Err(_) => false,
+    }
+}
+
+/// Recursively copy `src` into `dst`, skipping VCS/build directories. Symlinks
+/// are copied as plain files where possible; failures on individual entries are
+/// ignored so a partial copy still yields a usable workspace.
+fn copy_workspace_tree(src: &Path, dst: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("创建隔离目录失败: {e}"))?;
+    let entries = std::fs::read_dir(src).map_err(|e| format!("读取工作区失败: {e}"))?;
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        let from = entry.path();
+        let to = dst.join(&name);
+        if file_type.is_dir() {
+            if ISOLATED_COPY_EXCLUDED_DIRS
+                .iter()
+                .any(|excluded| name_str.as_ref() == *excluded)
+            {
+                continue;
+            }
+            let _ = copy_workspace_tree(&from, &to);
+        } else {
+            let _ = std::fs::copy(&from, &to);
+        }
+    }
+    Ok(())
+}
+
+fn prepare_isolated_workspace_blocking(
+    root_path: String,
+    session_id: String,
+) -> Result<IsolatedWorkspace, String> {
+    let root = PathBuf::from(root_path.trim());
+    if root.as_os_str().is_empty() || !root.is_dir() {
+        return Err("工作区路径无效".to_string());
+    }
+    // A stable, filesystem-safe slug derived from the session id keeps repeated
+    // preparations for the same session idempotent (reuse instead of duplicate).
+    let slug: String = session_id
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let slug = if slug.trim_matches('-').is_empty() {
+        format!("session-{}", now_ms())
+    } else {
+        slug
+    };
+
+    if is_inside_git_work_tree(&root) {
+        // Resolve the repository top-level so the worktree is created relative to
+        // the real repo root even when the session cwd is a subdirectory.
+        let toplevel =
+            match run_workspace_status_command(&root, "git", &["rev-parse", "--show-toplevel"]) {
+                Ok(output) if output.success && !output.timed_out => {
+                    PathBuf::from(output.stdout.trim())
+                }
+                _ => root.clone(),
+            };
+        let branch = format!("ow/session-{slug}");
+        let worktrees_root = toplevel.join(".worktree");
+        std::fs::create_dir_all(&worktrees_root)
+            .map_err(|e| format!("创建工作树目录失败: {e}"))?;
+        let worktree_path = worktrees_root.join(&slug);
+        // Reuse an existing worktree for the same session if present.
+        if worktree_path.is_dir() {
+            return Ok(IsolatedWorkspace {
+                path: worktree_path.to_string_lossy().to_string(),
+                kind: "worktree".to_string(),
+                branch: Some(branch),
+            });
+        }
+        let worktree_str = worktree_path.to_string_lossy().to_string();
+        let add = run_workspace_status_command_owned_with_timeout(
+            &toplevel,
+            "git",
+            &[
+                "worktree".to_string(),
+                "add".to_string(),
+                "-b".to_string(),
+                branch.clone(),
+                worktree_str.clone(),
+            ],
+            std::time::Duration::from_secs(60),
+        )
+        .map_err(|e| format!("创建 git worktree 失败: {e}"))?;
+        if !add.success {
+            // The branch may already exist (e.g. a re-run after manual cleanup);
+            // retry without -b so we attach to the existing branch instead.
+            let retry = run_workspace_status_command_owned_with_timeout(
+                &toplevel,
+                "git",
+                &[
+                    "worktree".to_string(),
+                    "add".to_string(),
+                    worktree_str.clone(),
+                    branch.clone(),
+                ],
+                std::time::Duration::from_secs(60),
+            )
+            .map_err(|e| format!("创建 git worktree 失败: {e}"))?;
+            if !retry.success {
+                return Err(format!(
+                    "创建 git worktree 失败: {}",
+                    workspace_status_error(&add)
+                ));
+            }
+        }
+        return Ok(IsolatedWorkspace {
+            path: worktree_str,
+            kind: "worktree".to_string(),
+            branch: Some(branch),
+        });
+    }
+
+    // Non-git: copy the tree into a sibling isolated directory under the global
+    // tmp area so the original workspace is never touched.
+    let copies_root = storage_paths::global_tmp_artifact_dir("worktrees")?;
+    let copy_path = copies_root.join(&slug);
+    if copy_path.is_dir() {
+        return Ok(IsolatedWorkspace {
+            path: copy_path.to_string_lossy().to_string(),
+            kind: "copy".to_string(),
+            branch: None,
+        });
+    }
+    copy_workspace_tree(&root, &copy_path)?;
+    Ok(IsolatedWorkspace {
+        path: copy_path.to_string_lossy().to_string(),
+        kind: "copy".to_string(),
+        branch: None,
+    })
+}
+
+/// Prepare an isolated working directory for a session started in "worktree"
+/// mode. Git repositories get a real `git worktree` on a fresh branch; other
+/// folders get a lean recursive copy. Returns the path the CLI should use as
+/// its cwd. Idempotent per session id.
+#[tauri::command]
+async fn prepare_isolated_workspace(
+    root_path: String,
+    session_id: String,
+) -> Result<IsolatedWorkspace, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        prepare_isolated_workspace_blocking(root_path, session_id)
+    })
+    .await
+    .map_err(|e| format!("隔离工作区准备任务失败: {e}"))?
+}
+
 fn image_mime_for_path(path: &std::path::Path) -> Option<&'static str> {
     let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
     match ext.as_str() {
@@ -8249,6 +8451,114 @@ async fn download_model_asset(
         .map_err(|e| format!("模型下载保存任务失败: {e}"))?
 }
 
+/// Directory for model-generated media assets, grouped by kind under the
+/// managed workspace cache (e.g. `assets/image`, `assets/video`).
+fn generated_asset_dir(cwd: Option<&str>, kind: &str) -> PathBuf {
+    let safe_kind: String = kind
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .take(32)
+        .collect();
+    let leaf = if safe_kind.is_empty() {
+        "file".to_string()
+    } else {
+        safe_kind
+    };
+    storage_paths::managed_artifact_dir(cwd, "assets").join(leaf)
+}
+
+/// Pick a file extension for a generated asset from an explicit file name, then
+/// the mime type, falling back to a kind-appropriate default.
+fn generated_asset_extension(mime: &str, file_name: Option<&str>, kind: &str) -> String {
+    if let Some(ext) = file_name
+        .and_then(|name| Path::new(name).extension())
+        .and_then(|ext| ext.to_str())
+        .filter(|ext| !ext.is_empty())
+    {
+        return ext.to_ascii_lowercase();
+    }
+    let m = mime.trim().to_ascii_lowercase();
+    let by_mime = match m.as_str() {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/webp" => Some("webp"),
+        "image/gif" => Some("gif"),
+        "image/svg+xml" => Some("svg"),
+        "video/mp4" => Some("mp4"),
+        "video/webm" => Some("webm"),
+        "video/quicktime" => Some("mov"),
+        "audio/mpeg" | "audio/mp3" => Some("mp3"),
+        "audio/wav" | "audio/x-wav" => Some("wav"),
+        "audio/ogg" => Some("ogg"),
+        "audio/flac" => Some("flac"),
+        "audio/aac" => Some("aac"),
+        "application/json" => Some("json"),
+        "model/gltf-binary" => Some("glb"),
+        "model/gltf+json" => Some("gltf"),
+        _ => None,
+    };
+    if let Some(ext) = by_mime {
+        return ext.to_string();
+    }
+    match kind {
+        "image" | "sprite" => "png",
+        "video" => "mp4",
+        "audio" | "music" | "speech" => "mp3",
+        "mesh" | "model" => "glb",
+        _ => "bin",
+    }
+    .to_string()
+}
+
+fn save_generated_asset_blocking(
+    bytes_base64: String,
+    mime: String,
+    kind: String,
+    file_name: Option<String>,
+    cwd: Option<String>,
+) -> Result<GeneratedAssetSave, String> {
+    use base64::Engine;
+
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(bytes_base64.trim())
+        .map_err(|e| format!("解析生成资产失败：{e}"))?;
+    if bytes.is_empty() {
+        return Err("生成资产为空。".to_string());
+    }
+
+    let ext = generated_asset_extension(&mime, file_name.as_deref(), &kind);
+    let stem = safe_model_asset_stem(file_name.as_deref(), None);
+    let dir = generated_asset_dir(cwd.as_deref(), &kind);
+    let path = write_unique_model_asset(&dir, &stem, &ext, &bytes)?;
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| stem.clone());
+    Ok(GeneratedAssetSave {
+        path: path.to_string_lossy().to_string(),
+        size_bytes: bytes.len(),
+        file_name,
+    })
+}
+
+/// Persist a model-generated asset (decoded base64 bytes) into the workspace
+/// asset cache and return its local path. Used by the unified Asset Hub so
+/// generated media survives a reload instead of living only as a data URL.
+#[tauri::command]
+async fn save_generated_asset(
+    bytes_base64: String,
+    mime: String,
+    kind: String,
+    file_name: Option<String>,
+    cwd: Option<String>,
+) -> Result<GeneratedAssetSave, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        save_generated_asset_blocking(bytes_base64, mime, kind, file_name, cwd)
+    })
+    .await
+    .map_err(|e| format!("保存生成资产任务失败: {e}"))?
+}
+
 fn fallback_local_model_hardware() -> LocalModelHardware {
     LocalModelHardware {
         ram_gb: None,
@@ -8771,6 +9081,80 @@ async fn setup_local_model(model: String) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || setup_local_model_blocking(model))
         .await
         .map_err(|e| format!("本地模型安装任务启动失败: {e}"))?
+}
+
+/// Managed install root for the ComfyUI runtime + downloaded models.
+fn comfyui_tools_dir() -> Result<PathBuf, String> {
+    let root = storage_paths::ensure_global_root_with_dirs(&["tools"])?;
+    let dir = root.join("tools").join("comfyui");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建 ComfyUI 工具目录失败：{e}"))?;
+    Ok(dir)
+}
+
+/// Accept only the known model-profile ids the installer script understands.
+fn validate_comfyui_model_id(model: &str) -> Result<Option<String>, String> {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    const ALLOWED: [&str; 3] = ["sd1.5", "sdxl-turbo", "flux-schnell"];
+    if !ALLOWED.contains(&trimmed) {
+        return Err(format!(
+            "未知的 ComfyUI 模型档位：{trimmed}。可选 sd1.5 / sdxl-turbo / flux-schnell。"
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+fn setup_comfyui_blocking(model: Option<String>, skip_model: bool) -> Result<(), String> {
+    if !cfg!(target_os = "windows") {
+        return Err(
+            "ComfyUI 一键安装目前仅支持 Windows（官方便携版）。其他平台请参考 github.com/comfyanonymous/ComfyUI 手动安装。"
+                .to_string(),
+        );
+    }
+    let model_id = validate_comfyui_model_id(model.as_deref().unwrap_or(""))?;
+    let install_root = comfyui_tools_dir()?;
+
+    #[cfg(target_os = "windows")]
+    {
+        let script_path =
+            managed_temp_path(None, "scripts", "freeultracode-setup-comfyui", "ps1");
+        std::fs::write(&script_path, COMFYUI_SETUP_PS1.as_bytes())
+            .map_err(|e| format!("写入 ComfyUI 安装脚本失败：{e}"))?;
+
+        let mut cmd = new_spawn_command("powershell");
+        cmd.arg("-NoProfile")
+            .arg("-ExecutionPolicy")
+            .arg("Bypass")
+            .arg("-File")
+            .arg(&script_path)
+            .arg("-InstallRoot")
+            .arg(install_root.to_string_lossy().to_string());
+        if let Some(id) = model_id {
+            cmd.arg("-Model").arg(id);
+        }
+        if skip_model {
+            cmd.arg("-SkipModel");
+        }
+        cmd.spawn()
+            .map_err(|e| format!("启动 ComfyUI 安装脚本失败：{e}"))?;
+        return Ok(());
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (model_id, install_root);
+        Err("ComfyUI 一键安装仅支持 Windows。".to_string())
+    }
+}
+
+#[tauri::command]
+async fn setup_comfyui(model: Option<String>, skip_model: Option<bool>) -> Result<(), String> {
+    let skip = skip_model.unwrap_or(false);
+    tauri::async_runtime::spawn_blocking(move || setup_comfyui_blocking(model, skip))
+        .await
+        .map_err(|e| format!("ComfyUI 安装任务启动失败：{e}"))?
 }
 
 #[tauri::command]
@@ -12708,6 +13092,7 @@ pub fn run() {
             local_model_list,
             list_remote_models,
             setup_local_model,
+            setup_comfyui,
             open_external,
             open_workspace_directory,
             list_workspace_dir,
@@ -12724,6 +13109,7 @@ pub fn run() {
             workspace_vcs_status_cached,
             workspace_vcs_status_scan,
             workspace_changes_cached,
+            prepare_isolated_workspace,
             preview_local_file,
             save_clipboard_image,
             save_session_capture,
@@ -12731,6 +13117,7 @@ pub fn run() {
             fetch_model_asset_data_url,
             read_model_asset_data_url,
             download_model_asset,
+            save_generated_asset,
             history::history_root,
             history::history_read_json,
             history::history_write_json,

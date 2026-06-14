@@ -313,6 +313,86 @@ export const SIMPLE_CHAT_SYSTEM = `你正在「简单 Workflow」里直接为用
 ${INTERACTION_PROTOCOL}`;
 
 /**
+ * CONTRACT: which built-in asset-generation channels are configured + ready.
+ *
+ * FreeUltraCode ships dedicated generation channels (image / music / 3D mesh /
+ * video / speech / sprite, plus a ComfyUI node-graph mode). Each is driven by a
+ * slash command and a user-configured provider; the model cannot run them
+ * itself. A `true` flag means at least one provider for that channel is
+ * configured and ready, so the model should route asset needs there instead of
+ * fabricating the asset with PIL / ffmpeg / hand-written code.
+ */
+export interface AssetChannelAvailability {
+  image: boolean;
+  music: boolean;
+  threeD: boolean;
+  video: boolean;
+  speech: boolean;
+  sprite: boolean;
+}
+
+const ASSET_CHANNEL_LINES: Array<{
+  key: keyof AssetChannelAvailability;
+  line: string;
+}> = [
+  {
+    key: 'image',
+    line: '· 生图：需要图片、插画、海报、头像、图标、贴图、UI 草图、概念图等 2D 视觉素材时，用 /image（或 /生图、/image-mode-start 进入生图模式）；要可编辑的节点图工作流则用 /comfyui-mode-start。给出可直接使用的图片提示词。',
+  },
+  {
+    key: 'sprite',
+    line: '· 精灵图：需要游戏精灵、序列帧、spritesheet 等素材时，用 /sprite（或 /sprite-mode-start 进入精灵模式）。给出可直接使用的精灵提示词。',
+  },
+  {
+    key: 'threeD',
+    line: '· 建模：需要 3D 道具、角色、场景网格、blockout 等资产时，用 /mesh-mode-start 进入建模模式。给出可直接使用的建模提示词。',
+  },
+  {
+    key: 'music',
+    line: '· 音乐：需要 BGM、配乐、音乐片段时，用 /music（或 /music-mode-start 进入音乐模式）。给出风格、时长、情绪等可直接使用的音乐提示词。',
+  },
+  {
+    key: 'speech',
+    line: '· 语音：需要文本转语音、配音、旁白朗读时，用 /speech（或 /speech-mode-start 进入语音模式）。',
+  },
+  {
+    key: 'video',
+    line: '· 视频：需要短视频、动态片段时，用 /video（或 /video-mode-start 进入视频模式）。给出可直接使用的视频提示词。',
+  },
+];
+
+/**
+ * Build a capability-awareness block telling the model about FreeUltraCode's
+ * built-in generation channels. Injected into BOTH the blueprint system prompt
+ * and the simple-chat system prompt so the model never tries to hand-roll an
+ * image with PIL, an audio clip with ffmpeg, etc. when a real channel exists.
+ *
+ * - Lists only channels that are configured + ready (so we never advertise a
+ *   command the user can't actually run).
+ * - Always emits the prefer-the-channel rule: when an asset is requested, route
+ *   it to the built-in channel first, and only fall back to hand-written code
+ *   (PIL / ffmpeg / etc.) when the channel fails, is refused, or can't cover the
+ *   need.
+ * - Returns '' when no channel is ready (nothing useful to say, and we don't
+ *   want to imply a capability the user hasn't set up).
+ */
+export function buildAssetCapabilityBlock(channels: AssetChannelAvailability): string {
+  const ready = ASSET_CHANNEL_LINES.filter(({ key }) => channels[key]);
+  if (ready.length === 0) return '';
+  return (
+    '\n\n【本应用内置生成渠道（重要）】FreeUltraCode 自带由 slash 命令触发的资产生成渠道，' +
+    '后台调用用户已配置的真实 Provider。你无法自己执行这些命令，但当用户的需求会产生下列素材时，' +
+    '请优先推荐对应命令并附上一段可直接使用的提示词，让用户一键调用，' +
+    '而不是一上来就用 PIL、Pillow、matplotlib、ffmpeg、canvas、SVG 等手写代码去“画”或“合成”，' +
+    '也不要假装已经生成。\n' +
+    '只有在以下情况才回退到手写代码：内置渠道生成失败、用户明确拒绝使用内置渠道，' +
+    '或该需求超出内置渠道的能力范围（例如需要精确数据驱动的图表、特定文件格式或程序化拼接）。' +
+    '回退时要说明原因。可用渠道如下：\n' +
+    ready.map(({ line }) => line).join('\n')
+  );
+}
+
+/**
  * AI 改图时为每个节点自动选模型的策略。与 store 的 ComposerSettings.modelStrategy
  * 同义，单独在此导出以便 UNIFIED_SYSTEM 注入逻辑独立于 store 类型。
  */

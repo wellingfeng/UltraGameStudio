@@ -642,6 +642,214 @@ describe('AIDock slash suggestions', () => {
     }
   });
 
+  it('toggles sticky UI mode via /ui-mode-start and /ui-mode-end', async () => {
+    resetStore();
+    const generateUiPrompt = vi.fn();
+    const sendPrompt = vi.fn();
+    useStore.setState({ generateUiPrompt, sendPrompt });
+    const view = await renderDock();
+
+    const submitEnter = (input: HTMLTextAreaElement) =>
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '/ui-mode-start');
+        submitEnter(input);
+      });
+      expect(useStore.getState().composer.uiMode).toBe(true);
+      expect(useStore.getState().composer.uiModeStartedAt).toBeGreaterThan(0);
+      expect(useStore.getState().composer.threeDMode).toBe(false);
+      expect(useStore.getState().composer.comfyMode).toBe(false);
+      expect(generateUiPrompt).not.toHaveBeenCalled();
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(
+        useStore
+          .getState()
+          .messages.some(
+            (m) => m.role === 'system' && m.text.includes('已进入 UI 模式'),
+          ),
+      ).toBe(true);
+
+      await act(async () => {
+        typeTextarea(input, '设计一个暂停菜单');
+        submitEnter(input);
+      });
+      expect(generateUiPrompt).toHaveBeenCalledWith('设计一个暂停菜单');
+      expect(sendPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        typeTextarea(input, '/ui-mode-end');
+        submitEnter(input);
+      });
+      expect(useStore.getState().composer.uiMode).toBe(false);
+      expect(useStore.getState().composer.uiModeStartedAt).toBeNull();
+      expect(
+        useStore
+          .getState()
+          .messages.some(
+            (m) => m.role === 'system' && m.text.includes('已退出 UI 模式'),
+          ),
+      ).toBe(true);
+
+      await act(async () => {
+        typeTextarea(input, '加一个登录节点');
+        submitEnter(input);
+      });
+      expect(sendPrompt).toHaveBeenCalledWith(expect.stringContaining('加一个登录节点'));
+      expect(generateUiPrompt).toHaveBeenCalledTimes(1);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('enters UI mode and generates when text follows /ui-mode-start', async () => {
+    resetStore();
+    const generateUiPrompt = vi.fn();
+    const sendPrompt = vi.fn();
+    useStore.setState({ generateUiPrompt, sendPrompt });
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '/ui-mode-start 设计一个赛博朋克 HUD');
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Enter',
+            ctrlKey: true,
+            bubbles: true,
+          }),
+        );
+      });
+
+      expect(useStore.getState().composer.uiMode).toBe(true);
+      expect(useStore.getState().composer.uiModeStartedAt).toBeGreaterThan(0);
+      expect(generateUiPrompt).toHaveBeenCalledWith('设计一个赛博朋克 HUD');
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(input.value).toBe('');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('toggles sticky sprite mode via /sprite-mode-start and /sprite-mode-end', async () => {
+    resetStore();
+    const generateSpritePrompt = vi.fn();
+    const sendPrompt = vi.fn();
+    useStore.setState({ generateSpritePrompt, sendPrompt });
+    const view = await renderDock();
+
+    const submitEnter = (input: HTMLTextAreaElement) =>
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          ctrlKey: true,
+          bubbles: true,
+        }),
+      );
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '/sprite-mode-start');
+        submitEnter(input);
+      });
+      expect(useStore.getState().composer.spriteMode).toBe(true);
+      expect(useStore.getState().composer.spriteModeStartedAt).toBeGreaterThan(0);
+      expect(useStore.getState().composer.imageMode).toBe(false);
+      expect(useStore.getState().composer.musicMode).toBe(false);
+      expect(useStore.getState().composer.threeDMode).toBe(false);
+      expect(useStore.getState().composer.videoMode).toBe(false);
+      expect(generateSpritePrompt).not.toHaveBeenCalled();
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(
+        useStore
+          .getState()
+          .messages.some(
+            (m) => m.role === 'system' && m.text.includes('已进入 Sprite 模式'),
+          ),
+      ).toBe(true);
+
+      await act(async () => {
+        typeTextarea(input, '一个 16 帧 idle 像素机器人');
+        submitEnter(input);
+      });
+      expect(generateSpritePrompt).toHaveBeenCalledWith('一个 16 帧 idle 像素机器人');
+      expect(sendPrompt).not.toHaveBeenCalled();
+
+      await act(async () => {
+        typeTextarea(input, '/review 看看这段代码');
+        submitEnter(input);
+      });
+      expect(sendPrompt).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        typeTextarea(input, '/sprite-mode-end');
+        submitEnter(input);
+      });
+      expect(useStore.getState().composer.spriteMode).toBe(false);
+      expect(useStore.getState().composer.spriteModeStartedAt).toBeNull();
+      expect(
+        useStore
+          .getState()
+          .messages.some(
+            (m) => m.role === 'system' && m.text.includes('已退出 Sprite 模式'),
+          ),
+      ).toBe(true);
+
+      await act(async () => {
+        typeTextarea(input, '加一个登录节点');
+        submitEnter(input);
+      });
+      expect(sendPrompt).toHaveBeenCalledWith(expect.stringContaining('加一个登录节点'));
+      expect(generateSpritePrompt).toHaveBeenCalledTimes(1);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('enters sprite mode and generates when text follows /sprite-mode-start', async () => {
+    resetStore();
+    const generateSpritePrompt = vi.fn();
+    const sendPrompt = vi.fn();
+    useStore.setState({ generateSpritePrompt, sendPrompt });
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '/sprite-mode-start 一套横版角色 walk spritesheet');
+        input.dispatchEvent(
+          new KeyboardEvent('keydown', {
+            key: 'Enter',
+            ctrlKey: true,
+            bubbles: true,
+          }),
+        );
+      });
+
+      expect(useStore.getState().composer.spriteMode).toBe(true);
+      expect(useStore.getState().composer.spriteModeStartedAt).toBeGreaterThan(0);
+      expect(generateSpritePrompt).toHaveBeenCalledWith('一套横版角色 walk spritesheet');
+      expect(sendPrompt).not.toHaveBeenCalled();
+      expect(input.value).toBe('');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   it('switches the bottom channel/model selectors to image providers in image mode', async () => {
     resetStore();
     useStore.setState({ composer: { ...defaultComposer, imageMode: true } });
@@ -755,6 +963,44 @@ describe('AIDock slash suggestions', () => {
         window.localStorage.getItem('freeultracode.threeDGeneration.v1') ?? '{}',
       );
       expect(saved.preferredProviderId).toBe('local-hunyuan3d');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('switches the bottom channel/model selectors to sprite providers in sprite mode', async () => {
+    resetStore();
+    useStore.setState({ composer: { ...defaultComposer, spriteMode: true } });
+    const view = await renderDock();
+
+    try {
+      const channelTrigger = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>('button[title]'),
+      ).find((btn) => btn.getAttribute('title') === '渠道');
+      expect(channelTrigger).toBeInstanceOf(HTMLButtonElement);
+
+      await act(async () => {
+        channelTrigger?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+
+      const menuText =
+        channelTrigger?.parentElement?.querySelector('[role="listbox"]')
+          ?.textContent ?? '';
+      expect(menuText).toContain('Ludo.ai Sprite Generator');
+      expect(menuText).toContain('本地 ComfyUI Sprite');
+
+      const localComfy = Array.from(
+        view.container.querySelectorAll<HTMLElement>('[role="option"]'),
+      ).find((opt) => opt.textContent?.includes('本地 ComfyUI Sprite'));
+      expect(localComfy).toBeInstanceOf(HTMLElement);
+      await act(async () => {
+        localComfy?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+
+      const saved = JSON.parse(
+        window.localStorage.getItem('freeultracode.spriteGeneration.v1') ?? '{}',
+      );
+      expect(saved.preferredProviderId).toBe('local-comfyui-sprite');
     } finally {
       await view.cleanup();
     }

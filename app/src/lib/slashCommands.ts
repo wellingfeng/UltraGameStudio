@@ -122,6 +122,114 @@ export const SLASH_COMMANDS = [
     },
   },
   {
+    name: '/video',
+    label: { 'zh-CN': '生成视频', 'en-US': 'Generate Video' },
+    detail: {
+      'zh-CN': '调用设置 > 视频渠道中的商用或免费渠道生成视频/短片',
+      'en-US': 'Generate video or short clips with the commercial or free channel configured in Settings > Video',
+    },
+    text: {
+      'zh-CN': '/video ',
+      'en-US': '/video ',
+    },
+  },
+  {
+    name: '/video-mode-start',
+    label: { 'zh-CN': '开始视频模式', 'en-US': 'Start Video Mode' },
+    detail: {
+      'zh-CN': '进入视频模式：之后每条消息都先让编程模型撰写视频提示词，再调用默认视频渠道',
+      'en-US': 'Enter video mode: every message has the coding model write a video prompt, then calls the default video channel',
+    },
+    text: {
+      'zh-CN': '',
+      'en-US': '',
+    },
+  },
+  {
+    name: '/video-mode-end',
+    label: { 'zh-CN': '结束视频模式', 'en-US': 'End Video Mode' },
+    detail: {
+      'zh-CN': '退出视频模式，回到 AI 编程',
+      'en-US': 'Leave video mode and return to AI coding',
+    },
+    text: {
+      'zh-CN': '',
+      'en-US': '',
+    },
+  },
+  {
+    name: '/tts',
+    label: { 'zh-CN': '文本转语音', 'en-US': 'Text to Speech' },
+    detail: {
+      'zh-CN': '调用设置 > 语音渠道中的商用或免费/本地渠道，把文字朗读成语音',
+      'en-US': 'Read text aloud with the commercial or free/local channel configured in Settings > Speech',
+    },
+    text: {
+      'zh-CN': '/tts ',
+      'en-US': '/tts ',
+    },
+  },
+  {
+    name: '/speech-mode-start',
+    label: { 'zh-CN': '开始语音模式', 'en-US': 'Start Speech Mode' },
+    detail: {
+      'zh-CN': '进入语音模式：之后每条消息都直接调用默认语音渠道朗读',
+      'en-US': 'Enter speech mode: every message is sent straight to the default text-to-speech channel',
+    },
+    text: {
+      'zh-CN': '',
+      'en-US': '',
+    },
+  },
+  {
+    name: '/speech-mode-end',
+    label: { 'zh-CN': '结束语音模式', 'en-US': 'End Speech Mode' },
+    detail: {
+      'zh-CN': '退出语音模式，回到 AI 编程',
+      'en-US': 'Leave speech mode and return to AI coding',
+    },
+    text: {
+      'zh-CN': '',
+      'en-US': '',
+    },
+  },
+  {
+    name: '/sprite',
+    label: { 'zh-CN': '生成 Sprite 动画', 'en-US': 'Generate Sprite Animation' },
+    detail: {
+      'zh-CN': '调用设置 > Sprite 中的商用或本地开源渠道生成精灵图、序列帧或 spritesheet',
+      'en-US': 'Generate sprites, frame sequences, or sprite sheets with the provider configured in Settings > Sprite',
+    },
+    text: {
+      'zh-CN': '/sprite ',
+      'en-US': '/sprite ',
+    },
+  },
+  {
+    name: '/sprite-mode-start',
+    label: { 'zh-CN': '开始 Sprite 模式', 'en-US': 'Start Sprite Mode' },
+    detail: {
+      'zh-CN': '进入 Sprite 模式：之后每条消息都先让编程模型撰写 Sprite 提示词，再调用商用或本地开源渠道',
+      'en-US': 'Enter sprite mode: every message has the coding model write a sprite prompt, then calls the selected commercial or local provider',
+    },
+    text: {
+      'zh-CN': '',
+      'en-US': '',
+    },
+  },
+  {
+    name: '/sprite-mode-end',
+    label: { 'zh-CN': '结束 Sprite 模式', 'en-US': 'End Sprite Mode' },
+    detail: {
+      'zh-CN': '退出 Sprite 模式，回到 AI 编程',
+      'en-US': 'Leave sprite mode and return to AI coding',
+    },
+    text: {
+      'zh-CN': '',
+      'en-US': '',
+    },
+  },
+  {
     name: '/mesh-mode-start',
     label: { 'zh-CN': '开始 Mesh 模式', 'en-US': 'Start Mesh Mode' },
     detail: {
@@ -151,6 +259,54 @@ export const SLASH_COMMANDS = [
     detail: {
       'zh-CN': '按关键字搜索 Sketchfab、Poly Haven、Fab、Unity Asset Store 等在线 3D 模型库，可下载的直接下载到会话',
       'en-US': 'Search online 3D model libraries (Sketchfab, Poly Haven, Fab, Unity Asset Store, ...) by keyword; downloadable results are pulled into the chat',
+    },
+    text: {
+      'zh-CN': '',
+      'en-US': '',
+    },
+  },
+  {
+    name: '/comfyui-mode-start',
+    label: { 'zh-CN': '开始 ComfyUI 模式', 'en-US': 'Start ComfyUI Mode' },
+    detail: {
+      'zh-CN': '进入 ComfyUI 模式：之后每条消息都让编程模型生成一张 ComfyUI 节点图，内嵌在信息流中，可点开放大编辑并运行',
+      'en-US': 'Enter ComfyUI mode: every message has the coding model author a ComfyUI node graph, embedded in the chat and expandable to a full editor you can run',
+    },
+    text: {
+      'zh-CN': '',
+      'en-US': '',
+    },
+  },
+  {
+    name: '/comfyui-mode-end',
+    label: { 'zh-CN': '结束 ComfyUI 模式', 'en-US': 'End ComfyUI Mode' },
+    detail: {
+      'zh-CN': '退出 ComfyUI 模式，回到 AI 编程',
+      'en-US': 'Leave ComfyUI mode and return to AI coding',
+    },
+    text: {
+      'zh-CN': '',
+      'en-US': '',
+    },
+  },
+  {
+    name: '/ui-mode-start',
+    label: { 'zh-CN': '开始 UI 模式', 'en-US': 'Start UI Mode' },
+    detail: {
+      'zh-CN': '进入 UI 模式：专门用于游戏 UI 设计，之后每条消息都让编程模型按默认 UI 渠道产出界面设计与可交付资产',
+      'en-US': 'Enter UI mode: dedicated to game UI design; every message has the coding model produce UI designs and deliverables for the default UI channel',
+    },
+    text: {
+      'zh-CN': '',
+      'en-US': '',
+    },
+  },
+  {
+    name: '/ui-mode-end',
+    label: { 'zh-CN': '结束 UI 模式', 'en-US': 'End UI Mode' },
+    detail: {
+      'zh-CN': '退出 UI 模式，回到 AI 编程',
+      'en-US': 'Leave UI mode and return to AI coding',
     },
     text: {
       'zh-CN': '',
@@ -297,8 +453,13 @@ export const PROJECT_COMMAND_NAMES = [
   '/music',
   '/music-mode-start',
   '/music-mode-end',
+  '/sprite',
+  '/sprite-mode-start',
+  '/sprite-mode-end',
   '/image-mode-start',
   '/image-mode-end',
+  '/comfyui-mode-start',
+  '/comfyui-mode-end',
   '/screenshot',
   '/screenshot-gif',
 ] as const;
@@ -308,6 +469,8 @@ export const GAME_PROJECT_COMMAND_NAMES = [
   '/mesh-mode-start',
   '/mesh-mode-end',
   '/mesh-search',
+  '/ui-mode-start',
+  '/ui-mode-end',
 ] as const;
 
 const PROJECT_COMMAND_NAME_SET: ReadonlySet<string> = new Set(

@@ -4,37 +4,73 @@
   <a href="../../README.md">English</a> | <a href="README.zh-CN.md">中文</a> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | Português | <a href="README.ru.md">Русский</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.hi.md">हिन्दी</a> | <a href="README.ar.md">العربية</a>
 </div>
 
-Nem toda tarefa de programação merece gastar cota dos modelos mais caros. O FreeUltraCode reúne Claude Code, Codex, Gemini, canais gratuitos e modelos locais em uma interface de chat local. Use modelos baratos para explorar e reserve modelos mais estáveis para decisões importantes.
+Em uma game engine, o código é só uma pequena parte do trabalho. O resto são assets e pipeline: materiais, blueprints, terreno, céu, UI, animação esquelética, empacotamento, performance. O FreeUltraCode é um agente de programação no estilo Claude Code / Codex / Gemini reconstruído em torno dessa realidade: ele entende os conceitos das game engines, gera toda a gama de assets de jogo (imagens, modelos 3D, animação de sprites 2D, atlas, áudio, rigging, vídeo) e roteia o trabalho rotineiro por canais gratuitos ou de baixo custo, reservando a cota premium para o que importa.
 
 <p align="center">
-  <strong>Roteamento de canais gratuitos</strong><br>
-  <img src="images/hero-free-channels.pt-BR.png" alt="Captura de tela do roteamento de canais gratuitos do FreeUltraCode" width="960">
+  <strong>Interface UMG do Unreal Engine em um clique</strong><br>
+  <img src="images/game/JMsXEKE.png" alt="O FreeUltraCode gera uma interface UMG do Unreal Engine em um clique" width="960">
+</p>
+
+<p align="center">
+  <strong>Geração de modelo 3D em um clique</strong><br>
+  <img src="images/game/noYfqPt.png" alt="O FreeUltraCode gera um modelo 3D em um clique" width="960">
+</p>
+
+<p align="center">
+  <strong>Imagens, sprites, meshes, áudio, rigging e vídeo — gerenciados por um único agente de programação</strong><br>
+  <img src="images/game/gmclmLS.png" alt="Geração unificada de assets de jogo do FreeUltraCode" width="960">
+  <br><br>
+  <img src="images/game/jXgMffC.png" alt="Fluxo de assets de jogo do FreeUltraCode" width="960">
 </p>
 
 ## Por que FreeUltraCode
 
-Agentes de programação são úteis, mas a cota de modelos premium acaba rápido. O FreeUltraCode mantém a experiência de chat local e facilita enviar solicitações para canais gratuitos, de teste ou de baixo custo quando eles são suficientes.
+Hoje a IA é boa o bastante para escrever a maior parte do código sozinha. O papel do programador está migrando para descrever a intenção, verificar a saída e orquestrar agentes. Mas um jogo não é só código. Uma game engine é cheia de materiais, blueprints, terreno, céu, UI, animação esquelética, empacotamento e ajuste de performance — e a maioria dos agentes de programação genéricos não entende nada disso.
 
-- Use GitHub Models, Hugging Face Router, SambaNova Cloud, Together AI, Gemini, DeepSeek, Kimi, Groq, OpenRouter, NVIDIA NIM, Z.ai, Kilo, LLM7, Ollama, LM Studio e llama.cpp.
-- Mantenha API keys e configurações de provedores na sua máquina.
-- Troque runtime, canal, modo de permissão e workspace direto no compositor de chat.
-- Preserve localmente histórico, favoritos, prompts agendados e contexto do workspace.
-- Use modelos locais sem API key quando o hardware permitir.
+O FreeUltraCode pega um agente no estilo Claude Code / Codex / Gemini e o personaliza profundamente para o desenvolvimento de jogos:
+
+- **Fala a língua das game engines.** O agente vem preparado com conceitos de desenvolvimento de jogos para raciocinar sobre materiais, blueprints, terreno, iluminação, UI (UMG e outras), animação esquelética, build/empacotamento e otimização de performance.
+- **Gera todos os tipos de asset que um jogo precisa.** Imagens, modelos 3D, animação de sprites 2D, atlas de sprites, áudio, rigging esquelético e vídeo são produzidos na mesma superfície e gerenciados por um único fluxo de agente.
+- **Time de especialistas em desenvolvimento de jogos embutido.** Mais de 40 papéis especializados (diretor técnico, programador de gameplay/IA/rede/ferramentas, designer de nível/economia, diretores de arte e áudio, QA, release manager etc.) cobrindo Unity, Unreal, Godot e Web.
+- **Reserva a cota premium para o que importa.** Roteie o trabalho rotineiro por canais gratuitos, de teste ou de baixo custo, e mantenha chaves, configurações e histórico localmente.
 
 ## O que ele faz
 
-### Chat de programação
+### Chat de desenvolvimento de jogos
 
-- Peça alterações de código, investigação de bugs, refatoração, testes, notas de release ou documentação.
+- Peça código de gameplay, integração de engine, lógica de shaders/materiais, scripts de build, investigação de bugs, refatoração, testes e notas de release.
+- Trabalhe em projetos Unity, Unreal, Godot ou Web — o agente raciocina sobre conceitos da engine, não só sobre arquivos.
 - Anexe caminhos de arquivos ou arraste arquivos para o compositor.
-- Veja saída em streaming, logs de comandos, referências de arquivos e resumos em uma única superfície de chat.
+- Veja saída em streaming, logs, referências de arquivos e resumos em uma única superfície de chat.
 - Continue com solicitações de acompanhamento na mesma sessão.
 
-### Geração de imagens + programação
+### Geração de assets de jogo
 
-- Use um modelo de geração de imagens e um modelo de programação na mesma conversa local.
-- Entre no modo de imagem quando precisar de assets visuais, ícones, pôsteres ou referências de design; depois volte ao modelo de programação para aplicar os assets no projeto.
-- A imagem gerada, o prompt, os dados do provedor, os logs e as alterações de código seguintes ficam no mesmo histórico.
+Cada tipo de asset que um jogo precisa pode ser gerado na mesma superfície e aplicado ao projeto, e então devolvido ao modelo de programação — tudo no mesmo histórico. Cada gerador passa pelo provedor que você configurou.
+
+| Asset | O que produz | Modo |
+| --- | --- | --- |
+| Imagens | Concept art, mockups de UI, ícones, pôsteres, texturas, referências | `/image`, `/img`, `/draw`, `/生图` ou `/image-mode-start` |
+| Grafos ComfyUI | Pipelines de imagem editáveis baseados em nós | `/comfyui-mode-start` |
+| Sprites 2D | Sprites de jogo, frames de sequência, spritesheets | `/sprite` ou `/sprite-mode-start` |
+| Modelos 3D | Props, personagens, meshes de cena, blockouts | `/mesh-mode-start` (busque com `/mesh-search`) |
+| Música | BGM, trilha, clipes musicais | `/music` ou `/music-mode-start` |
+| Voz | Falas e narração | `/speech-mode-start` |
+| Vídeo | Clipes de vídeo e assets animados | `/video` ou `/video-mode-start` |
+
+O agente primeiro refina seu prompt, envia ao provedor configurado e mostra o resultado no fluxo de chat. Saia de qualquer modo com o comando `*-mode-end` correspondente.
+
+### Time de especialistas em desenvolvimento de jogos
+
+O FreeUltraCode traz mais de 40 especialistas em desenvolvimento de jogos que o agente aciona automaticamente conforme a tarefa:
+
+- **Especialistas de engine** para Unity, Unreal, Godot (GDScript / C# / GDExtension / shaders) e Web.
+- **Programação**: diretor técnico, programadores lead/engine/gameplay/IA/rede/ferramentas/UI.
+- **Design**: designers de gameplay, nível, economia, live-ops e narrativa.
+- **Arte e áudio**: diretores e especialistas, VFX, sound design, direção de áudio.
+- **Produção, qualidade e release**: produtor, QA lead/tester, devops, segurança, localização, release manager.
+
+Configure a engine ativa, o modo council e os especialistas habilitados em **Settings**.
 
 ### Roteamento de modelos gratuitos
 
@@ -44,6 +80,11 @@ Agentes de programação são úteis, mas a cota de modelos premium acaba rápid
 - O proxy local em Rust traduz entre protocolos Anthropic e OpenAI-compatible.
 - Claude Code pode passar por canais gratuitos configurados sem mudar a interface de chat.
 - Keys, modelos personalizados e modelos locais são gerenciados nas configurações.
+
+<p align="center">
+  <strong>Roteamento de canais gratuitos</strong><br>
+  <img src="images/hero-free-channels.pt-BR.png" alt="Captura de tela do roteamento de canais gratuitos do FreeUltraCode" width="960">
+</p>
 
 Modelos padrão voltados para programação:
 
@@ -152,25 +193,25 @@ npm run package
 
 Quando o canal estiver pronto, use a entrada inferior para conversar por essa rota.
 
-### Usar o modo de imagem
+### Gerar assets de jogo
 
-O modo de imagem transforma o compositor em uma entrada de texto para imagem, mantendo o mesmo histórico da sessão. Ele é útil para gerar assets de UI, ícones, pôsteres e referências de design antes de voltar ao código.
+Os modos de asset transformam o compositor em uma superfície de geração de assets, mantendo o mesmo histórico. Úteis para gerar mockups de UI, ícones, texturas, sprites, modelos 3D, áudio e vídeo antes de voltar ao código. O exemplo abaixo usa o modo de imagem; os modos sprite, mesh, música, voz e vídeo funcionam igual com seus comandos `*-mode-start`.
 
-1. Abra **Settings** -> **Images**, escolha o provedor de imagem padrão e preencha a API key, Account ID, Base URL ou endpoint local do ComfyUI exigido pelo provedor.
+1. Abra **Settings** -> **Images** (ou a seção de asset correspondente), escolha o provedor padrão e preencha a API key, Account ID, Base URL ou endpoint local do ComfyUI exigido.
 2. Em uma sessão de chat, digite `/image-mode-start`. Você também pode iniciar e gerar no mesmo envio:
 
 ```text
-/image-mode-start um ícone limpo para um agente de código local, efeito de vidro, 1024x1024
+/image-mode-start uma textura de muro de pedra estilizada para uma masmorra de fantasia, tileable, 1024x1024
 ```
 
-3. Enquanto o modo estiver ativo, mensagens comuns geram imagens em vez de executar edições de código. O seletor **Channel** muda para provedores de imagem.
-4. Descreva a imagem desejada. FreeUltraCode primeiro pede ao modelo de programação para melhorar o prompt e depois envia ao provedor configurado.
+3. Enquanto o modo estiver ativo, mensagens comuns geram assets em vez de executar edições de código. O seletor **Channel** muda para provedores de assets.
+4. Descreva o asset desejado. FreeUltraCode primeiro pede ao modelo de programação para melhorar o prompt e depois envia ao provedor configurado.
 
 <p align="center">
-  <img src="images/生图/session-2026-06-07-2351.png" alt="O modo de imagem gera imagens na mesma sessão do FreeUltraCode" width="720">
+  <img src="images/生图/session-2026-06-07-2351.png" alt="O modo de asset gera elementos na mesma sessão do FreeUltraCode" width="720">
 </p>
 
-5. Envie `/image-mode-end` para voltar ao canal e modelo de programação. Para uma imagem única sem modo persistente, use `/image`, `/img`, `/draw`, `/生图` ou `/画图` seguido do prompt.
+5. Envie `/image-mode-end` para voltar ao canal e modelo de programação. Para um único asset sem modo persistente, use `/image`, `/img`, `/draw`, `/生图`, `/sprite`, `/music` ou `/video` seguido do prompt.
 
 ## Como funciona
 
@@ -205,7 +246,7 @@ Compositor de chat
 app/
   src/
     components/  UI compartilhada
-    lib/         Configurações de provedores, roteamento gratuito, persistência
+    lib/         Configurações de provedores, roteamento gratuito, geração de assets (imagem/sprite/3D/música/voz/vídeo/ComfyUI), time de especialistas de jogo, persistência
     panels/      Sidebar, chat dock, configurações, agendamento
     store/       Estado Zustand e histórico local
   src-tauri/

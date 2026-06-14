@@ -1,0 +1,22 @@
+services:
+  fuc-runner:
+    build: .
+    image: fuc-remote-runner:latest
+    restart: unless-stopped
+    ports:
+      - "8787:8787"
+    environment:
+      # REQUIRED: set a strong token, then use the same value in the desktop app.
+      FUC_RUNNER_TOKEN: ${FUC_RUNNER_TOKEN:?set FUC_RUNNER_TOKEN}
+      FUC_RUNNER_MAX_CONCURRENCY: "2"
+      FUC_RUNNER_JOB_TIMEOUT: "1800"
+      # Keep model keys on the server (optional — clients may override per job):
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+    volumes:
+      - fuc-runner-data:/data
+
+volumes:
+  fuc-runner-data:

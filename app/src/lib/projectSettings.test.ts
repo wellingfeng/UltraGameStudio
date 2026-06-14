@@ -7,6 +7,7 @@ import {
   preferUnrealMcpServer,
   projectSettingsFromMetadata,
   settingsWithDetectedGameFeatures,
+  uiDesignDefaultsForEngine,
 } from './projectSettings';
 import type { ProjectEngineKind, ProjectEnvironmentScan } from './tauri';
 
@@ -46,8 +47,16 @@ describe('project settings game features', () => {
       enabled: false,
       servers: [],
     });
+    expect(emptyProjectSettings().uiDesign).toEqual({
+      enabled: false,
+      mode: 'commercial',
+      defaultChannelId: 'figma',
+    });
     expect(gameFeatureDefaultsForEngine('unknown')).toEqual(
       emptyProjectSettings().gameFeatures,
+    );
+    expect(uiDesignDefaultsForEngine('unknown')).toEqual(
+      emptyProjectSettings().uiDesign,
     );
   });
 
@@ -64,6 +73,11 @@ describe('project settings game features', () => {
       gameExperts: true,
       gameExpertEngine: 'unity',
     });
+    expect(settings.uiDesign).toEqual({
+      enabled: true,
+      mode: 'commercial',
+      defaultChannelId: 'figma',
+    });
   });
 
   it('turns game-related features off for non-game projects', () => {
@@ -79,6 +93,7 @@ describe('project settings game features', () => {
 
     expect(settings.engine).toBe('unknown');
     expect(settings.gameFeatures).toEqual(emptyProjectSettings().gameFeatures);
+    expect(settings.uiDesign).toEqual(emptyProjectSettings().uiDesign);
   });
 
   it('preserves manual project settings when auto detection is disabled', () => {
@@ -121,6 +136,27 @@ describe('project settings game features', () => {
       rigging: true,
       gameExperts: true,
       gameExpertEngine: 'unreal',
+    });
+  });
+
+  it('normalizes persisted UI design channel settings', () => {
+    const settings = projectSettingsFromMetadata({
+      projectSettings: {
+        uiDesign: {
+          enabled: true,
+          mode: 'free-open',
+          defaultChannelId: 'figma',
+        },
+      },
+    });
+
+    // The default UI channel is project-wide and independent of the viewed
+    // category tab (mode), so a commercial channel stays selected even when the
+    // free-open tab is active.
+    expect(settings.uiDesign).toEqual({
+      enabled: true,
+      mode: 'free-open',
+      defaultChannelId: 'figma',
     });
   });
 

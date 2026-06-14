@@ -70,6 +70,16 @@ export interface ImageProviderDefinition {
   note: string;
 }
 
+/**
+ * Whether a channel can execute a native ComfyUI node-graph (POST /prompt).
+ * Only channels that *are* a ComfyUI deployment qualify — the embedded
+ * node-graph editor (/comfyui-mode-start) routes through these. Every other
+ * online provider only accepts a text prompt, not a raw ComfyUI graph.
+ */
+export function imageProviderSupportsComfyUiGraph(id: ImageProviderId): boolean {
+  return imageProviderById(id).apiKind === 'comfyui';
+}
+
 export interface ImageGenerationSettings {
   enabled: boolean;
   showComposerModelSelect: boolean;
@@ -181,18 +191,43 @@ export const IMAGE_PROVIDERS: ImageProviderDefinition[] = [
   },
   {
     id: 'local-comfyui',
-    label: 'ComfyUI (local)',
+    label: 'ComfyUI (本地/远程)',
     category: 'free-credit',
     apiKind: 'comfyui',
     defaultModel: 'default',
-    models: ['default', 'flux-schnell', 'sdxl-lightning', 'z-image-turbo', 'qwen-image'],
+    models: [
+      'default',
+      'flux2',
+      'flux-dev',
+      'flux-schnell',
+      'flux-kontext',
+      'z-image-turbo',
+      'qwen-image',
+      'qwen-image-edit',
+      'hunyuan-image-2.1',
+      'hidream',
+      'hidream-e1.1',
+      'sd3.5-large',
+      'sd3.5-medium',
+      'sdxl',
+      'sdxl-turbo',
+      'sdxl-lightning',
+      'sd1.5',
+      'stable-cascade',
+      'pixart-sigma',
+      'lumina-image-2.0',
+      'auraflow',
+      'hunyuan-dit',
+      'omnigen2',
+      'ernie-image',
+    ],
     needsKey: false,
     local: true,
     defaultBaseUrl: 'http://127.0.0.1:8188',
     supportsBaseUrl: true,
     endpointPlaceholder: 'http://127.0.0.1:8188',
     credentialUrl: 'https://github.com/comfyanonymous/ComfyUI',
-    note: 'Uses a local ComfyUI HTTP server. The first version calls a simple custom /prompt-text-to-image style endpoint when present.',
+    note: '连接 ComfyUI 服务（本地或远程/云端）。base URL 同时驱动简易生图与聊天流内嵌的 ComfyUI 节点图编辑器（/comfyui-mode-start），支持 ComfyUI 原生节点图 POST /prompt。本地服务通常无需 Key；指向带鉴权的远程端点时填入 API Key。模型清单对齐 ComfyUI 官方支持的本地扩散模型（Flux2、Qwen-Image、HiDream、Z-Image、SD3.5 等）。',
   },
   {
     id: 'local-vllm-image',

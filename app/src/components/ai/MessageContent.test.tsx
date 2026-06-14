@@ -177,6 +177,20 @@ describe('MessageContent integration', () => {
     expect(html).toMatch(/abc123\?token=xyz/);
   });
 
+  it('renders ordinary docs links as links when class names contain obj/model fragments', () => {
+    const url =
+      'https://dev.epicgames.com/documentation/en-us/unreal-engine/python-api/class/SubobjectDataSubsystem';
+    const html = renderToStaticMarkup(
+      createElement(MessageContent, {
+        text: `[${url}](${url})`,
+        streaming: false,
+      }),
+    );
+
+    expect(html).not.toMatch(/ai-model-viewer/);
+    expect(html).toMatch(/dev\.epicgames\.com/);
+  });
+
   it('does not render explicit image URLs as 3D viewports just because the label names a model', () => {
     const html = renderToStaticMarkup(
       createElement(MessageContent, {

@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
-import { Check, ChevronDown, FolderPlus, Layers } from 'lucide-react';
+import { Check, ChevronDown, Cloud, FolderPlus, Layers } from 'lucide-react';
 import { cn } from '@/lib/cn';
 import { t } from '@/lib/i18n';
 import type { Locale } from '@/lib/i18n';
+import { isRemoteWorkspacePath } from '@/lib/remoteWorkspace';
 import { workspacePathKey } from '@/lib/workspaceHistory';
 import type { WorkspaceSummary } from '@/store/history/types';
 
@@ -12,7 +13,8 @@ import type { WorkspaceSummary } from '@/store/history/types';
  * Lists every known workspace and lets the user jump to one (which activates
  * that workspace's first session). A "浏览本地…" action opens the native folder
  * picker to add a new workspace; selecting an already-known folder just
- * switches to it via {@link onBrowseLocal}.
+ * switches to it via {@link onBrowseLocal}. "添加远程工作区…" opens the remote
+ * Runner configuration dialog via {@link onAddRemote}.
  */
 export interface WorkspaceListSelectProps {
   workspaces: WorkspaceSummary[];
@@ -22,6 +24,8 @@ export interface WorkspaceListSelectProps {
   onSelect: (path: string) => void;
   /** Open the folder picker to add (or re-select) a workspace. */
   onBrowseLocal: () => void;
+  /** Open the remote-workspace dialog (create, or edit an existing one). */
+  onAddRemote?: (existingPath?: string) => void;
   disabled?: boolean;
 }
 
@@ -31,6 +35,7 @@ export default function WorkspaceListSelect({
   locale,
   onSelect,
   onBrowseLocal,
+  onAddRemote,
   disabled = false,
 }: WorkspaceListSelectProps) {
   const [open, setOpen] = useState(false);
@@ -90,6 +95,19 @@ export default function WorkspaceListSelect({
             <FolderPlus size={13} className="shrink-0 text-accent" />
             <span>{t(locale, 'workspaceList.browseLocal')}</span>
           </button>
+          {onAddRemote && (
+            <button
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                onAddRemote();
+              }}
+              className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-xs text-fg transition-colors hover:bg-border-soft"
+            >
+              <Cloud size={13} className="shrink-0 text-accent-2" />
+              <span>{t(locale, 'workspaceList.addRemote')}</span>
+            </button>
+          )}
 
           <div className="my-1 border-t border-border-soft" />
           <div className="px-3 pb-0.5 text-[10px] uppercase tracking-wider text-fg-faint">
@@ -108,6 +126,7 @@ export default function WorkspaceListSelect({
                   (activeKey !== '' &&
                     workspace.path !== '' &&
                     workspacePathKey(workspace.path) === activeKey);
+                const isRemote = isRemoteWorkspacePath(workspace.path);
                 return (
                   <li key={workspace.id}>
                     <button
@@ -126,26 +145,56 @@ export default function WorkspaceListSelect({
                           : 'text-fg-dim hover:bg-border-soft hover:text-fg',
                       )}
                     >
-                      <Check
-                        size={12}
-                        className={cn(
-                          'shrink-0',
-                          isActive ? 'text-accent' : 'text-transparent',
-                        )}
-                      />
+                      {isRemote ? (
+                        <Cloud
+                          size={12}
+                          className={cn(
+                            'shrink-0',
+                            isActive ? 'text-accent-2' : 'text-fg-faint',
+                          )}
+                        />
+                      ) : (
+                        <Check
+                          size={12}
+                          className={cn(
+                            'shrink-0',
+                            isActive ? 'text-accent' : 'text-transparent',
+                          )}
+                        />
+                      )}
                       <span className="flex min-w-0 flex-1 flex-col">
                         <span className="truncate font-medium">
                           {workspace.name}
                         </span>
-                        {workspace.path && (
+                        {workspace.path && !isRemote && (
                           <span className="truncate font-mono text-[9px] text-fg-faint">
                             {workspace.path}
                           </span>
                         )}
                       </span>
+                      {isRemote && (
+                        <span className="shrink-0 rounded border border-accent-2/40 px-1 py-0.5 text-[9px] leading-none text-accent-2">
+                          {t(locale, 'workspaceList.remoteBadge')}
+                        </span>
+                      )}
                       {isActive && (
                         <span className="shrink-0 rounded border border-border-soft px-1 py-0.5 text-[9px] leading-none text-fg-faint">
                           {t(locale, 'workspaceList.current')}
+                        </span>
+                      )}
+                      {isRemote && onAddRemote && (
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          title={t(locale, 'remoteWorkspace.title')}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setOpen(false);
+                            onAddRemote(workspace.path);
+                          }}
+                          className="shrink-0 rounded p-0.5 text-fg-faint hover:bg-border hover:text-fg"
+                        >
+                          ⚙
                         </span>
                       )}
                     </button>

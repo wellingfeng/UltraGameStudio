@@ -40,6 +40,29 @@ async function renderSettingsModal(): Promise<{
   };
 }
 
+async function clickButtonByText(container: HTMLElement, text: string): Promise<void> {
+  const button = Array.from(
+    container.querySelectorAll<HTMLButtonElement>('button'),
+  ).find((item) => item.textContent?.trim() === text);
+  expect(button).toBeInstanceOf(HTMLButtonElement);
+  await act(async () => {
+    button?.click();
+  });
+}
+
+async function pasteInput(input: HTMLInputElement, text: string): Promise<void> {
+  const event = new Event('paste', { bubbles: true, cancelable: true });
+  Object.defineProperty(event, 'clipboardData', {
+    value: {
+      getData: (type: string) =>
+        type === 'text/plain' || type === 'text' ? text : '',
+    },
+  });
+  await act(async () => {
+    input.dispatchEvent(event);
+  });
+}
+
 afterEach(() => {
   window.localStorage.clear();
   document.body.innerHTML = '';
@@ -63,6 +86,51 @@ describe('SettingsModal game feature navigation', () => {
           (button) => button.textContent?.trim() === '游戏专家',
         ),
       ).toBe(false);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('pastes video provider API keys into password inputs', async () => {
+    const view = await renderSettingsModal();
+
+    try {
+      await clickButtonByText(view.container, '视频渠道');
+      await clickButtonByText(view.container, '免费 / 本地渠道');
+
+      const input = view.container.querySelector<HTMLInputElement>(
+        'input[placeholder="r8_..."]',
+      );
+      expect(input).toBeInstanceOf(HTMLInputElement);
+
+      await pasteInput(input!, 'r8_test_video_key');
+
+      const saved = JSON.parse(
+        window.localStorage.getItem('freeultracode.videoGeneration.v1') ?? '{}',
+      );
+      expect(saved.providerKeys['replicate-video']).toBe('r8_test_video_key');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('pastes speech provider API keys into password inputs', async () => {
+    const view = await renderSettingsModal();
+
+    try {
+      await clickButtonByText(view.container, '语音渠道');
+
+      const input = view.container.querySelector<HTMLInputElement>(
+        'input[placeholder="xi-..."]',
+      );
+      expect(input).toBeInstanceOf(HTMLInputElement);
+
+      await pasteInput(input!, 'xi_test_speech_key');
+
+      const saved = JSON.parse(
+        window.localStorage.getItem('freeultracode.speechGeneration.v1') ?? '{}',
+      );
+      expect(saved.providerKeys.elevenlabs).toBe('xi_test_speech_key');
     } finally {
       await view.cleanup();
     }

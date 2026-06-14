@@ -7,6 +7,16 @@ import type {
 } from '@/lib/tauri';
 import type { HistoryMetadata, WorkspaceSummary } from '@/store/history/types';
 import { uniqueWorkspaceHistory } from '@/lib/workspaceHistory';
+import {
+  isUiDesignChannelCategory,
+  isUiDesignChannelId,
+  type UiDesignChannelCategory,
+  type UiDesignChannelId,
+} from '@/lib/uiDesignChannels';
+import {
+  isSpriteProviderId,
+  type SpriteProviderId,
+} from '@/lib/spriteGeneration';
 
 export const PREFERRED_UNREAL_MCP_SERVER_ID = 'ue-mcp-for-all-versions';
 
@@ -77,6 +87,25 @@ export interface ProjectGameFeatureSettings {
   gameExpertEngine: ProjectGameExpertEngine;
 }
 
+export type ProjectSpriteMode = 'commercial' | 'local-open';
+
+export interface ProjectSpriteSettings {
+  enabled: boolean;
+  /** Which category tab is currently being viewed (commercial vs local-open). */
+  mode: ProjectSpriteMode;
+  /**
+   * The single project-wide default Sprite provider. Shared across commercial
+   * and local-open — there is exactly one default, not one per category.
+   */
+  defaultProviderId: SpriteProviderId;
+}
+
+export interface ProjectUiDesignSettings {
+  enabled: boolean;
+  mode: UiDesignChannelCategory;
+  defaultChannelId: UiDesignChannelId;
+}
+
 export interface ProjectAutomationSettings {
   autoDetect: boolean;
   autoConfigureRecommendedMcp: boolean;
@@ -101,6 +130,8 @@ export interface ProjectSettings {
   skills: ProjectSkillSettings;
   lsp: ProjectLspSettings;
   gameFeatures: ProjectGameFeatureSettings;
+  sprite: ProjectSpriteSettings;
+  uiDesign: ProjectUiDesignSettings;
   automation: ProjectAutomationSettings;
   updatedAt?: string;
 }
@@ -141,6 +172,10 @@ function isProjectGameExpertEngine(value: unknown): value is ProjectGameExpertEn
   return value === 'unity' || value === 'unreal' || value === 'godot' || value === 'auto';
 }
 
+function isProjectSpriteMode(value: unknown): value is ProjectSpriteMode {
+  return value === 'commercial' || value === 'local-open';
+}
+
 export function isGameProjectEngine(
   engine: ProjectEngineKind | 'auto',
 ): engine is Extract<ProjectEngineKind, 'unreal' | 'unity' | 'godot'> {
@@ -156,6 +191,17 @@ export function gameFeatureDefaultsForEngine(
     rigging: enabled,
     gameExperts: enabled,
     gameExpertEngine: enabled ? engine : 'auto',
+  };
+}
+
+export function uiDesignDefaultsForEngine(
+  engine: ProjectEngineKind | 'auto',
+): ProjectUiDesignSettings {
+  const enabled = isGameProjectEngine(engine);
+  return {
+    enabled,
+    mode: 'commercial',
+    defaultChannelId: 'figma',
   };
 }
 
@@ -231,6 +277,12 @@ export function emptyProjectSettings(): ProjectSettings {
       servers: [],
     },
     gameFeatures: gameFeatureDefaultsForEngine('unknown'),
+    sprite: {
+      enabled: false,
+      mode: 'commercial',
+      defaultProviderId: 'ludo-sprite',
+    },
+    uiDesign: uiDesignDefaultsForEngine('unknown'),
     automation: {
       autoDetect: true,
       autoConfigureRecommendedMcp: false,
@@ -250,6 +302,8 @@ export function projectSettingsFromMetadata(
   const skills = isRecord(raw.skills) ? raw.skills : {};
   const lsp = isRecord(raw.lsp) ? raw.lsp : {};
   const gameFeatures = isRecord(raw.gameFeatures) ? raw.gameFeatures : {};
+  const sprite = isRecord(raw.sprite) ? raw.sprite : {};
+  const uiDesign = isRecord(raw.uiDesign) ? raw.uiDesign : {};
   const automation = isRecord(raw.automation) ? raw.automation : {};
   const mcpServers = Array.isArray(mcp.servers)
     ? mcp.servers
@@ -261,6 +315,15 @@ export function projectSettingsFromMetadata(
         .map(normalizeLspServer)
         .filter((server): server is ProjectLspServerConfig => server != null)
     : [];
+  const uiDesignMode = isUiDesignChannelCategory(uiDesign.mode)
+    ? uiDesign.mode
+    : defaults.uiDesign.mode;
+  // The default UI channel is a single project-wide choice that is independent of
+  // the currently viewed category tab (mode). Commercial and free-open share one
+  // default, so we only validate that it is a known channel id.
+  const uiDesignDefaultChannelId = isUiDesignChannelId(uiDesign.defaultChannelId)
+    ? uiDesign.defaultChannelId
+    : defaults.uiDesign.defaultChannelId;
   return {
     schemaVersion: PROJECT_SETTINGS_SCHEMA_VERSION,
     engine:
@@ -295,6 +358,20 @@ export function projectSettingsFromMetadata(
       gameExpertEngine: isProjectGameExpertEngine(gameFeatures.gameExpertEngine)
         ? gameFeatures.gameExpertEngine
         : defaults.gameFeatures.gameExpertEngine,
+    },
+    sprite: {
+      enabled: sprite.enabled === true,
+      mode: isProjectSpriteMode(sprite.mode)
+        ? sprite.mode
+        : defaults.sprite.mode,
+      defaultProviderId: isSpriteProviderId(sprite.defaultProviderId)
+        ? sprite.defaultProviderId
+        : defaults.sprite.defaultProviderId,
+    },
+    uiDesign: {
+      enabled: uiDesign.enabled === true,
+      mode: uiDesignMode,
+      defaultChannelId: uiDesignDefaultChannelId,
     },
     automation: {
       autoDetect: automation.autoDetect !== false,
@@ -462,6 +539,7 @@ export function settingsWithDetectedGameFeatures(
     ...settings,
     engine: scan.engine.engine,
     gameFeatures: gameFeatureDefaultsForEngine(scan.engine.engine),
+    uiDesign: uiDesignDefaultsForEngine(scan.engine.engine),
   };
 }
 

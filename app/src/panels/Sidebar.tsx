@@ -8,9 +8,11 @@ import {
   AlarmClock,
   ChevronDown,
   ChevronRight,
+  Download,
   FolderOpen,
   MoreHorizontal,
   Pencil,
+  Plus,
   Search,
   Settings as SettingsGlyph,
   Star,
@@ -19,9 +21,16 @@ import {
 } from 'lucide-react';
 import StatusIndicator, { type StatusTone } from '@/components/StatusIndicator';
 import WorkspaceListSelect from '@/components/WorkspaceListSelect';
+import RemoteWorkspaceDialog from '@/components/RemoteWorkspaceDialog';
 import { cn } from '@/lib/cn';
 import { pickFolder } from '@/lib/folderPicker';
+import {
+  getRemoteWorkspace,
+  remoteWorkspaceIdFromPath,
+  type RemoteWorkspaceConfig,
+} from '@/lib/remoteWorkspace';
 import { workspacePathKey } from '@/lib/workspaceHistory';
+import { historyStore } from '@/store/history/store';
 import {
   sessionLiveStatus,
   useStore,
@@ -44,6 +53,7 @@ import { t } from '@/lib/i18n';
 import SettingsModal from './SettingsModal';
 import ProjectSettingsModal from './ProjectSettingsModal';
 import ScheduledTaskDialog from './ScheduledTaskDialog';
+import DownloadsModal from './DownloadsModal';
 
 /**
  * CONTRACT: default export, no props. Left session rail.
@@ -76,6 +86,7 @@ type SidebarLiveState = {
   runningSessions: WorkflowSessionKey[];
   aiEditingSessions: WorkflowSessionKey[];
   chattingSessions: WorkflowSessionKey[];
+  waitingInputSessions: WorkflowSessionKey[];
 };
 type ProjectScanCacheEntry = {
   path: string;
@@ -96,6 +107,7 @@ function sessionLiveRank(
     liveState,
   );
   if (liveStatus === 'running') return 0;
+  if (liveStatus === 'waiting') return 0;
   if (liveStatus === 'aiEditing') return 1;
   return 2;
 }
@@ -153,6 +165,7 @@ function historyStatusLabel(
 ): string | undefined {
   if (!status) return undefined;
   if (status === 'running') return runningProgressLabel(locale, percent);
+  if (status === 'waiting') return t(locale, 'sidebar.waitingInput');
   if (status === 'thinking') return t(locale, 'sidebar.thinking');
   if (status === 'unrun') return t(locale, 'sidebar.unrun');
   if (status === 'success') return t(locale, 'sidebar.completed');
@@ -164,6 +177,7 @@ function historyStatusTone(
   liveStatus: ReturnType<typeof sessionLiveStatus>,
 ): StatusTone | null {
   if (liveStatus === 'running') return 'running';
+  if (liveStatus === 'waiting') return 'waiting';
   if (liveStatus === 'aiEditing') return 'thinking';
   if (session.runStatus === 'success') return 'success';
   if (
@@ -223,6 +237,9 @@ function sessionMatchesSearch(
 function sessionVisibleInTab(session: Session, tab: SidebarTab): boolean {
   return tab === 'history' || session.favorite === true;
 }
+
+const sidebarTextButtonClassName =
+  'group flex w-full items-center gap-3 rounded-sm px-3 py-2 text-left text-sm text-fg-dim transition-colors hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60 disabled:cursor-not-allowed disabled:opacity-40';
 
 function historySessionRowClassName(active: boolean): string {
   return (
@@ -295,6 +312,7 @@ export default function Sidebar() {
   const runningSessionProgress = useStore((s) => s.runningSessionProgress);
   const aiEditingSessions = useStore((s) => s.aiEditingSessions);
   const chattingSessions = useStore((s) => s.chattingSessions);
+  const waitingInputSessions = useStore((s) => s.waitingInputSessions);
   const newSession = useStore((s) => s.newSession);
   const setWorkspace = useStore((s) => s.setWorkspace);
   const selectSession = useStore((s) => s.selectSession);
@@ -308,6 +326,7 @@ export default function Sidebar() {
     (s) => s.setWorkflowScheduledTaskSession,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [downloadsOpen, setDownloadsOpen] = useState(false);
   const [projectSettingsWorkspace, setProjectSettingsWorkspace] =
     useState<WorkspaceSummary | null>(null);
   const [projectScanCache, setProjectScanCache] = useState<
@@ -357,6 +376,9 @@ export default function Sidebar() {
   } | null>(null);
   const [workspaceRemoveConfirm, setWorkspaceRemoveConfirm] =
     useState<WorkspaceSummary | null>(null);
+  const [remoteDialog, setRemoteDialog] = useState<{
+    existing: RemoteWorkspaceConfig | null;
+  } | null>(null);
 
   const menuDeleteProtectionReason = useMemo(() => {
     if (!menu) return null;
@@ -783,6 +805,28 @@ export default function Sidebar() {
     setWorkspace(path);
   }, [locale, setWorkspace]);
 
+  // Open the remote-workspace dialog. With a path, edits that existing remote
+  // workspace; without one, creates a new remote workspace.
+  const handleOpenRemoteDialog = useCallback((existingPath?: string) => {
+    const id = existingPath ? remoteWorkspaceIdFromPath(existingPath) : '';
+    setRemoteDialog({ existing: id ? getRemoteWorkspace(id) : null });
+  }, []);
+
+  // After saving a remote workspace, register/select it like any workspace; its
+  // synthetic remote://<id> path flows through the normal selection path.
+  const handleRemoteSaved = useCallback(
+    (remotePath: string, config: RemoteWorkspaceConfig) => {
+      setWorkspace(remotePath);
+      void historyStore
+        .resolveWorkspaceByPath(remotePath)
+        .then((ws) => historyStore.renameWorkspace(ws.id, config.label))
+        .catch(() => {
+          /* naming is best-effort */
+        });
+    },
+    [setWorkspace],
+  );
+
   const loadMoreWorkspace = useCallback((workspaceId: string) => {
     setWorkspaceLimits((prev) => ({
       ...prev,
@@ -823,8 +867,13 @@ export default function Sidebar() {
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const isSearching = normalizedQuery.length > 0;
   const sidebarLiveState = useMemo(
-    () => ({ runningSessions, aiEditingSessions, chattingSessions }),
-    [aiEditingSessions, chattingSessions, runningSessions],
+    () => ({
+      runningSessions,
+      aiEditingSessions,
+      chattingSessions,
+      waitingInputSessions,
+    }),
+    [aiEditingSessions, chattingSessions, runningSessions, waitingInputSessions],
   );
 
   const totalTreeSessions = useMemo(
@@ -1032,18 +1081,19 @@ export default function Sidebar() {
           onBrowseLocal={() => {
             void handleBrowseLocalWorkspace();
           }}
+          onAddRemote={handleOpenRemoteDialog}
         />
       </div>
 
       {/* Primary actions */}
-      <div className="flex flex-col gap-2 px-3 pt-3 pb-2.5">
+      <div className="flex flex-col gap-1 px-3 pt-3 pb-2.5">
         <button
           type="button"
           onClick={newSession}
-          className="flex items-center gap-2 rounded-md bg-accent px-3 py-2 text-sm font-medium text-bg transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          className={sidebarTextButtonClassName}
         >
-          <span className="text-base leading-none">＋</span>
-          {t(locale, 'sidebar.newSession')}
+          <Plus size={17} className="shrink-0 text-fg-faint group-hover:text-fg" />
+          <span>{t(locale, 'sidebar.newSession')}</span>
         </button>
       </div>
 
@@ -1275,7 +1325,7 @@ export default function Sidebar() {
                           };
                           const liveStatus = sessionLiveStatus(
                             sessionKey,
-                            { runningSessions, aiEditingSessions, chattingSessions },
+                            sidebarLiveState,
                           );
                           const status = historyStatusTone(session, liveStatus);
                           const runProgress =
@@ -1464,7 +1514,7 @@ export default function Sidebar() {
                   const sessionKey = { workspaceId: null, sessionId: session.id };
                   const liveStatus = sessionLiveStatus(
                     sessionKey,
-                    { runningSessions, aiEditingSessions, chattingSessions },
+                    sidebarLiveState,
                   );
                   const status = historyStatusTone(session, liveStatus);
                   const runProgress =
@@ -1621,20 +1671,44 @@ export default function Sidebar() {
         </div>
       </div>
 
-      <div className="border-t border-border-soft p-3">
+      <div className="flex flex-col gap-1 p-3">
         <button
           type="button"
           onClick={() => setSettingsOpen(true)}
           title={t(locale, 'settings.openHint')}
-          className="flex w-full items-center gap-2 rounded-md border border-border bg-panel-2 px-3 py-2 text-sm text-fg-dim transition-colors hover:border-accent hover:bg-border-soft hover:text-fg"
+          className={sidebarTextButtonClassName}
         >
-          <span className="text-base leading-none text-accent">⚙</span>
+          <SettingsGlyph
+            size={17}
+            className="shrink-0 text-fg-faint group-hover:text-fg"
+            aria-hidden="true"
+          />
           <span>{t(locale, 'settings.open')}</span>
+        </button>
+        <button
+          type="button"
+          onClick={() => setDownloadsOpen(true)}
+          title={t(locale, 'downloads.openHint')}
+          className={sidebarTextButtonClassName}
+        >
+          <Download
+            size={17}
+            className="shrink-0 text-fg-faint group-hover:text-fg"
+            aria-hidden="true"
+          />
+          <span>{t(locale, 'downloads.open')}</span>
         </button>
       </div>
 
       {settingsOpen && (
         <SettingsModal onClose={() => setSettingsOpen(false)} />
+      )}
+
+      {downloadsOpen && (
+        <DownloadsModal
+          locale={locale}
+          onClose={() => setDownloadsOpen(false)}
+        />
       )}
 
       {projectSettingsWorkspace && (
@@ -1684,6 +1758,14 @@ export default function Sidebar() {
           locale={locale}
           onCancel={handleCancelRemoveWorkspaceHistory}
           onConfirm={handleConfirmRemoveWorkspaceHistory}
+        />
+      )}
+      {remoteDialog && (
+        <RemoteWorkspaceDialog
+          locale={locale}
+          existing={remoteDialog.existing}
+          onClose={() => setRemoteDialog(null)}
+          onSaved={handleRemoteSaved}
         />
       )}
       {scheduleDialog && (

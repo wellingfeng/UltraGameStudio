@@ -4,37 +4,73 @@
   <a href="../../README.md">English</a> | <a href="README.zh-CN.md">中文</a> | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | <a href="README.pt-BR.md">Português</a> | <a href="README.ru.md">Русский</a> | <a href="README.ja.md">日本語</a> | 한국어 | <a href="README.hi.md">हिन्दी</a> | <a href="README.ar.md">العربية</a>
 </div>
 
-모든 프로그래밍 작업에 가장 비싼 모델 할당량을 쓸 필요는 없습니다. FreeUltraCode는 Claude Code, Codex, Gemini, 무료 채널, 로컬 모델을 하나의 로컬 채팅 화면에 모읍니다. 탐색과 반복 작업은 저렴한 모델로 처리하고, 중요한 판단은 더 안정적인 모델에 맡길 수 있습니다.
+게임 엔진에서 코드는 작업의 작은 일부일 뿐입니다. 나머지는 에셋과 파이프라인입니다 — 머티리얼, 블루프린트, 지형, 하늘, UI, 스켈레탈 애니메이션, 패키징, 성능. FreeUltraCode는 Claude Code / Codex / Gemini 계열의 코딩 에이전트를 이 현실에 맞춰 다시 만든 것입니다. 게임 엔진 개념을 이해하고, 게임에 필요한 모든 에셋(이미지, 3D 모델, 2D 스프라이트 애니메이션, 아틀라스, 오디오, 리깅, 비디오)을 생성하며, 반복 작업은 무료 또는 저비용 채널로 라우팅해 프리미엄 할당량을 중요한 곳에 씁니다.
 
 <p align="center">
-  <strong>무료 채널 라우팅</strong><br>
-  <img src="images/hero-free-channels.ko.png" alt="FreeUltraCode 무료 채널 라우팅 스크린샷" width="960">
+  <strong>원클릭 Unreal Engine UMG 인터페이스</strong><br>
+  <img src="images/game/JMsXEKE.png" alt="FreeUltraCode가 원클릭으로 Unreal Engine UMG 인터페이스를 생성" width="960">
+</p>
+
+<p align="center">
+  <strong>원클릭 3D 모델 생성</strong><br>
+  <img src="images/game/noYfqPt.png" alt="FreeUltraCode가 원클릭으로 3D 모델을 생성" width="960">
+</p>
+
+<p align="center">
+  <strong>이미지·스프라이트·메시·오디오·리깅·비디오 — 하나의 코딩 에이전트로 관리</strong><br>
+  <img src="images/game/gmclmLS.png" alt="FreeUltraCode 통합 게임 에셋 생성" width="960">
+  <br><br>
+  <img src="images/game/jXgMffC.png" alt="FreeUltraCode 게임 에셋 워크플로" width="960">
 </p>
 
 ## FreeUltraCode가 필요한 이유
 
-코딩 에이전트는 유용하지만 프리미엄 모델 할당량은 빠르게 줄어듭니다. FreeUltraCode는 채팅 경험을 로컬에 두고, 충분한 경우 무료, 체험 크레딧, 저비용 채널로 요청을 쉽게 보낼 수 있게 합니다.
+이제 AI는 대부분의 코드를 스스로 작성할 만큼 좋아졌습니다. 프로그래머의 역할은 의도를 설명하고, 출력을 검증하고, 에이전트를 오케스트레이션하는 쪽으로 옮겨가고 있습니다. 하지만 게임은 코드만이 아닙니다. 게임 엔진은 머티리얼, 블루프린트, 지형, 하늘, UI, 스켈레탈 애니메이션, 패키징, 성능 튜닝으로 가득 차 있으며 — 대부분의 범용 코딩 에이전트는 이를 전혀 이해하지 못합니다.
 
-- GitHub Models, Hugging Face Router, SambaNova Cloud, Together AI, Gemini, DeepSeek, Kimi, Groq, OpenRouter, NVIDIA NIM, Z.ai, Kilo, LLM7, Ollama, LM Studio, llama.cpp를 사용할 수 있습니다.
-- API 키와 provider 설정은 사용자 컴퓨터에 저장됩니다.
-- runtime, channel, permission mode, workspace를 채팅 입력 영역에서 바로 바꿀 수 있습니다.
-- 채팅 기록, 즐겨찾기, 예약 prompt, workspace context를 로컬에 보관합니다.
-- 하드웨어가 지원하면 로컬 모델은 API 키 없이 사용할 수 있습니다.
+FreeUltraCode는 Claude Code / Codex / Gemini 계열 에이전트를 게임 개발에 맞춰 깊이 커스터마이즈합니다.
+
+- **게임 엔진의 언어를 구사합니다.** 에이전트는 게임 개발 개념으로 준비되어 머티리얼, 블루프린트, 지형, 라이팅, UI(UMG 등), 스켈레탈 애니메이션, 빌드/패키징, 성능 최적화를 추론할 수 있습니다.
+- **게임에 필요한 모든 에셋 유형을 생성합니다.** 이미지, 3D 모델, 2D 스프라이트 애니메이션, 스프라이트 아틀라스, 오디오, 스켈레탈 리깅, 비디오를 같은 화면에서 생성하고 하나의 에이전트 워크플로로 관리합니다.
+- **내장 게임 개발 전문가 그룹.** 테크니컬 디렉터, 게임플레이/AI/네트워크/툴 프로그래머, 레벨/이코노미 디자이너, 아트·오디오 디렉터, QA, 릴리스 매니저 등 40개 이상의 전문 역할이 Unity, Unreal, Godot, Web을 아우릅니다.
+- **프리미엄 할당량을 중요한 곳에 남깁니다.** 반복 작업은 무료·체험·저비용 채널로 보내고, 키·설정·기록은 로컬에 보관합니다.
 
 ## 주요 기능
 
-### 프로그래밍 Chat
+### 게임 개발 Chat
 
-- 코드 수정, 버그 조사, 리팩터링, 테스트, 릴리스 노트, 문서 작성을 요청할 수 있습니다.
+- 게임플레이 코드, 엔진 통합, 셰이더/머티리얼 로직, 빌드 스크립트, 버그 조사, 리팩터링, 테스트, 릴리스 노트를 요청할 수 있습니다.
+- Unity, Unreal, Godot, Web 엔진 프로젝트에 대응 — 에이전트는 파일뿐 아니라 엔진 개념으로 추론합니다.
 - 파일 경로를 붙이거나 파일을 입력창에 드래그할 수 있습니다.
 - 스트리밍 응답, 명령 로그, 파일 참조, 요약을 한 채팅 화면에서 확인할 수 있습니다.
 - 같은 세션에서 후속 요청을 이어갈 수 있습니다.
 
-### 이미지 생성 + 프로그래밍
+### 게임 에셋 생성
 
-- 같은 로컬 대화 안에서 이미지 생성 모델과 프로그래밍 모델을 함께 사용할 수 있습니다.
-- 시각 자료, 아이콘, 포스터, 디자인 레퍼런스가 필요할 때 이미지 모드로 전환하고, 생성 후 다시 프로그래밍 모델로 돌아와 프로젝트에 적용할 수 있습니다.
-- 생성 이미지, 프롬프트, Provider 정보, 로그, 이후 코드 변경이 같은 세션 기록에 남습니다.
+게임에 필요한 모든 에셋 유형을 같은 화면에서 생성하고 프로젝트에 적용한 뒤 다시 프로그래밍 모델로 넘길 수 있습니다 — 모두 같은 기록에 남습니다. 각 생성기는 설정한 provider를 거칩니다.
+
+| 에셋 | 생성물 | 모드 |
+| --- | --- | --- |
+| 이미지 | 컨셉 아트, UI 목업, 아이콘, 포스터, 텍스처, 레퍼런스 | `/image`, `/img`, `/draw`, `/生图` 또는 `/image-mode-start` |
+| ComfyUI 그래프 | 노드 기반 편집 가능한 이미지 파이프라인 | `/comfyui-mode-start` |
+| 2D 스프라이트 | 게임 스프라이트, 시퀀스 프레임, 스프라이트시트 | `/sprite` 또는 `/sprite-mode-start` |
+| 3D 모델 | 프롭, 캐릭터, 씬 메시, 블록아웃 | `/mesh-mode-start`(`/mesh-search`로 라이브러리 검색) |
+| 음악 | BGM, 스코어, 음악 클립 | `/music` 또는 `/music-mode-start` |
+| 음성 | 보이스 라인과 내레이션 | `/speech-mode-start` |
+| 비디오 | 비디오 클립과 모션 에셋 | `/video` 또는 `/video-mode-start` |
+
+에이전트는 먼저 프롬프트를 다듬어 설정한 provider로 보내고, 결과를 프롬프트·provider 정보와 함께 채팅 스트림에 표시합니다. 각 모드는 해당하는 `*-mode-end` 명령으로 종료합니다.
+
+### 게임 개발 전문가 그룹
+
+FreeUltraCode에는 40개 이상의 게임 개발 전문가가 내장되어 작업에 따라 에이전트가 자동으로 호출합니다.
+
+- **엔진 전문가**: Unity, Unreal, Godot(GDScript / C# / GDExtension / 셰이더), Web.
+- **프로그래밍**: 테크니컬 디렉터, 리드/엔진/게임플레이/AI/네트워크/툴/UI 프로그래머.
+- **디자인**: 게임플레이, 레벨, 이코노미, 라이브옵스, 내러티브 디자이너.
+- **아트·오디오**: 디렉터와 전문가, VFX, 사운드 디자인, 오디오 디렉션.
+- **프로덕션·품질·릴리스**: 프로듀서, QA 리드/테스터, devops, 보안, 현지화, 릴리스 매니저.
+
+활성 엔진, council 모드, 활성화할 전문가는 **Settings**에서 설정합니다.
 
 ### 무료 모델 라우팅
 
@@ -44,6 +80,11 @@
 - 로컬 Rust proxy가 Anthropic과 OpenAI-compatible 프로토콜을 변환합니다.
 - Claude Code는 채팅 UI를 바꾸지 않고 설정된 무료 채널을 통해 사용할 수 있습니다.
 - 키, 모델 override, 로컬 모델 설정은 settings에서 관리합니다.
+
+<p align="center">
+  <strong>무료 채널 라우팅</strong><br>
+  <img src="images/hero-free-channels.ko.png" alt="FreeUltraCode 무료 채널 라우팅 스크린샷" width="960">
+</p>
 
 현재 기본 프로그래밍 모델:
 
@@ -152,25 +193,25 @@ npm run package
 
 채널이 준비되면 하단 입력창에서 해당 경로로 대화할 수 있습니다.
 
-### 이미지 모드 사용
+### 게임 에셋 생성
 
-이미지 모드는 같은 세션 기록을 유지한 채 채팅 입력창을 텍스트-이미지 생성 입력으로 바꿉니다. UI 에셋, 아이콘, 포스터, 디자인 레퍼런스를 만든 뒤 다시 코드 작업으로 돌아갈 때 유용합니다.
+에셋 모드는 같은 세션 기록을 유지한 채 채팅 입력창을 에셋 생성 화면으로 바꿉니다. UI 목업, 아이콘, 텍스처, 스프라이트, 3D 모델, 오디오, 비디오를 만든 뒤 다시 코드 작업으로 돌아갈 때 유용합니다. 아래 예시는 이미지 모드를 쓰지만, 스프라이트·메시·음악·음성·비디오 모드도 각자의 `*-mode-start` 명령으로 동일하게 작동합니다.
 
-1. **Settings** -> **Images**를 열고 기본 이미지 Provider를 선택한 뒤 필요한 API key, Account ID, Base URL 또는 로컬 ComfyUI endpoint를 입력합니다.
-2. 채팅 세션에서 `/image-mode-start`를 입력합니다. 첫 프롬프트를 같은 메시지에 붙일 수도 있습니다.
+1. **Settings** -> **Images**(또는 해당 에셋 섹션)를 열고 기본 Provider를 선택한 뒤 필요한 API key, Account ID, Base URL 또는 로컬 ComfyUI endpoint를 입력합니다.
+2. 채팅 세션에서 `/image-mode-start`를 입력합니다. 모드를 시작하면서 같은 메시지에서 바로 생성할 수도 있습니다.
 
 ```text
-/image-mode-start 로컬 코딩 에이전트용 깔끔한 앱 아이콘, 유리 효과, 1024x1024
+/image-mode-start 판타지 던전용 양식화된 돌벽 텍스처, 타일 가능, 1024x1024
 ```
 
-3. 모드가 켜져 있는 동안 일반 메시지는 코드 편집 대신 이미지를 생성합니다. **Channel** 선택기는 이미지 Provider로 전환됩니다.
-4. 원하는 이미지를 설명합니다. FreeUltraCode는 먼저 프로그래밍 모델로 이미지 프롬프트를 다듬고, 설정된 Provider로 보냅니다.
+3. 모드가 켜져 있는 동안 일반 메시지는 코드 편집 대신 에셋을 생성합니다. **Channel** 선택기는 에셋 Provider로 전환됩니다.
+4. 원하는 에셋을 설명합니다. FreeUltraCode는 먼저 프로그래밍 모델로 프롬프트를 다듬고, 설정된 Provider로 보냅니다.
 
 <p align="center">
-  <img src="images/生图/session-2026-06-07-2351.png" alt="이미지 모드는 같은 FreeUltraCode 세션 안에서 이미지를 생성합니다" width="720">
+  <img src="images/生图/session-2026-06-07-2351.png" alt="에셋 모드는 같은 FreeUltraCode 세션 안에서 소재를 생성합니다" width="720">
 </p>
 
-5. `/image-mode-end`를 보내면 프로그래밍 channel과 model로 돌아갑니다. 지속 모드 없이 한 장만 만들려면 `/image`, `/img`, `/draw`, `/生图`, `/画图` 뒤에 프롬프트를 입력합니다.
+5. `/image-mode-end`를 보내면 프로그래밍 channel과 model로 돌아갑니다. 지속 모드 없이 하나만 만들려면 `/image`, `/img`, `/draw`, `/生图`, `/sprite`, `/music`, `/video` 뒤에 프롬프트를 입력합니다.
 
 ## 동작 방식
 
@@ -205,7 +246,7 @@ Chat composer
 app/
   src/
     components/  공용 UI 컴포넌트
-    lib/         provider 설정, 무료 채널 라우팅, persistence
+    lib/         provider 설정, 무료 채널 라우팅, 에셋 생성(이미지/스프라이트/3D/음악/음성/비디오/ComfyUI), 게임 개발 전문가 그룹, persistence
     panels/      Sidebar, chat dock, settings, scheduling UI
     store/       Zustand state와 로컬 기록
   src-tauri/

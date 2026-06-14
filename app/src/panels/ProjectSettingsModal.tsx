@@ -14,6 +14,8 @@ import {
   Check,
   Copy,
   Download,
+  Eye,
+  EyeOff,
   ExternalLink,
   FileText,
   Folder,
@@ -22,6 +24,7 @@ import {
   Gamepad2,
   Info,
   Languages,
+  Palette,
   Plus,
   RefreshCw,
   Rocket,
@@ -54,6 +57,21 @@ import {
   type ProjectSettings,
 } from '@/lib/projectSettings';
 import {
+  UI_DESIGN_CHANNELS,
+  loadUiDesignChannelSettings,
+  saveUiDesignChannelSettings,
+  uiDesignChannelBaseUrl,
+  uiDesignChannelById,
+  uiDesignChannelCategoryLabel,
+  uiDesignChannelCommand,
+  uiDesignChannelExportFormat,
+  uiDesignChannelReady,
+  type UiDesignChannelCategory,
+  type UiDesignChannelDefinition,
+  type UiDesignChannelId,
+  type UiDesignChannelSettings,
+} from '@/lib/uiDesignChannels';
+import {
   fallbackLanguageScanForEngine,
   installCommandText,
   lspServerById,
@@ -85,6 +103,14 @@ import {
   loadThreeDGenerationSettings,
   saveThreeDGenerationSettings,
 } from '@/lib/threeDGeneration';
+import {
+  loadSpriteGenerationSettings,
+  saveSpriteGenerationSettings,
+  SPRITE_PROVIDERS,
+  spriteProviderById,
+  type SpriteProviderCategory,
+  type SpriteProviderId,
+} from '@/lib/spriteGeneration';
 import {
   MESH_LIBRARIES,
   MESH_LIBRARY_CATEGORY_LABELS,
@@ -132,6 +158,7 @@ import {
 } from '@/lib/pluginStoreTranslation';
 import {
   ThreeDGenerationSettingsPanel,
+  SpriteGenerationSettingsPanel,
   RiggingSettingsPanel,
   GameExpertSettingsPanel,
 } from '@/panels/SettingsModal';
@@ -139,6 +166,8 @@ import {
 type ProjectSettingsTab =
   | 'overview'
   | 'mesh'
+  | 'sprite'
+  | 'uiDesign'
   | 'meshLibrary'
   | 'rigging'
   | 'gameExperts'
@@ -151,6 +180,8 @@ type ProjectSettingsTab =
 const tabs: { id: ProjectSettingsTab; label: string; Icon: LucideIcon }[] = [
   { id: 'overview', label: '概览', Icon: Info },
   { id: 'mesh', label: 'Mesh 渠道', Icon: Box },
+  { id: 'sprite', label: 'Sprite', Icon: Boxes },
+  { id: 'uiDesign', label: 'UI 渠道', Icon: Palette },
   { id: 'meshLibrary', label: '模型库', Icon: Boxes },
   { id: 'rigging', label: '绑定渠道', Icon: Bone },
   { id: 'gameExperts', label: '游戏专家', Icon: Gamepad2 },
@@ -210,6 +241,34 @@ function syncProjectGameFeaturesToRuntime(settings: ProjectSettings): void {
   });
 }
 
+function projectSpriteCategoryLabel(category: SpriteProviderCategory): string {
+  return category === 'local-open' ? '本地开源' : '商用';
+}
+
+function syncProjectSpriteToRuntime(settings: ProjectSettings): void {
+  const currentSprite = loadSpriteGenerationSettings();
+  saveSpriteGenerationSettings({
+    ...currentSprite,
+    enabled: settings.sprite.enabled,
+    preferredProviderId: settings.sprite.defaultProviderId,
+  });
+}
+
+function syncProjectUiDesignToRuntime(settings: ProjectSettings): void {
+  const currentUiDesign = loadUiDesignChannelSettings();
+  saveUiDesignChannelSettings({
+    ...currentUiDesign,
+    enabled: settings.uiDesign.enabled,
+    preferredChannelId: settings.uiDesign.defaultChannelId,
+  });
+}
+
+function syncProjectSettingsToRuntime(settings: ProjectSettings): void {
+  syncProjectGameFeaturesToRuntime(settings);
+  syncProjectSpriteToRuntime(settings);
+  syncProjectUiDesignToRuntime(settings);
+}
+
 // Game-only tabs (Mesh / Rigging / Game Experts / Commands) only make sense for
 // recognized game engines (Unity / Unreal / Godot). For non-game projects they
 // stay hidden unless a feature was explicitly turned on for this project.
@@ -222,12 +281,14 @@ function shouldShowGameFeatures(
     isGameProjectEngine(detectedEngine) ||
     settings.gameFeatures.meshGeneration ||
     settings.gameFeatures.rigging ||
-    settings.gameFeatures.gameExperts
+    settings.gameFeatures.gameExperts ||
+    settings.uiDesign.enabled
   );
 }
 
 const GAME_FEATURE_TABS: ReadonlySet<ProjectSettingsTab> = new Set([
   'mesh',
+  'uiDesign',
   'meshLibrary',
   'rigging',
   'gameExperts',
@@ -630,6 +691,408 @@ function ProjectCommandRow({
   );
 }
 
+function uiDesignChannelBadgeClass(category: UiDesignChannelCategory): string {
+  return category === 'free-open'
+    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+    : 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+}
+
+function uiDesignChannelStatus(
+  channel: UiDesignChannelDefinition,
+  settings: UiDesignChannelSettings,
+): { label: string; className: string } {
+  if (uiDesignChannelReady(channel.id, settings)) {
+    return {
+      label: channel.needsKey || channel.requiresCommand ? '已配置' : '可用',
+      className: 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+    };
+  }
+  if (channel.needsKey && !settings.channelKeys[channel.id]?.trim()) {
+    return {
+      label: '待填 Key',
+      className: 'border-rose-500/40 bg-rose-500/10 text-rose-300',
+    };
+  }
+  if (channel.requiresCommand && !uiDesignChannelCommand(channel.id, settings)) {
+    return {
+      label: '待配置路径',
+      className: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+    };
+  }
+  return {
+    label: '待配置',
+    className: 'border-amber-500/40 bg-amber-500/10 text-amber-300',
+  };
+}
+
+function UiDesignChannelSettingsPanel({
+  projectUiDesign,
+  onProjectUiDesignChange,
+}: {
+  projectUiDesign: ProjectSettings['uiDesign'];
+  onProjectUiDesignChange: (patch: Partial<ProjectSettings['uiDesign']>) => void;
+}) {
+  const [runtimeSettings, setRuntimeSettings] = useState<UiDesignChannelSettings>(
+    () => loadUiDesignChannelSettings(),
+  );
+
+  const persistRuntimeSettings = useCallback((next: UiDesignChannelSettings) => {
+    saveUiDesignChannelSettings(next);
+    setRuntimeSettings(loadUiDesignChannelSettings());
+  }, []);
+
+  // The category tab only controls which channel cards are shown; the default
+  // channel is a single project-wide choice shared across commercial and
+  // free-open and can point at any channel regardless of the active tab.
+  const activeChannels = UI_DESIGN_CHANNELS.filter(
+    (channel) => channel.category === projectUiDesign.mode,
+  );
+  const defaultChannel = uiDesignChannelById(projectUiDesign.defaultChannelId);
+
+  const setMode = (mode: UiDesignChannelCategory) => {
+    onProjectUiDesignChange({ mode });
+  };
+
+  const setDefaultChannel = (channelId: UiDesignChannelId) => {
+    onProjectUiDesignChange({ defaultChannelId: channelId });
+    persistRuntimeSettings({
+      ...runtimeSettings,
+      preferredChannelId: channelId,
+    });
+  };
+
+  return (
+    <div className="grid gap-4">
+      <div className="grid gap-3 rounded-md border border-border bg-panel-2 p-4">
+        <SettingsRow
+          label="默认 UI 渠道"
+          hint="这个项目在进行游戏 UI 设计时优先使用的设计工具或协作平台。/ui-mode-start 会使用这里选择的默认渠道；商用与免费开源共用一个默认。"
+        >
+          <select
+            value={projectUiDesign.defaultChannelId}
+            onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+              setDefaultChannel(event.currentTarget.value as UiDesignChannelId)
+            }
+            className="h-9 w-full rounded-md border border-border bg-bg-alt px-2.5 text-sm text-fg outline-none transition-colors focus:border-accent"
+          >
+            {(['commercial', 'free-open'] as const).map((category) => {
+              const channels = UI_DESIGN_CHANNELS.filter(
+                (channel) => channel.category === category,
+              );
+              if (channels.length === 0) return null;
+              return (
+                <optgroup
+                  key={category}
+                  label={uiDesignChannelCategoryLabel(category)}
+                >
+                  {channels.map((channel) => (
+                    <option key={channel.id} value={channel.id}>
+                      {channel.label}
+                    </option>
+                  ))}
+                </optgroup>
+              );
+            })}
+          </select>
+        </SettingsRow>
+
+        <div className="flex flex-wrap gap-2 text-[11px] text-fg-faint">
+          <span className="inline-flex items-center gap-1 rounded border border-border-soft bg-bg-alt px-2 py-1">
+            <Palette size={12} />
+            UI 渠道：{projectUiDesign.enabled ? '开启' : '关闭'}
+          </span>
+          <span className="inline-flex items-center gap-1 rounded border border-border-soft bg-bg-alt px-2 py-1">
+            默认：{defaultChannel.label}（
+            {uiDesignChannelCategoryLabel(defaultChannel.category)}）
+          </span>
+        </div>
+      </div>
+
+      <div>
+        <div
+          role="tablist"
+          aria-orientation="horizontal"
+          className="flex w-full min-w-0 flex-wrap items-center gap-1 border-b border-border"
+        >
+          {(
+            [
+              ['commercial', '商用渠道'],
+              ['free-open', '免费开源渠道'],
+            ] as const
+          ).map(([mode, label]) => {
+            const active = projectUiDesign.mode === mode;
+            return (
+              <button
+                key={mode}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setMode(mode)}
+                className={cn(
+                  'px-4 py-2 text-xs font-medium outline-none transition-colors focus-visible:ring-1 focus-visible:ring-accent',
+                  active
+                    ? '-mb-px border-b-2 border-accent text-fg'
+                    : 'text-fg-faint hover:text-fg',
+                )}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <section
+        role="tabpanel"
+        className="rounded-md border border-border bg-panel-2 p-4"
+      >
+        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h4 className="text-sm font-semibold text-fg">
+              {uiDesignChannelCategoryLabel(projectUiDesign.mode)}渠道
+            </h4>
+            <p className="mt-1 text-xs leading-relaxed text-fg-faint">
+              {projectUiDesign.mode === 'commercial'
+                ? '生产协作优先，适合 Figma 文件、Photoshop 视觉资产和可交付 UI 规范。'
+                : '免费和开源优先，适合 Pencil 原型、Penpot 自托管协作、GIMP/Inkscape 图形资产。'}
+            </p>
+          </div>
+          <span className="rounded border border-border-soft bg-bg-alt px-2 py-0.5 text-[11px] text-fg-faint">
+            {activeChannels.length} 个
+          </span>
+        </div>
+        <div className="grid gap-3 xl:grid-cols-2">
+          {activeChannels.map((channel) => (
+            <UiDesignChannelCard
+              key={channel.id}
+              channel={channel}
+              isDefault={projectUiDesign.defaultChannelId === channel.id}
+              settings={runtimeSettings}
+              onDefault={() => setDefaultChannel(channel.id)}
+              onChange={persistRuntimeSettings}
+            />
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function UiDesignChannelCard({
+  channel,
+  isDefault,
+  settings,
+  onDefault,
+  onChange,
+}: {
+  channel: UiDesignChannelDefinition;
+  isDefault: boolean;
+  settings: UiDesignChannelSettings;
+  onDefault: () => void;
+  onChange: (settings: UiDesignChannelSettings) => void;
+}) {
+  const [showKey, setShowKey] = useState(false);
+  const keyValue = settings.channelKeys[channel.id] ?? '';
+  const baseUrl = settings.channelBaseUrls[channel.id] ?? '';
+  const command = settings.channelCommands[channel.id] ?? '';
+  const exportFormat = uiDesignChannelExportFormat(channel.id, settings);
+  const effectiveBaseUrl = uiDesignChannelBaseUrl(channel.id, settings);
+  const status = uiDesignChannelStatus(channel, settings);
+  const KeyIcon = showKey ? EyeOff : Eye;
+
+  const patchChannel = (
+    patch: Partial<{
+      key: string;
+      baseUrl: string;
+      command: string;
+      exportFormat: string;
+    }>,
+  ) => {
+    const next: UiDesignChannelSettings = {
+      ...settings,
+      channelKeys: { ...settings.channelKeys },
+      channelBaseUrls: { ...settings.channelBaseUrls },
+      channelCommands: { ...settings.channelCommands },
+      channelExportFormats: { ...settings.channelExportFormats },
+    };
+    if (patch.key !== undefined) {
+      const value = patch.key.trim();
+      if (value) next.channelKeys[channel.id] = value;
+      else delete next.channelKeys[channel.id];
+    }
+    if (patch.baseUrl !== undefined) {
+      const value = patch.baseUrl.trim();
+      if (value) next.channelBaseUrls[channel.id] = value;
+      else delete next.channelBaseUrls[channel.id];
+    }
+    if (patch.command !== undefined) {
+      const value = patch.command.trim();
+      if (value) next.channelCommands[channel.id] = value;
+      else delete next.channelCommands[channel.id];
+    }
+    if (patch.exportFormat !== undefined) {
+      const value = patch.exportFormat.trim();
+      if (value && channel.exportFormats.includes(value)) {
+        next.channelExportFormats[channel.id] = value;
+      } else {
+        delete next.channelExportFormats[channel.id];
+      }
+    }
+    onChange(next);
+  };
+
+  return (
+    <article className="space-y-3 rounded-md border border-border bg-bg-alt p-4">
+      <div className="flex flex-wrap items-start gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-fg">{channel.label}</span>
+            <span
+              className={cn(
+                'inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium',
+                uiDesignChannelBadgeClass(channel.category),
+              )}
+            >
+              {uiDesignChannelCategoryLabel(channel.category)}
+            </span>
+            <span
+              className={cn(
+                'inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium',
+                status.className,
+              )}
+            >
+              {status.label}
+            </span>
+            {isDefault ? (
+              <span className="inline-flex shrink-0 rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-[10px] font-medium text-accent">
+                默认
+              </span>
+            ) : null}
+          </div>
+          <p className="mt-1 text-[11px] leading-relaxed text-fg-faint">
+            {channel.note}
+          </p>
+        </div>
+        <div className="flex shrink-0 flex-wrap gap-2">
+          {!isDefault ? (
+            <button
+              type="button"
+              onClick={onDefault}
+              className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+            >
+              <Check size={13} />
+              设为默认
+            </button>
+          ) : null}
+          {channel.credentialUrl ? (
+            <button
+              type="button"
+              onClick={() => void openExternal(channel.credentialUrl as string)}
+              className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+            >
+              <ExternalLink size={13} strokeWidth={2.2} />
+              {channel.needsKey ? '获取 Key' : '打开官网'}
+            </button>
+          ) : null}
+        </div>
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        {channel.supportsBaseUrl ? (
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-fg-dim">Base URL</span>
+            <input
+              type="text"
+              value={baseUrl}
+              onChange={(event) => patchChannel({ baseUrl: event.target.value })}
+              placeholder={effectiveBaseUrl || channel.endpointPlaceholder}
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+            />
+          </label>
+        ) : null}
+
+        {channel.supportsKey ? (
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {channel.keyLabel ?? 'API Key'}
+            </span>
+            <div className="relative">
+              <input
+                type={showKey ? 'text' : 'password'}
+                value={keyValue}
+                onChange={(event) => patchChannel({ key: event.target.value })}
+                placeholder={channel.keyPlaceholder ?? '粘贴 API Key / Token'}
+                autoComplete="off"
+                spellCheck={false}
+                className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 pr-14 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+              />
+              <div className="absolute inset-y-0 right-1 flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => setShowKey((value) => !value)}
+                  title={showKey ? '隐藏 Key' : '显示 Key'}
+                  className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-fg"
+                >
+                  <KeyIcon size={13} strokeWidth={2} />
+                </button>
+                {keyValue ? (
+                  <button
+                    type="button"
+                    onClick={() => patchChannel({ key: '' })}
+                    title="清空"
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                  >
+                    <Trash2 size={13} strokeWidth={2} />
+                  </button>
+                ) : null}
+              </div>
+            </div>
+          </label>
+        ) : null}
+
+        {channel.supportsCommand ? (
+          <label className="block space-y-1 lg:col-span-2">
+            <span className="text-[11px] font-medium text-fg-dim">
+              本地命令 / 工具路径
+            </span>
+            <input
+              type="text"
+              value={command}
+              onChange={(event) => patchChannel({ command: event.target.value })}
+              placeholder={channel.commandPlaceholder}
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+            />
+          </label>
+        ) : null}
+
+        <label
+          className={cn(
+            'block space-y-1',
+            channel.supportsBaseUrl || channel.supportsKey ? 'lg:col-span-2' : '',
+          )}
+        >
+          <span className="text-[11px] font-medium text-fg-dim">默认导出格式</span>
+          <select
+            value={exportFormat}
+            onChange={(event) => patchChannel({ exportFormat: event.target.value })}
+            className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+          >
+            {channel.exportFormats.map((format) => (
+              <option key={format} value={format}>
+                {format}
+              </option>
+            ))}
+          </select>
+        </label>
+      </div>
+    </article>
+  );
+}
+
 function MeshLibraryCard({
   library,
   settings,
@@ -842,37 +1305,44 @@ function MeshLibrarySettings() {
         </div>
       </section>
 
-      <div className="flex gap-1 rounded-lg border border-border bg-panel-2 p-1">
+      <div
+        role="tablist"
+        aria-orientation="horizontal"
+        className="flex w-full min-w-0 flex-wrap items-center gap-1 border-b border-border"
+      >
         {(
           [
             { id: 'enabled' as const, label: '已启用', count: usableCount },
             { id: 'repository' as const, label: '仓库', count: MESH_LIBRARIES.length },
           ]
-        ).map((tab) => (
-          <button
-            key={tab.id}
-            type="button"
-            onClick={() => setInnerTab(tab.id)}
-            className={cn(
-              'flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-semibold transition-colors',
-              innerTab === tab.id
-                ? 'bg-accent/15 text-accent'
-                : 'text-fg-faint hover:text-fg',
-            )}
-          >
-            <span>{tab.label}</span>
-            <span
+        ).map((tab) => {
+          const active = innerTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => setInnerTab(tab.id)}
               className={cn(
-                'rounded px-1.5 py-0.5 text-[10px]',
-                innerTab === tab.id
-                  ? 'bg-accent/20 text-accent'
-                  : 'bg-bg-alt text-fg-faint',
+                'px-4 py-2 text-xs font-medium outline-none transition-colors focus-visible:ring-1 focus-visible:ring-accent',
+                active
+                  ? '-mb-px border-b-2 border-accent text-fg'
+                  : 'text-fg-faint hover:text-fg',
               )}
             >
-              {tab.count}
-            </span>
-          </button>
-        ))}
+              {tab.label}
+              <span
+                className={cn(
+                  'ml-1.5 rounded-full px-1.5 py-0.5 text-[10px]',
+                  active ? 'bg-accent/20 text-accent' : 'bg-bg-alt text-fg-faint',
+                )}
+              >
+                {tab.count}
+              </span>
+            </button>
+          );
+        })}
       </div>
 
       {innerTab === 'enabled' ? (
@@ -1646,6 +2116,35 @@ export default function ProjectSettingsModal({
     [],
   );
 
+  const updateSprite = useCallback(
+    (patch: Partial<ProjectSettings['sprite']>) => {
+      setSettings((current) => ({
+        ...current,
+        sprite: { ...current.sprite, ...patch },
+      }));
+      setDirty(true);
+    },
+    [],
+  );
+
+  const updateUiDesign = useCallback(
+    (patch: Partial<ProjectSettings['uiDesign']>) => {
+      setSettings((current) => ({
+        ...current,
+        // `mode` is just the viewed category tab; `defaultChannelId` is a single
+        // project-wide choice that can point at either a commercial or free-open
+        // channel. They are independent — switching tabs never reassigns the
+        // default, and choosing a default never changes the viewed tab.
+        uiDesign: {
+          ...current.uiDesign,
+          ...patch,
+        },
+      }));
+      setDirty(true);
+    },
+    [],
+  );
+
   const updateSkills = useCallback(
     (patch: Partial<ProjectSettings['skills']>) => {
       setSettings((current) => ({
@@ -1735,7 +2234,7 @@ export default function ProjectSettingsModal({
         ? settingsWithDetectedGameFeatures(baseSettings, nextScan)
         : baseSettings;
       setSettings(nextSettings);
-      syncProjectGameFeaturesToRuntime(nextSettings);
+      syncProjectSettingsToRuntime(nextSettings);
       setDirty(false);
     } catch (err) {
       setStatus(`检测失败：${describeError(err)}`);
@@ -1909,7 +2408,7 @@ export default function ProjectSettingsModal({
         setRecord(nextRecord);
         const savedSettings = projectSettingsFromMetadata(nextRecord.metadata);
         setSettings(savedSettings);
-        syncProjectGameFeaturesToRuntime(savedSettings);
+        syncProjectSettingsToRuntime(savedSettings);
         useStore.setState((state) => ({
           workspaces: state.workspaces.map((item) =>
             item.id === summary.id ? summary : item,
@@ -2701,6 +3200,132 @@ export default function ProjectSettingsModal({
 
     if (tab === 'meshLibrary') {
       return <MeshLibrarySettings />;
+    }
+
+    if (tab === 'sprite') {
+      const defaultProvider = spriteProviderById(settings.sprite.defaultProviderId);
+      return (
+        <div className="grid gap-4">
+          <section className="rounded-md border border-border bg-panel-2 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-fg">Sprite 动画</div>
+                <div className="mt-1 text-xs leading-relaxed text-fg-faint">
+                  控制当前项目是否启用 Sprite 生成入口，并为项目指定一个默认 Sprite 渠道。商用与本地开源共用同一个默认，只有一个默认渠道。
+                </div>
+              </div>
+              <span className="rounded border border-border-soft bg-bg-alt px-2 py-0.5 text-[11px] text-fg-faint">
+                /sprite-mode-start
+              </span>
+            </div>
+          </section>
+
+          <ToggleRow
+            label="启用 Sprite 渠道"
+            hint="开启后，输入 /sprite-mode-start 或 /sprite 会调用当前项目选择的默认 Sprite 渠道。"
+            checked={settings.sprite.enabled}
+            onChange={(checked) => updateSprite({ enabled: checked })}
+          />
+
+          <div className="grid gap-3 rounded-md border border-border bg-panel-2 p-4">
+            <SettingsRow
+              label="默认 Sprite 渠道"
+              hint="这个项目生成 Sprite 时优先使用的渠道。/sprite-mode-start 会使用这里选择的默认渠道；商用与本地开源共用一个默认。"
+            >
+              <select
+                value={settings.sprite.defaultProviderId}
+                onChange={(event: ChangeEvent<HTMLSelectElement>) =>
+                  updateSprite({
+                    defaultProviderId: event.currentTarget
+                      .value as SpriteProviderId,
+                  })
+                }
+                className="h-9 w-full rounded-md border border-border bg-bg-alt px-2.5 text-sm text-fg outline-none transition-colors focus:border-accent"
+              >
+                {(['commercial', 'local-open'] as const).map((category) => {
+                  const providers = SPRITE_PROVIDERS.filter(
+                    (provider) => provider.category === category,
+                  );
+                  if (providers.length === 0) return null;
+                  return (
+                    <optgroup
+                      key={category}
+                      label={projectSpriteCategoryLabel(category)}
+                    >
+                      {providers.map((provider) => (
+                        <option key={provider.id} value={provider.id}>
+                          {provider.label}
+                        </option>
+                      ))}
+                    </optgroup>
+                  );
+                })}
+              </select>
+            </SettingsRow>
+
+            <div className="flex flex-wrap gap-2 text-[11px] text-fg-faint">
+              <span className="inline-flex items-center gap-1 rounded border border-border-soft bg-bg-alt px-2 py-1">
+                <Boxes size={12} />
+                Sprite：{settings.sprite.enabled ? '开启' : '关闭'}
+              </span>
+              <span className="inline-flex items-center gap-1 rounded border border-border-soft bg-bg-alt px-2 py-1">
+                默认：{defaultProvider.label}（
+                {projectSpriteCategoryLabel(defaultProvider.category)}）
+              </span>
+            </div>
+          </div>
+
+          <SpriteGenerationSettingsPanel
+            locale={locale}
+            embedded
+            defaultProviderId={settings.sprite.defaultProviderId}
+            onDefaultProviderIdChange={(id) =>
+              updateSprite({ defaultProviderId: id })
+            }
+          />
+        </div>
+      );
+    }
+
+    if (tab === 'uiDesign') {
+      const detectedEngine = scan?.engine.engine ?? 'unknown';
+      const autoMode = settings.automation.autoDetect;
+      return (
+        <div className="grid gap-4">
+          <section className="rounded-md border border-border bg-panel-2 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-fg">UI 渠道</div>
+                <div className="mt-1 text-xs leading-relaxed text-fg-faint">
+                  给游戏项目设计 UI 时使用的默认设计工具渠道。可在商用路线和免费开源路线之间切换，并为项目指定默认渠道。
+                </div>
+              </div>
+              <span
+                className={cn(
+                  'rounded border px-2 py-0.5 text-[11px]',
+                  detectedEngine === 'unknown'
+                    ? 'border-border-soft bg-bg-alt text-fg-faint'
+                    : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+                )}
+              >
+                {autoMode ? '游戏项目自动开启' : '手动设置'}
+              </span>
+            </div>
+          </section>
+
+          <ToggleRow
+            label="启用 UI 渠道"
+            hint="开启后，当前项目的游戏 UI 设计任务会优先使用这里选择的默认渠道。"
+            checked={settings.uiDesign.enabled}
+            onChange={(checked) => updateUiDesign({ enabled: checked })}
+          />
+
+          <UiDesignChannelSettingsPanel
+            projectUiDesign={settings.uiDesign}
+            onProjectUiDesignChange={updateUiDesign}
+          />
+        </div>
+      );
     }
 
     if (tab === 'rigging') {

@@ -4,37 +4,73 @@
   <a href="../../README.md">English</a> | 中文 | <a href="README.fr.md">Français</a> | <a href="README.de.md">Deutsch</a> | <a href="README.es.md">Español</a> | <a href="README.pt-BR.md">Português</a> | <a href="README.ru.md">Русский</a> | <a href="README.ja.md">日本語</a> | <a href="README.ko.md">한국어</a> | <a href="README.hi.md">हिन्दी</a> | <a href="README.ar.md">العربية</a>
 </div>
 
-不是每个编程任务都值得烧最贵的模型额度。FreeUltraCode 把 Claude Code、Codex、Gemini、免费渠道和本地模型放到同一个本地聊天界面里。常规任务走便宜模型，关键判断再交给更稳的模型。
+在游戏引擎里，代码只占很小一部分，更多的是资产和流程——材质、蓝图、地形、天空、UI、骨骼动画、打包、性能优化。FreeUltraCode 把 Claude Code / Codex / Gemini 这类编程 Agent 针对这一现实做了深度定制：它理解游戏引擎概念，能生成游戏所需的各类资产（图片、3D 模型、2D 精灵动画、图集、音频、骨骼绑定、视频），并把常规任务路由到免费或低成本渠道，让高级模型额度用在刀刃上。
 
 <p align="center">
-  <strong>免费渠道路由</strong><br>
-  <img src="images/hero-free-channels.zh-CN.png" alt="FreeUltraCode 免费渠道路由截图" width="960">
+  <strong>一键生成虚幻引擎 UMG 界面</strong><br>
+  <img src="images/game/JMsXEKE.png" alt="FreeUltraCode 一键生成虚幻引擎 UMG 界面" width="960">
+</p>
+
+<p align="center">
+  <strong>一键生成 3D 模型</strong><br>
+  <img src="images/game/noYfqPt.png" alt="FreeUltraCode 一键生成 3D 模型" width="960">
+</p>
+
+<p align="center">
+  <strong>图片、精灵、网格、音频、骨骼绑定、视频——统一由一个编程 Agent 管理</strong><br>
+  <img src="images/game/gmclmLS.png" alt="FreeUltraCode 统一游戏资产生成" width="960">
+  <br><br>
+  <img src="images/game/jXgMffC.png" alt="FreeUltraCode 游戏资产工作流" width="960">
 </p>
 
 ## 为什么做 FreeUltraCode
 
-AI 编程工具确实好用，但高级模型额度消耗很快。FreeUltraCode 的思路很直接：保留本地聊天体验，同时让请求可以方便地走免费、试用额度或低成本渠道。
+如今 AI 已经足够好，大部分代码都能自己写。程序员的角色正在转向描述需求、验证产出、编排 Agent。但游戏不只是代码。游戏引擎里充满了材质、蓝图、地形、天空、UI、骨骼动画、打包和性能调优——而大多数通用编程 Agent 根本不懂这些。
 
-- 支持 GitHub Models、Hugging Face Router、SambaNova Cloud、Together AI、Gemini、DeepSeek、Kimi、Groq、OpenRouter、NVIDIA NIM、Z.ai、Kilo、LLM7、Ollama、LM Studio、llama.cpp 等渠道。
-- API Key 和 provider 设置保存在本机。
-- 在底部输入区直接切换 runtime、channel、权限模式和 workspace。
-- 会话历史、收藏夹、定时提示词和 workspace 上下文都保存在本机。
-- 本地模型可以零 API Key 使用，前提是本机服务和模型已准备好。
+FreeUltraCode 把 Claude Code / Codex / Gemini 这类编程 Agent 针对游戏开发做了深度定制：
+
+- **懂游戏引擎语言。** Agent 预置了游戏开发概念，能推理材质、蓝图、地形、光照、UI（UMG 等）、骨骼动画、构建打包和性能优化，而不只是处理通用源码文件。
+- **生成游戏所需的各类资产。** 图片、3D 模型、2D 精灵动画、精灵图集、音频、骨骼绑定、视频都能在同一个聊天界面里产出，并通过一套编程 Agent 工作流统一管理。
+- **内置游戏开发专家团。** 40+ 个专家角色（技术总监，玩法/AI/网络/工具程序，关卡/数值设计，美术与音频总监，QA，发布经理等）覆盖 Unity、Unreal、Godot 和 Web 引擎。
+- **把高级额度留给关键判断。** 常规任务走免费、试用额度或低成本渠道，Key、设置和历史都保存在本机。
 
 ## 主要能力
 
-### 编程 Chat
+### 游戏开发 Chat
 
-- 让 AI 修改代码、排查 Bug、重构、补测试、写发布说明或文档。
+- 让 AI 写玩法代码、引擎集成、shader/材质逻辑、构建脚本，排查 Bug、重构、补测试、写发布说明。
+- 面向 Unity、Unreal、Godot 或 Web 引擎项目——Agent 推理的是引擎概念，而不只是文件。
 - 支持附加文件路径，也可以把文件拖进输入区。
 - 在同一个聊天界面查看流式输出、命令日志、文件引用和总结。
 - 可以在同一个会话里继续追问，不需要重复解释上下文。
 
-### 生图 + 编程
+### 游戏资产生成
 
-- 在同一个本地会话里同时使用生图模型和编程模型。
-- 需要视觉素材、图标、海报、设计参考时进入生图模式，生成完成后再切回编程模型继续改代码。
-- 生成图片、提示词、Provider 信息、命令日志和后续代码修改都会保留在同一段会话历史中。
+游戏所需的各类资产都能在同一个聊天界面里生成、应用到项目，再交回编程模型——全部保留在同一段会话历史中。每个生成器都通过你配置好的 Provider 运行。
+
+| 资产 | 用途 | 进入方式 |
+| --- | --- | --- |
+| 图片 | 概念图、UI 草图、图标、海报、贴图、参考图 | `/image`、`/img`、`/draw`、`/生图` 或 `/image-mode-start` |
+| ComfyUI 节点图 | 可编辑的节点式生图工作流 | `/comfyui-mode-start` |
+| 2D 精灵 | 游戏精灵、序列帧、spritesheet | `/sprite` 或 `/sprite-mode-start` |
+| 3D 模型 | 道具、角色、场景网格、blockout | `/mesh-mode-start`（用 `/mesh-search` 搜索素材库） |
+| 音乐 | BGM、配乐、音乐片段 | `/music` 或 `/music-mode-start` |
+| 语音 | 配音和旁白 | `/speech-mode-start` |
+| 视频 | 视频片段和动态素材 | `/video` 或 `/video-mode-start` |
+
+Agent 会先扩写你的提示词，调用配置好的 Provider，并把结果连同提示词和 Provider 信息一起显示在聊天流里。用对应的 `*-mode-end` 命令退出任意模式。
+
+### 游戏开发专家团
+
+FreeUltraCode 内置 40+ 个游戏开发专家，Agent 会根据任务自动调用：
+
+- **引擎专家**：Unity、Unreal、Godot（GDScript / C# / GDExtension / shader）和 Web。
+- **程序**角色：技术总监，主程/引擎/玩法/AI/网络/工具/UI 程序。
+- **设计**角色：玩法、关卡、数值、运营和叙事设计。
+- **美术与音频**总监及专家、特效、音效设计和音频总监。
+- **制作、质量与发布**：制作人，QA 负责人/测试，devops，安全，本地化，发布经理。
+
+在 **设置** 里配置当前引擎、council 模式以及启用哪些专家。
 
 ### 免费大模型路由
 
@@ -44,6 +80,11 @@ AI 编程工具确实好用，但高级模型额度消耗很快。FreeUltraCode 
 - 内置 Rust 本地反向代理，自动翻译 Anthropic 和 OpenAI-compatible 协议。
 - Claude Code 可以通过已经配置好的免费渠道路由，不需要改聊天界面。
 - API Key、模型覆盖值和本地模型配置都可以在设置里管理。
+
+<p align="center">
+  <strong>免费渠道路由</strong><br>
+  <img src="images/hero-free-channels.zh-CN.png" alt="FreeUltraCode 免费渠道路由截图" width="960">
+</p>
 
 当前默认的编程向模型：
 
@@ -171,25 +212,25 @@ build.bat       # Windows：打包 NSIS 安装器
 
 渠道状态显示 **已就绪** 后，就可以在底部输入框提问。完整步骤见 [注册并配置免费渠道 API Key](register-free-channel.md)。
 
-### 使用生图模式
+### 生成游戏资产
 
-生图模式会把聊天输入区切换成文生图入口，同时保留同一段会话历史。它适合生成 UI 素材、图标、海报、设计参考，然后继续让编程模型把素材用到项目里。
+资产模式会把聊天输入区切换成资产生成入口，同时保留同一段会话历史。适合生成 UI 草图、图标、贴图、精灵、3D 模型、音频和视频，然后继续让编程模型把素材用到项目里。下面以生图模式为例，精灵、建模、音乐、语音、视频模式用各自的 `*-mode-start` 命令，用法一致。
 
-1. 打开 **设置** -> **生图渠道**，选择默认生图 Provider，并按渠道要求填写 API Key、Account ID、Base URL 或本地 ComfyUI 地址。配置完整的 Provider 会出现在生图模式的底部渠道选择器里。
+1. 打开 **设置** -> **生图渠道**（或对应资产章节），选择默认 Provider，并按渠道要求填写 API Key、Account ID、Base URL 或本地 ComfyUI 地址。配置完整的 Provider 会出现在该模式的底部渠道选择器里。
 2. 新建或打开一个 Chat，输入 `/image-mode-start` 进入生图模式。也可以在同一条消息里直接带上第一个需求，例如：
 
 ```text
-/image-mode-start 一个本地 AI 编程工具的玻璃质感应用图标，1024x1024
+/image-mode-start 奇幻地牢里可平铺的石墙贴图，1024x1024
 ```
 
-3. 生图模式开启后，普通文本都会走生图，不会触发代码修改。底部 **Channel** 会切换为生图 Provider；如果打开了“显示生图模型下拉框”，还可以在输入区底部切换具体模型。
-4. 描述你想要的图片。FreeUltraCode 会先让编程模型扩写生图提示词，再调用配置好的生图 Provider 出图。生成结果会和提示词、Provider 信息一起显示在聊天流里。
+3. 模式开启后，普通文本都会走资产生成，不会触发代码修改。底部 **Channel** 会切换为资产 Provider；如果打开了模型下拉框，还可以在输入区底部切换具体模型。
+4. 描述你想要的资产。FreeUltraCode 会先让编程模型扩写提示词，再调用配置好的 Provider 出图。生成结果会和提示词、Provider 信息一起显示在聊天流里。
 
 <p align="center">
-  <img src="images/生图/session-2026-06-07-2209.png" alt="生图模式在同一个 FreeUltraCode 会话中生成图片并保留上下文" width="720">
+  <img src="images/生图/session-2026-06-07-2209.png" alt="资产模式在同一个 FreeUltraCode 会话中生成素材并保留上下文" width="720">
 </p>
 
-5. 输入 `/image-mode-end` 退出生图模式，回到普通 AI 编程渠道和模型。如果只想临时生成一张图，不需要进入常驻模式，可以直接发送 `/image`、`/img`、`/draw`、`/生图` 或 `/画图` 加上提示词。
+5. 输入 `/image-mode-end` 退出生图模式，回到普通 AI 编程渠道和模型。如果只想临时生成一份资产，不进入常驻模式，可以直接发送 `/image`、`/img`、`/draw`、`/生图`、`/sprite`、`/music` 或 `/video` 加上提示词。
 
 ## 工作原理
 
@@ -231,7 +272,7 @@ build.bat       # Windows：打包 NSIS 安装器
 app/
   src/
     components/  共享 UI 和富文本 assistant message 渲染
-    lib/         Provider 设置、免费渠道路由、持久化辅助函数
+    lib/         Provider 设置、免费渠道路由、资产生成（图片/精灵/3D 网格/音乐/语音/视频/ComfyUI）、游戏开发专家团、持久化辅助函数
     panels/      Sidebar、chat dock、settings、定时任务 UI
     store/       Zustand 状态和本地历史
   src-tauri/

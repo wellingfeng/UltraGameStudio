@@ -10,6 +10,7 @@ import {
   type ProjectEnvironmentScan,
 } from '@/lib/tauri';
 import type { WorkspaceSummary } from '@/store/history/types';
+import { historyStore } from '@/store/history/store';
 import { useStore } from '@/store/useStore';
 
 vi.mock('@/lib/tauri', async () => {
@@ -128,6 +129,8 @@ describe('ProjectSettingsModal game project tabs', () => {
       expect(tabText).toEqual([
         '概览',
         'Mesh 渠道',
+        'Sprite',
+        'UI 渠道',
         '模型库',
         '绑定渠道',
         '游戏专家',
@@ -153,12 +156,15 @@ describe('ProjectSettingsModal game project tabs', () => {
 
       expect(tabText).toEqual([
         '概览',
+        'Sprite',
         'MCP',
         'LSP',
         'Skills',
         '权限/自动化',
       ]);
       expect(tabText).not.toContain('Mesh 渠道');
+      expect(tabText).toContain('Sprite');
+      expect(tabText).not.toContain('UI 渠道');
       expect(tabText).not.toContain('绑定渠道');
       expect(tabText).not.toContain('游戏专家');
       expect(tabText).not.toContain('命令');
@@ -249,7 +255,139 @@ describe('ProjectSettingsModal game project tabs', () => {
         '/mesh-mode-start',
         '/mesh-mode-end',
         '/mesh-search',
+        '/ui-mode-start',
+        '/ui-mode-end',
       ]);
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('renders Sprite project settings and syncs the default provider on save', async () => {
+    const resolved = await historyStore.resolveWorkspaceByPath(workspace.path);
+    const view = await renderProjectSettingsModal(unknownScan(), {
+      id: resolved.id,
+      path: resolved.path,
+      name: resolved.name,
+      updatedAt: resolved.updatedAt,
+      sessionCount: resolved.sessionCount,
+      metadata: resolved.metadata,
+    });
+
+    try {
+      const spriteTab = Array.from(
+        view.container.querySelectorAll('nav [role="tab"]'),
+      ).find((tab) => tab.textContent?.trim() === 'Sprite');
+
+      await act(async () => {
+        (spriteTab as HTMLButtonElement).click();
+      });
+
+      expect(view.container.textContent).toContain('Sprite 动画');
+      expect(view.container.textContent).toContain('/sprite-mode-start');
+
+      const enableSwitch = Array.from(
+        view.container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+      ).find((input) =>
+        input.closest('label')?.textContent?.includes('启用 Sprite 渠道'),
+      );
+      expect(enableSwitch).toBeInstanceOf(HTMLInputElement);
+      await act(async () => {
+        enableSwitch?.click();
+      });
+
+      const defaultSelect = Array.from(
+        view.container.querySelectorAll<HTMLSelectElement>('select'),
+      ).find((select) =>
+        Array.from(select.options).some(
+          (option) => option.value === 'local-comfyui-sprite',
+        ),
+      );
+      expect(defaultSelect).toBeInstanceOf(HTMLSelectElement);
+      await act(async () => {
+        const select = defaultSelect as HTMLSelectElement;
+        select.value = 'local-comfyui-sprite';
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+
+      const save = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.includes('保存'));
+      expect(save).toBeInstanceOf(HTMLButtonElement);
+      await act(async () => {
+        save?.click();
+      });
+      await settle();
+
+      const saved = JSON.parse(
+        window.localStorage.getItem('freeultracode.spriteGeneration.v1') ?? '{}',
+      );
+      expect(saved.enabled).toBe(true);
+      expect(saved.preferredProviderId).toBe('local-comfyui-sprite');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('renders UI design channels and syncs the default open-source channel on save', async () => {
+    const resolved = await historyStore.resolveWorkspaceByPath(workspace.path);
+    const view = await renderProjectSettingsModal(unrealScan(), {
+      id: resolved.id,
+      path: resolved.path,
+      name: resolved.name,
+      updatedAt: resolved.updatedAt,
+      sessionCount: resolved.sessionCount,
+      metadata: resolved.metadata,
+    });
+
+    try {
+      const uiTab = Array.from(
+        view.container.querySelectorAll('nav [role="tab"]'),
+      ).find((tab) => tab.textContent?.trim() === 'UI 渠道');
+
+      await act(async () => {
+        (uiTab as HTMLButtonElement).click();
+      });
+
+      expect(view.container.textContent).toContain('UI 渠道');
+      expect(view.container.textContent).toContain('Figma');
+      expect(view.container.textContent).toContain('Adobe Photoshop');
+
+      const freeOpen = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.trim() === '免费开源渠道');
+      expect(freeOpen).toBeInstanceOf(HTMLButtonElement);
+      await act(async () => {
+        freeOpen?.click();
+      });
+
+      expect(view.container.textContent).toContain('Pencil Project');
+      expect(view.container.textContent).toContain('Penpot');
+
+      const defaultSelect = view.container.querySelector(
+        'select',
+      ) as HTMLSelectElement | null;
+      expect(defaultSelect).toBeInstanceOf(HTMLSelectElement);
+      await act(async () => {
+        if (!defaultSelect) return;
+        defaultSelect.value = 'penpot';
+        defaultSelect.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+
+      const save = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.includes('保存'));
+      expect(save).toBeInstanceOf(HTMLButtonElement);
+      await act(async () => {
+        save?.click();
+      });
+      await settle();
+
+      const saved = JSON.parse(
+        window.localStorage.getItem('freeultracode.uiDesignChannels.v1') ?? '{}',
+      );
+      expect(saved.enabled).toBe(true);
+      expect(saved.preferredChannelId).toBe('penpot');
     } finally {
       await view.cleanup();
     }

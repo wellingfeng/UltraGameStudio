@@ -10,6 +10,8 @@ export type MusicProviderId =
   | 'tempolor-instrumental'
   | 'mubert'
   | 'sunoapi-music'
+  | 'sonauto-song'
+  | 'sonauto-instrumental'
   | 'fal-ace-step'
   | 'fal-stable-audio'
   | 'minimax-music-free'
@@ -40,6 +42,7 @@ type MusicProviderApiKind =
   | 'tempolor-music'
   | 'mubert'
   | 'sunoapi-music'
+  | 'sonauto-music'
   | 'fal-music'
   | 'huggingface-inference'
   | 'generic-local-music';
@@ -285,6 +288,41 @@ export const MUSIC_PROVIDERS: MusicProviderDefinition[] = [
     keyLabel: 'SunoAPI.org API Key',
     keyPlaceholder: 'Bearer token',
     note: '第三方 Suno API 服务。适合需要 Suno 模型链路的用户；非 Suno 官方，商用前需单独核授权和地区可用性。',
+  },
+  {
+    id: 'sonauto-song',
+    label: 'Sonauto Song',
+    category: 'commercial',
+    apiKind: 'sonauto-music',
+    defaultModel: 'v2.1',
+    models: ['v2.1', 'v2'],
+    needsKey: true,
+    local: false,
+    defaultBaseUrl: 'https://api.sonauto.ai',
+    supportsBaseUrl: true,
+    endpointPlaceholder: 'https://api.sonauto.ai',
+    credentialUrl: 'https://sonauto.ai/developers',
+    keyLabel: 'Sonauto API Key',
+    keyPlaceholder: 'Bearer token',
+    note: 'Sonauto（现 Treblo）官方音乐 API。异步任务，提交后轮询 status 获取音频；适合带歌词的完整歌曲。海外 Key 可把 Base URL 改成 https://api.treblo.com。',
+  },
+  {
+    id: 'sonauto-instrumental',
+    label: 'Sonauto Instrumental',
+    category: 'commercial',
+    apiKind: 'sonauto-music',
+    defaultModel: 'v2.1',
+    models: ['v2.1', 'v2'],
+    needsKey: true,
+    local: false,
+    defaultBaseUrl: 'https://api.sonauto.ai',
+    supportsBaseUrl: true,
+    endpointPlaceholder: 'https://api.sonauto.ai',
+    keyProviderId: 'sonauto-song',
+    credentialUrl: 'https://sonauto.ai/developers',
+    keyLabel: 'Sonauto API Key',
+    keyPlaceholder: 'Bearer token',
+    note: 'Sonauto（现 Treblo）官方纯音乐 API。BGM、配乐、无歌词；与 Sonauto Song 共用 Key。',
   },
   {
     id: 'fal-ace-step',
@@ -845,6 +883,8 @@ async function generateWithProvider(
       return generateMubert(prompt, model, settings, targetDurationSeconds, signal);
     case 'sunoapi-music':
       return generateSunoApiMusic(prompt, model, settings, signal);
+    case 'sonauto-music':
+      return generateSonautoMusic(providerId, prompt, model, settings, signal);
     case 'fal-music':
       return generateFalMusic(providerId, prompt, model, settings, targetDurationSeconds, signal);
     case 'huggingface-inference':
@@ -1201,6 +1241,70 @@ async function generateSunoApiMusic(
     if (audios.length > 0 && isSuccessState(state, status)) return audios;
   }
   throw new Error('SunoAPI.org job timed out before audio was ready.');
+}
+
+async function generateSonautoMusic(
+  providerId: MusicProviderId,
+  prompt: string,
+  model: string,
+  settings: MusicGenerationSettings,
+  signal?: AbortSignal,
+): Promise<string[]> {
+  const apiKey = musicProviderKey(providerId, settings);
+  if (!apiKey) throw new Error('Sonauto API key is missing.');
+  const baseUrl = musicProviderBaseUrl(providerId, settings);
+  const instrumental = providerId === 'sonauto-instrumental';
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+    'Content-Type': 'application/json',
+  };
+  const body: Record<string, unknown> = {
+    prompt,
+    instrumental,
+    num_songs: 1,
+    output_format: 'mp3',
+  };
+  if (model && model !== 'v2.1') body.model = model;
+  if (!instrumental) {
+    const lyrics = looksLikeLyrics(prompt) ? prompt : '';
+    // Empty string tells Sonauto to auto-write lyrics from the prompt.
+    body.lyrics = lyrics;
+  }
+  const response = await fetch(`${baseUrl}/v1/generations`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal,
+  });
+  const started = await readJsonResponse(response);
+  assertProviderJsonOk(started, 'Sonauto');
+  const immediate = audiosFromJson(started);
+  if (immediate.length > 0) return immediate;
+  const taskId = taskIdFromJson(started);
+  if (!taskId) throw new Error('Sonauto did not return a task id.');
+  for (let i = 0; i < 120; i += 1) {
+    await delay(3000, signal);
+    const statusResponse = await fetch(
+      `${baseUrl}/v1/generations/status/${encodeURIComponent(taskId)}`,
+      { headers, signal },
+    );
+    const status = await readJsonResponse(statusResponse);
+    const state = jsonState(status);
+    if (isFailedState(state)) {
+      throw new Error(providerErrorMessage(status) || 'Sonauto generation failed.');
+    }
+    if (isSuccessState(state, status)) {
+      const resultResponse = await fetch(
+        `${baseUrl}/v1/generations/${encodeURIComponent(taskId)}`,
+        { headers, signal },
+      );
+      const result = await readJsonResponse(resultResponse);
+      const audios = audiosFromJson(result);
+      if (audios.length > 0) return audios;
+      throw new Error('Sonauto returned no audio.');
+    }
+  }
+  throw new Error('Sonauto job timed out before audio was ready.');
 }
 
 async function generateFalMusic(

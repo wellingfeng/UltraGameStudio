@@ -917,6 +917,49 @@ export const cacheTtlOptions: SelectOption[] = CACHE_TTL_MINUTES_OPTIONS.map(
 );
 
 /**
+ * 会话启动模式可选项。'local' = 在本地处理(默认,直接在工作区运行);
+ * 'worktree' = 新工作树(首次发送前准备隔离工作目录)。只在会话开启前可改。
+ */
+export const DEFAULT_STARTUP_MODE = 'local' as const;
+
+export const startupModeOptions: SelectOption[] = [
+  {
+    id: 'local',
+    label: '在本地处理',
+    translations: {
+      'zh-CN': { label: '在本地处理' },
+      'en-US': { label: 'Process locally' },
+      'fr-FR': { label: 'Traiter en local' },
+      'ru-RU': { label: 'Обрабатывать локально' },
+      'es-ES': { label: 'Procesar localmente' },
+      'hi-IN': { label: 'स्थानीय रूप से प्रोसेस करें' },
+      'ar-SA': { label: 'المعالجة محليًا' },
+      'pt-BR': { label: 'Processar localmente' },
+      'ja-JP': { label: 'ローカルで処理' },
+      'de-DE': { label: 'Lokal verarbeiten' },
+      'ko-KR': { label: '로컬에서 처리' },
+    },
+  },
+  {
+    id: 'worktree',
+    label: '新工作树',
+    translations: {
+      'zh-CN': { label: '新工作树' },
+      'en-US': { label: 'New worktree' },
+      'fr-FR': { label: 'Nouveau worktree' },
+      'ru-RU': { label: 'Новое рабочее дерево' },
+      'es-ES': { label: 'Nuevo worktree' },
+      'hi-IN': { label: 'नया worktree' },
+      'ar-SA': { label: 'شجرة عمل جديدة' },
+      'pt-BR': { label: 'Nova worktree' },
+      'ja-JP': { label: '新しいワークツリー' },
+      'de-DE': { label: 'Neuer Worktree' },
+      'ko-KR': { label: '새 워크트리' },
+    },
+  },
+];
+
+/**
  * Default composer settings. Permission/model default to the first option;
  * workspace starts empty — it is chosen via the native folder picker and the
  * dropdown shows the user's previously-selected folders (see workspaceHistory).
@@ -925,6 +968,7 @@ export const defaultComposer: ComposerSettings = {
   permission: permissionOptions[0].id,
   model: modelOptions[0].id,
   cacheTtlMinutes: DEFAULT_CACHE_TTL_MINUTES,
+  startupMode: DEFAULT_STARTUP_MODE,
   workspace: '',
   workspaceFolders: [],
   modelStrategy: 'inherit',
@@ -934,4 +978,14 @@ export const defaultComposer: ComposerSettings = {
   musicModeStartedAt: null,
   threeDMode: false,
   threeDModeStartedAt: null,
+  videoMode: false,
+  videoModeStartedAt: null,
+  speechMode: false,
+  speechModeStartedAt: null,
+  spriteMode: false,
+  spriteModeStartedAt: null,
+  comfyMode: false,
+  comfyModeStartedAt: null,
+  uiMode: false,
+  uiModeStartedAt: null,
 };

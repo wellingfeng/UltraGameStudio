@@ -4,12 +4,15 @@ import {
   MESH_LIBRARIES,
   loadMeshLibrarySettings,
   looksLikeMeshSearchRequest,
+  meshSearchQueryNeedsEnglish,
   meshLibraryReady,
   meshLibraryUsability,
   meshLibraryUsable,
   meshLibrarySearchUrl,
   meshLibraryById,
   normalizeMeshLibrarySettings,
+  normalizeMeshSearchKeywords,
+  resolveMeshSearchQuery,
   saveMeshLibrarySettings,
   searchMeshLibraries,
   stripMeshSearchCommand,
@@ -30,6 +33,71 @@ describe('mesh-search command parsing', () => {
   it('strips the command prefix', () => {
     expect(stripMeshSearchCommand('/mesh-search low poly chest')).toBe('low poly chest');
     expect(stripMeshSearchCommand('/找模型 龙')).toBe('龙');
+  });
+
+  it('allows any non-empty query to be normalized toward English', () => {
+    expect(meshSearchQueryNeedsEnglish('低多边形宝箱')).toBe(true);
+    expect(meshSearchQueryNeedsEnglish('coffre au trésor')).toBe(true);
+    expect(meshSearchQueryNeedsEnglish('low poly chest')).toBe(true);
+    expect(meshSearchQueryNeedsEnglish('   ')).toBe(false);
+  });
+
+  it('normalizes translated keywords for model sites', () => {
+    expect(normalizeMeshSearchKeywords('Find a 3D model of low-polygon bear!')).toBe(
+      'low poly bear',
+    );
+    expect(normalizeMeshSearchKeywords('coffre au trésor')).toBe('coffre au tresor');
+  });
+
+  it('resolves Chinese queries to English search terms', async () => {
+    const resolved = await resolveMeshSearchQuery(
+      '低多边形宝箱',
+      async () => 'low-polygon treasure chest',
+    );
+    expect(resolved).toEqual({
+      sourceQuery: '低多边形宝箱',
+      searchQuery: 'low poly treasure chest',
+      translated: true,
+      translatedQuery: 'low poly treasure chest',
+    });
+  });
+
+  it('resolves other languages to English search terms', async () => {
+    const resolved = await resolveMeshSearchQuery(
+      'coffre au trésor',
+      async () => 'treasure chest',
+    );
+    expect(resolved).toEqual({
+      sourceQuery: 'coffre au trésor',
+      searchQuery: 'treasure chest',
+      translated: true,
+      translatedQuery: 'treasure chest',
+    });
+  });
+
+  it('does not mark already-English queries as translated', async () => {
+    const resolved = await resolveMeshSearchQuery(
+      'low-polygon bear',
+      async () => 'low polygon bear',
+    );
+    expect(resolved).toEqual({
+      sourceQuery: 'low-polygon bear',
+      searchQuery: 'low poly bear',
+      translated: false,
+      translatedQuery: undefined,
+    });
+  });
+
+  it('falls back to the original query if English resolution fails', async () => {
+    const resolved = await resolveMeshSearchQuery('低多边形宝箱', async () => {
+      throw new Error('offline');
+    });
+    expect(resolved).toEqual({
+      sourceQuery: '低多边形宝箱',
+      searchQuery: '低多边形宝箱',
+      translated: false,
+      translationError: 'offline',
+    });
   });
 });
 

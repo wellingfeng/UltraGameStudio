@@ -38,4 +38,16 @@ describe('workspace path identity', () => {
     );
     expect(workspaceLeafName('\\\\server\\share\\')).toBe('share');
   });
+
+  it('passes opaque scheme paths (remote://) through verbatim', () => {
+    // remote workspaces use a synthetic scheme, not a filesystem path; the
+    // scheme separator must survive identity + leaf-name normalization.
+    expect(normalizeWorkspaceIdentityPath('remote://rw_abc123')).toBe(
+      'remote://rw_abc123',
+    );
+    expect(workspaceIdentityHashInput('remote://rw_abc123')).toBe(
+      'remote://rw_abc123',
+    );
+    expect(workspaceLeafName('remote://rw_abc123')).toBe('remote://rw_abc123');
+  });
 });

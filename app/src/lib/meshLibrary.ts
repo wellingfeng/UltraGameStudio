@@ -96,6 +96,16 @@ export interface MeshSearchResult {
   errors: MeshSearchError[];
 }
 
+export interface MeshSearchQueryResolution {
+  sourceQuery: string;
+  searchQuery: string;
+  translated: boolean;
+  translatedQuery?: string;
+  translationError?: string;
+}
+
+export type MeshSearchEnglishTranslator = (query: string) => Promise<string>;
+
 const STORAGE_KEY = 'freeultracode.meshLibrary.v1';
 
 export const MESH_LIBRARY_CATEGORY_LABELS: Record<MeshLibraryCategory, string> = {
@@ -365,6 +375,84 @@ export function looksLikeMeshSearchRequest(text: string): boolean {
   return /^\/(?:mesh-search|model-search|asset-search|搜模型|搜索模型|找模型)(?:\s|$)/iu.test(
     text.trim(),
   );
+}
+
+export function meshSearchQueryNeedsEnglish(query: string): boolean {
+  // Auto-detecting ASCII-only non-English text (for example Spanish without
+  // accents) is unreliable without a language model/API, so /mesh-search lets
+  // the public translator normalize every non-empty query toward English. When
+  // the input is already English, resolveMeshSearchQuery treats the unchanged
+  // translated result as a normal, untranslated search.
+  return query.trim().length > 0;
+}
+
+export function normalizeMeshSearchKeywords(query: string): string {
+  return query
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]+/gu, '')
+    .normalize('NFKC')
+    .replace(/[“”„]/gu, '"')
+    .replace(/[‘’]/gu, "'")
+    .replace(/\b(?:please\s+)?(?:search|find|look\s+for)\b/giu, ' ')
+    .replace(/\b(?:a|an|the)\s+3d\s+models?\s+(?:of|for)\b/giu, ' ')
+    .replace(/\b3d\s+models?\s+(?:of|for)\b/giu, ' ')
+    .replace(/\b3d\s+models?\b/giu, ' ')
+    .replace(/\blow\s*[- ]?\s*polygon(?:al)?\b/giu, 'low poly')
+    .replace(/\blowpoly\b/giu, 'low poly')
+    .replace(/[()[\]{}"<>]+/gu, ' ')
+    .replace(/[，。、“”‘’：；！？,.:;!?]+/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function containsNonAsciiCharacters(text: string): boolean {
+  for (const char of text) {
+    if ((char.codePointAt(0) ?? 0) > 0x7f) return true;
+  }
+  return false;
+}
+
+export async function resolveMeshSearchQuery(
+  query: string,
+  translateToEnglish: MeshSearchEnglishTranslator,
+): Promise<MeshSearchQueryResolution> {
+  const sourceQuery = query.trim();
+  if (!sourceQuery) {
+    return { sourceQuery, searchQuery: '', translated: false };
+  }
+
+  const normalizedSourceQuery =
+    normalizeMeshSearchKeywords(sourceQuery) || sourceQuery;
+
+  try {
+    const translatedQuery = normalizeMeshSearchKeywords(
+      await translateToEnglish(sourceQuery),
+    );
+    if (!translatedQuery || containsNonAsciiCharacters(translatedQuery)) {
+      return {
+        sourceQuery,
+        searchQuery: normalizedSourceQuery,
+        translated: false,
+        translatedQuery: translatedQuery || undefined,
+      };
+    }
+    const sourceKey = normalizedSourceQuery.toLocaleLowerCase();
+    const translatedKey = translatedQuery.toLocaleLowerCase();
+    return {
+      sourceQuery,
+      searchQuery: translatedQuery,
+      translated: translatedKey !== sourceKey,
+      translatedQuery:
+        translatedKey !== sourceKey ? translatedQuery : undefined,
+    };
+  } catch (err) {
+    return {
+      sourceQuery,
+      searchQuery: normalizedSourceQuery,
+      translated: false,
+      translationError: err instanceof Error ? err.message : String(err),
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------

@@ -74,6 +74,7 @@ describe('withAppOnlyStaticEntries', () => {
     expect(names).toContain('/status');
     // App-only feature commands are folded back in.
     expect(names).toContain('/image-mode-start');
+    expect(names).toContain('/sprite-mode-start');
     expect(names).toContain('/screenshot');
   });
 
@@ -104,6 +105,8 @@ describe('project command allowlist', () => {
   it('matches names case-insensitively and trims whitespace', () => {
     expect(isProjectCommandName('/ultracode')).toBe(true);
     expect(isProjectCommandName('  /Deep-Research ')).toBe(true);
+    expect(isProjectCommandName('/sprite-mode-start')).toBe(true);
+    expect(isProjectCommandName('  /SPRITE ')).toBe(true);
     expect(isGameProjectCommandName('/game')).toBe(true);
     expect(isGameProjectCommandName('  /MESH-MODE-START ')).toBe(true);
     expect(isProjectCommandName('/game')).toBe(false);
@@ -130,6 +133,9 @@ describe('project command allowlist', () => {
     const names = projectOnly.map((item) => item.name);
     expect(names).toContain('/ultracode');
     expect(names).toContain('/deep-research');
+    expect(names).toContain('/sprite');
+    expect(names).toContain('/sprite-mode-start');
+    expect(names).toContain('/sprite-mode-end');
     expect(names).not.toContain('/game');
     expect(names).not.toContain('/help');
     expect(names).not.toContain('/review');

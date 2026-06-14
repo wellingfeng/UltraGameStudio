@@ -6,6 +6,7 @@ import {
   imageProviderBaseUrl,
   imageProviderById,
   imageProviderReady,
+  imageProviderSupportsComfyUiGraph,
   looksLikeImageGenerationRequest,
   normalizeImageGenerationSettings,
   preferredReadyImageProviderId,
@@ -17,6 +18,30 @@ afterEach(() => {
 });
 
 describe('image generation settings and routing', () => {
+  it('marks only ComfyUI-deployment channels as node-graph capable', () => {
+    expect(imageProviderSupportsComfyUiGraph('local-comfyui')).toBe(true);
+    // Every other online/aggregator channel only accepts a text prompt.
+    expect(imageProviderSupportsComfyUiGraph('siliconflow')).toBe(false);
+    expect(imageProviderSupportsComfyUiGraph('replicate')).toBe(false);
+    expect(imageProviderSupportsComfyUiGraph('google-gemini-image')).toBe(false);
+    const supported = IMAGE_PROVIDERS.filter((p) =>
+      imageProviderSupportsComfyUiGraph(p.id),
+    );
+    expect(supported.map((p) => p.id)).toEqual(['local-comfyui']);
+  });
+
+  it('exposes the ComfyUI channel with an expanded README-aligned model list', () => {
+    const comfy = imageProviderById('local-comfyui');
+    expect(comfy.models).toEqual(expect.arrayContaining([
+      'flux2',
+      'qwen-image',
+      'hidream',
+      'z-image-turbo',
+      'sd3.5-large',
+    ]));
+    expect(comfy.models.length).toBeGreaterThan(15);
+  });
+
   it('detects explicit image generation requests', () => {
     expect(looksLikeImageGenerationRequest('帮我生成一张赛博朋克头像')).toBe(true);
     expect(looksLikeImageGenerationRequest('/image a minimal app icon')).toBe(true);

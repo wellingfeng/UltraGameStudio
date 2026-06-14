@@ -462,6 +462,7 @@ pre,
 }
 
 .fuc-ai-input--chat {
+  background: color-mix(in oklab, var(--panel-2) 70%, var(--bg));
   border-color: var(--fuc-composer-chat-border);
 }
 
@@ -496,6 +497,33 @@ pre,
 }
 
 .fuc-ai-input--three-d:focus-within {
+  border-color: var(--accent);
+}
+
+.fuc-ai-input--video {
+  background: color-mix(in oklab, var(--accent-2) 7%, var(--bg));
+  border-color: color-mix(in oklab, var(--accent-2) 48%, var(--border));
+}
+
+.fuc-ai-input--video:focus-within {
+  border-color: var(--accent-2);
+}
+
+.fuc-ai-input--sprite {
+  background: color-mix(in oklab, var(--status-running) 8%, var(--bg));
+  border-color: color-mix(in oklab, var(--status-running) 48%, var(--border));
+}
+
+.fuc-ai-input--sprite:focus-within {
+  border-color: var(--status-running);
+}
+
+.fuc-ai-input--speech {
+  background: color-mix(in oklab, var(--accent) 7%, var(--bg));
+  border-color: color-mix(in oklab, var(--accent) 48%, var(--border));
+}
+
+.fuc-ai-input--speech:focus-within {
   border-color: var(--accent);
 }
 

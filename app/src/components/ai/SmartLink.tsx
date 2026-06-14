@@ -4,6 +4,7 @@ import { openExternal } from '@/lib/tauri';
 import { parseFileRef } from './lib/filePath';
 import FileChip, { type OpenFileFn } from './FileChip';
 import AudioPlayer from './AudioPlayer';
+import VideoPlayer from './VideoPlayer';
 import ModelViewer from './ModelViewer';
 import { canPreviewModelUrl, isModelUrl } from './lib/modelLink';
 
@@ -31,6 +32,9 @@ export default function SmartLink({
   const isAudioUrl =
     /^data:audio\//i.test(url) ||
     /^https?:\/\/.+\.(?:mp3|wav|m4a|aac|ogg|flac|webm)(?:[?#].*)?$/i.test(url);
+  const isVideoUrl =
+    /^data:video\//i.test(url) ||
+    /^https?:\/\/.+\.(?:mp4|mov|m4v|webm|mkv|avi)(?:[?#].*)?$/i.test(url);
   const isWebUrl = /^https?:/i.test(url);
   const hasExplicitNonModelMediaExt =
     /\.(?:png|apng|jpe?g|jpe|jfif|pjpeg|pjp|gif|webp|bmp|svg|avif|ico|mp4|mov|webm|mp3|wav|m4a|aac|ogg|flac)(?:[?#].*)?$/i.test(
@@ -40,7 +44,7 @@ export default function SmartLink({
     isModelUrl(url) ||
     (isWebUrl &&
       !hasExplicitNonModelMediaExt &&
-      /(?:3d\s*模型|3d model|mesh|glb|gltf|obj|fbx|stl|ply)/i.test(labelText));
+      hasExplicitModelPreviewLabel(labelText));
   const isExternal = /^(https?:|mailto:)/i.test(url);
   const ref = parseFileRef(url, { allowSpaces: true });
 
@@ -56,6 +60,10 @@ export default function SmartLink({
   }
 
   if (ref) return <FileChip refData={ref} onOpenFile={onOpenFile} cwd={cwd} />;
+
+  if (isVideoUrl) {
+    return <VideoPlayer src={url} label={labelText} />;
+  }
 
   if (isAudioUrl) {
     return <AudioPlayer src={url} label={labelText} />;
@@ -101,4 +109,17 @@ function childrenToText(children: ReactNode): string {
     return childrenToText((children.props as { children?: ReactNode }).children);
   }
   return '';
+}
+
+function hasExplicitModelPreviewLabel(text: string): boolean {
+  const value = text.trim();
+  if (!value || /^https?:\/\//i.test(value)) return false;
+  return (
+    /(?:预览|查看|打开|下载)(?:\s*\/\s*(?:预览|下载))?\s*(?:3d|三维)\s*(?:模型|资产)/iu.test(
+      value,
+    ) ||
+    /\b(?:preview|view|open|download)(?:\s*\/\s*(?:preview|download))?\s*(?:3d|three[-\s]?d)\s*(?:model|asset)\b/iu.test(
+      value,
+    )
+  );
 }

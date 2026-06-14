@@ -1,5 +1,11 @@
 import type { IRGraph } from '@/core/ir';
 import { runShellPayload } from '@/lib/shellConfig';
+import {
+  markDownloadDone,
+  markDownloadFailed,
+  registerAsset,
+  startDownload,
+} from '@/lib/downloadRegistry';
 
 /**
  * CONTRACT: thin, browser-safe bridge to the Tauri Rust backend.
@@ -168,6 +174,17 @@ export interface WorkspaceDirectoryListing {
   entries: WorkspaceTreeEntry[];
   truncated: boolean;
   totalEntries: number;
+}
+
+/**
+ * Result of preparing an isolated working directory for a "worktree"-mode
+ * session. `kind` is 'worktree' for git repos (a fresh branch under .worktree/)
+ * or 'copy' for non-git folders (a lean recursive copy under the global tmp).
+ */
+export interface IsolatedWorkspace {
+  path: string;
+  kind: 'worktree' | 'copy';
+  branch?: string | null;
 }
 
 export type ProjectEngineKind = 'unreal' | 'unity' | 'godot' | 'unknown';
@@ -368,6 +385,13 @@ export interface ModelAssetDownload {
   path: string;
   mime: string;
   sizeBytes: number;
+}
+
+/** Result of persisting a model-generated asset into the workspace cache. */
+export interface GeneratedAssetSave {
+  path: string;
+  sizeBytes: number;
+  fileName: string;
 }
 
 export interface ClipboardImageSaveRequest {
@@ -919,6 +943,38 @@ export async function setupLocalModel(model: string): Promise<void> {
   await invoke('setup_local_model', { model });
 }
 
+/** Known ComfyUI one-click model profiles (must match the installer script + Rust validator). */
+export type ComfyUiSetupModel = 'sd1.5' | 'sdxl-turbo' | 'flux-schnell';
+
+/**
+ * Kick off the one-click ComfyUI install: downloads the official Windows
+ * portable runtime, extracts it, optionally pulls a default checkpoint, and
+ * launches the server on 127.0.0.1:8188. Windows desktop only.
+ */
+export async function setupComfyui(
+  model?: ComfyUiSetupModel,
+  skipModel = false,
+): Promise<void> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  await invoke('setup_comfyui', { model: model ?? null, skipModel });
+  // The installer runs fire-and-forget in a terminal and launches the server on
+  // 127.0.0.1:8188, so there is no on-disk path to track. Surface it in the
+  // Asset Hub as an installed local tool with its server endpoint as "source".
+  registerAsset({
+    kind: 'plugin',
+    source: 'installed',
+    origin: 'local',
+    title: model ? `ComfyUI · ${model}` : 'ComfyUI',
+    status: 'success',
+    remoteUrl: 'http://127.0.0.1:8188',
+    provider: 'ComfyUI',
+    meta: { model: model ?? null, skipModel },
+  });
+}
+
 /** Open an external URL via the OS default browser (web: new tab). */
 export async function openExternal(url: string): Promise<void> {
   if (!tauriAvailable()) {
@@ -1000,6 +1056,26 @@ export async function listWorkspaceDirectory(
   });
 }
 
+/**
+ * Prepare an isolated working directory for a session started in "worktree"
+ * mode. Git repos get a real `git worktree` on a fresh branch; other folders
+ * get a lean recursive copy. Returns the path the CLI should use as its cwd.
+ * Throws NO_BACKEND on web so callers can fall back to the original workspace.
+ */
+export async function prepareIsolatedWorkspace(
+  rootPath: string,
+  sessionId: string,
+): Promise<IsolatedWorkspace> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  return invoke<IsolatedWorkspace>('prepare_isolated_workspace', {
+    rootPath,
+    sessionId,
+  });
+}
+
 /** Detect game-engine project metadata and project-local skill roots. */
 export async function scanProjectEnvironment(
   rootPath: string,
@@ -1045,7 +1121,26 @@ export async function installProjectLspServer(
     throw new Error('NO_BACKEND');
   }
   const invoke = await getInvoke();
-  return invoke<ProjectLspInstallResult>('project_lsp_install', { request });
+  const result = await invoke<ProjectLspInstallResult>('project_lsp_install', {
+    request,
+  });
+  // Record successful LSP installs in the Asset Hub as installed plugins.
+  if (result.ok) {
+    registerAsset({
+      kind: 'plugin',
+      source: 'installed',
+      origin: 'local',
+      title: `LSP · ${result.serverId}`,
+      status: 'success',
+      provider: result.serverId,
+      meta: {
+        status: result.status,
+        commandLine: result.commandLine ?? undefined,
+        platform: result.platform,
+      },
+    });
+  }
+  return result;
 }
 
 /**
@@ -1058,7 +1153,23 @@ export async function ueMcpEnsureBinary(): Promise<UeMcpBinaryStatus> {
     throw new Error('NO_BACKEND');
   }
   const invoke = await getInvoke();
-  return invoke<UeMcpBinaryStatus>('ue_mcp_ensure_binary');
+  const status = await invoke<UeMcpBinaryStatus>('ue_mcp_ensure_binary');
+  // Surface freshly downloaded MCP binaries in the Asset Hub. Already-cached
+  // binaries (downloaded === false) are not re-registered to avoid duplicates.
+  if (status.available && status.downloaded) {
+    registerAsset({
+      kind: 'mcp',
+      source: 'installed',
+      origin: 'local',
+      title: `${status.serverId} ${status.version}`.trim(),
+      status: 'success',
+      localPath: status.path,
+      provider: status.serverId,
+      remoteUrl: status.source || undefined,
+      meta: { sha256: status.sha256, version: status.version },
+    });
+  }
+  return status;
 }
 
 /**
@@ -1288,10 +1399,56 @@ export async function downloadModelAsset(
     throw new Error('NO_BACKEND');
   }
   const invoke = await getInvoke();
-  return invoke<ModelAssetDownload>('download_model_asset', {
+  // Surface the transfer in the Downloads panel. Tracking is best-effort and
+  // must never change the function's success/failure contract.
+  const trackId = startDownload({
     url,
-    cwd: opts?.cwd ?? null,
-    fileName: opts?.fileName ?? null,
+    fileName: opts?.fileName,
+    kind: 'model',
+  });
+  try {
+    const result = await invoke<ModelAssetDownload>('download_model_asset', {
+      url,
+      cwd: opts?.cwd ?? null,
+      fileName: opts?.fileName ?? null,
+    });
+    markDownloadDone(trackId, {
+      path: result.path,
+      sizeBytes: result.sizeBytes,
+    });
+    return result;
+  } catch (err) {
+    markDownloadFailed(
+      trackId,
+      err instanceof Error ? err.message : String(err),
+    );
+    throw err;
+  }
+}
+
+/**
+ * Persist a model-generated asset (base64 bytes) into the workspace asset
+ * cache and return its local path. Asset-Hub callers use this so generated
+ * media (image/video/audio/sprite/mesh) survives a reload instead of living
+ * only as an in-memory data URL.
+ */
+export async function saveGeneratedAsset(params: {
+  bytesBase64: string;
+  mime: string;
+  kind: string;
+  fileName?: string;
+  cwd?: string;
+}): Promise<GeneratedAssetSave> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  return invoke<GeneratedAssetSave>('save_generated_asset', {
+    bytesBase64: params.bytesBase64,
+    mime: params.mime,
+    kind: params.kind,
+    fileName: params.fileName ?? null,
+    cwd: params.cwd ?? null,
   });
 }
 
@@ -1427,7 +1584,7 @@ export async function installSkillFromUrl(params: {
     throw new Error('NO_BACKEND');
   }
   const invoke = await getInvoke();
-  return invoke<InstalledSkill>('install_skill_from_url', {
+  const installed = await invoke<InstalledSkill>('install_skill_from_url', {
     url: params.url,
     name: params.name,
     slug: params.slug,
@@ -1436,6 +1593,17 @@ export async function installSkillFromUrl(params: {
     sourceUrl: params.sourceUrl ?? null,
     projectRoot: params.projectRoot ?? null,
   });
+  registerAsset({
+    kind: 'skill',
+    source: 'installed',
+    origin: 'local',
+    title: installed.name || installed.slug,
+    status: 'success',
+    localPath: installed.skillFile || installed.path,
+    remoteUrl: installed.sourceUrl ?? params.sourceUrl ?? params.url,
+    meta: { targetId: installed.targetId, slug: installed.slug },
+  });
+  return installed;
 }
 
 /** Scan PATH for supported local model CLIs. Desktop-only. */

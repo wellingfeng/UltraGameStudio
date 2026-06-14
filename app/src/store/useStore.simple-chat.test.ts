@@ -65,7 +65,11 @@ vi.mock('@/lib/sessionNotification', async () => {
 });
 
 import { useStore } from './useStore';
-import { isActiveAiEditingSession, isWorkflowReadOnly } from './useStore';
+import {
+  isActiveAiEditingSession,
+  isWorkflowReadOnly,
+  __resetSimpleChatRuntimeForTests,
+} from './useStore';
 import { historyStore } from './history/store';
 import type { Message, Session } from './types';
 
@@ -154,6 +158,7 @@ async function waitFor(
 }
 
 afterEach(async () => {
+  __resetSimpleChatRuntimeForTests();
   gatewayMocks.completeGatewayText.mockReset();
   gatewayMocks.resolveDirectGatewayRoute.mockReset();
   gatewayMocks.resolveCliGatewayRoute.mockReset();
@@ -995,6 +1000,45 @@ describe('simple-workflow chat mode', () => {
     ]);
   });
 
+  it('keeps a localOnly translation note out of the next turn transcript', async () => {
+    resetStore(simpleBlueprint('Simple chat'));
+    mockDirectRoute();
+    const userContents: string[] = [];
+    gatewayMocks.completeGatewayText.mockImplementation(async (request) => {
+      userContents.push(String(request.userContent));
+      return userContents.length === 1
+        ? 'Run <invoke name="Bash"></invoke> now.'
+        : '已完成。';
+    });
+
+    useStore.getState().sendPrompt('帮我跑一下脚本');
+    await waitFor(
+      () => !useStore.getState().aiStreaming && userContents.length === 1,
+      'the first answer',
+    );
+
+    // Simulate the "🌐 翻译为 简体中文" on-demand translation, whose translated
+    // text mangles the tool-call markup. Marked localOnly so it must not leak
+    // into the model transcript on the next turn.
+    useStore
+      .getState()
+      .appendChatNote('🌐 翻译为 简体中文\n\n运行 <调用名称="Bash"></调用> 吧。', 'assistant', {
+        localOnly: true,
+      });
+
+    useStore.getState().sendPrompt('继续');
+    await waitFor(
+      () => !useStore.getState().aiStreaming && userContents.length === 2,
+      'the second answer',
+    );
+
+    // The real assistant answer is folded in; the translation note is not.
+    expect(userContents[1]).toContain('之前的对话');
+    expect(userContents[1]).toContain('Run <invoke name="Bash"></invoke> now.');
+    expect(userContents[1]).not.toContain('翻译为 简体中文');
+    expect(userContents[1]).not.toContain('调用名称');
+  });
+
   it('reruns a favorited simple chat with a fresh direct context', async () => {
     resetStore(simpleBlueprint('Reusable chat'));
     useStore.setState({
@@ -1155,6 +1199,94 @@ describe('simple-workflow chat mode', () => {
     expect(calls[3].prompt).toContain('换个模型后还能接上文吗？');
     expect(calls[3].prompt).toContain('切换模型后的回答。');
     expect(calls[3].prompt).toContain('再切回原模型呢？');
+  });
+
+  it('starts a fresh native Claude CLI session when the resume target is missing', async () => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({
+      workspaceId: workspace.id,
+      isWorkflow: false,
+      messages: [],
+      title: 'Chat',
+    });
+    resetStore(simpleBlueprint('Chat'));
+    const session = {
+      id: record.id,
+      workspaceId: workspace.id,
+      title: record.title,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      isWorkflow: false,
+      messageCount: 0,
+    };
+    useStore.setState({
+      historyReady: true,
+      activeWorkspaceId: workspace.id,
+      activeSessionId: record.id,
+      workspaces: [workspace],
+      sessions: [session],
+      sessionTree: { [workspace.id]: [session] },
+      locale: 'zh-CN',
+    });
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockImplementation(async (selection) => ({
+      selection,
+      adapter: 'claude-code',
+      modelClass: selection.modelClass,
+      model: selection.modelClass,
+      transport: 'cli',
+      mode: 'cli',
+      label: 'Claude Code',
+      source: 'global',
+      cliCommand: 'claude',
+    }));
+    const calls: Array<{
+      prompt: string;
+      opts: { sessionId?: string; resume?: boolean };
+    }> = [];
+    tauriMocks.aiEditViaCli.mockImplementation(async (prompt, _adapter, opts) => {
+      calls.push({ prompt, opts });
+      if (calls.length === 1) return '第一轮回答。';
+      if (calls.length === 2) {
+        throw new Error(
+          `CLI "claude" 退出码 1: No conversation found with session ID: ${opts.sessionId}`,
+        );
+      }
+      return '恢复后的回答。';
+    });
+
+    useStore.getState().sendPrompt('第一轮问题');
+    await waitFor(
+      () => !useStore.getState().aiStreaming && calls.length === 1,
+      'first successful CLI chat call',
+    );
+
+    useStore.getState().sendPrompt('第二轮问题');
+    await waitFor(
+      () => !useStore.getState().aiStreaming && calls.length === 3,
+      'missing-session fallback CLI chat call',
+    );
+
+    expect(calls[1].opts.sessionId).toBe(calls[0].opts.sessionId);
+    expect(calls[1].opts.resume).toBe(true);
+    expect(calls[2].opts.sessionId).toEqual(expect.any(String));
+    expect(calls[2].opts.sessionId).not.toBe(calls[0].opts.sessionId);
+    expect(calls[2].opts.resume).toBe(false);
+    expect(calls[2].prompt).toContain('之前的对话');
+    expect(calls[2].prompt).toContain('第一轮问题');
+    expect(calls[2].prompt).toContain('第一轮回答。');
+    expect(calls[2].prompt).toContain('第二轮问题');
+    expect(
+      useStore
+        .getState()
+        .messages.some(
+          (m) => m.role === 'assistant' && m.text.includes('恢复后的回答。'),
+        ),
+    ).toBe(true);
   });
 
   it('mints a fresh native session id when a failed CLI chat is retried', async () => {
@@ -1408,40 +1540,48 @@ describe('simple-workflow chat mode', () => {
     expect(useStore.getState().chattingSessions.length).toBe(0);
   });
 
-  it('keeps both replies when a second chat message finishes before the first', async () => {
+  it('queues an interjection behind the in-flight turn and merges it into the running chat', async () => {
     resetStore(simpleBlueprint('Simple chat'));
     mockDirectRoute();
     const resolvers: Array<(value: string) => void> = [];
+    const userContents: string[] = [];
     gatewayMocks.completeGatewayText.mockImplementation(
-      async () => new Promise<string>((resolve) => resolvers.push(resolve)),
+      async (request) =>
+        new Promise<string>((resolve) => {
+          userContents.push(String(request.userContent));
+          resolvers.push(resolve);
+        }),
     );
 
     useStore.getState().sendPrompt('问题一');
     await waitFor(() => resolvers.length === 1, 'first chat call');
 
-    // Second send must NOT be rejected by the read-only gate.
+    // Interjection: a follow-up sent mid-stream is accepted immediately (not
+    // blocked by the read-only gate) but must NOT fire a second concurrent
+    // model call — it queues behind the in-flight turn.
     useStore.getState().sendPrompt('问题二');
-    await waitFor(() => resolvers.length === 2, 'second chat call (not blocked)');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(gatewayMocks.completeGatewayText).toHaveBeenCalledTimes(1);
+    // Both user messages are already in the transcript while the queue drains.
+    expect(
+      useStore
+        .getState()
+        .messages.filter((m) => m.role === 'user')
+        .map((m) => m.text),
+    ).toEqual(['问题一', '问题二']);
 
+    // Finish the first turn; only then does the queued interjection run.
+    resolvers[0]('答一');
+    await waitFor(() => resolvers.length === 2, 'queued interjection runs after first');
     expect(gatewayMocks.completeGatewayText).toHaveBeenCalledTimes(2);
 
     resolvers[1]('答二');
     await waitFor(
       () =>
-        useStore
-          .getState()
-          .messages.some((m) => m.role === 'assistant' && m.text.includes('答二')),
-      'second chat reply',
-    );
-    expect(useStore.getState().aiStreaming).toBe(true);
-
-    resolvers[0]('答一');
-    await waitFor(
-      () =>
         !useStore.getState().aiStreaming &&
         useStore
           .getState()
-          .messages.some((m) => m.role === 'assistant' && m.text.includes('答一')),
+          .messages.some((m) => m.role === 'assistant' && m.text.includes('答二')),
       'all chat turns to finish',
     );
 
@@ -1452,6 +1592,12 @@ describe('simple-workflow chat mode', () => {
       .join('\n');
     expect(assistantText).toContain('答一');
     expect(assistantText).toContain('答二');
+    // The interjection saw the FIRST turn's real answer folded into context —
+    // not the "⟳ 生成中…" placeholder that was live when it was typed.
+    expect(userContents[1]).toContain('之前的对话');
+    expect(userContents[1]).toContain('问题一');
+    expect(userContents[1]).toContain('答一');
+    expect(userContents[1]).not.toContain('⟳');
     expect(useStore.getState().workflow.nodes[0].params.userInputs).toEqual([
       '问题一',
       '问题二',
@@ -1468,21 +1614,18 @@ describe('simple-workflow chat mode', () => {
 
     useStore.getState().sendPrompt('问题一');
     await waitFor(() => resolvers.length === 1, 'first chat call');
+    // Interjection queues behind the first turn; it only fires once the first
+    // turn finishes, so the queue is never empty in between.
     useStore.getState().sendPrompt('问题二');
-    await waitFor(() => resolvers.length === 2, 'second chat call');
 
-    resolvers[1]('答二');
-    await waitFor(
-      () =>
-        useStore
-          .getState()
-          .messages.some((m) => m.role === 'assistant' && m.text.includes('答二')),
-      'second chat reply',
-    );
+    // Finishing the first turn must NOT notify completion — the queued
+    // interjection is still pending for the same session.
+    resolvers[0]('答一');
+    await waitFor(() => resolvers.length === 2, 'queued interjection runs');
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(notificationMocks.notifySessionComplete).not.toHaveBeenCalled();
 
-    resolvers[0]('答一');
+    resolvers[1]('答二');
     await waitFor(
       () => !useStore.getState().aiStreaming,
       'all chat turns to finish',

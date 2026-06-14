@@ -140,6 +140,17 @@ function joinParsedPosixPath(parsed: ParsedPosixPath): string {
   return tail;
 }
 
+/**
+ * Opaque (non-filesystem) workspace identifiers such as `remote://<id>` must
+ * survive identity/name normalization verbatim — they are not real paths and
+ * the POSIX/Windows parsers would corrupt the scheme separator. Returns the
+ * trimmed value when the input uses such a scheme, otherwise ''.
+ */
+function opaqueSchemePath(input: string): string {
+  const trimmed = input.trim();
+  return /^[a-z][a-z0-9+.-]*:\/\//iu.test(trimmed) ? trimmed : '';
+}
+
 function parseWorkspacePath(input: string): ParsedWorkspacePath {
   const trimmed = input.trim();
   if (
@@ -255,10 +266,14 @@ export async function sha1Hex(input: string): Promise<string> {
 }
 
 export function normalizeWorkspaceIdentityPath(input: string): string {
+  const opaque = opaqueSchemePath(input);
+  if (opaque) return opaque;
   return joinParsedWorkspacePath(parseWorkspacePath(input));
 }
 
 export function workspaceIdentityHashInput(input: string): string {
+  const opaque = opaqueSchemePath(input);
+  if (opaque) return opaque;
   const parsed = parseWorkspacePath(input);
   const normalized = joinParsedWorkspacePath(parsed);
   return parsed.family === 'windows'
@@ -324,6 +339,8 @@ export function isMigrationSessionId(value: string): boolean {
 }
 
 export function workspaceLeafName(input: string): string {
+  const opaque = opaqueSchemePath(input);
+  if (opaque) return opaque;
   const parsed = parseWorkspacePath(input);
   const lastSegment = parsed.segments[parsed.segments.length - 1];
   if (lastSegment) return lastSegment;

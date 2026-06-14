@@ -5,6 +5,7 @@ export type StatusTone =
   | 'thinking'
   | 'unrun'
   | 'running'
+  | 'waiting'
   | 'success'
   | 'failed';
 
@@ -22,6 +23,7 @@ const TONE_STYLE: Record<StatusTone, CSSProperties> = {
   thinking: statusColorStyle('var(--status-ai-edit)'),
   unrun: statusColorStyle('var(--status-ai-edit)'),
   running: statusColorStyle('var(--status-success)'),
+  waiting: statusColorStyle('var(--status-running)'),
   success: statusColorStyle('var(--status-success)'),
   failed: statusColorStyle('var(--status-error)'),
 };

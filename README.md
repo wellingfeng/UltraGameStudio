@@ -4,12 +4,16 @@
 
 <h1 align="center">FreeUltraCode</h1>
 
-<h3 align="center">Run coding agents without burning premium quota.</h3>
+<h3 align="center">The AI coding agent built for game development.</h3>
 
 <p align="center">
-  FreeUltraCode gives developers one local chat surface for Claude Code, Codex,
-  Gemini, free provider channels, and local models. Use the expensive models
-  when they matter. Send the routine work somewhere cheaper.
+  In a game engine, code is only a small part of the work. The rest is assets and
+  pipeline — materials, blueprints, terrain, sky, UI, skeletal animation, packaging,
+  performance. FreeUltraCode is a Claude Code / Codex / Gemini style agent rebuilt
+  around that reality: it understands game-engine concepts, generates the full range
+  of game assets (images, 3D models, 2D sprite animation, atlases, audio, rigging,
+  video), and routes routine work through free or low-cost channels so premium quota
+  goes where it matters.
 </p>
 
 <p align="center">
@@ -41,7 +45,7 @@
 </p>
 
 <p align="center">
-  <a href="app/package.json"><img src="https://img.shields.io/badge/version-0.2.8-2F6FED?style=flat-square&labelColor=161b22" alt="version 0.2.8"></a>
+  <a href="app/package.json"><img src="https://img.shields.io/badge/version-0.3.7-2F6FED?style=flat-square&labelColor=161b22" alt="version 0.3.7"></a>
   <a href="app/src-tauri/tauri.conf.json"><img src="https://img.shields.io/badge/Tauri-2.11-24C8DB?style=flat-square&labelColor=161b22&logo=tauri&logoColor=white" alt="Tauri 2.11"></a>
   <a href="app/package.json"><img src="https://img.shields.io/badge/React-18-61DAFB?style=flat-square&labelColor=161b22&logo=react&logoColor=white" alt="React 18"></a>
   <a href="app/package.json"><img src="https://img.shields.io/badge/TypeScript-5.6-3178C6?style=flat-square&labelColor=161b22&logo=typescript&logoColor=white" alt="TypeScript 5.6"></a>
@@ -60,13 +64,25 @@
 </table>
 
 <p align="center">
-  <strong>Free channel routing</strong><br>
-  <img src="app/doc/images/hero-free-channels.png" alt="FreeUltraCode free channel routing screenshot" width="960">
+  <strong>One-click Unreal Engine UMG interface</strong><br>
+  <img src="app/doc/images/game/JMsXEKE.png" alt="FreeUltraCode generates an Unreal Engine UMG interface in one click" width="960">
 </p>
 
 <p align="center">
-  <strong>Image generation and coding in one session</strong><br>
-  <img src="app/doc/images/生图/session-2026-06-07-2351.png" alt="FreeUltraCode switches from image generation to coding in one chat session" width="720">
+  <strong>One-click 3D model generation</strong><br>
+  <img src="app/doc/images/game/noYfqPt.png" alt="FreeUltraCode generates a 3D model in one click" width="960">
+</p>
+
+<p align="center">
+  <strong>Image, sprite, mesh, audio, rigging, and video — all managed through one coding agent</strong><br>
+  <img src="app/doc/images/game/gmclmLS.png" alt="FreeUltraCode unified game asset generation" width="960">
+  <br><br>
+  <img src="app/doc/images/game/jXgMffC.png" alt="FreeUltraCode game asset workflow" width="960">
+</p>
+
+<p align="center">
+  <strong>Game-asset generation in the same session as your code</strong><br>
+  <img src="app/doc/images/生图/session-2026-06-07-2351.png" alt="FreeUltraCode generates an asset, then switches back to coding in one chat session" width="720">
 </p>
 
 > [!IMPORTANT]
@@ -74,37 +90,65 @@
 
 ## Why FreeUltraCode
 
-Coding agents are useful, but premium model quota can disappear quickly. FreeUltraCode focuses on a simpler path: keep the chat experience local, then make it easy to route requests through cheaper channels when they are good enough.
+AI is now good enough to write most of the code on its own. In practice the programmer's role is shifting toward describing intent, verifying output, and orchestrating agents. But a game is not just code. A game engine is full of materials, blueprints, terrain, sky, UI, skeletal animation, packaging, and performance tuning — and most general coding agents have no idea what any of that means.
 
-- Use free, trial-credit, or low-cost channels such as GitHub Models, Hugging Face Router, SambaNova Cloud, Together AI, Gemini, DeepSeek, Kimi, Groq, OpenRouter, NVIDIA NIM, Z.ai, Kilo, LLM7, Ollama, LM Studio, and llama.cpp.
-- Keep API keys and provider settings on your machine.
-- Switch runtime, channel, permission mode, and workspace directly from the chat composer.
-- Preserve chat history, favorites, scheduled prompts, and workspace context locally.
-- Use local models with zero API keys when your hardware supports them.
+FreeUltraCode takes a Claude Code / Codex / Gemini style agent and customizes it deeply for game development:
+
+- **Speaks game-engine language.** The agent is primed with game-development concepts so it can reason about materials, blueprints, terrain, lighting, UI (UMG and others), skeletal animation, build/packaging, and performance optimization — not just generic source files.
+- **Generates every asset type a game needs.** Images, 3D models, 2D sprite animation, sprite atlases, audio, skeletal rigging, and video are all produced from the same chat surface and managed through one coding-agent workflow.
+- **Built-in game-dev expert roster.** 40+ specialist roles (technical director, gameplay/AI/network/tools programmer, level/economy designer, art and audio directors, QA, release manager, and more) span Unity, Unreal, Godot, and Web engines.
+- **Keeps premium quota for what matters.** Route routine work through free, trial-credit, or low-cost channels, and keep keys, settings, and history local.
 
 ## What It Can Do
 
-### Coding Chat
+### Game-Dev Coding Chat
 
-- Ask for code edits, bug investigation, refactor help, tests, release notes, or documentation.
+- Ask for gameplay code, engine integration, shader/material logic, build scripts, bug investigation, refactors, tests, and release notes.
+- Work against Unity, Unreal, Godot, or Web engine projects — the agent reasons about engine concepts, not just files.
 - Attach file paths or drag files into the composer.
 - Review streamed assistant output, command logs, file references, and generated summaries in one chat surface.
 - Continue with follow-up requests in the same session.
 
-### Image Generation + Coding
+### Game Asset Generation
 
-- Use an image-generation model and a programming model inside the same local conversation.
-- Enter image mode when you need visual assets, icons, or design references, then switch back to the coding model to apply those assets to the app.
-- Keep the generated image, implementation request, command log, and final code changes in one session history.
+Every asset type a game needs can be generated from the same chat surface and applied to your project, then handed back to the coding model — all in one session history. Each generator runs through your configured provider.
+
+| Asset | What it makes | Enter mode |
+| --- | --- | --- |
+| Images | Concept art, UI mockups, icons, posters, textures, references | `/image`, `/img`, `/draw`, `/生图`, or `/image-mode-start` |
+| ComfyUI graphs | Node-based, editable image pipelines | `/comfyui-mode-start` |
+| 2D sprites | Game sprites, sequence frames, spritesheets | `/sprite` or `/sprite-mode-start` |
+| 3D models | Props, characters, scene meshes, blockouts | `/mesh-mode-start` (search the library with `/mesh-search`) |
+| Music | BGM, score, music clips | `/music` or `/music-mode-start` |
+| Speech | Voice lines and narration | `/speech-mode-start` |
+| Video | Video clips and motion assets | `/video` or `/video-mode-start` |
+
+The agent first polishes your prompt, sends it to the configured provider, and shows the result in the chat stream with the prompt and provider details. Leave any mode with its matching `*-mode-end` command.
+
+### Game-Dev Expert Roster
+
+FreeUltraCode ships a roster of 40+ game-development specialists that the agent can draw on automatically based on the task:
+
+- **Engine specialists** for Unity, Unreal, Godot (GDScript / C# / GDExtension / shaders), and Web.
+- **Programming** roles: technical director, lead/engine/gameplay/AI/network/tools/UI programmers.
+- **Design** roles: game, level, economy, live-ops, and narrative designers.
+- **Art & audio** directors and specialists, VFX, sound design, and audio direction.
+- **Production, quality, and release**: producer, QA lead/tester, devops, security, localization, and release manager.
+
+Configure the active engine, council mode, and which experts are enabled in **Settings**.
 
 ### Free-Model Routing
 
-- **20+ remote channels plus local runtimes**: NVIDIA NIM, OpenRouter, GitHub Models, Hugging Face Router, SambaNova Cloud, Together AI, Google Gemini, DeepSeek, Mistral, Mistral Codestral, OpenCode, Wafer, Kimi, Cerebras, Groq, Fireworks, Z.ai, LLM7, Kilo Gateway, plus local runtimes such as Ollama, LM Studio, and llama.cpp.
-- **Keyless experimental routes**: LLM7 and Kilo Gateway can be tried without an API key, but should only be used for non-sensitive coding prompts.
+- **20+ remote channels plus local runtimes**: NVIDIA NIM, OpenRouter, GitHub Models, Hugging Face Router, SambaNova Cloud, Together AI, Google Gemini, DeepSeek, Mistral, Mistral Codestral, OpenCode, Wafer, Kimi, Cerebras, Groq, Fireworks, Z.ai, LLM7, Kilo Gateway, plus local runtimes such as Ollama, LM Studio, and llama.cpp.- **Keyless experimental routes**: LLM7 and Kilo Gateway can be tried without an API key, but should only be used for non-sensitive coding prompts.
 - **Official free/trial-credit routes**: GitHub Models, Hugging Face Router, SambaNova Cloud, Together AI, Gemini, Groq, Cerebras, NVIDIA NIM, OpenRouter, Mistral/Codestral, DeepSeek, Kimi, Z.ai, OpenCode, Wafer, and Fireworks use provider keys kept locally in the app.
 - Local Rust proxy translates between Anthropic and OpenAI-compatible protocols.
 - Claude Code can route through configured free channels without changing the chat UI.
 - Provider keys, model overrides, and local model settings are managed from the app settings.
+
+<p align="center">
+  <strong>Free channel routing</strong><br>
+  <img src="app/doc/images/hero-free-channels.png" alt="FreeUltraCode free channel routing screenshot" width="960">
+</p>
 
 Current default coding-oriented models:
 
@@ -232,20 +276,20 @@ build.bat       # Windows: package the NSIS installer
 
 After the channel is ready, use the bottom input to chat through that route. See the [free channel registration guide](app/doc/register-free-channel.md) for the full Chinese walkthrough.
 
-### Use Image Mode
+### Generate Game Assets
 
-Image mode turns the chat composer into a text-to-image surface while keeping the same session history. It is useful for generating UI assets, icons, posters, design references, and then switching back to coding in the same conversation.
+Asset modes turn the chat composer into an asset-generation surface while keeping the same session history. They are useful for producing UI mockups, icons, textures, sprites, 3D models, audio, and video, then switching back to coding in the same conversation. Image mode is the example below; sprite, mesh, music, speech, and video modes work the same way with their own `*-mode-start` commands.
 
-1. Open **Settings** -> **Images**, choose a default image provider, and fill in the required API key, account ID, base URL, or local ComfyUI endpoint. Providers with complete configuration are available from the composer in image mode.
+1. Open **Settings** -> **Images** (or the matching asset section), choose a default provider, and fill in the required API key, account ID, base URL, or local ComfyUI endpoint. Providers with complete configuration are available from the composer in that mode.
 2. Start a chat session and type `/image-mode-start`. You can also start and generate in one message, for example:
 
    ```text
-   /image-mode-start a clean app icon for a local coding agent, glass effect, 1024x1024
+   /image-mode-start a stylized stone-wall texture for a fantasy dungeon, tileable, 1024x1024
    ```
 
-3. While image mode is on, ordinary messages generate images instead of running coding edits. The bottom **Channel** selector switches to image providers, and the model selector appears when image model selection is enabled.
-4. Describe the image you want. FreeUltraCode first asks the coding model to polish the image prompt, then sends it to the configured image provider. The generated image appears in the chat stream with the prompt and provider details.
-5. Send `/image-mode-end` to return to the normal coding channel and model. If you only need one image without staying in image mode, send `/image`, `/img`, `/draw`, `/生图`, or `/画图` followed by the prompt.
+3. While the mode is on, ordinary messages generate assets instead of running coding edits. The bottom **Channel** selector switches to asset providers, and the model selector appears when model selection is enabled.
+4. Describe the asset you want. FreeUltraCode first asks the coding model to polish the prompt, then sends it to the configured provider. The result appears in the chat stream with the prompt and provider details.
+5. Send `/image-mode-end` to return to the normal coding channel and model. If you only need one asset without staying in a mode, send a one-shot command such as `/image`, `/img`, `/draw`, `/生图`, `/sprite`, `/music`, or `/video` followed by the prompt.
 
 ## How It Works
 
@@ -287,7 +331,9 @@ Free-channel proxy:
 app/
   src/
     components/  Shared UI and rich assistant-message rendering
-    lib/         Provider settings, free-channel routing, persistence helpers
+    lib/         Provider settings, free-channel routing, asset generation
+                 (image, sprite, mesh/3D, music, speech, video, ComfyUI),
+                 game-dev expert roster, persistence helpers
     panels/      Sidebar, chat dock, settings, scheduling UI
     store/       Zustand state and local history
   src-tauri/

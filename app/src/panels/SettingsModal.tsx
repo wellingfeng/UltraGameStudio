@@ -6,12 +6,14 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type ClipboardEvent as ReactClipboardEvent,
   type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
 } from 'react';
 import {
   Bone,
   Box,
+  Boxes,
   Check,
   ChevronDown,
   Copy,
@@ -43,6 +45,8 @@ import {
   Trash2,
   Type,
   UploadCloud,
+  Video,
+  Volume2,
   X,
   type LucideIcon,
 } from 'lucide-react';
@@ -99,6 +103,8 @@ import {
   isTauri,
   localModelStatus,
   openExternal,
+  setupComfyui,
+  type ComfyUiSetupModel,
   type LocalModelRuntimeStatus,
   validateShellPath,
 } from '@/lib/tauri';
@@ -194,6 +200,7 @@ import {
   imageProviderBaseUrl,
   imageProviderModel,
   imageProviderReady,
+  imageProviderSupportsComfyUiGraph,
   loadImageGenerationSettings,
   saveImageGenerationSettings,
   type ImageGenerationSettings,
@@ -213,6 +220,43 @@ import {
   type MusicProviderCategory,
   type MusicProviderId,
 } from '@/lib/musicGeneration';
+import {
+  VIDEO_PROVIDERS,
+  loadVideoGenerationSettings,
+  saveVideoGenerationSettings,
+  videoProviderBaseUrl,
+  videoProviderModel,
+  videoProviderReady,
+  type VideoGenerationSettings,
+  type VideoProviderDefinition,
+  type VideoProviderCategory,
+  type VideoProviderId,
+} from '@/lib/videoGeneration';
+import {
+  SPEECH_PROVIDERS,
+  loadSpeechGenerationSettings,
+  saveSpeechGenerationSettings,
+  speechProviderBaseUrl,
+  speechProviderModel,
+  speechProviderVoice,
+  speechProviderReady,
+  type SpeechGenerationSettings,
+  type SpeechProviderDefinition,
+  type SpeechProviderCategory,
+  type SpeechProviderId,
+} from '@/lib/speechGeneration';
+import {
+  SPRITE_PROVIDERS,
+  loadSpriteGenerationSettings,
+  saveSpriteGenerationSettings,
+  spriteProviderBaseUrl,
+  spriteProviderModel,
+  spriteProviderReady,
+  type SpriteGenerationSettings,
+  type SpriteProviderCategory,
+  type SpriteProviderDefinition,
+  type SpriteProviderId,
+} from '@/lib/spriteGeneration';
 import {
   THREE_D_RIGGING_PROVIDERS,
   THREE_D_PROVIDERS,
@@ -270,6 +314,8 @@ type SettingsTab =
   | 'models'
   | 'imageGeneration'
   | 'musicGeneration'
+  | 'videoGeneration'
+  | 'speechGeneration'
   | 'threeDGeneration'
   | 'rigging'
   | 'gameExperts'
@@ -291,6 +337,8 @@ const tabs: { id: SettingsTab; labelKey: TranslationKey; Icon: LucideIcon }[] = 
   { id: 'models', labelKey: 'settings.tabs.models', Icon: Cpu },
   { id: 'imageGeneration', labelKey: 'settings.tabs.imageGeneration', Icon: Sparkles },
   { id: 'musicGeneration', labelKey: 'settings.tabs.musicGeneration', Icon: Music },
+  { id: 'videoGeneration', labelKey: 'settings.tabs.videoGeneration', Icon: Video },
+  { id: 'speechGeneration', labelKey: 'settings.tabs.speechGeneration', Icon: Volume2 },
   { id: 'commands', labelKey: 'settings.tabs.commands', Icon: SlashSquare },
   { id: 'shortcuts', labelKey: 'settings.tabs.shortcuts', Icon: Keyboard },
   { id: 'appearance', labelKey: 'settings.tabs.appearance', Icon: Palette },
@@ -382,6 +430,18 @@ function describeExportError(err: unknown, locale: Locale): string {
     return t(locale, 'settings.channels.exportPickerUnavailable');
   }
   return describeError(err);
+}
+
+function inputValueAfterPaste(event: ReactClipboardEvent<HTMLInputElement>): string | null {
+  const text =
+    event.clipboardData.getData('text/plain') ||
+    event.clipboardData.getData('text');
+  if (!text) return null;
+  event.preventDefault();
+  const input = event.currentTarget;
+  const start = input.selectionStart ?? input.value.length;
+  const end = input.selectionEnd ?? start;
+  return `${input.value.slice(0, start)}${text}${input.value.slice(end)}`;
 }
 
 export default function SettingsModal({ onClose }: { onClose: () => void }) {
@@ -599,6 +659,10 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                 <ImageGenerationSettingsPanel locale={locale} />
               ) : tab === 'musicGeneration' ? (
                 <MusicGenerationSettingsPanel locale={locale} />
+              ) : tab === 'videoGeneration' ? (
+                <VideoGenerationSettingsPanel locale={locale} />
+              ) : tab === 'speechGeneration' ? (
+                <SpeechGenerationSettingsPanel locale={locale} />
               ) : tab === 'threeDGeneration' ? (
                 <ThreeDGenerationSettingsPanel locale={locale} />
               ) : tab === 'rigging' ? (
@@ -3348,6 +3412,10 @@ function ImageProviderSettingsRow({
     loading: boolean;
     error: string | null;
   }>({ loading: false, error: null });
+  const [comfyInstall, setComfyInstall] = useState<{
+    state: 'idle' | 'starting' | 'started' | 'error';
+    message: string | null;
+  }>({ state: 'idle', message: null });
   const keyValue = settings.providerKeys[provider.id] ?? '';
   const accountId = settings.providerAccountIds[provider.id] ?? '';
   const baseUrl = settings.providerBaseUrls[provider.id] ?? '';
@@ -3429,6 +3497,38 @@ function ImageProviderSettingsRow({
     }
   };
 
+  const isComfyChannel = provider.id === 'local-comfyui';
+  const runComfyInstall = async () => {
+    if (!isTauri()) {
+      setComfyInstall({
+        state: 'error',
+        message: t(locale, 'settings.imageGeneration.comfyInstallDesktopOnly'),
+      });
+      return;
+    }
+    setComfyInstall({ state: 'starting', message: null });
+    try {
+      // The model dropdown selection maps onto a known installer profile when it
+      // is one of the one-click checkpoints; otherwise let the script pick by VRAM.
+      const known: ComfyUiSetupModel[] = ['sd1.5', 'sdxl-turbo', 'flux-schnell'];
+      const picked = known.find((m) => m === model);
+      await setupComfyui(picked, false);
+      setComfyInstall({
+        state: 'started',
+        message: t(locale, 'settings.imageGeneration.comfyInstallStarted'),
+      });
+    } catch (err) {
+      const raw = err instanceof Error ? err.message : String(err);
+      setComfyInstall({
+        state: 'error',
+        message:
+          raw === 'NO_BACKEND'
+            ? t(locale, 'settings.imageGeneration.comfyInstallDesktopOnly')
+            : raw,
+      });
+    }
+  };
+
   return (
     <div className="space-y-3 rounded-lg border border-border bg-bg-alt p-4">
       <div className="flex flex-wrap items-start gap-2">
@@ -3447,6 +3547,27 @@ function ImageProviderSettingsRow({
               state={ready ? 'direct' : 'unavailable'}
               label={imageProviderStatusLabel(provider, settings, locale)}
             />
+            <span
+              className={cn(
+                'inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[10px] font-medium',
+                imageProviderSupportsComfyUiGraph(provider.id)
+                  ? 'border-accent/40 bg-accent/10 text-accent'
+                  : 'border-border bg-panel text-fg-faint',
+              )}
+              title={
+                imageProviderSupportsComfyUiGraph(provider.id)
+                  ? t(locale, 'settings.imageGeneration.comfyGraphSupportedHint')
+                  : t(locale, 'settings.imageGeneration.comfyGraphUnsupportedHint')
+              }
+            >
+              <Boxes size={11} strokeWidth={2.2} />
+              {t(
+                locale,
+                imageProviderSupportsComfyUiGraph(provider.id)
+                  ? 'settings.imageGeneration.comfyGraphSupported'
+                  : 'settings.imageGeneration.comfyGraphUnsupported',
+              )}
+            </span>
           </div>
           <p className="mt-1 text-[11px] leading-relaxed text-fg-faint">
             {provider.note}
@@ -3596,6 +3717,47 @@ function ImageProviderSettingsRow({
             </p>
           )}
         </label>
+
+        {isComfyChannel && (
+          <div className="lg:col-span-2 space-y-2 rounded-md border border-accent/30 bg-accent/5 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-fg">
+                  <Boxes size={13} strokeWidth={2.2} className="text-accent" />
+                  {t(locale, 'settings.imageGeneration.comfyInstallTitle')}
+                </div>
+                <p className="mt-1 text-[11px] leading-relaxed text-fg-faint">
+                  {t(locale, 'settings.imageGeneration.comfyInstallDesc')}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void runComfyInstall()}
+                disabled={comfyInstall.state === 'starting'}
+                className="inline-flex shrink-0 items-center gap-1.5 rounded border border-accent bg-accent px-3 py-1.5 text-xs font-medium text-bg transition-colors hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                <DownloadCloud
+                  size={14}
+                  strokeWidth={2.2}
+                  className={comfyInstall.state === 'starting' ? 'animate-pulse' : undefined}
+                />
+                {comfyInstall.state === 'starting'
+                  ? t(locale, 'settings.imageGeneration.comfyInstallStarting')
+                  : t(locale, 'settings.imageGeneration.comfyInstallButton')}
+              </button>
+            </div>
+            {comfyInstall.state === 'started' && comfyInstall.message && (
+              <p className="rounded border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-emerald-200">
+                {comfyInstall.message}
+              </p>
+            )}
+            {comfyInstall.state === 'error' && comfyInstall.message && (
+              <p className="rounded border border-rose-500/30 bg-rose-500/10 px-2.5 py-1.5 text-[11px] leading-relaxed text-rose-200">
+                {comfyInstall.message}
+              </p>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -3886,6 +4048,1431 @@ function MusicProviderSettingsRow({
             <StatusBadge
               state={ready ? 'direct' : 'unavailable'}
               label={musicProviderStatusLabel(provider, settings, locale)}
+            />
+          </div>
+          <p className="mt-1 text-[11px] leading-relaxed text-fg-faint">
+            {provider.note}
+          </p>
+        </div>
+        {provider.credentialUrl && (
+          <button
+            type="button"
+            onClick={() => void openExternal(provider.credentialUrl as string)}
+            className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+          >
+            <ExternalLink size={13} strokeWidth={2.2} />
+            {provider.local
+              ? t(locale, 'dock.localModelDownload')
+              : t(
+                  locale,
+                  ready
+                    ? 'settings.freeChannels.manageKey'
+                    : 'settings.freeChannels.getKey',
+                )}
+          </button>
+        )}
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        {provider.supportsBaseUrl && (
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.models.baseUrl')}
+            </span>
+            <input
+              type="text"
+              value={baseUrl}
+              onChange={(event) => patchProvider({ baseUrl: event.target.value })}
+              placeholder={effectiveBaseUrl || provider.endpointPlaceholder}
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+            />
+          </label>
+        )}
+
+        {provider.needsKey && (
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {provider.keyLabel ?? t(locale, 'settings.models.apiKey')}
+            </span>
+            <div className="relative">
+              <input
+                type={showKey ? 'text' : 'password'}
+                value={keyValue}
+                onChange={(event) => patchProvider({ key: event.target.value })}
+                onPaste={(event) => {
+                  const nextValue = inputValueAfterPaste(event);
+                  if (nextValue != null) patchProvider({ key: nextValue });
+                }}
+                placeholder={provider.keyPlaceholder ?? 'sk-...'}
+                autoComplete="off"
+                spellCheck={false}
+                className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 pr-14 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+              />
+              <div className="absolute inset-y-0 right-1 flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => setShowKey((v) => !v)}
+                  title={t(
+                    locale,
+                    showKey ? 'settings.models.hideKey' : 'settings.models.showKey',
+                  )}
+                  className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-fg"
+                >
+                  <KeyIcon size={13} strokeWidth={2} />
+                </button>
+                {keyValue && (
+                  <button
+                    type="button"
+                    onClick={() => patchProvider({ key: '' })}
+                    title={t(locale, 'settings.models.clear')}
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                  >
+                    <Trash2 size={13} strokeWidth={2} />
+                  </button>
+                )}
+              </div>
+            </div>
+          </label>
+        )}
+
+        <label className="block space-y-1 lg:col-span-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.freeChannels.modelLabel')}
+            </span>
+            <button
+              type="button"
+              onClick={() => void refreshModels()}
+              disabled={!canRefresh || modelRefresh.loading}
+              title={
+                canRefresh
+                  ? t(locale, 'settings.models.fetchModels')
+                  : t(locale, 'settings.models.fetchModelsUnavailable')
+              }
+              className="inline-flex items-center gap-1 rounded border border-border bg-panel px-2 py-0.5 text-[11px] text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <RefreshCw
+                size={11}
+                strokeWidth={2}
+                className={modelRefresh.loading ? 'animate-spin' : undefined}
+              />
+              {t(locale, 'settings.models.fetchModels')}
+            </button>
+          </div>
+          <select
+            value={model}
+            onChange={(event) => patchProvider({ model: event.target.value })}
+            className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+          >
+            {modelOptions.map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
+          {modelRefresh.error && (
+            <p className="text-[11px] leading-relaxed text-amber-300">
+              {modelRefresh.error}
+            </p>
+          )}
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function VideoGenerationSettingsPanel({ locale }: { locale: Locale }) {
+  const [settings, setSettings] = useState<VideoGenerationSettings>(() =>
+    loadVideoGenerationSettings(),
+  );
+  const [category, setCategory] = useState<VideoProviderCategory>('commercial');
+
+  const update = (patch: Partial<VideoGenerationSettings>) => {
+    const next = { ...settings, ...patch };
+    saveVideoGenerationSettings(next);
+    setSettings(loadVideoGenerationSettings());
+  };
+
+  const providerOptions = VIDEO_PROVIDERS.map((provider) => ({
+    id: provider.id,
+    label: provider.label,
+    hint: `${videoProviderCategoryLabel(provider.category, locale)} · ${videoProviderStatusLabel(
+      provider,
+      settings,
+      locale,
+    )}`,
+    group: videoProviderCategoryLabel(provider.category, locale),
+  }));
+  const activeProviders = VIDEO_PROVIDERS.filter(
+    (provider) => provider.category === category,
+  );
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-lg font-semibold text-fg">
+          {t(locale, 'settings.videoGeneration.title')}
+        </h3>
+        <p className="mt-1 text-xs leading-relaxed text-fg-faint">
+          {t(locale, 'settings.videoGeneration.description')}
+        </p>
+      </div>
+
+      <SettingRow
+        title={t(locale, 'settings.videoGeneration.enabledLabel')}
+        description={t(locale, 'settings.videoGeneration.enabledDesc')}
+      >
+        <SwitchControl
+          checked={settings.enabled}
+          onChange={(enabled) => update({ enabled })}
+        />
+      </SettingRow>
+
+      <SettingRow
+        title={t(locale, 'settings.videoGeneration.defaultProviderLabel')}
+        description={t(locale, 'settings.videoGeneration.defaultProviderDesc')}
+      >
+        <div className="w-full min-w-[14rem]">
+          <SelectControl
+            value={settings.preferredProviderId}
+            options={providerOptions}
+            onChange={(id) =>
+              update({ preferredProviderId: id as VideoProviderId })
+            }
+            icon={<Video size={15} strokeWidth={2.1} />}
+          />
+        </div>
+      </SettingRow>
+
+      <div>
+        <div
+          role="tablist"
+          aria-orientation="horizontal"
+          className={SETTINGS_INNER_TABLIST_CLASS}
+        >
+          {videoProviderCategoryOrder.map((item) => {
+            const active = category === item;
+            return (
+              <button
+                key={item}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setCategory(item)}
+                className={cn(
+                  SETTINGS_INNER_TAB_CLASS,
+                  active
+                    ? '-mb-px border-b-2 border-accent text-fg'
+                    : 'text-fg-faint hover:text-fg',
+                )}
+              >
+                {t(locale, videoProviderCategoryTitleKey(item))}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <section role="tabpanel" className="rounded-lg border border-border bg-bg-alt p-4">
+        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1">
+            <h4 className="text-sm font-semibold text-fg">
+              {t(locale, videoProviderCategoryTitleKey(category))}
+            </h4>
+            <p className="text-xs leading-relaxed text-fg-faint">
+              {t(locale, videoProviderCategoryDescKey(category))}
+            </p>
+          </div>
+          <StatusBadge state="default" label={String(activeProviders.length)} />
+        </div>
+        <div className={SETTINGS_PROVIDER_GRID_CLASS}>
+          {activeProviders.map((provider) => (
+            <VideoProviderSettingsRow
+              key={provider.id}
+              provider={provider}
+              settings={settings}
+              locale={locale}
+              onChange={(next) => {
+                saveVideoGenerationSettings(next);
+                setSettings(loadVideoGenerationSettings());
+              }}
+            />
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+const videoProviderCategoryOrder: VideoProviderCategory[] = ['commercial', 'free'];
+
+function videoProviderCategoryTitleKey(
+  category: VideoProviderCategory,
+): TranslationKey {
+  return category === 'free'
+    ? 'settings.videoGeneration.freeProviders'
+    : 'settings.videoGeneration.commercialProviders';
+}
+
+function videoProviderCategoryDescKey(
+  category: VideoProviderCategory,
+): TranslationKey {
+  return category === 'free'
+    ? 'settings.videoGeneration.freeProvidersDesc'
+    : 'settings.videoGeneration.commercialProvidersDesc';
+}
+
+function videoProviderCategoryLabel(
+  category: VideoProviderCategory,
+  locale: Locale,
+): string {
+  return t(
+    locale,
+    category === 'free'
+      ? 'settings.videoGeneration.categoryFree'
+      : 'settings.videoGeneration.categoryCommercial',
+  );
+}
+
+function videoProviderCategoryBadgeClass(category: VideoProviderCategory): string {
+  return category === 'free'
+    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+    : 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+}
+
+function videoProviderStatusLabel(
+  provider: VideoProviderDefinition,
+  settings: VideoGenerationSettings,
+  locale: Locale,
+): string {
+  if (videoProviderReady(provider.id, settings)) {
+    return t(locale, 'settings.freeChannels.ready');
+  }
+  if (provider.local) return t(locale, 'settings.freeChannels.localNeedsSetup');
+  if (provider.needsKey) return t(locale, 'settings.freeChannels.needsKey');
+  return t(locale, 'settings.imageGeneration.noKeyRequired');
+}
+
+function VideoProviderSettingsRow({
+  provider,
+  settings,
+  locale,
+  onChange,
+}: {
+  provider: VideoProviderDefinition;
+  settings: VideoGenerationSettings;
+  locale: Locale;
+  onChange: (settings: VideoGenerationSettings) => void;
+}) {
+  const [showKey, setShowKey] = useState(false);
+  const [modelRefresh, setModelRefresh] = useState<{
+    loading: boolean;
+    error: string | null;
+  }>({ loading: false, error: null });
+  const keyProviderId = provider.keyProviderId ?? provider.id;
+  const keyValue = settings.providerKeys[keyProviderId] ?? '';
+  const baseUrl = settings.providerBaseUrls[provider.id] ?? '';
+  const effectiveBaseUrl = videoProviderBaseUrl(provider.id, settings);
+  const model = videoProviderModel(provider.id, settings);
+  const ready = videoProviderReady(provider.id, settings);
+  const KeyIcon = showKey ? EyeOff : Eye;
+
+  const cacheKey = endpointModelCacheKey('video', provider.id, effectiveBaseUrl);
+  const cachedModels = getCachedModels(cacheKey)?.models ?? [];
+  const modelOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of [model, ...cachedModels, ...provider.models]) {
+      const value = item?.trim();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      out.push(value);
+    }
+    return out;
+  }, [model, cachedModels, provider.models]);
+  const canRefresh =
+    !!effectiveBaseUrl && (!provider.needsKey || keyValue.trim().length > 0);
+
+  const patchProvider = (
+    patch: Partial<{
+      key: string;
+      baseUrl: string;
+      model: string;
+    }>,
+  ) => {
+    const next: VideoGenerationSettings = {
+      ...settings,
+      providerKeys: { ...settings.providerKeys },
+      providerBaseUrls: { ...settings.providerBaseUrls },
+      providerModels: { ...settings.providerModels },
+    };
+    if (patch.key !== undefined) {
+      const value = patch.key.trim();
+      if (value) next.providerKeys[keyProviderId] = value;
+      else delete next.providerKeys[keyProviderId];
+    }
+    if (patch.baseUrl !== undefined) {
+      const value = patch.baseUrl.trim();
+      if (value) next.providerBaseUrls[provider.id] = value;
+      else delete next.providerBaseUrls[provider.id];
+    }
+    if (patch.model !== undefined) {
+      const value = patch.model.trim();
+      if (value) next.providerModels[provider.id] = value;
+      else delete next.providerModels[provider.id];
+    }
+    if (
+      !videoProviderReady(next.preferredProviderId, next) &&
+      videoProviderReady(provider.id, next)
+    ) {
+      next.preferredProviderId = provider.id;
+    }
+    onChange(next);
+  };
+
+  const refreshModels = async () => {
+    if (!canRefresh || modelRefresh.loading) return;
+    setModelRefresh({ loading: true, error: null });
+    try {
+      const result = await refreshEndpointModels({
+        cacheKey,
+        baseUrl: effectiveBaseUrl,
+        apiKey: keyValue,
+        fallback: [model, ...provider.models],
+      });
+      setModelRefresh({ loading: false, error: result.error ?? null });
+    } catch (err) {
+      setModelRefresh({
+        loading: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-bg-alt p-4">
+      <div className="flex flex-wrap items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-fg">{provider.label}</span>
+            <span
+              className={cn(
+                'inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium',
+                videoProviderCategoryBadgeClass(provider.category),
+              )}
+            >
+              {videoProviderCategoryLabel(provider.category, locale)}
+            </span>
+            <StatusBadge
+              state={ready ? 'direct' : 'unavailable'}
+              label={videoProviderStatusLabel(provider, settings, locale)}
+            />
+          </div>
+          <p className="mt-1 text-[11px] leading-relaxed text-fg-faint">
+            {provider.note}
+          </p>
+        </div>
+        {provider.credentialUrl && (
+          <button
+            type="button"
+            onClick={() => void openExternal(provider.credentialUrl as string)}
+            className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+          >
+            <ExternalLink size={13} strokeWidth={2.2} />
+            {provider.local
+              ? t(locale, 'dock.localModelDownload')
+              : t(
+                  locale,
+                  ready
+                    ? 'settings.freeChannels.manageKey'
+                    : 'settings.freeChannels.getKey',
+                )}
+          </button>
+        )}
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        {provider.supportsBaseUrl && (
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.models.baseUrl')}
+            </span>
+            <input
+              type="text"
+              value={baseUrl}
+              onChange={(event) => patchProvider({ baseUrl: event.target.value })}
+              placeholder={effectiveBaseUrl || provider.endpointPlaceholder}
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+            />
+          </label>
+        )}
+
+        {provider.needsKey && (
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {provider.keyLabel ?? t(locale, 'settings.models.apiKey')}
+            </span>
+            <div className="relative">
+              <input
+                type={showKey ? 'text' : 'password'}
+                value={keyValue}
+                onChange={(event) => patchProvider({ key: event.target.value })}
+                onPaste={(event) => {
+                  const nextValue = inputValueAfterPaste(event);
+                  if (nextValue != null) patchProvider({ key: nextValue });
+                }}
+                placeholder={provider.keyPlaceholder ?? 'sk-...'}
+                autoComplete="off"
+                spellCheck={false}
+                className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 pr-14 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+              />
+              <div className="absolute inset-y-0 right-1 flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => setShowKey((v) => !v)}
+                  title={t(
+                    locale,
+                    showKey ? 'settings.models.hideKey' : 'settings.models.showKey',
+                  )}
+                  className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-fg"
+                >
+                  <KeyIcon size={13} strokeWidth={2} />
+                </button>
+                {keyValue && (
+                  <button
+                    type="button"
+                    onClick={() => patchProvider({ key: '' })}
+                    title={t(locale, 'settings.models.clear')}
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                  >
+                    <Trash2 size={13} strokeWidth={2} />
+                  </button>
+                )}
+              </div>
+            </div>
+          </label>
+        )}
+
+        <label className="block space-y-1 lg:col-span-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.freeChannels.modelLabel')}
+            </span>
+            <button
+              type="button"
+              onClick={() => void refreshModels()}
+              disabled={!canRefresh || modelRefresh.loading}
+              title={
+                canRefresh
+                  ? t(locale, 'settings.models.fetchModels')
+                  : t(locale, 'settings.models.fetchModelsUnavailable')
+              }
+              className="inline-flex items-center gap-1 rounded border border-border bg-panel px-2 py-0.5 text-[11px] text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <RefreshCw
+                size={11}
+                strokeWidth={2}
+                className={modelRefresh.loading ? 'animate-spin' : undefined}
+              />
+              {t(locale, 'settings.models.fetchModels')}
+            </button>
+          </div>
+          <select
+            value={model}
+            onChange={(event) => patchProvider({ model: event.target.value })}
+            className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+          >
+            {modelOptions.map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
+          {modelRefresh.error && (
+            <p className="text-[11px] leading-relaxed text-amber-300">
+              {modelRefresh.error}
+            </p>
+          )}
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function SpeechGenerationSettingsPanel({ locale }: { locale: Locale }) {
+  const [settings, setSettings] = useState<SpeechGenerationSettings>(() =>
+    loadSpeechGenerationSettings(),
+  );
+  const [category, setCategory] = useState<SpeechProviderCategory>('commercial');
+
+  const update = (patch: Partial<SpeechGenerationSettings>) => {
+    const next = { ...settings, ...patch };
+    saveSpeechGenerationSettings(next);
+    setSettings(loadSpeechGenerationSettings());
+  };
+
+  const providerOptions = SPEECH_PROVIDERS.map((provider) => ({
+    id: provider.id,
+    label: provider.label,
+    hint: `${speechProviderCategoryLabel(provider.category, locale)} · ${speechProviderStatusLabel(
+      provider,
+      settings,
+      locale,
+    )}`,
+    group: speechProviderCategoryLabel(provider.category, locale),
+  }));
+  const activeProviders = SPEECH_PROVIDERS.filter(
+    (provider) => provider.category === category,
+  );
+
+  return (
+    <div className="space-y-5">
+      <div>
+        <h3 className="text-lg font-semibold text-fg">
+          {t(locale, 'settings.speechGeneration.title')}
+        </h3>
+        <p className="mt-1 text-xs leading-relaxed text-fg-faint">
+          {t(locale, 'settings.speechGeneration.description')}
+        </p>
+      </div>
+
+      <SettingRow
+        title={t(locale, 'settings.speechGeneration.enabledLabel')}
+        description={t(locale, 'settings.speechGeneration.enabledDesc')}
+      >
+        <SwitchControl
+          checked={settings.enabled}
+          onChange={(enabled) => update({ enabled })}
+        />
+      </SettingRow>
+
+      <SettingRow
+        title={t(locale, 'settings.speechGeneration.defaultProviderLabel')}
+        description={t(locale, 'settings.speechGeneration.defaultProviderDesc')}
+      >
+        <div className="w-full min-w-[14rem]">
+          <SelectControl
+            value={settings.preferredProviderId}
+            options={providerOptions}
+            onChange={(id) =>
+              update({ preferredProviderId: id as SpeechProviderId })
+            }
+            icon={<Volume2 size={15} strokeWidth={2.1} />}
+          />
+        </div>
+      </SettingRow>
+
+      <div>
+        <div
+          role="tablist"
+          aria-orientation="horizontal"
+          className={SETTINGS_INNER_TABLIST_CLASS}
+        >
+          {speechProviderCategoryOrder.map((item) => {
+            const active = category === item;
+            return (
+              <button
+                key={item}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setCategory(item)}
+                className={cn(
+                  SETTINGS_INNER_TAB_CLASS,
+                  active
+                    ? '-mb-px border-b-2 border-accent text-fg'
+                    : 'text-fg-faint hover:text-fg',
+                )}
+              >
+                {t(locale, speechProviderCategoryTitleKey(item))}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <section role="tabpanel" className="rounded-lg border border-border bg-bg-alt p-4">
+        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1">
+            <h4 className="text-sm font-semibold text-fg">
+              {t(locale, speechProviderCategoryTitleKey(category))}
+            </h4>
+            <p className="text-xs leading-relaxed text-fg-faint">
+              {t(locale, speechProviderCategoryDescKey(category))}
+            </p>
+          </div>
+          <StatusBadge state="default" label={String(activeProviders.length)} />
+        </div>
+        <div className={SETTINGS_PROVIDER_GRID_CLASS}>
+          {activeProviders.map((provider) => (
+            <SpeechProviderSettingsRow
+              key={provider.id}
+              provider={provider}
+              settings={settings}
+              locale={locale}
+              onChange={(next) => {
+                saveSpeechGenerationSettings(next);
+                setSettings(loadSpeechGenerationSettings());
+              }}
+            />
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+const speechProviderCategoryOrder: SpeechProviderCategory[] = ['commercial', 'free'];
+
+function speechProviderCategoryTitleKey(
+  category: SpeechProviderCategory,
+): TranslationKey {
+  return category === 'free'
+    ? 'settings.speechGeneration.freeProviders'
+    : 'settings.speechGeneration.commercialProviders';
+}
+
+function speechProviderCategoryDescKey(
+  category: SpeechProviderCategory,
+): TranslationKey {
+  return category === 'free'
+    ? 'settings.speechGeneration.freeProvidersDesc'
+    : 'settings.speechGeneration.commercialProvidersDesc';
+}
+
+function speechProviderCategoryLabel(
+  category: SpeechProviderCategory,
+  locale: Locale,
+): string {
+  return t(
+    locale,
+    category === 'free'
+      ? 'settings.speechGeneration.categoryFree'
+      : 'settings.speechGeneration.categoryCommercial',
+  );
+}
+
+function speechProviderCategoryBadgeClass(category: SpeechProviderCategory): string {
+  return category === 'free'
+    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+    : 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+}
+
+function speechProviderStatusLabel(
+  provider: SpeechProviderDefinition,
+  settings: SpeechGenerationSettings,
+  locale: Locale,
+): string {
+  if (speechProviderReady(provider.id, settings)) {
+    return t(locale, 'settings.freeChannels.ready');
+  }
+  if (provider.local) return t(locale, 'settings.freeChannels.localNeedsSetup');
+  if (provider.needsKey) return t(locale, 'settings.freeChannels.needsKey');
+  return t(locale, 'settings.imageGeneration.noKeyRequired');
+}
+// __SPEECH_ROW__
+function SpeechProviderSettingsRow({
+  provider,
+  settings,
+  locale,
+  onChange,
+}: {
+  provider: SpeechProviderDefinition;
+  settings: SpeechGenerationSettings;
+  locale: Locale;
+  onChange: (settings: SpeechGenerationSettings) => void;
+}) {
+  const [showKey, setShowKey] = useState(false);
+  const [modelRefresh, setModelRefresh] = useState<{
+    loading: boolean;
+    error: string | null;
+  }>({ loading: false, error: null });
+  const keyProviderId = provider.keyProviderId ?? provider.id;
+  const keyValue = settings.providerKeys[keyProviderId] ?? '';
+  const accountIdValue = settings.providerAccountIds[provider.id] ?? '';
+  const baseUrl = settings.providerBaseUrls[provider.id] ?? '';
+  const effectiveBaseUrl = speechProviderBaseUrl(provider.id, settings);
+  const model = speechProviderModel(provider.id, settings);
+  const voice = speechProviderVoice(provider.id, settings);
+  const ready = speechProviderReady(provider.id, settings);
+  const KeyIcon = showKey ? EyeOff : Eye;
+
+  const cacheKey = endpointModelCacheKey('speech', provider.id, effectiveBaseUrl);
+  const cachedModels = getCachedModels(cacheKey)?.models ?? [];
+  const modelOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of [model, ...cachedModels, ...provider.models]) {
+      const value = item?.trim();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      out.push(value);
+    }
+    return out;
+  }, [model, cachedModels, provider.models]);
+  const voiceOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of [voice, ...provider.voices]) {
+      const value = item?.trim();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      out.push(value);
+    }
+    return out;
+  }, [voice, provider.voices]);
+  const canRefresh =
+    !!effectiveBaseUrl && (!provider.needsKey || keyValue.trim().length > 0);
+
+  const patchProvider = (
+    patch: Partial<{
+      key: string;
+      accountId: string;
+      baseUrl: string;
+      model: string;
+      voice: string;
+    }>,
+  ) => {
+    const next: SpeechGenerationSettings = {
+      ...settings,
+      providerKeys: { ...settings.providerKeys },
+      providerAccountIds: { ...settings.providerAccountIds },
+      providerBaseUrls: { ...settings.providerBaseUrls },
+      providerModels: { ...settings.providerModels },
+      providerVoices: { ...settings.providerVoices },
+    };
+    if (patch.key !== undefined) {
+      const value = patch.key.trim();
+      if (value) next.providerKeys[keyProviderId] = value;
+      else delete next.providerKeys[keyProviderId];
+    }
+    if (patch.accountId !== undefined) {
+      const value = patch.accountId.trim();
+      if (value) next.providerAccountIds[provider.id] = value;
+      else delete next.providerAccountIds[provider.id];
+    }
+    if (patch.baseUrl !== undefined) {
+      const value = patch.baseUrl.trim();
+      if (value) next.providerBaseUrls[provider.id] = value;
+      else delete next.providerBaseUrls[provider.id];
+    }
+    if (patch.model !== undefined) {
+      const value = patch.model.trim();
+      if (value) next.providerModels[provider.id] = value;
+      else delete next.providerModels[provider.id];
+    }
+    if (patch.voice !== undefined) {
+      const value = patch.voice.trim();
+      if (value) next.providerVoices[provider.id] = value;
+      else delete next.providerVoices[provider.id];
+    }
+    if (
+      !speechProviderReady(next.preferredProviderId, next) &&
+      speechProviderReady(provider.id, next)
+    ) {
+      next.preferredProviderId = provider.id;
+    }
+    onChange(next);
+  };
+
+  const refreshModels = async () => {
+    if (!canRefresh || modelRefresh.loading) return;
+    setModelRefresh({ loading: true, error: null });
+    try {
+      const result = await refreshEndpointModels({
+        cacheKey,
+        baseUrl: effectiveBaseUrl,
+        apiKey: keyValue,
+        fallback: [model, ...provider.models],
+      });
+      setModelRefresh({ loading: false, error: result.error ?? null });
+    } catch (err) {
+      setModelRefresh({
+        loading: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+  // __SPEECH_ROW_RENDER__
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-bg-alt p-4">
+      <div className="flex flex-wrap items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-fg">{provider.label}</span>
+            <span
+              className={cn(
+                'inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium',
+                speechProviderCategoryBadgeClass(provider.category),
+              )}
+            >
+              {speechProviderCategoryLabel(provider.category, locale)}
+            </span>
+            <StatusBadge
+              state={ready ? 'direct' : 'unavailable'}
+              label={speechProviderStatusLabel(provider, settings, locale)}
+            />
+          </div>
+          <p className="mt-1 text-[11px] leading-relaxed text-fg-faint">
+            {provider.note}
+          </p>
+        </div>
+        {provider.credentialUrl && (
+          <button
+            type="button"
+            onClick={() => void openExternal(provider.credentialUrl as string)}
+            className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+          >
+            <ExternalLink size={13} strokeWidth={2.2} />
+            {provider.local
+              ? t(locale, 'dock.localModelDownload')
+              : t(
+                  locale,
+                  ready
+                    ? 'settings.freeChannels.manageKey'
+                    : 'settings.freeChannels.getKey',
+                )}
+          </button>
+        )}
+      </div>
+
+      <div className="grid gap-3 lg:grid-cols-2">
+        {/* __SPEECH_ROW_FIELDS__ */}
+        {provider.supportsBaseUrl && (
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.models.baseUrl')}
+            </span>
+            <input
+              type="text"
+              value={baseUrl}
+              onChange={(event) => patchProvider({ baseUrl: event.target.value })}
+              placeholder={effectiveBaseUrl || provider.endpointPlaceholder}
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+            />
+          </label>
+        )}
+
+        {provider.needsKey && (
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {provider.keyLabel ?? t(locale, 'settings.models.apiKey')}
+            </span>
+            <div className="relative">
+              <input
+                type={showKey ? 'text' : 'password'}
+                value={keyValue}
+                onChange={(event) => patchProvider({ key: event.target.value })}
+                onPaste={(event) => {
+                  const nextValue = inputValueAfterPaste(event);
+                  if (nextValue != null) patchProvider({ key: nextValue });
+                }}
+                placeholder={provider.keyPlaceholder ?? 'sk-...'}
+                autoComplete="off"
+                spellCheck={false}
+                className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 pr-14 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+              />
+              <div className="absolute inset-y-0 right-1 flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => setShowKey((v) => !v)}
+                  title={t(
+                    locale,
+                    showKey ? 'settings.models.hideKey' : 'settings.models.showKey',
+                  )}
+                  className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-fg"
+                >
+                  <KeyIcon size={13} strokeWidth={2} />
+                </button>
+                {keyValue && (
+                  <button
+                    type="button"
+                    onClick={() => patchProvider({ key: '' })}
+                    title={t(locale, 'settings.models.clear')}
+                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
+                  >
+                    <Trash2 size={13} strokeWidth={2} />
+                  </button>
+                )}
+              </div>
+            </div>
+          </label>
+        )}
+        {/* __SPEECH_ROW_FIELDS_B__ */}
+        {provider.needsAccountId && (
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {provider.accountIdLabel ??
+                t(locale, 'settings.speechGeneration.accountIdLabel')}
+            </span>
+            <input
+              type="text"
+              value={accountIdValue}
+              onChange={(event) => patchProvider({ accountId: event.target.value })}
+              placeholder={provider.accountIdPlaceholder ?? ''}
+              autoComplete="off"
+              spellCheck={false}
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+            />
+          </label>
+        )}
+
+        <label className="block space-y-1">
+          <span className="text-[11px] font-medium text-fg-dim">
+            {t(locale, 'settings.speechGeneration.voiceLabel')}
+          </span>
+          <input
+            type="text"
+            value={voice}
+            onChange={(event) => patchProvider({ voice: event.target.value })}
+            placeholder={provider.defaultVoice || 'voice id'}
+            autoComplete="off"
+            spellCheck={false}
+            list={`speech-voices-${provider.id}`}
+            className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
+          />
+          <datalist id={`speech-voices-${provider.id}`}>
+            {voiceOptions.map((item) => (
+              <option key={item} value={item} />
+            ))}
+          </datalist>
+        </label>
+
+        <label className="block space-y-1 lg:col-span-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.freeChannels.modelLabel')}
+            </span>
+            <button
+              type="button"
+              onClick={() => void refreshModels()}
+              disabled={!canRefresh || modelRefresh.loading}
+              title={
+                canRefresh
+                  ? t(locale, 'settings.models.fetchModels')
+                  : t(locale, 'settings.models.fetchModelsUnavailable')
+              }
+              className="inline-flex items-center gap-1 rounded border border-border bg-panel px-2 py-0.5 text-[11px] text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <RefreshCw
+                size={11}
+                strokeWidth={2}
+                className={modelRefresh.loading ? 'animate-spin' : undefined}
+              />
+              {t(locale, 'settings.models.fetchModels')}
+            </button>
+          </div>
+          <select
+            value={model}
+            onChange={(event) => patchProvider({ model: event.target.value })}
+            className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
+          >
+            {modelOptions.map((item) => (
+              <option key={item} value={item}>
+                {item}
+              </option>
+            ))}
+          </select>
+          {modelRefresh.error && (
+            <p className="text-[11px] leading-relaxed text-amber-300">
+              {modelRefresh.error}
+            </p>
+          )}
+        </label>
+      </div>
+    </div>
+  );
+}
+export function SpriteGenerationSettingsPanel({
+  locale,
+  embedded = false,
+  defaultProviderId,
+  onDefaultProviderIdChange,
+}: {
+  locale: Locale;
+  embedded?: boolean;
+  /**
+   * When provided, the "default provider" select binds to this value (a single
+   * project-wide default shared across commercial and local-open) instead of the
+   * runtime `preferredProviderId`. Choosing a default never changes the viewed
+   * category tab.
+   */
+  defaultProviderId?: SpriteProviderId;
+  onDefaultProviderIdChange?: (id: SpriteProviderId) => void;
+}) {
+  const [settings, setSettings] = useState<SpriteGenerationSettings>(() =>
+    loadSpriteGenerationSettings(),
+  );
+  const [category, setCategory] = useState<SpriteProviderCategory>('commercial');
+
+  const update = (patch: Partial<SpriteGenerationSettings>) => {
+    const next = { ...settings, ...patch };
+    saveSpriteGenerationSettings(next);
+    setSettings(loadSpriteGenerationSettings());
+  };
+
+  const boundDefaultProviderId = defaultProviderId ?? settings.preferredProviderId;
+  const setDefaultProviderId = (id: SpriteProviderId) => {
+    if (onDefaultProviderIdChange) {
+      onDefaultProviderIdChange(id);
+      return;
+    }
+    update({ preferredProviderId: id });
+  };
+
+  const providerOptions = SPRITE_PROVIDERS.map((provider) => ({
+    id: provider.id,
+    label: provider.label,
+    hint: `${spriteProviderCategoryLabel(provider.category, locale)} · ${spriteProviderStatusLabel(
+      provider,
+      settings,
+      locale,
+    )}`,
+    group: spriteProviderCategoryLabel(provider.category, locale),
+  }));
+  const activeProviders = SPRITE_PROVIDERS.filter(
+    (provider) => provider.category === category,
+  );
+
+  return (
+    <div className="space-y-5">
+      {!embedded && (
+        <div>
+          <h3 className="text-lg font-semibold text-fg">
+            {t(locale, 'settings.spriteGeneration.title')}
+          </h3>
+          <p className="mt-1 text-xs leading-relaxed text-fg-faint">
+            {t(locale, 'settings.spriteGeneration.description')}
+          </p>
+        </div>
+      )}
+
+      {!embedded && (
+        <SettingRow
+          title={t(locale, 'settings.spriteGeneration.enabledLabel')}
+          description={t(locale, 'settings.spriteGeneration.enabledDesc')}
+        >
+          <SwitchControl
+            checked={settings.enabled}
+            onChange={(enabled) => update({ enabled })}
+          />
+        </SettingRow>
+      )}
+
+      <SettingRow
+        title={t(locale, 'settings.spriteGeneration.defaultProviderLabel')}
+        description={t(locale, 'settings.spriteGeneration.defaultProviderDesc')}
+      >
+        <div className="w-full min-w-[14rem]">
+          <SelectControl
+            value={boundDefaultProviderId}
+            options={providerOptions}
+            onChange={(id) => setDefaultProviderId(id as SpriteProviderId)}
+            icon={<Boxes size={15} strokeWidth={2.1} />}
+          />
+        </div>
+      </SettingRow>
+
+      <div className="grid gap-3 rounded-lg border border-border bg-bg-alt p-4 md:grid-cols-2">
+        <label className="block space-y-1">
+          <span className="text-[11px] font-medium text-fg-dim">
+            {t(locale, 'settings.spriteGeneration.frameCountLabel')}
+          </span>
+          <input
+            type="number"
+            min={1}
+            max={64}
+            value={settings.defaultFrameCount}
+            onChange={(event) =>
+              update({ defaultFrameCount: Number(event.currentTarget.value) })
+            }
+            className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 text-sm text-fg outline-none transition-colors focus:border-accent"
+          />
+        </label>
+        <label className="block space-y-1">
+          <span className="text-[11px] font-medium text-fg-dim">
+            {t(locale, 'settings.spriteGeneration.frameSizeLabel')}
+          </span>
+          <input
+            type="number"
+            min={16}
+            max={512}
+            step={16}
+            value={settings.defaultFrameSize}
+            onChange={(event) =>
+              update({ defaultFrameSize: Number(event.currentTarget.value) })
+            }
+            className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 text-sm text-fg outline-none transition-colors focus:border-accent"
+          />
+        </label>
+        <SwitchLine
+          label={t(locale, 'settings.spriteGeneration.removeBackgroundLabel')}
+          checked={settings.removeBackground}
+          onChange={(removeBackground) => update({ removeBackground })}
+        />
+        <SwitchLine
+          label={t(locale, 'settings.spriteGeneration.autoTrimLabel')}
+          checked={settings.autoTrim}
+          onChange={(autoTrim) => update({ autoTrim })}
+        />
+        <SwitchLine
+          label={t(locale, 'settings.spriteGeneration.alignFramesLabel')}
+          checked={settings.alignFrames}
+          onChange={(alignFrames) => update({ alignFrames })}
+        />
+        <SwitchLine
+          label={t(locale, 'settings.spriteGeneration.packSpritesheetLabel')}
+          checked={settings.packSpritesheet}
+          onChange={(packSpritesheet) => update({ packSpritesheet })}
+        />
+      </div>
+
+      <div>
+        <div
+          role="tablist"
+          aria-orientation="horizontal"
+          className={SETTINGS_INNER_TABLIST_CLASS}
+        >
+          {spriteProviderCategoryOrder.map((item) => {
+            const active = category === item;
+            return (
+              <button
+                key={item}
+                type="button"
+                role="tab"
+                aria-selected={active}
+                onClick={() => setCategory(item)}
+                className={cn(
+                  SETTINGS_INNER_TAB_CLASS,
+                  active
+                    ? '-mb-px border-b-2 border-accent text-fg'
+                    : 'text-fg-faint hover:text-fg',
+                )}
+              >
+                {t(locale, spriteProviderCategoryTitleKey(item))}
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
+      <section role="tabpanel" className="rounded-lg border border-border bg-bg-alt p-4">
+        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0 space-y-1">
+            <h4 className="text-sm font-semibold text-fg">
+              {t(locale, spriteProviderCategoryTitleKey(category))}
+            </h4>
+            <p className="text-xs leading-relaxed text-fg-faint">
+              {t(locale, spriteProviderCategoryDescKey(category))}
+            </p>
+          </div>
+          <StatusBadge state="default" label={String(activeProviders.length)} />
+        </div>
+        <div className={SETTINGS_PROVIDER_GRID_CLASS}>
+          {activeProviders.map((provider) => (
+            <SpriteProviderSettingsRow
+              key={provider.id}
+              provider={provider}
+              settings={settings}
+              locale={locale}
+              onChange={(next) => {
+                saveSpriteGenerationSettings(next);
+                setSettings(loadSpriteGenerationSettings());
+              }}
+            />
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+const spriteProviderCategoryOrder: SpriteProviderCategory[] = [
+  'commercial',
+  'local-open',
+];
+
+function spriteProviderCategoryTitleKey(
+  category: SpriteProviderCategory,
+): TranslationKey {
+  return category === 'local-open'
+    ? 'settings.spriteGeneration.localOpenProviders'
+    : 'settings.spriteGeneration.commercialProviders';
+}
+
+function spriteProviderCategoryDescKey(
+  category: SpriteProviderCategory,
+): TranslationKey {
+  return category === 'local-open'
+    ? 'settings.spriteGeneration.localOpenProvidersDesc'
+    : 'settings.spriteGeneration.commercialProvidersDesc';
+}
+
+function spriteProviderCategoryLabel(
+  category: SpriteProviderCategory,
+  locale: Locale,
+): string {
+  return t(
+    locale,
+    category === 'local-open'
+      ? 'settings.spriteGeneration.categoryLocalOpen'
+      : 'settings.spriteGeneration.categoryCommercial',
+  );
+}
+
+function spriteProviderCategoryBadgeClass(category: SpriteProviderCategory): string {
+  return category === 'local-open'
+    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+    : 'border-sky-500/30 bg-sky-500/10 text-sky-300';
+}
+
+function spriteProviderStatusLabel(
+  provider: SpriteProviderDefinition,
+  settings: SpriteGenerationSettings,
+  locale: Locale,
+): string {
+  if (spriteProviderReady(provider.id, settings)) {
+    return t(locale, 'settings.freeChannels.ready');
+  }
+  if (provider.local) return t(locale, 'settings.freeChannels.localNeedsSetup');
+  if (provider.needsKey) return t(locale, 'settings.freeChannels.needsKey');
+  return t(locale, 'settings.imageGeneration.noKeyRequired');
+}
+
+function SwitchLine({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  return (
+    <label className="flex items-center justify-between gap-3 rounded-md border border-border-soft bg-panel px-2.5 py-2 text-xs text-fg-dim">
+      <span>{label}</span>
+      <SwitchControl checked={checked} onChange={onChange} />
+    </label>
+  );
+}
+
+function SpriteProviderSettingsRow({
+  provider,
+  settings,
+  locale,
+  onChange,
+}: {
+  provider: SpriteProviderDefinition;
+  settings: SpriteGenerationSettings;
+  locale: Locale;
+  onChange: (settings: SpriteGenerationSettings) => void;
+}) {
+  const [showKey, setShowKey] = useState(false);
+  const [modelRefresh, setModelRefresh] = useState<{
+    loading: boolean;
+    error: string | null;
+  }>({ loading: false, error: null });
+  const keyValue = settings.providerKeys[provider.id] ?? '';
+  const baseUrl = settings.providerBaseUrls[provider.id] ?? '';
+  const effectiveBaseUrl = spriteProviderBaseUrl(provider.id, settings);
+  const model = spriteProviderModel(provider.id, settings);
+  const ready = spriteProviderReady(provider.id, settings);
+  const KeyIcon = showKey ? EyeOff : Eye;
+  const cacheKey = endpointModelCacheKey('sprite', provider.id, effectiveBaseUrl);
+  const cachedModels = getCachedModels(cacheKey)?.models ?? [];
+  const modelOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const item of [model, ...cachedModels, ...provider.models]) {
+      const value = item?.trim();
+      if (!value || seen.has(value)) continue;
+      seen.add(value);
+      out.push(value);
+    }
+    return out;
+  }, [model, cachedModels, provider.models]);
+  const canRefresh =
+    !!effectiveBaseUrl && (!provider.needsKey || keyValue.trim().length > 0);
+
+  const patchProvider = (
+    patch: Partial<{
+      key: string;
+      baseUrl: string;
+      model: string;
+    }>,
+  ) => {
+    const next: SpriteGenerationSettings = {
+      ...settings,
+      providerKeys: { ...settings.providerKeys },
+      providerBaseUrls: { ...settings.providerBaseUrls },
+      providerModels: { ...settings.providerModels },
+    };
+    if (patch.key !== undefined) {
+      const value = patch.key.trim();
+      if (value) next.providerKeys[provider.id] = value;
+      else delete next.providerKeys[provider.id];
+    }
+    if (patch.baseUrl !== undefined) {
+      const value = patch.baseUrl.trim();
+      if (value) next.providerBaseUrls[provider.id] = value;
+      else delete next.providerBaseUrls[provider.id];
+    }
+    if (patch.model !== undefined) {
+      const value = patch.model.trim();
+      if (value) next.providerModels[provider.id] = value;
+      else delete next.providerModels[provider.id];
+    }
+    if (
+      !spriteProviderReady(next.preferredProviderId, next) &&
+      spriteProviderReady(provider.id, next)
+    ) {
+      next.preferredProviderId = provider.id;
+    }
+    onChange(next);
+  };
+
+  const refreshModels = async () => {
+    if (!canRefresh || modelRefresh.loading) return;
+    setModelRefresh({ loading: true, error: null });
+    try {
+      const result = await refreshEndpointModels({
+        cacheKey,
+        baseUrl: effectiveBaseUrl,
+        apiKey: keyValue,
+        fallback: [model, ...provider.models],
+      });
+      setModelRefresh({ loading: false, error: result.error ?? null });
+    } catch (err) {
+      setModelRefresh({
+        loading: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <div className="space-y-3 rounded-lg border border-border bg-bg-alt p-4">
+      <div className="flex flex-wrap items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-sm font-semibold text-fg">{provider.label}</span>
+            <span
+              className={cn(
+                'inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium',
+                spriteProviderCategoryBadgeClass(provider.category),
+              )}
+            >
+              {spriteProviderCategoryLabel(provider.category, locale)}
+            </span>
+            <StatusBadge
+              state={ready ? 'direct' : 'unavailable'}
+              label={spriteProviderStatusLabel(provider, settings, locale)}
             />
           </div>
           <p className="mt-1 text-[11px] leading-relaxed text-fg-faint">

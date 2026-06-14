@@ -45,6 +45,12 @@ function markdownUrlTransform(url: string, key: string): string | null | undefin
   ) {
     return url;
   }
+  if (
+    key === 'href' &&
+    /^data:video\/(?:mp4|mpeg|quicktime|webm|x-matroska|avi);base64,/i.test(url)
+  ) {
+    return url;
+  }
   if (key === 'href' && isModelUrl(url)) return url;
   return defaultUrlTransform(url);
 }

@@ -91,7 +91,7 @@ export function getCachedModels(key: string): CachedModelList | null {
 
 /** Cache key for image/music provider model lists (keyed by base URL). */
 export function endpointModelCacheKey(
-  scope: 'image' | 'music',
+  scope: 'image' | 'music' | 'video' | 'sprite' | 'speech',
   providerId: string,
   baseUrl: string,
 ): string {
