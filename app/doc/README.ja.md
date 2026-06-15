@@ -14,6 +14,8 @@
 <p align="center">
   <strong>ワンクリックで 3D モデル生成</strong><br>
   <img src="images/game/noYfqPt.png" alt="FreeUltraCode がワンクリックで 3D モデルを生成" width="960">
+  <br><br>
+  <img src="images/20260615-214236.jpg" alt="FreeUltraCode が生成した 3D モデルのプレビュー" width="960">
 </p>
 
 <p align="center">

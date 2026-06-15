@@ -197,8 +197,8 @@ export const SLASH_COMMANDS = [
     name: '/sprite',
     label: { 'zh-CN': '生成 Sprite 动画', 'en-US': 'Generate Sprite Animation' },
     detail: {
-      'zh-CN': '调用设置 > Sprite 中的商用或本地开源渠道生成精灵图、序列帧或 spritesheet',
-      'en-US': 'Generate sprites, frame sequences, or sprite sheets with the provider configured in Settings > Sprite',
+      'zh-CN': '复用设置 > 生图渠道生成精灵图、序列帧或 spritesheet',
+      'en-US': 'Generate sprites, frame sequences, or sprite sheets with the provider configured in Settings > Images',
     },
     text: {
       'zh-CN': '/sprite ',
@@ -209,8 +209,8 @@ export const SLASH_COMMANDS = [
     name: '/sprite-mode-start',
     label: { 'zh-CN': '开始 Sprite 模式', 'en-US': 'Start Sprite Mode' },
     detail: {
-      'zh-CN': '进入 Sprite 模式：之后每条消息都先让编程模型撰写 Sprite 提示词，再调用商用或本地开源渠道',
-      'en-US': 'Enter sprite mode: every message has the coding model write a sprite prompt, then calls the selected commercial or local provider',
+      'zh-CN': '进入 Sprite 模式：之后每条消息都先让编程模型撰写 Sprite 提示词，再复用生图渠道',
+      'en-US': 'Enter sprite mode: every message has the coding model write a sprite prompt, then reuses the image provider',
     },
     text: {
       'zh-CN': '',

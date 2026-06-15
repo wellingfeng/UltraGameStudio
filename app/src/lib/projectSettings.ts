@@ -90,6 +90,7 @@ export interface ProjectGameFeatureSettings {
   isGameProject: boolean;
   meshGeneration: boolean;
   rigging: boolean;
+  capturePerf: boolean;
   gameExperts: boolean;
   gameExpertEngine: ProjectGameExpertEngine;
 }
@@ -98,12 +99,9 @@ export type ProjectSpriteMode = 'commercial' | 'local-open';
 
 export interface ProjectSpriteSettings {
   enabled: boolean;
-  /** Which category tab is currently being viewed (commercial vs local-open). */
+  /** Legacy persisted tab value; Sprite now reuses image-generation routing. */
   mode: ProjectSpriteMode;
-  /**
-   * The single project-wide default Sprite provider. Shared across commercial
-   * and local-open — there is exactly one default, not one per category.
-   */
+  /** Legacy persisted provider value kept so older workspace metadata loads. */
   defaultProviderId: SpriteProviderId;
 }
 
@@ -210,6 +208,7 @@ export function gameFeatureDefaultsForEngine(
     isGameProject: enabled,
     meshGeneration: enabled,
     rigging: enabled,
+    capturePerf: enabled,
     gameExperts: enabled,
     gameExpertEngine: gameExpertEngineForProjectEngine(engine),
   };
@@ -350,6 +349,7 @@ export function projectSettingsFromMetadata(
       ? gameFeatures.isGameProject
       : gameFeatures.meshGeneration === true ||
         gameFeatures.rigging === true ||
+        gameFeatures.capturePerf === true ||
         gameFeatures.gameExperts === true ||
         uiDesign.enabled === true;
   return {
@@ -384,6 +384,7 @@ export function projectSettingsFromMetadata(
       isGameProject,
       meshGeneration: isGameProject && gameFeatures.meshGeneration === true,
       rigging: isGameProject && gameFeatures.rigging === true,
+      capturePerf: isGameProject && gameFeatures.capturePerf === true,
       gameExperts: isGameProject && gameFeatures.gameExperts === true,
       gameExpertEngine: isProjectGameExpertEngine(gameFeatures.gameExpertEngine)
         ? gameFeatures.gameExpertEngine

@@ -3,6 +3,7 @@ import { defaultBlueprint, simpleBlueprint } from '@/core/defaultBlueprint';
 import type { IRGraph } from '@/core/ir';
 import { personalInstructionsKey } from '@/core/personalInstructions';
 import { encodeToolPatch } from '@/components/ai/lib/toolEvent';
+import { extractSessionFiles } from '@/lib/sessionFiles';
 import { refreshCliRuntime } from '@/lib/cliConfig';
 import {
   systemDefaultGatewaySelection,
@@ -666,6 +667,55 @@ describe('simple-workflow chat mode', () => {
     expect(record?.meta?.runStatus).toBe('success');
   });
 
+  it('does not inject asset generation routing for asset-center product rules', async () => {
+    resetStore(simpleBlueprint('Simple chat'));
+    mockDirectRoute();
+    const systems: string[] = [];
+    gatewayMocks.completeGatewayText.mockImplementation(async (request) => {
+      systems.push(String(request.system));
+      return '已定位资产中心规则。';
+    });
+
+    useStore
+      .getState()
+      .sendPrompt(
+        '资产中心的内容不需要将用户发送的内容也展示出来，只展示AI生成、下载、修改后的资产',
+      );
+
+    await waitFor(
+      () =>
+        !useStore.getState().aiStreaming &&
+        useStore.getState().messages.some((m) => m.role === 'assistant'),
+      'asset-center simple chat reply',
+    );
+
+    expect(systems[0]).toContain('先判断用户当前真正意图');
+    expect(systems[0]).not.toContain('【本应用内置生成渠道');
+    expect(systems[0]).not.toContain('/image');
+  });
+
+  it('injects asset generation routing for concrete asset creation requests', async () => {
+    resetStore(simpleBlueprint('Simple chat'));
+    mockDirectRoute();
+    const systems: string[] = [];
+    gatewayMocks.completeGatewayText.mockImplementation(async (request) => {
+      systems.push(String(request.system));
+      return '可使用 /image。';
+    });
+
+    useStore.getState().sendPrompt('帮我生成一张赛博朋克头像');
+
+    await waitFor(
+      () =>
+        !useStore.getState().aiStreaming &&
+        useStore.getState().messages.some((m) => m.role === 'assistant'),
+      'image generation simple chat reply',
+    );
+
+    expect(systems[0]).toContain('【本应用内置生成渠道');
+    expect(systems[0]).toContain('/image');
+  });
+
   it('marks a plain chat history entry failed when the model call fails', async () => {
     window.localStorage.clear();
     await historyStore.ready();
@@ -877,6 +927,45 @@ describe('simple-workflow chat mode', () => {
     expect(gatewayMocks.completeGatewayText).toHaveBeenCalledTimes(2);
     expect(requests[1].userContent).toContain('用户的回答：继续连接');
     expect(useStore.getState().waitingInputSessions).toHaveLength(0);
+  });
+
+  it('does not pause simple chat on an unterminated interaction block', async () => {
+    resetStore(simpleBlueprint('Simple chat'));
+    mockDirectRoute();
+    gatewayMocks.completeGatewayText.mockResolvedValue(
+      [
+        '我需要确认一件事：',
+        '<<FUC_ASK>>',
+        JSON.stringify({
+          type: 'confirm',
+          prompt: '要不要我直接动手改那三处代码？',
+          confirmLabel: '直接改',
+          cancelLabel: '先别改',
+        }),
+      ].join('\n'),
+    );
+
+    useStore.getState().sendPrompt('分析会话为什么突然停了');
+
+    await waitFor(
+      () =>
+        !useStore.getState().aiStreaming &&
+        useStore
+          .getState()
+          .messages.some((message) =>
+            message.text.includes('要不要我直接动手改那三处代码？'),
+          ),
+      'unterminated interaction reply to finalize as text',
+    );
+
+    expect(
+      useStore.getState().messages.some((message) => message.interaction),
+    ).toBe(false);
+    expect(useStore.getState().waitingInputSessions).toHaveLength(0);
+    expect(notificationMocks.notifySessionComplete).not.toHaveBeenCalledWith(
+      expect.objectContaining({ status: 'waitingInput' }),
+    );
+    expect(gatewayMocks.completeGatewayText).toHaveBeenCalledTimes(1);
   });
 
   it('injects app personal instructions for Codex simple chat prompts', async () => {
@@ -2372,5 +2461,203 @@ describe('simple-workflow chat mode', () => {
     expect(useStore.getState().messages).toEqual([]);
     expect(record?.messages).toEqual([]);
     expect(record?.workflow?.nodes[0]?.params.userInputs).toEqual([]);
+  });
+
+  it('keeps streamed tool sentinels on the final CLI chat message across turns', async () => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({
+      workspaceId: workspace.id,
+      isWorkflow: false,
+      messages: [],
+      title: 'Chat',
+    });
+    resetStore(simpleBlueprint('Chat'));
+    const session = {
+      id: record.id,
+      workspaceId: workspace.id,
+      title: record.title,
+      createdAt: record.createdAt,
+      updatedAt: record.updatedAt,
+      isWorkflow: false,
+      messageCount: 0,
+    };
+    useStore.setState({
+      historyReady: true,
+      activeWorkspaceId: workspace.id,
+      activeSessionId: record.id,
+      workspaces: [workspace],
+      sessions: [session],
+      sessionTree: { [workspace.id]: [session] },
+      locale: 'zh-CN',
+    });
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockImplementation(async (selection) => ({
+      selection,
+      adapter: 'claude-code',
+      modelClass: selection.modelClass,
+      model: selection.modelClass,
+      transport: 'cli',
+      mode: 'cli',
+      label: 'Claude Code',
+      source: 'global',
+      cliCommand: 'claude',
+    }));
+    let turn = 0;
+    tauriMocks.aiEditViaCli.mockImplementation(async (_prompt, _adapter, opts) => {
+      turn += 1;
+      // The CLI streams a tool-use sentinel (a file edit) followed by prose, but
+      // the resolved value is the clean prose only — mirroring the real runtime.
+      const editedPath = turn === 1 ? 'src/first.ts' : 'src/second.ts';
+      opts.onProgress?.(
+        encodeToolPatch({
+          id: `tool_${turn}`,
+          name: 'Edit',
+          subject: editedPath,
+          args: { file_path: editedPath },
+          status: 'done',
+        }),
+      );
+      return turn === 1 ? '改好了第一个文件。' : '改好了第二个文件。';
+    });
+
+    useStore.getState().sendPrompt('改一下第一个文件');
+    await waitFor(
+      () =>
+        !useStore.getState().aiStreaming &&
+        useStore
+          .getState()
+          .messages.some(
+            (m) => m.role === 'assistant' && m.text.includes('改好了第一个文件'),
+          ),
+      'first CLI chat turn finalized',
+    );
+
+    // After the first turn the sentinel must survive on the final message.
+    const afterFirst = useStore.getState().messages.filter((m) => m.role === 'assistant');
+    expect(afterFirst.some((m) => m.text.includes('src/first.ts'))).toBe(true);
+
+    useStore.getState().sendPrompt('再改第二个文件');
+    await waitFor(
+      () =>
+        !useStore.getState().aiStreaming &&
+        useStore
+          .getState()
+          .messages.some(
+            (m) => m.role === 'assistant' && m.text.includes('改好了第二个文件'),
+          ),
+      'second CLI chat turn finalized',
+    );
+
+    // Both turns' edited files remain visible (merged across the session).
+    const finalMessages = useStore.getState().messages;
+    const allText = finalMessages.map((m) => m.text).join('\n');
+    expect(allText).toContain('src/first.ts');
+    expect(allText).toContain('src/second.ts');
+
+    const files = extractSessionFiles(finalMessages);
+    const editedPaths = files
+      .filter((f) => f.action === 'edited')
+      .map((f) => f.path);
+    expect(editedPaths).toContain('src/first.ts');
+    expect(editedPaths).toContain('src/second.ts');
+  });
+
+  it('keeps streamed tool cards before the final CLI prose when the tool ran first', async () => {
+    resetStore(simpleBlueprint('Simple chat'));
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockResolvedValue({
+      selection: { adapter: 'claude-code', modelClass: 'sonnet' },
+      adapter: 'claude-code',
+      modelClass: 'sonnet',
+      model: 'sonnet',
+      transport: 'cli',
+      mode: 'cli',
+      label: 'Claude Code',
+      source: 'fallback',
+      cliCommand: 'claude',
+    });
+    tauriMocks.aiEditViaCli.mockImplementation(async (_prompt, _adapter, opts) => {
+      opts.onProgress?.(
+        encodeToolPatch({
+          id: 'tool_first',
+          name: 'Read',
+          subject: 'src/context.ts',
+          args: { file_path: 'src/context.ts' },
+          status: 'done',
+        }),
+      );
+      opts.onProgress?.('结论：已经检查完。');
+      return '结论：已经检查完。';
+    });
+
+    useStore.getState().sendPrompt('先查文件再回答');
+    await waitFor(
+      () =>
+        !useStore.getState().aiStreaming &&
+        useStore
+          .getState()
+          .messages.some((m) => m.role === 'assistant' && m.text.includes('已经检查完')),
+      'CLI final message with ordered tools',
+    );
+
+    const assistant = useStore
+      .getState()
+      .messages.find((m) => m.role === 'assistant' && m.text.includes('已经检查完'));
+    expect(assistant?.text.indexOf('<<FUC_TOOL>>')).toBeLessThan(
+      assistant?.text.indexOf('结论：已经检查完。') ?? -1,
+    );
+  });
+
+  it('places streamed tool cards before final CLI prose when live text lacks the final answer', async () => {
+    resetStore(simpleBlueprint('Simple chat'));
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockResolvedValue({
+      selection: { adapter: 'claude-code', modelClass: 'sonnet' },
+      adapter: 'claude-code',
+      modelClass: 'sonnet',
+      model: 'sonnet',
+      transport: 'cli',
+      mode: 'cli',
+      label: 'Claude Code',
+      source: 'fallback',
+      cliCommand: 'claude',
+    });
+    tauriMocks.aiEditViaCli.mockImplementation(async (_prompt, _adapter, opts) => {
+      opts.onProgress?.(
+        encodeToolPatch({
+          id: 'tool_only_live',
+          name: 'command_execution',
+          subject: 'git status --short',
+          args: { command: 'git status --short' },
+          status: 'done',
+        }),
+      );
+      return '结论：仓库状态已经检查完。';
+    });
+
+    useStore.getState().sendPrompt('检查状态后告诉我结论');
+    await waitFor(
+      () =>
+        !useStore.getState().aiStreaming &&
+        useStore
+          .getState()
+          .messages.some((m) => m.role === 'assistant' && m.text.includes('仓库状态')),
+      'CLI final message with live-only tools',
+    );
+
+    const assistant = useStore
+      .getState()
+      .messages.find((m) => m.role === 'assistant' && m.text.includes('仓库状态'));
+    expect(assistant?.text.indexOf('<<FUC_TOOL>>')).toBeLessThan(
+      assistant?.text.indexOf('结论：仓库状态已经检查完。') ?? -1,
+    );
   });
 });

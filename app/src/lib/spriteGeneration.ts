@@ -1,3 +1,11 @@
+import {
+  generateImage,
+  imageProviderReady,
+  loadImageGenerationSettings,
+  type ImageGenerationSettings,
+  type ImageProviderId,
+} from './imageGeneration';
+
 export type SpriteProviderId = 'ludo-sprite' | 'local-comfyui-sprite';
 
 export type SpriteProviderCategory = 'commercial' | 'local-open';
@@ -23,6 +31,9 @@ export interface SpriteProviderDefinition {
 }
 
 export type SpriteGenerationMode = 'text-to-sprite' | 'image-to-animation' | 'motion-transfer';
+export type SpriteSheetPreset = 'auto' | '2x2' | '2x3' | '4x4' | 'custom';
+export type SpriteFrameAnchor = 'center' | 'bottom' | 'feet';
+export type SpriteComponentMode = 'largest' | 'all';
 
 export interface SpriteGenerationSettings {
   enabled: boolean;
@@ -36,11 +47,19 @@ export interface SpriteGenerationSettings {
   autoTrim: boolean;
   alignFrames: boolean;
   packSpritesheet: boolean;
+  sheetPreset: SpriteSheetPreset;
+  sheetRows: number;
+  sheetColumns: number;
+  chromaKey: string;
+  frameAnchor: SpriteFrameAnchor;
+  componentMode: SpriteComponentMode;
+  rejectEdgeTouch: boolean;
+  fitScale: number;
 }
 
 export interface SpriteGenerationRequest {
   prompt: string;
-  providerId?: SpriteProviderId;
+  providerId?: ImageProviderId;
   model?: string;
   mode?: SpriteGenerationMode;
   frameCount?: number;
@@ -53,7 +72,7 @@ export interface SpriteGenerationRequest {
 }
 
 export interface SpriteGenerationResult {
-  providerId: SpriteProviderId;
+  providerId: ImageProviderId;
   providerLabel: string;
   model: string;
   prompt: string;
@@ -72,6 +91,19 @@ const MIN_FRAME_COUNT = 1;
 const MAX_FRAME_COUNT = 64;
 const MIN_FRAME_SIZE = 16;
 const MAX_FRAME_SIZE = 512;
+const MIN_SHEET_DIMENSION = 1;
+const MAX_SHEET_DIMENSION = 8;
+const MIN_FIT_SCALE = 0.5;
+const MAX_FIT_SCALE = 1;
+const DEFAULT_CHROMA_KEY = '#FF00FF';
+
+const SPRITE_SHEET_PRESET_DIMENSIONS: Partial<
+  Record<SpriteSheetPreset, { rows: number; columns: number }>
+> = {
+  '2x2': { rows: 2, columns: 2 },
+  '2x3': { rows: 2, columns: 3 },
+  '4x4': { rows: 4, columns: 4 },
+};
 
 export const SPRITE_PROVIDERS: SpriteProviderDefinition[] = [
   {
@@ -124,6 +156,14 @@ export const DEFAULT_SPRITE_GENERATION_SETTINGS: SpriteGenerationSettings = {
   autoTrim: true,
   alignFrames: true,
   packSpritesheet: true,
+  sheetPreset: '4x4',
+  sheetRows: 4,
+  sheetColumns: 4,
+  chromaKey: DEFAULT_CHROMA_KEY,
+  frameAnchor: 'feet',
+  componentMode: 'largest',
+  rejectEdgeTouch: true,
+  fitScale: 0.92,
 };
 
 function hasStorage(): boolean {
@@ -132,6 +172,18 @@ function hasStorage(): boolean {
 
 export function isSpriteProviderId(value: unknown): value is SpriteProviderId {
   return typeof value === 'string' && SPRITE_PROVIDER_BY_ID.has(value as SpriteProviderId);
+}
+
+function isSpriteSheetPreset(value: unknown): value is SpriteSheetPreset {
+  return value === 'auto' || value === '2x2' || value === '2x3' || value === '4x4' || value === 'custom';
+}
+
+function isSpriteFrameAnchor(value: unknown): value is SpriteFrameAnchor {
+  return value === 'center' || value === 'bottom' || value === 'feet';
+}
+
+function isSpriteComponentMode(value: unknown): value is SpriteComponentMode {
+  return value === 'largest' || value === 'all';
 }
 
 function cleanRecord<T extends string>(
@@ -154,6 +206,56 @@ function clampInteger(value: unknown, min: number, max: number, fallback: number
   return Math.max(min, Math.min(max, Math.round(n)));
 }
 
+function clampNumber(value: unknown, min: number, max: number, fallback: number): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function normalizeChromaKey(value: unknown): string {
+  const source = typeof value === 'string' ? value.trim() : '';
+  if (/^#[0-9a-f]{6}$/iu.test(source)) return source.toUpperCase();
+  return DEFAULT_CHROMA_KEY;
+}
+
+export function spriteSheetGridForSettings(
+  settings: Pick<SpriteGenerationSettings, 'sheetPreset' | 'sheetRows' | 'sheetColumns' | 'defaultFrameCount'>,
+): { rows: number; columns: number; cells: number; label: string } {
+  const preset = settings.sheetPreset;
+  const fixed = SPRITE_SHEET_PRESET_DIMENSIONS[preset];
+  if (fixed) {
+    return {
+      ...fixed,
+      cells: fixed.rows * fixed.columns,
+      label: `${fixed.rows}x${fixed.columns}`,
+    };
+  }
+  if (preset === 'custom') {
+    const rows = clampInteger(
+      settings.sheetRows,
+      MIN_SHEET_DIMENSION,
+      MAX_SHEET_DIMENSION,
+      DEFAULT_SPRITE_GENERATION_SETTINGS.sheetRows,
+    );
+    const columns = clampInteger(
+      settings.sheetColumns,
+      MIN_SHEET_DIMENSION,
+      MAX_SHEET_DIMENSION,
+      DEFAULT_SPRITE_GENERATION_SETTINGS.sheetColumns,
+    );
+    return { rows, columns, cells: rows * columns, label: `${rows}x${columns}` };
+  }
+  const cells = clampInteger(
+    settings.defaultFrameCount,
+    MIN_FRAME_COUNT,
+    MAX_FRAME_COUNT,
+    DEFAULT_SPRITE_GENERATION_SETTINGS.defaultFrameCount,
+  );
+  const columns = Math.ceil(Math.sqrt(cells));
+  const rows = Math.ceil(cells / columns);
+  return { rows, columns, cells, label: `${rows}x${columns}` };
+}
+
 export function normalizeSpriteGenerationSettings(
   value: unknown,
 ): SpriteGenerationSettings {
@@ -164,6 +266,9 @@ export function normalizeSpriteGenerationSettings(
   const preferredProviderId = isSpriteProviderId(source.preferredProviderId)
     ? source.preferredProviderId
     : DEFAULT_SPRITE_GENERATION_SETTINGS.preferredProviderId;
+  const sheetPreset = isSpriteSheetPreset(source.sheetPreset)
+    ? source.sheetPreset
+    : DEFAULT_SPRITE_GENERATION_SETTINGS.sheetPreset;
   return {
     enabled:
       typeof source.enabled === 'boolean'
@@ -201,6 +306,36 @@ export function normalizeSpriteGenerationSettings(
       typeof source.packSpritesheet === 'boolean'
         ? source.packSpritesheet
         : DEFAULT_SPRITE_GENERATION_SETTINGS.packSpritesheet,
+    sheetPreset,
+    sheetRows: clampInteger(
+      source.sheetRows,
+      MIN_SHEET_DIMENSION,
+      MAX_SHEET_DIMENSION,
+      DEFAULT_SPRITE_GENERATION_SETTINGS.sheetRows,
+    ),
+    sheetColumns: clampInteger(
+      source.sheetColumns,
+      MIN_SHEET_DIMENSION,
+      MAX_SHEET_DIMENSION,
+      DEFAULT_SPRITE_GENERATION_SETTINGS.sheetColumns,
+    ),
+    chromaKey: normalizeChromaKey(source.chromaKey),
+    frameAnchor: isSpriteFrameAnchor(source.frameAnchor)
+      ? source.frameAnchor
+      : DEFAULT_SPRITE_GENERATION_SETTINGS.frameAnchor,
+    componentMode: isSpriteComponentMode(source.componentMode)
+      ? source.componentMode
+      : DEFAULT_SPRITE_GENERATION_SETTINGS.componentMode,
+    rejectEdgeTouch:
+      typeof source.rejectEdgeTouch === 'boolean'
+        ? source.rejectEdgeTouch
+        : DEFAULT_SPRITE_GENERATION_SETTINGS.rejectEdgeTouch,
+    fitScale: clampNumber(
+      source.fitScale,
+      MIN_FIT_SCALE,
+      MAX_FIT_SCALE,
+      DEFAULT_SPRITE_GENERATION_SETTINGS.fitScale,
+    ),
   };
 }
 
@@ -273,12 +408,11 @@ export function configuredSpriteProviderIds(
 }
 
 export function preferredReadySpriteProviderId(
-  settings = loadSpriteGenerationSettings(),
-): SpriteProviderId | null {
-  if (spriteProviderReady(settings.preferredProviderId, settings)) {
-    return settings.preferredProviderId;
-  }
-  return configuredSpriteProviderIds(settings)[0] ?? null;
+  imageSettings = loadImageGenerationSettings(),
+): ImageProviderId | null {
+  return imageProviderReady(imageSettings.preferredProviderId, imageSettings)
+    ? imageSettings.preferredProviderId
+    : null;
 }
 
 export function looksLikeSpriteGenerationRequest(text: string): boolean {
@@ -321,22 +455,20 @@ export function inferSpriteMode(prompt: string): SpriteGenerationMode {
 export async function generateSprite(
   request: SpriteGenerationRequest,
   settings = loadSpriteGenerationSettings(),
+  imageSettings: ImageGenerationSettings = loadImageGenerationSettings(),
 ): Promise<SpriteGenerationResult> {
   if (!settings.enabled) throw new Error('SPRITE_GENERATION_DISABLED');
-  const providerId = request.providerId ?? preferredReadySpriteProviderId(settings);
-  if (!providerId) throw new Error('NO_READY_SPRITE_PROVIDER');
-  if (!spriteProviderReady(providerId, settings)) {
-    throw new Error(`SPRITE_PROVIDER_NOT_READY:${providerId}`);
-  }
-  const provider = spriteProviderById(providerId);
   const prompt = stripSpriteCommand(request.prompt);
-  const model = request.model?.trim() || spriteProviderModel(providerId, settings);
-  const frameCount = clampInteger(
-    request.frameCount,
-    MIN_FRAME_COUNT,
-    MAX_FRAME_COUNT,
-    settings.defaultFrameCount,
-  );
+  const settingsGrid = spriteSheetGridForSettings(settings);
+  const frameCount =
+    settings.sheetPreset === 'auto'
+      ? clampInteger(
+          request.frameCount,
+          MIN_FRAME_COUNT,
+          MAX_FRAME_COUNT,
+          settings.defaultFrameCount,
+        )
+      : settingsGrid.cells;
   const frameSize = clampInteger(
     request.frameSize,
     MIN_FRAME_SIZE,
@@ -344,31 +476,46 @@ export async function generateSprite(
     settings.defaultFrameSize,
   );
   const mode = request.mode ?? inferSpriteMode(prompt);
-  const assets = await generateWithProvider(
-    providerId,
+  const imageResult = await generateImage(
     {
-      prompt,
-      model,
-      mode,
-      frameCount,
-      frameSize,
-      removeBackground: request.removeBackground ?? settings.removeBackground,
-      autoTrim: request.autoTrim ?? settings.autoTrim,
-      alignFrames: request.alignFrames ?? settings.alignFrames,
-      packSpritesheet: request.packSpritesheet ?? settings.packSpritesheet,
+      prompt: spritePromptWithContract({
+        prompt,
+        model: request.model?.trim() || '',
+        mode,
+        frameCount,
+        frameSize,
+        removeBackground: request.removeBackground ?? settings.removeBackground,
+        autoTrim: request.autoTrim ?? settings.autoTrim,
+        alignFrames: request.alignFrames ?? settings.alignFrames,
+        packSpritesheet: request.packSpritesheet ?? settings.packSpritesheet,
+        sheetPreset: settings.sheetPreset,
+        sheetRows: settingsGrid.rows,
+        sheetColumns: settingsGrid.columns,
+        chromaKey: settings.chromaKey,
+        frameAnchor: settings.frameAnchor,
+        componentMode: settings.componentMode,
+        rejectEdgeTouch: settings.rejectEdgeTouch,
+        fitScale: settings.fitScale,
+      }),
+      providerId: request.providerId ?? imageSettings.preferredProviderId,
+      model: request.model,
+      signal: request.signal,
     },
-    settings,
-    request.signal,
+    imageSettings,
   );
   return {
-    providerId,
-    providerLabel: provider.label,
-    model,
+    providerId: imageResult.providerId,
+    providerLabel: imageResult.providerLabel,
+    model: imageResult.model,
     prompt,
     mode,
     frameCount,
     frameSize,
-    ...assets,
+    spritesheets: imageResult.images,
+    frames: [],
+    gifs: [],
+    videos: [],
+    metadata: [],
   };
 }
 
@@ -382,503 +529,41 @@ interface SpriteProviderPayload {
   autoTrim: boolean;
   alignFrames: boolean;
   packSpritesheet: boolean;
+  sheetPreset: SpriteSheetPreset;
+  sheetRows: number;
+  sheetColumns: number;
+  chromaKey: string;
+  frameAnchor: SpriteFrameAnchor;
+  componentMode: SpriteComponentMode;
+  rejectEdgeTouch: boolean;
+  fitScale: number;
 }
 
-interface SpriteAssets {
-  spritesheets: string[];
-  frames: string[];
-  gifs: string[];
-  videos: string[];
-  metadata: string[];
-}
-
-async function generateWithProvider(
-  providerId: SpriteProviderId,
-  payload: SpriteProviderPayload,
-  settings: SpriteGenerationSettings,
-  signal?: AbortSignal,
-): Promise<SpriteAssets> {
-  switch (spriteProviderById(providerId).apiKind) {
-    case 'ludo-compatible':
-      return generateLudoSprite(payload, settings, signal);
-    case 'generic-local-sprite':
-      return generateGenericLocalSprite(providerId, payload, settings, signal);
-    default:
-      throw new Error(`Unsupported sprite provider: ${providerId}`);
-  }
-}
-
-function spriteRequestBody(payload: SpriteProviderPayload): Record<string, unknown> {
-  return {
-    prompt: payload.prompt,
-    model: payload.model,
-    mode: payload.mode,
-    generation_mode: payload.mode,
-    action: spriteActionForMode(payload.mode),
-    frame_count: payload.frameCount,
-    frames: payload.frameCount,
-    frame_size: payload.frameSize,
-    width: payload.frameSize,
-    height: payload.frameSize,
-    transparent_background: payload.removeBackground,
-    remove_background: payload.removeBackground,
-    auto_trim: payload.autoTrim,
-    trim: payload.autoTrim,
-    align_frames: payload.alignFrames,
-    align: payload.alignFrames,
-    pack_spritesheet: payload.packSpritesheet,
-    spritesheet: payload.packSpritesheet,
-    output_formats: ['spritesheet', 'frames', 'gif', 'mp4', 'json'],
-    postprocess: {
-      ffmpeg_extract_frames: true,
-      remove_background: payload.removeBackground,
-      align_frames: payload.alignFrames,
-      auto_trim: payload.autoTrim,
-      pack_spritesheet: payload.packSpritesheet,
-    },
-  };
-}
-
-function spriteActionForMode(mode: SpriteGenerationMode): string {
-  if (mode === 'motion-transfer') return 'transferMotion';
-  if (mode === 'image-to-animation') return 'animateSprite';
-  return 'createImage';
-}
-
-async function generateLudoSprite(
-  payload: SpriteProviderPayload,
-  settings: SpriteGenerationSettings,
-  signal?: AbortSignal,
-): Promise<SpriteAssets> {
-  const apiKey = spriteProviderKey('ludo-sprite', settings);
-  if (!apiKey) throw new Error('Ludo API key is missing.');
-  const baseUrl = spriteProviderBaseUrl('ludo-sprite', settings);
-  const response = await fetch(`${baseUrl}/sprite/generations`, {
-    method: 'POST',
-    headers: {
-      Authorization: apiKey.toLowerCase().startsWith('bearer ') ? apiKey : `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(spriteRequestBody(payload)),
-    signal,
+function spriteGridForPayload(
+  payload: Pick<SpriteProviderPayload, 'sheetPreset' | 'sheetRows' | 'sheetColumns' | 'frameCount'>,
+): { rows: number; columns: number; cells: number; label: string } {
+  return spriteSheetGridForSettings({
+    sheetPreset: payload.sheetPreset,
+    sheetRows: payload.sheetRows,
+    sheetColumns: payload.sheetColumns,
+    defaultFrameCount: payload.frameCount,
   });
-  return waitForSpriteAssets(response, 'Ludo.ai Sprite Generator', settings, 'ludo-sprite', signal);
 }
 
-async function generateGenericLocalSprite(
-  providerId: SpriteProviderId,
-  payload: SpriteProviderPayload,
-  settings: SpriteGenerationSettings,
-  signal?: AbortSignal,
-): Promise<SpriteAssets> {
-  const baseUrl = spriteProviderBaseUrl(providerId, settings);
-  const apiKey = spriteProviderKey(providerId, settings);
-  const headers: Record<string, string> = {
-    Accept: 'image/*, video/*, application/json, application/zip',
-    'Content-Type': 'application/json',
-  };
-  if (apiKey) headers.Authorization = `Bearer ${apiKey}`;
-  const response = await fetch(baseUrl, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(spriteRequestBody(payload)),
-    signal,
-  });
-  return waitForSpriteAssets(response, spriteProviderById(providerId).label, settings, providerId, signal);
-}
-
-async function waitForSpriteAssets(
-  response: Response,
-  providerLabel: string,
-  settings: SpriteGenerationSettings,
-  providerId: SpriteProviderId,
-  signal?: AbortSignal,
-): Promise<SpriteAssets> {
-  const started = await readResponseJsonOrSpriteAssets(response, providerLabel);
-  const immediate = spriteAssetsFromJson(started);
-  if (spriteAssetsReady(immediate) && isTerminalSuccess(started)) return immediate;
-  const statusUrl = statusUrlFromUnknown(started);
-  const taskId = taskIdFromJson(started);
-  if (!statusUrl && !taskId) {
-    if (spriteAssetsReady(immediate)) return immediate;
-    throw new Error(`${providerLabel} returned no sprite assets.`);
-  }
-  const baseUrl = spriteProviderBaseUrl(providerId, settings);
-  for (let i = 0; i < 180; i += 1) {
-    await delay(2000, signal);
-    const pollUrl =
-      statusUrl || `${baseUrl.replace(/\/+$/, '')}/${encodeURIComponent(taskId ?? '')}`;
-    const pollResponse = await fetch(pollUrl, {
-      headers: authHeadersForProvider(providerId, settings),
-      signal,
-    });
-    const status = await readResponseJsonOrSpriteAssets(pollResponse, providerLabel);
-    const state = jsonState(status);
-    if (isFailedState(state)) {
-      throw new Error(providerErrorMessage(status) || `${providerLabel} generation failed.`);
-    }
-    const assets = spriteAssetsFromJson(status);
-    if (spriteAssetsReady(assets) && (isSuccessState(state, status) || state === '')) return assets;
-  }
-  throw new Error(`${providerLabel} job timed out before sprite assets were ready.`);
-}
-
-function authHeadersForProvider(
-  providerId: SpriteProviderId,
-  settings: SpriteGenerationSettings,
-): Record<string, string> {
-  const apiKey = spriteProviderKey(providerId, settings);
-  if (!apiKey) return {};
-  return {
-    Authorization: apiKey.toLowerCase().startsWith('bearer ') ? apiKey : `Bearer ${apiKey}`,
-  };
-}
-
-async function readResponseJsonOrSpriteAssets(
-  response: Response,
-  providerLabel: string,
-): Promise<Record<string, unknown>> {
-  if (!response.ok) {
-    const body = await response.text().catch(() => '');
-    throw new Error(`${providerLabel} ${response.status} ${response.statusText}${body ? `: ${body.slice(0, 240)}` : ''}`);
-  }
-  const contentType = response.headers.get('content-type') ?? '';
-  if (contentType.startsWith('image/')) {
-    const blob = await response.blob();
-    const src = await blobToDataUrl(blob);
-    return contentType.includes('gif')
-      ? { gif_url: src, status: 'succeeded' }
-      : { spritesheet_url: src, status: 'succeeded' };
-  }
-  if (contentType.startsWith('video/')) {
-    const bytes = arrayBufferToBase64(await response.arrayBuffer());
-    return { video_url: `data:${contentType.split(';')[0]};base64,${bytes}`, status: 'succeeded' };
-  }
-  const json = await response.json().catch(() => null);
-  if (!json || typeof json !== 'object' || Array.isArray(json)) {
-    throw new Error(`${providerLabel} returned a non-JSON response.`);
-  }
-  return json as Record<string, unknown>;
-}
-
-function spriteAssetsFromJson(json: Record<string, unknown>): SpriteAssets {
-  const out: SpriteAssets = {
-    spritesheets: [],
-    frames: [],
-    gifs: [],
-    videos: [],
-    metadata: [],
-  };
-  for (const src of spriteSourcesFromUnknown(json)) {
-    pushSpriteSource(out, src);
-  }
-  return out;
-}
-
-interface SpriteSource {
-  url: string;
-  kind: 'spritesheet' | 'frame' | 'gif' | 'video' | 'metadata';
-}
-
-function pushSpriteSource(out: SpriteAssets, source: SpriteSource): void {
-  const list =
-    source.kind === 'spritesheet'
-      ? out.spritesheets
-      : source.kind === 'frame'
-        ? out.frames
-        : source.kind === 'gif'
-          ? out.gifs
-          : source.kind === 'video'
-            ? out.videos
-            : out.metadata;
-  if (source.url && !list.includes(source.url)) list.push(source.url);
-}
-
-function spriteSourcesFromUnknown(value: unknown, keyHint = ''): SpriteSource[] {
-  if (!value) return [];
-  if (typeof value === 'string') {
-    const source = spriteSourceFromString(value, keyHint);
-    return source ? [source] : [];
-  }
-  if (Array.isArray(value)) {
-    return value.flatMap((item) => spriteSourcesFromUnknown(item, keyHint));
-  }
-  if (typeof value !== 'object') return [];
-  const record = value as Record<string, unknown>;
-  const sources: SpriteSource[] = [];
-  const push = (items: SpriteSource[]) => {
-    for (const item of items) {
-      if (!item.url) continue;
-      if (sources.some((existing) => existing.url === item.url && existing.kind === item.kind)) {
-        continue;
-      }
-      sources.push(item);
-    }
-  };
-  const inlineData = objectValue(record.inlineData) ?? objectValue(record.inline_data);
-  if (inlineData) {
-    const data = stringValue(inlineData.data);
-    const mimeType = stringValue(inlineData.mimeType) || stringValue(inlineData.mime_type);
-    if (data) {
-      push([{
-        url: dataUrlFromMime(data, mimeType || 'image/png'),
-        kind: sourceKindFromMime(mimeType || 'image/png', keyHint),
-      }]);
-    }
-  }
-  const bytesBase64 =
-    stringValue(record.bytesBase64Encoded) ||
-    stringValue(record.bytes_base64_encoded) ||
-    stringValue(record.base64) ||
-    stringValue(record.b64);
-  if (bytesBase64) {
-    const mimeType = stringValue(record.mimeType) || stringValue(record.mime_type) || mimeFromKeyHint(keyHint);
-    push([{
-      url: dataUrlFromMime(bytesBase64, mimeType || 'image/png'),
-      kind: sourceKindFromMime(mimeType || 'image/png', keyHint),
-    }]);
-  }
-  for (const key of [
-    'spritesheet',
-    'spritesheet_url',
-    'spritesheetUrl',
-    'sprite_sheet',
-    'spriteSheet',
-    'sheet',
-    'sheet_url',
-    'sheetUrl',
-    'frames',
-    'frame_urls',
-    'frameUrls',
-    'images',
-    'image_urls',
-    'imageUrls',
-    'gif',
-    'gif_url',
-    'gifUrl',
-    'animation',
-    'animation_url',
-    'animationUrl',
-    'video',
-    'video_url',
-    'videoUrl',
-    'mp4',
-    'mp4_url',
-    'metadata',
-    'metadata_url',
-    'metadataUrl',
-    'json',
-    'json_url',
-    'jsonUrl',
-    'assets',
-    'asset',
-    'outputs',
-    'output',
-    'result',
-    'results',
-    'data',
-    'files',
-    'file',
-    'url',
-    'uri',
-  ]) {
-    push(spriteSourcesFromUnknown(record[key], key));
-  }
-  for (const [key, child] of Object.entries(record)) {
-    if (key in record && keyHint === key) continue;
-    push(spriteSourcesFromUnknown(child, key));
-  }
-  return sources;
-}
-
-function spriteSourceFromString(value: string, keyHint: string): SpriteSource | null {
-  const src = value.trim();
-  if (!src) return null;
-  if (/^data:/i.test(src)) {
-    return { url: src, kind: sourceKindFromMime(src.slice(5, src.indexOf(';')), keyHint) };
-  }
-  if (/^https?:\/\//i.test(src) || /^file:\/\//i.test(src)) {
-    return { url: src, kind: sourceKindFromUrl(src, keyHint) };
-  }
-  if (/^[A-Za-z0-9+/]+={0,2}$/u.test(src) && src.length > 80 && /base64|b64|image|video|gif|sprite|frame|sheet|json/i.test(keyHint)) {
-    const mime = mimeFromKeyHint(keyHint);
-    return { url: dataUrlFromMime(src, mime), kind: sourceKindFromMime(mime, keyHint) };
-  }
-  return null;
-}
-
-function sourceKindFromUrl(
-  src: string,
-  keyHint: string,
-): SpriteSource['kind'] {
-  if (/\.(?:gif)(?:[?#]|$)/i.test(src) || /gif/i.test(keyHint)) return 'gif';
-  if (/\.(?:mp4|webm|mov|m4v)(?:[?#]|$)/i.test(src) || /video|mp4|movie|clip/i.test(keyHint)) return 'video';
-  if (/\.(?:json)(?:[?#]|$)/i.test(src) || /metadata|json/i.test(keyHint)) return 'metadata';
-  if (/frame|frames/i.test(keyHint)) return 'frame';
-  return 'spritesheet';
-}
-
-function sourceKindFromMime(
-  mime: string,
-  keyHint: string,
-): SpriteSource['kind'] {
-  if (/gif/i.test(mime) || /gif/i.test(keyHint)) return 'gif';
-  if (/^video\//i.test(mime) || /video|mp4|movie|clip/i.test(keyHint)) return 'video';
-  if (/json/i.test(mime) || /metadata|json/i.test(keyHint)) return 'metadata';
-  if (/frame|frames/i.test(keyHint)) return 'frame';
-  return 'spritesheet';
-}
-
-function mimeFromKeyHint(keyHint: string): string {
-  if (/gif/i.test(keyHint)) return 'image/gif';
-  if (/video|mp4|movie|clip/i.test(keyHint)) return 'video/mp4';
-  if (/metadata|json/i.test(keyHint)) return 'application/json';
-  return 'image/png';
-}
-
-function dataUrlFromMime(base64: string, mimeType: string): string {
-  const clean = base64.trim().replace(/^data:[^;]+;base64,/i, '');
-  return `data:${mimeType || 'image/png'};base64,${clean}`;
-}
-
-function spriteAssetsReady(assets: SpriteAssets): boolean {
-  return (
-    assets.spritesheets.length > 0 ||
-    assets.frames.length > 0 ||
-    assets.gifs.length > 0 ||
-    assets.videos.length > 0
-  );
-}
-
-function taskIdFromJson(json: Record<string, unknown>): string {
-  return (
-    stringValue(json.id) ||
-    stringValue(json.task_id) ||
-    stringValue(json.taskId) ||
-    stringValue(json.request_id) ||
-    stringValue(json.requestId) ||
-    stringValue(json.generation_id) ||
-    stringValue(json.generationId) ||
-    stringValue(objectValue(json.output)?.task_id) ||
-    stringValue(objectValue(json.data)?.task_id) ||
-    stringValue(objectValue(json.data)?.id)
-  );
-}
-
-function statusUrlFromUnknown(json: Record<string, unknown>): string {
-  return (
-    stringValue(json.status_url) ||
-    stringValue(json.statusUrl) ||
-    stringValue(json.polling_url) ||
-    stringValue(json.pollingUrl) ||
-    stringValue(json.get_url) ||
-    stringValue(json.getUrl) ||
-    stringValue(objectValue(json.urls)?.get) ||
-    stringValue(objectValue(json.urls)?.status)
-  );
-}
-
-function jsonState(json: Record<string, unknown>): string {
-  return (
-    stringValue(json.status) ||
-    stringValue(json.state) ||
-    stringValue(json.task_status) ||
-    stringValue(json.taskStatus) ||
-    stringValue(json.phase) ||
-    stringValue(objectValue(json.output)?.task_status) ||
-    stringValue(objectValue(json.data)?.status) ||
-    ''
-  ).toLowerCase();
-}
-
-function isFailedState(state: string): boolean {
+function spritePromptWithContract(payload: SpriteProviderPayload): string {
+  const grid = spriteGridForPayload(payload);
+  const backgroundLine = payload.removeBackground
+    ? `raw sheet background must be solid ${payload.chromaKey} chroma key, perfectly flat, no transparency before postprocess`
+    : 'clean transparent or flat plain background';
   return [
-    'failed',
-    'failure',
-    'error',
-    'errored',
-    'canceled',
-    'cancelled',
-    'rejected',
-    'blocked',
-  ].includes(state.toLowerCase());
-}
-
-function isSuccessState(state: string, json: Record<string, unknown>): boolean {
-  const normalized = state.toLowerCase();
-  return (
-    json.done === true ||
-    json.completed === true ||
-    [
-      'succeeded',
-      'success',
-      'completed',
-      'complete',
-      'done',
-      'ready',
-      'finish',
-      'finished',
-    ].includes(normalized)
-  );
-}
-
-function isTerminalSuccess(json: Record<string, unknown>): boolean {
-  return isSuccessState(jsonState(json), json);
-}
-
-function providerErrorMessage(json: Record<string, unknown>): string {
-  return (
-    stringValue(json.error) ||
-    stringValue(json.message) ||
-    stringValue(json.msg) ||
-    stringValue(json.failure_reason) ||
-    stringValue(json.failureReason) ||
-    stringValue(objectValue(json.error)?.message) ||
-    stringValue(objectValue(json.data)?.error) ||
-    ''
-  );
-}
-
-function objectValue(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function stringValue(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
-}
-
-function delay(ms: number, signal?: AbortSignal): Promise<void> {
-  if (signal?.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));
-  return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(resolve, ms);
-    signal?.addEventListener(
-      'abort',
-      () => {
-        window.clearTimeout(timer);
-        reject(new DOMException('Aborted', 'AbortError'));
-      },
-      { once: true },
-    );
-  });
-}
-
-function blobToDataUrl(blob: Blob): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result ?? ''));
-    reader.onerror = () => reject(reader.error ?? new Error('Failed to read sprite blob.'));
-    reader.readAsDataURL(blob);
-  });
-}
-
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  let binary = '';
-  const bytes = new Uint8Array(buffer);
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
-  }
-  return btoa(binary);
+    payload.prompt.trim(),
+    '',
+    'Sprite Forge compatible raw spritesheet constraints:',
+    `- exact layout: ${grid.rows} rows x ${grid.columns} columns, ${payload.frameCount} frames, each frame ${payload.frameSize}x${payload.frameSize}px`,
+    `- ${backgroundLine}`,
+    '- one subject and one action only, consistent identity, proportions, facing direction, lighting, and silhouette across all frames',
+    `- stable ${payload.frameAnchor} anchor, centered subject, even spacing, safe margins, no frame touches canvas edge`,
+    '- no text, labels, UI, watermark, border, grid line, scenery, shadow-only artifacts, duplicate poses, or mixed actions',
+    '- output a single game-ready spritesheet suitable for deterministic chroma-key cleanup, frame extraction, alignment, and QC',
+  ].join('\n');
 }

@@ -14,6 +14,8 @@
 <p align="center">
   <strong>Генерация 3D-модели в один клик</strong><br>
   <img src="images/game/noYfqPt.png" alt="FreeUltraCode генерирует 3D-модель в один клик" width="960">
+  <br><br>
+  <img src="images/20260615-214236.jpg" alt="Предпросмотр 3D-модели, сгенерированной FreeUltraCode" width="960">
 </p>
 
 <p align="center">

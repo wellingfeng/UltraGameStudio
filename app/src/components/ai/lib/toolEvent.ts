@@ -44,9 +44,20 @@ export type ToolEventPatch = Partial<ToolEvent> & { id: string };
 export const TOOL_OPEN = '<<FUC_TOOL>>';
 export const TOOL_CLOSE = '<<FUC_TOOL_END>>';
 
+/**
+ * Escape `<`/`>` in a serialised JSON payload as `<` / `>`. JSON.parse
+ * decodes these back to the literal characters, so the payload round-trips
+ * byte-for-byte — but a tool result that itself contains the literal sentinel
+ * markers (e.g. reading this very file) can no longer produce a `<<FUC_TOOL_END>>`
+ * substring that would prematurely close the block and leak the rest as prose.
+ */
+function escapeSentinelPayload(json: string): string {
+  return json.replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+}
+
 /** Serialise a patch into an inline sentinel block for the text stream. */
 export function encodeToolPatch(patch: ToolEventPatch): string {
-  return `\n${TOOL_OPEN}${JSON.stringify(patch)}${TOOL_CLOSE}\n`;
+  return `\n${TOOL_OPEN}${escapeSentinelPayload(JSON.stringify(patch))}${TOOL_CLOSE}\n`;
 }
 
 /** True when the text contains at least one tool sentinel (fast pre-check). */
@@ -113,17 +124,29 @@ export function extractToolSentinels(text: string): ToolSentinelSplit {
     out += before;
     pendingText += before;
     const json = text.slice(open + TOOL_OPEN.length, close);
+    let parsed: ToolEventPatch | null = null;
     try {
-      const parsed = JSON.parse(json) as ToolEventPatch;
-      if (parsed && typeof parsed.id === 'string') {
-        flushText();
-        patches.push(parsed);
-        parts.push({ patch: parsed });
-      }
+      const candidate = JSON.parse(json) as ToolEventPatch;
+      if (candidate && typeof candidate.id === 'string') parsed = candidate;
     } catch {
-      /* drop a malformed block silently */
+      /* not a real sentinel payload — fall through to literal handling */
     }
-    cursor = close + TOOL_CLOSE.length;
+    if (parsed) {
+      flushText();
+      patches.push(parsed);
+      parts.push({ patch: parsed });
+      cursor = close + TOOL_CLOSE.length;
+    } else {
+      // The `<<FUC_TOOL>>` marker is literal prose: the model wrote the token
+      // itself (e.g. while explaining this protocol), so its body isn't a valid
+      // patch — and its `close` actually paired with a genuine sentinel further
+      // downstream. Keep the marker verbatim and resume scanning right after it
+      // so real sentinels (and everything between) still parse instead of being
+      // swallowed and dropped as one giant unparseable block.
+      out += TOOL_OPEN;
+      pendingText += TOOL_OPEN;
+      cursor = open + TOOL_OPEN.length;
+    }
   }
   flushText();
 

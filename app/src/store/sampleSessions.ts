@@ -859,12 +859,39 @@ export const permissionOptions: SelectOption[] = [
  */
 export const modelOptions: SelectOption[] = [
   {
+    id: 'claude-fable-5',
+    label: 'claude-fable-5',
+    hint: '标准',
+    translations: {
+      'zh-CN': { label: 'claude-fable-5', hint: '标准' },
+      'en-US': { label: 'claude-fable-5', hint: 'Standard' },
+    },
+  },
+  {
     id: 'claude-opus-4-8',
     label: 'claude-opus-4.8',
     hint: '深度',
     translations: {
       'zh-CN': { label: 'claude-opus-4.8', hint: '深度' },
       'en-US': { label: 'claude-opus-4.8', hint: 'Deep' },
+    },
+  },
+  {
+    id: 'claude-opus-4-7',
+    label: 'claude-opus-4.7',
+    hint: '深度',
+    translations: {
+      'zh-CN': { label: 'claude-opus-4.7', hint: '深度' },
+      'en-US': { label: 'claude-opus-4.7', hint: 'Deep' },
+    },
+  },
+  {
+    id: 'claude-opus-4-6',
+    label: 'claude-opus-4.6',
+    hint: '深度',
+    translations: {
+      'zh-CN': { label: 'claude-opus-4.6', hint: '深度' },
+      'en-US': { label: 'claude-opus-4.6', hint: 'Deep' },
     },
   },
   {

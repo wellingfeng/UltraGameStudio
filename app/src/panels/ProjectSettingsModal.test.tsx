@@ -4,9 +4,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import ProjectSettingsModal from './ProjectSettingsModal';
 import { DEFAULT_GAME_EXPERT_SETTINGS } from '@/lib/gameExperts';
 import {
+  installSkillFromUrl,
+  openExternal,
   probeProjectLspServer,
   scanProjectEnvironment,
+  skillInstallTargets,
   tauriAvailable,
+  uninstallSkill,
   type ProjectEnvironmentScan,
 } from '@/lib/tauri';
 import type { WorkspaceSummary } from '@/store/history/types';
@@ -24,6 +28,9 @@ vi.mock('@/lib/tauri', async () => {
     probeProjectMcpServer: vi.fn(),
     probeProjectLspServer: vi.fn(),
     skillInstallTargets: vi.fn(async () => []),
+    installSkillFromText: vi.fn(),
+    installSkillFromUrl: vi.fn(),
+    uninstallSkill: vi.fn(),
     tauriAvailable: vi.fn(() => false),
     scanProjectEnvironment: vi.fn(),
     unityMcpSetupProject: vi.fn(),
@@ -169,7 +176,7 @@ afterEach(() => {
 });
 
 describe('ProjectSettingsModal game project tabs', () => {
-  it('splits game project capabilities into Mesh, rigging, expert, and command tabs', async () => {
+  it('splits game project capabilities into Mesh, rigging, capture/perf, expert, and command tabs', async () => {
     const view = await renderProjectSettingsModal();
 
     try {
@@ -180,10 +187,11 @@ describe('ProjectSettingsModal game project tabs', () => {
       expect(tabText).toEqual([
         '概览',
         'Mesh 渠道',
+        '在线模型库',
         'Sprite',
         'UI 渠道',
-        '模型库',
         '绑定渠道',
+        '抓帧/性能',
         '游戏专家',
         '命令',
         'MCP',
@@ -207,18 +215,122 @@ describe('ProjectSettingsModal game project tabs', () => {
 
       expect(tabText).toEqual([
         '概览',
-        'Sprite',
         'MCP',
         'LSP',
         'Skills',
         '权限/自动化',
       ]);
       expect(tabText).not.toContain('Mesh 渠道');
-      expect(tabText).toContain('Sprite');
+      expect(tabText).not.toContain('Sprite');
       expect(tabText).not.toContain('UI 渠道');
       expect(tabText).not.toContain('绑定渠道');
+      expect(tabText).not.toContain('抓帧/性能');
       expect(tabText).not.toContain('游戏专家');
       expect(tabText).not.toContain('命令');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('shows capture/performance skills with versions', async () => {
+    const view = await renderProjectSettingsModal();
+
+    try {
+      const captureTab = Array.from(
+        view.container.querySelectorAll('nav [role="tab"]'),
+      ).find((tab) => tab.textContent?.trim() === '抓帧/性能');
+
+      await act(async () => {
+        (captureTab as HTMLButtonElement).click();
+      });
+      await settle();
+
+      expect(view.container.textContent).toContain('RenderDoc GPU Debug');
+      expect(view.container.textContent).toContain('Nsight Graphics CLI');
+      expect(view.container.textContent).toContain('v0.2.0');
+      expect(view.container.textContent).toContain('SmartPerfetto');
+      expect(view.container.textContent).toContain('v1.0.33');
+      expect(view.container.textContent).toContain('Android App Memory Analysis');
+      expect(view.container.textContent).toContain('v1.1.0');
+      expect(view.container.textContent).toContain('Unity Performance Workflow');
+      expect(view.container.textContent).toContain('mcpmarket');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('can install and uninstall capture/performance skills', async () => {
+    vi.mocked(skillInstallTargets).mockResolvedValue([
+      {
+        id: 'project-codex',
+        label: 'Codex 项目 Skill',
+        path: 'E:\\OpenWorkflows\\.codex\\skills',
+        exists: true,
+        skillCount: 1,
+        skills: ['renderdoc-gpu-debug'],
+        isDefault: true,
+        scope: 'project',
+      },
+    ]);
+    vi.mocked(installSkillFromUrl).mockResolvedValue({
+      name: 'renderdoc-gpu-debug',
+      slug: 'renderdoc-gpu-debug',
+      targetId: 'project-codex',
+      path: 'E:\\OpenWorkflows\\.codex\\skills\\renderdoc-gpu-debug',
+      skillFile: 'E:\\OpenWorkflows\\.codex\\skills\\renderdoc-gpu-debug\\SKILL.md',
+      sourceUrl: 'https://github.com/rudybear/renderdoc-skill',
+      overwritten: true,
+    });
+    vi.mocked(uninstallSkill).mockResolvedValue({
+      targetId: 'project-codex',
+      slug: 'renderdoc-gpu-debug',
+      path: 'E:\\OpenWorkflows\\.codex\\skills\\renderdoc-gpu-debug',
+      removed: true,
+    });
+
+    const view = await renderProjectSettingsModal();
+
+    try {
+      vi.mocked(tauriAvailable).mockReturnValue(true);
+      const captureTab = Array.from(
+        view.container.querySelectorAll('nav [role="tab"]'),
+      ).find((tab) => tab.textContent?.trim() === '抓帧/性能');
+
+      await act(async () => {
+        (captureTab as HTMLButtonElement).click();
+      });
+      await settle();
+
+      const updateButton = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.trim() === '更新');
+      const uninstallButton = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.trim() === '卸载');
+
+      await act(async () => {
+        updateButton?.click();
+      });
+      await settle();
+
+      expect(installSkillFromUrl).toHaveBeenCalledWith(
+        expect.objectContaining({
+          slug: 'renderdoc-gpu-debug',
+          targetId: 'project-codex',
+          overwrite: true,
+        }),
+      );
+
+      await act(async () => {
+        uninstallButton?.click();
+      });
+      await settle();
+
+      expect(uninstallSkill).toHaveBeenCalledWith({
+        targetId: 'project-codex',
+        slug: 'renderdoc-gpu-debug',
+        projectRoot: workspace.path,
+      });
     } finally {
       await view.cleanup();
     }
@@ -314,9 +426,9 @@ describe('ProjectSettingsModal game project tabs', () => {
     }
   });
 
-  it('renders Sprite project settings and syncs the default provider on save', async () => {
+  it('renders Sprite project settings as parameters and flow only', async () => {
     const resolved = await historyStore.resolveWorkspaceByPath(workspace.path);
-    const view = await renderProjectSettingsModal(unknownScan(), {
+    const view = await renderProjectSettingsModal(unrealScan(), {
       id: resolved.id,
       path: resolved.path,
       name: resolved.name,
@@ -336,30 +448,34 @@ describe('ProjectSettingsModal game project tabs', () => {
 
       expect(view.container.textContent).toContain('Sprite 动画');
       expect(view.container.textContent).toContain('/sprite-mode-start');
+      expect(view.container.textContent).toContain('设计流程');
+      expect(view.container.textContent).toContain('复用生图路由');
+      expect(view.container.textContent).toContain('套 Sprite 协议');
+      expect(view.container.textContent).toContain('本地后处理');
+      expect(view.container.textContent).toContain('质检并导出');
+      expect(view.container.textContent).toContain('Sheet 网格');
+      expect(view.container.textContent).not.toContain('默认 Sprite 渠道');
+      expect(view.container.textContent).not.toContain('商用渠道');
+      expect(view.container.textContent).not.toContain('本地开源渠道');
 
       const enableSwitch = Array.from(
         view.container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
       ).find((input) =>
-        input.closest('label')?.textContent?.includes('启用 Sprite 渠道'),
+        input.closest('label')?.textContent?.includes('启用 Sprite 模式'),
       );
       expect(enableSwitch).toBeInstanceOf(HTMLInputElement);
       await act(async () => {
         enableSwitch?.click();
       });
 
-      const defaultSelect = Array.from(
+      const providerOption = Array.from(
         view.container.querySelectorAll<HTMLSelectElement>('select'),
-      ).find((select) =>
-        Array.from(select.options).some(
-          (option) => option.value === 'local-comfyui-sprite',
+      ).some((select) =>
+        Array.from(select.options).some((option) =>
+          ['ludo-sprite', 'local-comfyui-sprite'].includes(option.value),
         ),
       );
-      expect(defaultSelect).toBeInstanceOf(HTMLSelectElement);
-      await act(async () => {
-        const select = defaultSelect as HTMLSelectElement;
-        select.value = 'local-comfyui-sprite';
-        select.dispatchEvent(new Event('change', { bubbles: true }));
-      });
+      expect(providerOption).toBe(false);
 
       const save = Array.from(
         view.container.querySelectorAll<HTMLButtonElement>('button'),
@@ -374,7 +490,7 @@ describe('ProjectSettingsModal game project tabs', () => {
         window.localStorage.getItem('freeultracode.spriteGeneration.v1') ?? '{}',
       );
       expect(saved.enabled).toBe(true);
-      expect(saved.preferredProviderId).toBe('local-comfyui-sprite');
+      expect(saved.preferredProviderId).toBe('ludo-sprite');
     } finally {
       await view.cleanup();
     }
@@ -403,6 +519,29 @@ describe('ProjectSettingsModal game project tabs', () => {
       expect(view.container.textContent).toContain('UI 渠道');
       expect(view.container.textContent).toContain('Figma');
       expect(view.container.textContent).toContain('Adobe Photoshop');
+      expect(view.container.textContent).toContain('Figma 下载');
+      expect(view.container.textContent).toContain('Photoshop 下载');
+      expect(view.container.textContent).not.toContain('Figma Token');
+      expect(view.container.textContent).not.toContain('Base URL');
+      expect(view.container.textContent).not.toContain('本地命令 / 工具路径');
+
+      const figmaDownload = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.trim() === 'Figma 下载');
+      await act(async () => {
+        figmaDownload?.click();
+      });
+      expect(openExternal).toHaveBeenCalledWith('https://www.figma.com/downloads/');
+
+      const photoshopDownload = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.trim() === 'Photoshop 下载');
+      await act(async () => {
+        photoshopDownload?.click();
+      });
+      expect(openExternal).toHaveBeenCalledWith(
+        'https://www.adobe.com/products/photoshop/free-trial-download.html',
+      );
 
       const freeOpen = Array.from(
         view.container.querySelectorAll<HTMLButtonElement>('button'),
@@ -412,8 +551,23 @@ describe('ProjectSettingsModal game project tabs', () => {
         freeOpen?.click();
       });
 
-      expect(view.container.textContent).toContain('Pencil Project');
+      expect(view.container.textContent).toContain('Pencil');
       expect(view.container.textContent).toContain('Penpot');
+      expect(view.container.textContent).toContain('Pencil 下载');
+      expect(view.container.textContent).toContain('Penpot Web');
+      expect(view.container.textContent).toContain('GIMP 下载');
+      expect(view.container.textContent).toContain('Inkscape 下载');
+      expect(view.container.textContent).not.toContain('Base URL');
+      expect(view.container.textContent).not.toContain('Penpot Token');
+      expect(view.container.textContent).not.toContain('本地命令 / 工具路径');
+
+      const pencilDownload = Array.from(
+        view.container.querySelectorAll<HTMLButtonElement>('button'),
+      ).find((button) => button.textContent?.trim() === 'Pencil 下载');
+      await act(async () => {
+        pencilDownload?.click();
+      });
+      expect(openExternal).toHaveBeenCalledWith('https://www.pencil.dev/downloads');
 
       const defaultSelect = view.container.querySelector(
         'select',
@@ -516,8 +670,9 @@ describe('ProjectSettingsModal game project tabs', () => {
 
       expect(tabText).toContain('Mesh 渠道');
       expect(tabText).toContain('UI 渠道');
-      expect(tabText).toContain('模型库');
+      expect(tabText).toContain('在线模型库');
       expect(tabText).toContain('绑定渠道');
+      expect(tabText).toContain('抓帧/性能');
       expect(tabText).toContain('游戏专家');
       expect(tabText).toContain('命令');
       expect(view.container.textContent).toContain('游戏项目：开启');
@@ -552,8 +707,9 @@ describe('ProjectSettingsModal game project tabs', () => {
 
       expect(tabText).toContain('Mesh 渠道');
       expect(tabText).toContain('UI 渠道');
-      expect(tabText).toContain('模型库');
+      expect(tabText).toContain('在线模型库');
       expect(tabText).toContain('绑定渠道');
+      expect(tabText).toContain('抓帧/性能');
       expect(tabText).toContain('游戏专家');
       expect(tabText).toContain('命令');
     } finally {
@@ -573,7 +729,7 @@ describe('ProjectSettingsModal game project tabs', () => {
         (mcpTab as HTMLButtonElement).click();
       });
 
-      expect(view.container.textContent).toContain('一键配置 Unity MCP');
+      expect(view.container.textContent).toContain('Unity MCP');
       expect(view.container.textContent).toContain(
         'Packages/manifest.json',
       );
@@ -596,10 +752,20 @@ describe('ProjectSettingsModal game project tabs', () => {
       });
 
       expect(view.container.textContent).toContain('游戏 MCP 候选');
-      expect(view.container.textContent).toContain('一键配置 Unity MCP');
-      expect(view.container.textContent).toContain('一键配置 Unreal MCP');
+      expect(view.container.textContent).toContain('Unity MCP');
+      expect(view.container.textContent).toContain('Unreal MCP');
       expect(view.container.textContent).toContain('Godot MCP');
       expect(view.container.textContent).toContain('Cocos MCP');
+      expect(view.container.textContent).toContain(
+        'uvx --from mcpforunityserver mcp-for-unity --transport stdio',
+      );
+      expect(view.container.textContent).toContain(
+        'https://github.com/wellingfeng/unity-mcp',
+      );
+      expect(view.container.textContent).toContain('ue-mcp-for-all-versions.exe');
+      expect(view.container.textContent).toContain(
+        'https://github.com/wellingfeng/ue-mcp-for-all-versions',
+      );
       expect(view.container.textContent).toContain(
         '是否安装由用户自己决定',
       );

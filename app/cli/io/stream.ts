@@ -88,7 +88,11 @@ const TOOL_CLOSE = '<<FUC_TOOL_END>>';
 
 /** Serialise a tool-event patch into an inline sentinel block for the stream. */
 export function encodeToolPatch(patch: Record<string, unknown>): string {
-  return `\n${TOOL_OPEN}${JSON.stringify(patch)}${TOOL_CLOSE}\n`;
+  // Escape `<`/`>` in the payload (JSON.parse restores them) so a tool result
+  // that itself contains the literal sentinel markers can't produce a stray
+  // `<<FUC_TOOL_END>>` that would prematurely close the block.
+  const payload = JSON.stringify(patch).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
+  return `\n${TOOL_OPEN}${payload}${TOOL_CLOSE}\n`;
 }
 
 /** The method/type discriminator of a codex JSONL event. */

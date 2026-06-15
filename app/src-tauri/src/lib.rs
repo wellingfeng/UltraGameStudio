@@ -136,14 +136,13 @@ fn show_session_completion_notification(
     use tauri_winrt_notification::{Duration, Scenario, Sound, Toast};
 
     let app_id = windows_notification_app_id(&app);
-    let mut toast = Toast::new(&app_id)
-        .title(&title)
-        .text2(&body)
-        .duration(if kind == SessionNotificationKind::WaitingInput {
+    let mut toast = Toast::new(&app_id).title(&title).text2(&body).duration(
+        if kind == SessionNotificationKind::WaitingInput {
             Duration::Long
         } else {
             Duration::Short
-        });
+        },
+    );
     if kind == SessionNotificationKind::WaitingInput {
         toast = toast
             .scenario(Scenario::Reminder)
@@ -559,6 +558,19 @@ struct GeneratedAssetSave {
     file_name: String,
 }
 
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CachedAssetFile {
+    kind: String,
+    source: String,
+    origin: String,
+    title: String,
+    local_path: String,
+    size_bytes: u64,
+    created_at_ms: Option<u64>,
+    modified_at_ms: Option<u64>,
+}
+
 #[derive(Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SlashCatalogEntry {
@@ -605,6 +617,15 @@ struct InstalledSkill {
     skill_file: String,
     source_url: Option<String>,
     overwritten: bool,
+}
+
+#[derive(Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SkillUninstallResult {
+    target_id: String,
+    slug: String,
+    path: String,
+    removed: bool,
 }
 
 fn localized_text(zh_cn: &str, en_us: &str) -> HashMap<String, String> {
@@ -2133,6 +2154,35 @@ fn install_skill_from_url_blocking(
     project_root: Option<String>,
 ) -> Result<InstalledSkill, String> {
     let text = download_skill_text(&url)?;
+    install_skill_from_text_blocking(
+        text,
+        name,
+        slug,
+        target_id,
+        overwrite,
+        source_url,
+        project_root,
+        Some(url),
+    )
+}
+
+fn install_skill_from_text_blocking(
+    text: String,
+    name: String,
+    slug: String,
+    target_id: String,
+    overwrite: bool,
+    source_url: Option<String>,
+    project_root: Option<String>,
+    download_url: Option<String>,
+) -> Result<InstalledSkill, String> {
+    if text.len() as u64 > MAX_SKILL_INSTALL_BYTES {
+        return Err("SKILL.md 过大，已拒绝安装。".to_string());
+    }
+    if text.trim().is_empty() {
+        return Err("SKILL.md 内容为空。".to_string());
+    }
+
     let project_root = match project_root
         .as_deref()
         .filter(|value| !value.trim().is_empty())
@@ -2142,7 +2192,18 @@ fn install_skill_from_url_blocking(
     };
     let (target_id, _label, root, _is_default) =
         skill_install_root(&target_id, project_root.as_deref())?;
-    let slug = sanitize_skill_install_slug(if slug.trim().is_empty() { &name } else { &slug });
+    let (frontmatter_name, _description) = parse_skill_frontmatter(&text, &name);
+    let installed_name = if name.trim().is_empty() {
+        frontmatter_name
+    } else {
+        name.trim().to_string()
+    };
+    let slug_source = if slug.trim().is_empty() {
+        installed_name.as_str()
+    } else {
+        slug.as_str()
+    };
+    let slug = sanitize_skill_install_slug(slug_source);
     std::fs::create_dir_all(&root).map_err(|e| format!("创建技能目录失败: {e}"))?;
     let root = std::fs::canonicalize(&root).map_err(|e| format!("读取技能目录失败: {e}"))?;
     let target_dir = root.join(&slug);
@@ -2161,9 +2222,9 @@ fn install_skill_from_url_blocking(
 
     std::fs::write(&skill_file, text).map_err(|e| format!("写入 SKILL.md 失败: {e}"))?;
     let source_meta = serde_json::json!({
-        "name": name.clone(),
+        "name": installed_name.clone(),
         "slug": slug.clone(),
-        "downloadUrl": url,
+        "downloadUrl": download_url,
         "sourceUrl": source_url.clone(),
         "installedAtMs": now_ms(),
         "installedBy": "FreeUltraCode plugin store"
@@ -2174,7 +2235,7 @@ fn install_skill_from_url_blocking(
     );
 
     Ok(InstalledSkill {
-        name,
+        name: installed_name,
         slug,
         target_id,
         path: display_preview_path(&target_dir),
@@ -2210,6 +2271,104 @@ async fn install_skill_from_url(
     .map_err(|e| format!("安装任务失败: {e}"))??;
     let _ = refresh_slash_catalog_async(app).await;
     Ok(installed)
+}
+
+#[tauri::command]
+async fn install_skill_from_text(
+    app: AppHandle,
+    text: String,
+    name: String,
+    slug: String,
+    target_id: String,
+    overwrite: Option<bool>,
+    source_url: Option<String>,
+    project_root: Option<String>,
+) -> Result<InstalledSkill, String> {
+    let installed = tauri::async_runtime::spawn_blocking(move || {
+        install_skill_from_text_blocking(
+            text,
+            name,
+            slug,
+            target_id,
+            overwrite.unwrap_or(false),
+            source_url,
+            project_root,
+            None,
+        )
+    })
+    .await
+    .map_err(|e| format!("安装任务失败: {e}"))??;
+    let _ = refresh_slash_catalog_async(app).await;
+    Ok(installed)
+}
+
+fn uninstall_skill_blocking(
+    target_id: String,
+    slug: String,
+    project_root: Option<String>,
+) -> Result<SkillUninstallResult, String> {
+    let project_root = match project_root
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        Some(raw) => Some(project_scan_root(raw)?),
+        None => None,
+    };
+    let (target_id, _label, root, _is_default) =
+        skill_install_root(&target_id, project_root.as_deref())?;
+    let slug = sanitize_skill_install_slug(&slug);
+    let display_path = display_preview_path(&root.join(&slug));
+    if !root.is_dir() {
+        return Ok(SkillUninstallResult {
+            target_id,
+            slug,
+            path: display_path,
+            removed: false,
+        });
+    }
+
+    let root = std::fs::canonicalize(&root).map_err(|e| format!("读取技能目录失败: {e}"))?;
+    let target_dir = root.join(&slug);
+    if !target_dir.exists() {
+        return Ok(SkillUninstallResult {
+            target_id,
+            slug,
+            path: display_preview_path(&target_dir),
+            removed: false,
+        });
+    }
+    let canonical_target =
+        std::fs::canonicalize(&target_dir).map_err(|e| format!("读取安装目录失败: {e}"))?;
+    if !canonical_target.starts_with(&root) {
+        return Err("卸载路径超出允许目录。".to_string());
+    }
+    if !canonical_target.join("SKILL.md").is_file() {
+        return Err("目标目录不是可卸载的 skill。".to_string());
+    }
+
+    std::fs::remove_dir_all(&canonical_target).map_err(|e| format!("卸载失败: {e}"))?;
+    Ok(SkillUninstallResult {
+        target_id,
+        slug,
+        path: display_preview_path(&canonical_target),
+        removed: true,
+    })
+}
+
+#[tauri::command]
+async fn uninstall_skill(
+    app: AppHandle,
+    target_id: String,
+    slug: String,
+    project_root: Option<String>,
+) -> Result<SkillUninstallResult, String> {
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        uninstall_skill_blocking(target_id, slug, project_root)
+    })
+    .await
+    .map_err(|e| format!("卸载任务失败: {e}"))??;
+    let _ = refresh_slash_catalog_async(app).await;
+    Ok(result)
 }
 
 fn known_free_channel_ids() -> HashSet<&'static str> {
@@ -2719,6 +2878,76 @@ fn preview_workspace_app_fallback(path: &str, cwd: Option<&str>) -> Option<PathB
     };
 
     candidate.exists().then_some(candidate)
+}
+
+fn path_segments_for_suffix_match(path: &str) -> Vec<&str> {
+    path.split('/')
+        .filter(|segment| !segment.trim().is_empty())
+        .collect()
+}
+
+fn path_segments_equal(a: &[&str], b: &[&str]) -> bool {
+    a.len() == b.len()
+        && a.iter().zip(b.iter()).all(|(left, right)| {
+            if cfg!(windows) {
+                left.eq_ignore_ascii_case(right)
+            } else {
+                left == right
+            }
+        })
+}
+
+fn preview_depot_path_fallback(path: &str, cwd: Option<&str>) -> Option<PathBuf> {
+    let trimmed = path.trim();
+    if !trimmed.starts_with("//") || trimmed.starts_with("///") {
+        return None;
+    }
+
+    let cwd = cwd?.trim();
+    if cwd.is_empty() {
+        return None;
+    }
+    let root = PathBuf::from(cwd);
+    if !root.is_dir() {
+        return None;
+    }
+
+    let depot = normalize_p4_mapping_path(trimmed);
+    let depot_segments = path_segments_for_suffix_match(depot.trim_start_matches('/'));
+    if depot_segments.is_empty() {
+        return None;
+    }
+
+    let cwd_normalized = normalize_p4_mapping_path(&root.to_string_lossy());
+    let cwd_segments = path_segments_for_suffix_match(&cwd_normalized);
+    let mut starts = Vec::new();
+    let max_overlap = cwd_segments.len().min(depot_segments.len());
+    for overlap in (1..=max_overlap).rev() {
+        if path_segments_equal(
+            &cwd_segments[cwd_segments.len() - overlap..],
+            &depot_segments[..overlap],
+        ) {
+            starts.push(overlap);
+            break;
+        }
+    }
+    starts.extend(0..depot_segments.len());
+
+    let mut seen = HashSet::new();
+    for start in starts {
+        if start >= depot_segments.len() || !seen.insert(start) {
+            continue;
+        }
+        let mut candidate = root.clone();
+        for segment in &depot_segments[start..] {
+            candidate.push(segment);
+        }
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+
+    None
 }
 
 #[cfg(windows)]
@@ -3325,8 +3554,8 @@ fn project_suggested_mcp_servers(engine: &str) -> Vec<ProjectMcpServerSuggestion
     // the cached verified binary when it is already present so "apply
     // recommended" + probe work without extra steps. Falls back to the
     // server id label when not yet installed.
-    let cached = ue_mcp_expected_binary_path()
-        .filter(|path| path.is_file() && ue_mcp_binary_verified(path));
+    let cached =
+        ue_mcp_expected_binary_path().filter(|path| path.is_file() && ue_mcp_binary_verified(path));
     let command = cached
         .as_ref()
         .map(|path| display_preview_path(path))
@@ -4468,7 +4697,10 @@ fn godot_mcp_setup_project_blocking(
                 .to_string(),
             transport: "stdio".to_string(),
             server_command: Some(GODOT_MCP_COMMAND.to_string()),
-            server_args: GODOT_MCP_ARGS.iter().map(|value| (*value).to_string()).collect(),
+            server_args: GODOT_MCP_ARGS
+                .iter()
+                .map(|value| (*value).to_string())
+                .collect(),
             server_url: None,
             configured_files: Vec::new(),
             changed_files: Vec::new(),
@@ -4493,11 +4725,17 @@ fn godot_mcp_setup_project_blocking(
                 "GODOT_PATH": ""
             }
         });
-        if let Some(file) = project_mcp_write_project_mcp_json(&root, GODOT_MCP_SERVER_ID, desired)? {
+        if let Some(file) = project_mcp_write_project_mcp_json(&root, GODOT_MCP_SERVER_ID, desired)?
+        {
             changed_files.push(file);
         }
-        notes.push(format!("已写入 {GODOT_MCP_SOURCE_URL} 的 Godot MCP 项目配置。"));
-        warnings.push("需要本机可用 Node.js / npx；如果无法自动发现 Godot，请在 MCP 配置中填写 GODOT_PATH。".to_string());
+        notes.push(format!(
+            "已写入 {GODOT_MCP_SOURCE_URL} 的 Godot MCP 项目配置。"
+        ));
+        warnings.push(
+            "需要本机可用 Node.js / npx；如果无法自动发现 Godot，请在 MCP 配置中填写 GODOT_PATH。"
+                .to_string(),
+        );
     }
 
     Ok(GenericProjectMcpSetupResult {
@@ -4506,11 +4744,13 @@ fn godot_mcp_setup_project_blocking(
         dry_run,
         server_id: GODOT_MCP_SERVER_ID.to_string(),
         label: "Godot MCP".to_string(),
-        description: "wellingfeng/godot-mcp：通过 npm 启动 Godot Editor 并管理项目。"
-            .to_string(),
+        description: "wellingfeng/godot-mcp：通过 npm 启动 Godot Editor 并管理项目。".to_string(),
         transport: "stdio".to_string(),
         server_command: Some(GODOT_MCP_COMMAND.to_string()),
-        server_args: GODOT_MCP_ARGS.iter().map(|value| (*value).to_string()).collect(),
+        server_args: GODOT_MCP_ARGS
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect(),
         server_url: None,
         configured_files,
         changed_files,
@@ -4542,7 +4782,10 @@ fn cocos_mcp_setup_project_blocking(
             changed_files: Vec::new(),
             notes: Vec::new(),
             warnings: Vec::new(),
-            error: Some("未检测到 Cocos 工程；需要 project.json 或 settings/project.json，并包含 assets/。".to_string()),
+            error: Some(
+                "未检测到 Cocos 工程；需要 project.json 或 settings/project.json，并包含 assets/。"
+                    .to_string(),
+            ),
         });
     }
 
@@ -4587,12 +4830,14 @@ fn cocos_mcp_setup_project_blocking(
             "url": COCOS_MCP_URL,
             "transport": "streamable-http"
         });
-        if let Some(file) = project_mcp_write_project_mcp_json(&root, COCOS_MCP_SERVER_ID, desired)? {
+        if let Some(file) = project_mcp_write_project_mcp_json(&root, COCOS_MCP_SERVER_ID, desired)?
+        {
             changed_files.push(file);
         }
         notes.push("已配置 Cocos Creator 扩展和项目 .mcp.json。".to_string());
         warnings.push("请在 Cocos Creator 中打开 Extension Manager 启用 cocos-mcp-server；扩展服务启动后再探测 MCP。".to_string());
-        warnings.push("如未安装 git，请从来源仓库手动下载到 extensions/cocos-mcp-server。".to_string());
+        warnings
+            .push("如未安装 git，请从来源仓库手动下载到 extensions/cocos-mcp-server。".to_string());
     }
     configured_files.sort();
     configured_files.dedup();
@@ -4794,9 +5039,7 @@ fn ue_mcp_expected_binary_path() -> Option<PathBuf> {
 /// True when `path` matches the recorded install and its sha256 still checks out.
 fn ue_mcp_binary_verified(path: &Path) -> bool {
     match ue_mcp_read_installed_meta() {
-        Some(meta) => {
-            PathBuf::from(&meta.path) == path && ue_mcp_verify_file(path, &meta.sha256)
-        }
+        Some(meta) => PathBuf::from(&meta.path) == path && ue_mcp_verify_file(path, &meta.sha256),
         None => false,
     }
 }
@@ -4960,7 +5203,10 @@ fn ue_mcp_ensure_binary_blocking() -> Result<UeMcpBinaryStatus, String> {
                 sha256: meta.sha256.clone(),
                 source: "cached".to_string(),
                 supported_platform: true,
-                message: format!("已使用本地缓存的 UE MCP {} 二进制（校验通过）。", meta.version),
+                message: format!(
+                    "已使用本地缓存的 UE MCP {} 二进制（校验通过）。",
+                    meta.version
+                ),
             });
         }
     }
@@ -5430,8 +5676,9 @@ fn ue_mcp_write_project_mcp_json(
 
 fn ue_mcp_setup_project_blocking(req: UeMcpSetupRequest) -> Result<UeMcpSetupResult, String> {
     let root = project_scan_root(&req.root_path)?;
-    let binary = ue_mcp_expected_binary_path()
-        .ok_or_else(|| "UE MCP 二进制不存在，请先点击“一键配置 Unreal MCP”下载安装。".to_string())?;
+    let binary = ue_mcp_expected_binary_path().ok_or_else(|| {
+        "UE MCP 二进制不存在，请先点击“一键配置 Unreal MCP”下载安装。".to_string()
+    })?;
     if !binary.is_file() {
         return Err("UE MCP 二进制不存在，请先下载安装。".to_string());
     }
@@ -6417,6 +6664,7 @@ fn strip_git_workspace_prefix(path: &str, prefix: &str) -> String {
         .to_string()
 }
 
+#[allow(dead_code)]
 fn workspace_change_relative_path(root: &Path, relative_path: &str) -> Option<PathBuf> {
     let normalized = normalize_vcs_status_path(relative_path);
     if normalized.is_empty() {
@@ -6788,6 +7036,7 @@ fn parse_git_workspace_changes(stdout: &str, prefix: &str) -> Vec<WorkspaceChang
     files
 }
 
+#[allow(dead_code)]
 fn git_diff_path(path: &str, prefix: &str) -> Option<String> {
     let trimmed = path.trim();
     if trimmed == "/dev/null" {
@@ -6801,6 +7050,7 @@ fn git_diff_path(path: &str, prefix: &str) -> Option<String> {
     Some(strip_git_workspace_prefix(trimmed, prefix))
 }
 
+#[allow(dead_code)]
 fn parse_git_diff_header_paths(
     line: &str,
     prefix: &str,
@@ -6812,11 +7062,13 @@ fn parse_git_diff_header_paths(
     Some((old_path, new_path))
 }
 
+#[allow(dead_code)]
 fn parse_git_hunk_start(token: &str) -> Option<u32> {
     let range = token.get(1..)?;
     range.split(',').next()?.parse::<u32>().ok()
 }
 
+#[allow(dead_code)]
 fn parse_git_hunk_header(line: &str) -> Option<(u32, u32)> {
     if !line.starts_with("@@ ") {
         return None;
@@ -6837,6 +7089,7 @@ fn parse_git_hunk_header(line: &str) -> Option<(u32, u32)> {
     Some((old_start?, new_start?))
 }
 
+#[allow(dead_code)]
 fn flush_git_diff_file(
     files: &mut Vec<WorkspaceChangeFile>,
     current: &mut Option<WorkspaceChangeFile>,
@@ -6851,6 +7104,7 @@ fn flush_git_diff_file(
     }
 }
 
+#[allow(dead_code)]
 fn parse_git_diff_workspace_changes(stdout: &str, prefix: &str) -> Vec<WorkspaceChangeFile> {
     let mut files = Vec::new();
     let mut current: Option<WorkspaceChangeFile> = None;
@@ -6963,6 +7217,7 @@ fn parse_git_diff_workspace_changes(stdout: &str, prefix: &str) -> Vec<Workspace
     files
 }
 
+#[allow(dead_code)]
 fn workspace_change_file_from_current_path(
     root: &Path,
     file: &WorkspaceChangeFile,
@@ -6979,6 +7234,7 @@ fn workspace_change_file_from_current_path(
     Some(change)
 }
 
+#[allow(dead_code)]
 fn merge_workspace_status_files_with_diff(
     root: &Path,
     status_files: Vec<WorkspaceChangeFile>,
@@ -7021,6 +7277,7 @@ fn merge_workspace_status_files_with_diff(
     merged
 }
 
+#[allow(dead_code)]
 fn git_workspace_diff_changes(
     root: &Path,
     prefix: &str,
@@ -7598,6 +7855,7 @@ fn git_workspace_vcs_status_shallow(root: &Path) -> Option<Result<WorkspaceChang
     )))
 }
 
+#[allow(dead_code)]
 fn git_workspace_changes(root: &Path) -> Option<Result<WorkspaceChanges, String>> {
     let (prefix, status_files) = match git_workspace_status_files(root)? {
         Ok(result) => result,
@@ -7715,6 +7973,7 @@ fn p4_workspace_changes_shallow(root: &Path) -> Option<Result<WorkspaceChanges, 
     p4_workspace_changes_for_specs(root, p4_workspace_root_status_specs(), "root")
 }
 
+#[allow(dead_code)]
 fn vcs_workspace_changes(root: &Path) -> Option<Result<WorkspaceChanges, String>> {
     git_workspace_changes(root)
         .or_else(|| svn_workspace_changes(root))
@@ -7813,13 +8072,6 @@ fn workspace_changes_blocking(
     baseline_at_ms: Option<u64>,
 ) -> Result<WorkspaceChanges, String> {
     let (root, _) = workspace_tree_resolve_dir(&root_path, "")?;
-    if let Some(changes) = vcs_workspace_changes(&root) {
-        let changes = changes?;
-        let cache_file = workspace_change_cache_file(&root, &cache_key, "changes");
-        write_json_cache(&cache_file, &changes)?;
-        return Ok(changes);
-    }
-
     let baseline =
         workspace_changes_baseline_blocking(root_path.clone(), cache_key.clone(), baseline_at_ms)?;
     let (current_files, current_truncated) = scan_workspace_snapshot(&root);
@@ -8046,8 +8298,7 @@ fn prepare_isolated_workspace_blocking(
             };
         let branch = format!("ow/session-{slug}");
         let worktrees_root = toplevel.join(".worktree");
-        std::fs::create_dir_all(&worktrees_root)
-            .map_err(|e| format!("创建工作树目录失败: {e}"))?;
+        std::fs::create_dir_all(&worktrees_root).map_err(|e| format!("创建工作树目录失败: {e}"))?;
         let worktree_path = worktrees_root.join(&slug);
         // Reuse an existing worktree for the same session if present.
         if worktree_path.is_dir() {
@@ -8155,15 +8406,11 @@ fn document_mime_for_path(path: &std::path::Path) -> Option<&'static str> {
     let ext = path.extension()?.to_string_lossy().to_ascii_lowercase();
     match ext.as_str() {
         "pdf" => Some("application/pdf"),
-        "docx" => {
-            Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-        }
+        "docx" => Some("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         "doc" => Some("application/msword"),
         "rtf" => Some("application/rtf"),
         "odt" => Some("application/vnd.oasis.opendocument.text"),
-        "pptx" => {
-            Some("application/vnd.openxmlformats-officedocument.presentationml.presentation")
-        }
+        "pptx" => Some("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         "ppt" => Some("application/vnd.ms-powerpoint"),
         "xlsx" => Some("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
         "xls" => Some("application/vnd.ms-excel"),
@@ -8470,7 +8717,8 @@ fn preview_local_file_blocking(
     let resolved = if resolved.exists() {
         resolved
     } else {
-        preview_workspace_app_fallback(&path, cwd.as_deref())
+        preview_depot_path_fallback(&path, cwd.as_deref())
+            .or_else(|| preview_workspace_app_fallback(&path, cwd.as_deref()))
             .or_else(|| preview_bare_name_fallback(&path, cwd.as_deref()))
             .unwrap_or(resolved)
     };
@@ -9216,6 +9464,139 @@ async fn save_generated_asset(
     .map_err(|e| format!("保存生成资产任务失败: {e}"))?
 }
 
+fn system_time_to_ms(time: std::time::SystemTime) -> Option<u64> {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+}
+
+fn media_kind_for_path(path: &Path, fallback: &str) -> Option<String> {
+    if matches!(
+        fallback,
+        "sprite" | "video" | "audio" | "music" | "speech" | "mesh" | "model"
+    ) {
+        return Some(fallback.to_string());
+    }
+    if image_mime_for_path(path).is_some() {
+        return Some("image".to_string());
+    }
+    let ext = path
+        .extension()
+        .map(|ext| ext.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let kind = match ext.as_str() {
+        "mp4" | "webm" | "mov" | "m4v" => Some("video"),
+        "mp3" | "wav" | "ogg" | "flac" | "aac" | "m4a" => Some("audio"),
+        _ if model_mime_for_path(path).is_some() => Some("mesh"),
+        _ => match fallback {
+            "image" | "sprite" | "video" | "audio" | "music" | "speech" | "mesh" | "model"
+            | "file" => Some(fallback),
+            _ => None,
+        },
+    }?;
+    Some(kind.to_string())
+}
+
+fn cached_asset_file(path: &Path, kind: &str, source: &str) -> Option<CachedAssetFile> {
+    let metadata = std::fs::metadata(path).ok()?;
+    if !metadata.is_file() {
+        return None;
+    }
+    let title = path.file_name()?.to_string_lossy().to_string();
+    let kind = media_kind_for_path(path, kind)?;
+    Some(CachedAssetFile {
+        kind,
+        source: source.to_string(),
+        origin: "local".to_string(),
+        title,
+        local_path: display_preview_path(path),
+        size_bytes: metadata.len(),
+        created_at_ms: metadata.created().ok().and_then(system_time_to_ms),
+        modified_at_ms: metadata.modified().ok().and_then(system_time_to_ms),
+    })
+}
+
+fn collect_cached_assets_from_dir(
+    dir: &Path,
+    kind: &str,
+    source: &str,
+    depth: usize,
+    out: &mut Vec<CachedAssetFile>,
+) {
+    if depth == 0 {
+        return;
+    }
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            collect_cached_assets_from_dir(&path, kind, source, depth - 1, out);
+        } else if file_type.is_file() {
+            if let Some(file) = cached_asset_file(&path, kind, source) {
+                out.push(file);
+            }
+        }
+    }
+}
+
+fn list_cached_assets_blocking(cwd: Option<String>) -> Result<Vec<CachedAssetFile>, String> {
+    let cwd = cwd.as_deref();
+    let mut files = Vec::new();
+
+    collect_cached_assets_from_dir(
+        &clipboard_image_dir(cwd),
+        "image",
+        "generated",
+        1,
+        &mut files,
+    );
+    collect_cached_assets_from_dir(
+        &session_capture_dir(cwd),
+        "image",
+        "generated",
+        1,
+        &mut files,
+    );
+    collect_cached_assets_from_dir(&model_asset_dir(cwd), "mesh", "downloaded", 1, &mut files);
+
+    let assets_root = storage_paths::managed_artifact_dir(cwd, "assets");
+    if let Ok(read_dir) = std::fs::read_dir(&assets_root) {
+        for entry in read_dir.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                let kind = entry.file_name().to_string_lossy().to_string();
+                collect_cached_assets_from_dir(&path, &kind, "generated", 2, &mut files);
+            } else if file_type.is_file() {
+                if let Some(file) = cached_asset_file(&path, "file", "generated") {
+                    files.push(file);
+                }
+            }
+        }
+    }
+
+    files.sort_by(|a, b| {
+        let at = a.modified_at_ms.or(a.created_at_ms).unwrap_or(0);
+        let bt = b.modified_at_ms.or(b.created_at_ms).unwrap_or(0);
+        bt.cmp(&at).then_with(|| b.local_path.cmp(&a.local_path))
+    });
+    Ok(files)
+}
+
+#[tauri::command]
+async fn list_cached_assets(cwd: Option<String>) -> Result<Vec<CachedAssetFile>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_cached_assets_blocking(cwd))
+        .await
+        .map_err(|e| format!("读取资产缓存任务失败: {e}"))?
+}
+
 fn fallback_local_model_hardware() -> LocalModelHardware {
     LocalModelHardware {
         ram_gb: None,
@@ -9775,8 +10156,7 @@ fn setup_comfyui_blocking(model: Option<String>, skip_model: bool) -> Result<(),
 
     #[cfg(target_os = "windows")]
     {
-        let script_path =
-            managed_temp_path(None, "scripts", "freeultracode-setup-comfyui", "ps1");
+        let script_path = managed_temp_path(None, "scripts", "freeultracode-setup-comfyui", "ps1");
         std::fs::write(&script_path, COMFYUI_SETUP_PS1.as_bytes())
             .map_err(|e| format!("写入 ComfyUI 安装脚本失败：{e}"))?;
 
@@ -11193,8 +11573,13 @@ fn tool_subject(input: &serde_json::Value) -> String {
 
 /// Serialise a structured tool-event patch into an inline sentinel block that
 /// the frontend render layer decodes (mirrors src/components/ai/lib/toolEvent.ts).
+/// `<`/`>` in the JSON payload are escaped as `<`/`>` (JSON parsing
+/// restores them) so a tool result that itself contains the literal sentinel
+/// markers can't emit a stray `<<FUC_TOOL_END>>` that prematurely closes the
+/// block and leaks the rest of the payload as prose.
 fn encode_tool_patch(patch: &serde_json::Value) -> String {
-    format!("\n<<FUC_TOOL>>{}<<FUC_TOOL_END>>\n", patch)
+    let payload = patch.to_string().replace('<', "\\u003c").replace('>', "\\u003e");
+    format!("\n<<FUC_TOOL>>{}<<FUC_TOOL_END>>\n", payload)
 }
 
 /// Cap a tool result body so a huge file read doesn't bloat the message text.
@@ -11274,15 +11659,23 @@ struct CodexLiteTurn {
 
 #[derive(serde::Deserialize)]
 struct CodexLiteItem {
+    id: Option<String>,
     #[serde(rename = "type")]
     item_type: Option<String>,
     text: Option<String>,
+    output: Option<String>,
     command: Option<String>,
     name: Option<String>,
     path: Option<String>,
     file_path: Option<String>,
+    old_path: Option<String>,
+    new_path: Option<String>,
     query: Option<String>,
     status: Option<String>,
+    changes: Option<serde_json::Value>,
+    files: Option<serde_json::Value>,
+    paths: Option<serde_json::Value>,
+    edits: Option<serde_json::Value>,
 }
 
 impl CodexLiteEvent {
@@ -11373,6 +11766,94 @@ fn codex_progress_line(item: &CodexLiteItem) -> Option<String> {
     } else {
         Some(format!("\n🔧 {item_type}: {detail}\n"))
     }
+}
+
+fn insert_codex_arg_string(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: &Option<String>,
+) {
+    if let Some(value) = value.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        map.insert(key.to_string(), serde_json::Value::String(value.to_string()));
+    }
+}
+
+fn insert_codex_arg_value(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: &Option<serde_json::Value>,
+) {
+    if let Some(value) = value {
+        if !value.is_null() {
+            map.insert(key.to_string(), value.clone());
+        }
+    }
+}
+
+fn codex_tool_subject(item: &CodexLiteItem) -> String {
+    let detail = item
+        .command
+        .as_deref()
+        .or(item.name.as_deref())
+        .or(item.path.as_deref())
+        .or(item.file_path.as_deref())
+        .or(item.query.as_deref())
+        .or(item.text.as_deref())
+        .or(item.status.as_deref())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.replace(['\n', '\r'], " "))
+        .unwrap_or_default();
+    detail.chars().take(200).collect()
+}
+
+fn codex_tool_args(item: &CodexLiteItem) -> Option<serde_json::Value> {
+    let mut map = serde_json::Map::new();
+    insert_codex_arg_string(&mut map, "id", &item.id);
+    insert_codex_arg_string(&mut map, "type", &item.item_type);
+    insert_codex_arg_string(&mut map, "command", &item.command);
+    insert_codex_arg_string(&mut map, "name", &item.name);
+    insert_codex_arg_string(&mut map, "path", &item.path);
+    insert_codex_arg_string(&mut map, "file_path", &item.file_path);
+    insert_codex_arg_string(&mut map, "old_path", &item.old_path);
+    insert_codex_arg_string(&mut map, "new_path", &item.new_path);
+    insert_codex_arg_string(&mut map, "query", &item.query);
+    insert_codex_arg_string(&mut map, "status", &item.status);
+    insert_codex_arg_value(&mut map, "changes", &item.changes);
+    insert_codex_arg_value(&mut map, "files", &item.files);
+    insert_codex_arg_value(&mut map, "paths", &item.paths);
+    insert_codex_arg_value(&mut map, "edits", &item.edits);
+    (!map.is_empty()).then_some(serde_json::Value::Object(map))
+}
+
+fn codex_tool_patch(item: &CodexLiteItem, fallback_id: String) -> Option<serde_json::Value> {
+    let item_type = item.item_type.as_deref().unwrap_or("");
+    if item_type.is_empty() || item_type == "agent_message" {
+        return None;
+    }
+    let result_raw = item.output.as_deref().or(item.text.as_deref()).unwrap_or("");
+    let truncated = result_raw.chars().count() > TOOL_RESULT_CLAMP;
+    let result: String = result_raw.chars().take(TOOL_RESULT_CLAMP).collect();
+    let is_error = item
+        .status
+        .as_deref()
+        .map(|status| {
+            let status = status.to_ascii_lowercase();
+            status.contains("error") || status.contains("fail")
+        })
+        .unwrap_or(false);
+    let mut patch = serde_json::json!({
+        "id": item.id.clone().unwrap_or(fallback_id),
+        "name": item_type,
+        "subject": codex_tool_subject(item),
+        "status": if is_error { "error" } else { "done" },
+        "result": result,
+        "truncated": truncated,
+    });
+    if let Some(args) = codex_tool_args(item) {
+        patch["args"] = args;
+    }
+    Some(patch)
 }
 
 fn codex_status_success(status: &str) -> bool {
@@ -11896,12 +12377,27 @@ async fn ai_cli(
                             continue;
                         }
                         if let Some(item) = event.completed_item() {
-                            if let Some(line) = codex_progress_line(item) {
+                            if item.item_type.as_deref() == Some("agent_message") {
+                                let Some(line) = codex_progress_line(item) else {
+                                    continue;
+                                };
                                 acc.push_str(&line);
                                 if let Ok(mut current) = codex_streamed_output_reader.lock() {
                                     current.push_str(&line);
                                 }
                                 emit_progress(&app2, &run2, &line);
+                            } else if let Some(patch) =
+                                codex_tool_patch(item, format!("cx{}", tool_starts.len()))
+                            {
+                                tool_starts.insert(
+                                    patch
+                                        .get("id")
+                                        .and_then(|value| value.as_str())
+                                        .unwrap_or("")
+                                        .to_string(),
+                                    std::time::Instant::now(),
+                                );
+                                emit_progress(&app2, &run2, &encode_tool_patch(&patch));
                             }
                         }
                         continue;
@@ -12509,6 +13005,31 @@ mod tests {
     }
 
     #[test]
+    fn list_cached_assets_finds_workspace_cache_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "fuc-assets-cache-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let clipboard_dir = dir.join(".freeultracode").join("clipboard-images");
+        let model_dir = dir.join(".freeultracode").join("model-assets");
+        std::fs::create_dir_all(&clipboard_dir).unwrap();
+        std::fs::create_dir_all(&model_dir).unwrap();
+        std::fs::write(clipboard_dir.join("shot.png"), b"png").unwrap();
+        std::fs::write(model_dir.join("model.glb"), b"glb").unwrap();
+
+        let files = list_cached_assets_blocking(Some(dir.to_string_lossy().to_string())).unwrap();
+        assert!(files.iter().any(|file| {
+            file.title == "shot.png" && file.kind == "image" && file.source == "generated"
+        }));
+        assert!(files.iter().any(|file| {
+            file.title == "model.glb" && file.kind == "mesh" && file.source == "downloaded"
+        }));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn ue_mcp_parse_engine_version_handles_lines_and_guids() {
         assert_eq!(ue_mcp_parse_engine_version("5.3"), Some((5, 3)));
         assert_eq!(ue_mcp_parse_engine_version("4.25"), Some((4, 25)));
@@ -12718,7 +13239,10 @@ mod tests {
     fn ue_mcp_suggestion_uses_stable_server_id() {
         let servers = project_suggested_mcp_servers("unreal");
         assert_eq!(servers.len(), 4);
-        let ue = servers.iter().find(|server| server.id == UE_MCP_SERVER_ID).unwrap();
+        let ue = servers
+            .iter()
+            .find(|server| server.id == UE_MCP_SERVER_ID)
+            .unwrap();
         assert_eq!(ue.transport, "stdio");
         assert!(ue.requires_user_approval);
         let cocos = servers
@@ -12763,8 +13287,8 @@ mod tests {
             }
         });
 
-        let settings = project_mcp_settings_json_from_settings(&raw_settings, Some("E:/Game"))
-            .unwrap();
+        let settings =
+            project_mcp_settings_json_from_settings(&raw_settings, Some("E:/Game")).unwrap();
 
         assert_eq!(
             settings["mcpServers"]["cocos-mcp-server"]["url"].as_str(),
@@ -12890,7 +13414,10 @@ mod tests {
             document_mime_for_path(std::path::Path::new("legacy.doc")),
             Some("application/msword")
         );
-        assert_eq!(document_mime_for_path(std::path::Path::new("readme.txt")), None);
+        assert_eq!(
+            document_mime_for_path(std::path::Path::new("readme.txt")),
+            None
+        );
     }
 
     #[test]
@@ -12929,6 +13456,40 @@ mod tests {
         assert_eq!(found.as_deref(), Some(file.as_path()));
 
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preview_fallback_maps_p4_depot_path_to_workspace_tail() {
+        let base = std::env::temp_dir().join(format!(
+            "freeultracode-preview-p4-test-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        let root = base
+            .join("project_moon_ue5")
+            .join("MoonGame")
+            .join("development")
+            .join("Client")
+            .join("Game");
+        let file = root.join("Config").join("DefaultEditor.ini");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, "[Editor]\n").unwrap();
+
+        let found = preview_depot_path_fallback(
+            "//MoonGame/development/Client/Game/Config/DefaultEditor.ini#7",
+            root.to_str(),
+        );
+        assert_eq!(found.as_deref(), Some(file.as_path()));
+
+        let preview = preview_local_file_blocking(
+            "//MoonGame/development/Client/Game/Config/DefaultEditor.ini#7".to_string(),
+            Some(root.to_string_lossy().to_string()),
+        )
+        .unwrap();
+        assert_eq!(preview.kind, "text");
+        assert_eq!(preview.text.as_deref(), Some("[Editor]\n"));
+
+        let _ = std::fs::remove_dir_all(base);
     }
 
     #[test]
@@ -13074,6 +13635,34 @@ mod tests {
         assert_eq!(
             line.as_deref(),
             Some("\n🔧 command_execution: rg -n foo app/src\n")
+        );
+    }
+
+    #[test]
+    fn codex_tool_patch_keeps_file_change_paths() {
+        let event: CodexLiteEvent = serde_json::from_str(
+            r#"{
+              "method": "item/completed",
+              "params": {
+                "item": {
+                  "id": "fc1",
+                  "type": "file_change",
+                  "status": "completed",
+                  "changes": [{ "path": "app/src/lib/sessionFiles.ts" }],
+                  "output": "*** Update File: app/src/lib/sessionFiles.ts"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+        let patch = event
+            .completed_item()
+            .and_then(|item| codex_tool_patch(item, "fallback".to_string()))
+            .unwrap();
+        assert_eq!(patch["name"].as_str(), Some("file_change"));
+        assert_eq!(
+            patch["args"]["changes"][0]["path"].as_str(),
+            Some("app/src/lib/sessionFiles.ts")
         );
     }
 
@@ -13807,6 +14396,8 @@ pub fn run() {
             refresh_slash_catalog,
             skill_install_targets,
             install_skill_from_url,
+            install_skill_from_text,
+            uninstall_skill,
             scan_model_clis,
             validate_cli_path,
             validate_shell_path,
@@ -13845,6 +14436,7 @@ pub fn run() {
             read_model_asset_data_url,
             download_model_asset,
             save_generated_asset,
+            list_cached_assets,
             history::history_root,
             history::history_read_json,
             history::history_write_json,

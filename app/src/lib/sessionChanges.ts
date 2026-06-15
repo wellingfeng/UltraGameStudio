@@ -7,6 +7,7 @@ import {
 
 const SESSION_CHANGES_CACHE_PREFIX = 'freeultracode.sessionChanges.v5:';
 const SESSION_CHANGES_CACHE_KEY_VERSION = 'v5';
+export const SESSION_CHANGES_UPDATED_EVENT = 'freeultracode:session-changes-updated';
 
 export function sessionChangesCacheKey(
   workspaceId: string | null | undefined,
@@ -43,6 +44,11 @@ function writeCachedSessionChanges(cacheKey: string | null, snapshot: WorkspaceC
   if (!key || typeof window === 'undefined') return;
   try {
     window.localStorage.setItem(key, JSON.stringify(snapshot));
+    window.dispatchEvent(
+      new CustomEvent(SESSION_CHANGES_UPDATED_EVENT, {
+        detail: { cacheKey, rootPath: snapshot.rootPath },
+      }),
+    );
   } catch {
     /* ignore cache quota errors */
   }

@@ -120,15 +120,6 @@ import {
   type SpeechGenerationSettings,
   type SpeechProviderId,
 } from '@/lib/speechGeneration';
-import {
-  SPRITE_PROVIDERS,
-  loadSpriteGenerationSettings,
-  saveSpriteGenerationSettings,
-  spriteProviderModel,
-  spriteProviderReady,
-  type SpriteGenerationSettings,
-  type SpriteProviderId,
-} from '@/lib/spriteGeneration';
 import type { SelectOption } from '@/store/types';
 import { cacheTtlOptions, startupModeOptions } from '@/store/sampleSessions';
 import {
@@ -195,6 +186,11 @@ import {
   refreshProviderModels,
 } from '@/lib/modelLists';
 import { formatCompactTokenCount } from '@/lib/contextUsage';
+import {
+  normalizeWorkspacePath,
+  uniqueWorkspaceHistory,
+  workspacePathKey,
+} from '@/lib/workspaceHistory';
 import LazyMessageContent from '@/components/ai/LazyMessageContent';
 import CopyButton from '@/components/ai/CopyButton';
 import {
@@ -274,6 +270,15 @@ function streamScrollKey(
   sessionId: string | null | undefined,
 ): string {
   return `${layout}:${workspaceId ?? 'global'}:${sessionId ?? 'none'}`;
+}
+
+const ASSET_SESSION_JUMP_EVENT = 'fuc:asset-session-jump';
+
+interface AssetSessionJumpDetail {
+  assetId?: string;
+  sessionId: string;
+  workspaceId?: string | null;
+  messageId?: string | null;
 }
 
 function isStreamAtBottom(el: HTMLElement): boolean {
@@ -445,7 +450,7 @@ type FileMentionListing =
       message: string;
     };
 
-const MAX_SLASH_SUGGESTIONS = 10;
+const MAX_FILTERED_SLASH_SUGGESTIONS = 10;
 const MAX_FILE_MENTION_SUGGESTIONS = 12;
 
 function slashSuggestionRankForAdapter(
@@ -501,6 +506,100 @@ function normalizeFileMentionPath(value: string): string {
     .replace(/^\/+/, '');
 }
 
+function normalizeFileMentionAbsolutePath(value: string): string {
+  return normalizeWorkspacePath(value).replace(/\\/g, '/');
+}
+
+function joinFileMentionPath(rootPath: string, relativePath: string): string {
+  const root = normalizeFileMentionAbsolutePath(rootPath);
+  const relative = normalizeFileMentionPath(relativePath).replace(/^\/+|\/+$/g, '');
+  return relative ? `${root}/${relative}` : root;
+}
+
+interface FileMentionListTarget {
+  rootPath: string;
+  relativePath: string;
+  insertAbsolute: boolean;
+}
+
+function fileMentionListTargets(
+  directory: string,
+  rootFolders: string[],
+): FileMentionListTarget[] {
+  const [primaryRoot] = rootFolders;
+  if (!primaryRoot) return [];
+  const primaryKey = workspacePathKey(primaryRoot);
+  const normalizedDirectory = normalizeFileMentionAbsolutePath(directory);
+
+  if (!normalizedDirectory) {
+    return rootFolders.map((rootPath) => ({
+      rootPath,
+      relativePath: '',
+      insertAbsolute: workspacePathKey(rootPath) !== primaryKey,
+    }));
+  }
+
+  const directoryKey = workspacePathKey(normalizedDirectory);
+  const matchedRoot = [...rootFolders]
+    .sort((a, b) => normalizeFileMentionAbsolutePath(b).length - normalizeFileMentionAbsolutePath(a).length)
+    .find((rootPath) => {
+      const rootKey = workspacePathKey(rootPath);
+      return directoryKey === rootKey || directoryKey.startsWith(`${rootKey}/`);
+    });
+
+  if (matchedRoot) {
+    const root = normalizeFileMentionAbsolutePath(matchedRoot);
+    const relativePath =
+      directoryKey === workspacePathKey(matchedRoot)
+        ? ''
+        : normalizedDirectory.slice(root.length + 1);
+    return [
+      {
+        rootPath: matchedRoot,
+        relativePath: normalizeFileMentionPath(relativePath),
+        insertAbsolute: true,
+      },
+    ];
+  }
+
+  return [
+    {
+      rootPath: primaryRoot,
+      relativePath: normalizeFileMentionPath(directory),
+      insertAbsolute: false,
+    },
+  ];
+}
+
+function fileMentionEntryForTarget(
+  entry: WorkspaceTreeEntry,
+  target: FileMentionListTarget,
+): WorkspaceTreeEntry {
+  if (!target.insertAbsolute) return entry;
+  return {
+    ...entry,
+    relativePath: joinFileMentionPath(target.rootPath, entry.relativePath),
+  };
+}
+
+function fileMentionListingKey(targets: FileMentionListTarget[]): string {
+  return targets
+    .map((target) => `${workspacePathKey(target.rootPath)}::${target.relativePath}::${target.insertAbsolute}`)
+    .join('|');
+}
+
+function uniqueFileMentionEntries(entries: WorkspaceTreeEntry[]): WorkspaceTreeEntry[] {
+  const seen = new Set<string>();
+  const out: WorkspaceTreeEntry[] = [];
+  for (const entry of entries) {
+    const key = workspacePathKey(entry.path || entry.relativePath);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(entry);
+  }
+  return out;
+}
+
 function splitFileMentionPath(value: string): {
   directory: string;
   query: string;
@@ -535,7 +634,7 @@ function filterSlashSuggestions(
   query: string,
 ): SlashSuggestion[] {
   const q = query.trim().toLowerCase();
-  if (!q) return suggestions.slice(0, MAX_SLASH_SUGGESTIONS);
+  if (!q) return suggestions;
 
   const starts: SlashSuggestion[] = [];
   const contains: SlashSuggestion[] = [];
@@ -549,7 +648,7 @@ function filterSlashSuggestions(
     if (suggestion.searchText.includes(q)) contains.push(suggestion);
   }
 
-  return [...starts, ...contains].slice(0, MAX_SLASH_SUGGESTIONS);
+  return [...starts, ...contains].slice(0, MAX_FILTERED_SLASH_SUGGESTIONS);
 }
 
 function filterFileMentionEntries(
@@ -1616,6 +1715,7 @@ export default function AIDock({
   const setComposerDraft = useStore((s) => s.setComposerDraft);
   const permissionOptions = useStore((s) => s.permissionOptions);
   const composerModelOptions = useStore((s) => s.modelOptions);
+  const workspaces = useStore((s) => s.workspaces);
   const mode = useStore((s) => s.mode);
   const activeAiEditing = useStore((s) => isActiveAiEditingSession(s));
   const activeChatting = useStore((s) =>
@@ -1689,6 +1789,7 @@ export default function AIDock({
   const searchScrollTopRef = useRef<number | null>(null);
   const lastSearchActiveRef = useRef(false);
   const stickToBottomRef = useRef(true);
+  const forceNextMessageBottomRef = useRef(false);
   const streamScrollSnapshotsRef = useRef(new Map<string, StreamScrollSnapshot>());
   const activeStreamScrollKey = useMemo(
     () => streamScrollKey(layout, activeWorkspaceId, activeSessionId),
@@ -1699,6 +1800,12 @@ export default function AIDock({
   const pendingStreamScrollRestoreKeyRef = useRef<string | null>(
     activeStreamScrollKey,
   );
+  const [assetJumpTarget, setAssetJumpTarget] =
+    useState<AssetSessionJumpDetail | null>(null);
+  const [assetJumpHighlightId, setAssetJumpHighlightId] = useState<string | null>(
+    null,
+  );
+  const assetJumpHighlightTimerRef = useRef<number | null>(null);
 
   const isReadOnly = mode === 'running';
   // Cache TTL is a session-open-time setting: changeable only before the first
@@ -2357,72 +2464,6 @@ export default function AIDock({
     },
     [],
   );
-  const [spriteSettings, setSpriteSettings] = useState<SpriteGenerationSettings>(
-    () => loadSpriteGenerationSettings(),
-  );
-  useEffect(() => {
-    const refresh = () => setSpriteSettings(loadSpriteGenerationSettings());
-    window.addEventListener('fuc:sprite-generation-settings-changed', refresh);
-    return () =>
-      window.removeEventListener(
-        'fuc:sprite-generation-settings-changed',
-        refresh,
-      );
-  }, []);
-  const spriteChannelOptions = useMemo<SelectOption[]>(
-    () =>
-      SPRITE_PROVIDERS.map((provider) => ({
-        id: provider.id,
-        label:
-          provider.label +
-          (spriteProviderReady(provider.id, spriteSettings) ? '' : ' ⚠'),
-        hint: t(
-          locale,
-          provider.category === 'commercial'
-            ? 'settings.spriteGeneration.categoryCommercial'
-            : 'settings.spriteGeneration.categoryLocalOpen',
-        ),
-        group: t(
-          locale,
-          provider.category === 'commercial'
-            ? 'settings.spriteGeneration.commercialProviders'
-            : 'settings.spriteGeneration.localOpenProviders',
-        ),
-      })),
-    [spriteSettings, locale],
-  );
-  const spriteChannelValue = spriteSettings.preferredProviderId;
-  const spriteModelOptions = useMemo<SelectOption[]>(() => {
-    const provider = SPRITE_PROVIDERS.find(
-      (item) => item.id === spriteSettings.preferredProviderId,
-    );
-    if (!provider) return [];
-    const current = spriteProviderModel(provider.id, spriteSettings);
-    return uniqueModelSelectOptions([current, ...provider.models]);
-  }, [spriteSettings]);
-  const spriteModelValue = spriteProviderModel(
-    spriteSettings.preferredProviderId,
-    spriteSettings,
-  );
-  const onSpriteChannelChange = useCallback((id: string) => {
-    saveSpriteGenerationSettings({
-      ...loadSpriteGenerationSettings(),
-      preferredProviderId: id as SpriteProviderId,
-    });
-  }, []);
-  const onSpriteModelChange = useCallback(
-    (model: string) => {
-      const selected = model.trim();
-      if (!selected) return;
-      const current = loadSpriteGenerationSettings();
-      const providerId = current.preferredProviderId;
-      saveSpriteGenerationSettings({
-        ...current,
-        providerModels: { ...current.providerModels, [providerId]: selected },
-      });
-    },
-    [],
-  );
   const channelSelectOptions = useMemo<SelectOption[]>(
     () => {
       const defaultOptions = RUNTIME_ADAPTERS.flatMap((adapter) => {
@@ -2886,12 +2927,35 @@ export default function AIDock({
   // Open a local file referenced by an AI-message chip in the right preview pane.
   // Paths resolve against the active workspace folder in the Tauri command.
   const workspaceCwd = composer.workspace;
+  const activeWorkspacePath = useMemo(
+    () =>
+      workspaces.find((workspace) => workspace.id === activeWorkspaceId)?.path?.trim() ??
+      '',
+    [activeWorkspaceId, workspaces],
+  );
+  const fileMentionRootFolders = useMemo(
+    () =>
+      uniqueWorkspaceHistory([
+        composer.workspace,
+        ...composer.workspaceFolders,
+        activeWorkspacePath,
+      ]),
+    [activeWorkspacePath, composer.workspace, composer.workspaceFolders],
+  );
+  const fileMentionRootKey = useMemo(
+    () => fileMentionRootFolders.map(workspacePathKey).join('|'),
+    [fileMentionRootFolders],
+  );
   useEffect(() => {
     if (!fileMentionTrigger || isReadOnly) return;
 
-    const rootPath = workspaceCwd.trim();
+    const targets = fileMentionListTargets(
+      fileMentionTrigger.directory,
+      fileMentionRootFolders,
+    );
+    const listingKey = fileMentionListingKey(targets);
     const directory = fileMentionTrigger.directory;
-    if (!rootPath) {
+    if (targets.length === 0) {
       setFileMentionListing({
         status: 'error',
         rootPath: '',
@@ -2905,22 +2969,46 @@ export default function AIDock({
     let cancelled = false;
     setFileMentionListing((current) => ({
       status: 'loading',
-      rootPath,
+      rootPath: listingKey,
       directory,
       entries:
-        current.rootPath === rootPath && current.directory === directory
+        current.rootPath === listingKey && current.directory === directory
           ? current.entries
           : [],
     }));
 
-    void listWorkspaceDirectory(rootPath, directory)
-      .then((listing) => {
+    void Promise.allSettled(
+      targets.map(async (target) => ({
+        target,
+        listing: await listWorkspaceDirectory(target.rootPath, target.relativePath),
+      })),
+    )
+      .then((results) => {
         if (cancelled) return;
+        const fulfilled = results.filter(
+          (result): result is PromiseFulfilledResult<{
+            target: FileMentionListTarget;
+            listing: Awaited<ReturnType<typeof listWorkspaceDirectory>>;
+          }> => result.status === 'fulfilled',
+        );
+        if (fulfilled.length === 0) {
+          const rejected = results.find(
+            (result): result is PromiseRejectedResult =>
+              result.status === 'rejected',
+          );
+          throw rejected?.reason ?? new Error('Workspace listing failed');
+        }
         setFileMentionListing({
           status: 'ready',
-          rootPath: listing.rootPath,
-          directory: listing.relativePath,
-          entries: listing.entries,
+          rootPath: listingKey,
+          directory,
+          entries: uniqueFileMentionEntries(
+            fulfilled.flatMap(({ value }) =>
+              value.listing.entries.map((entry) =>
+                fileMentionEntryForTarget(entry, value.target),
+              ),
+            ),
+          ),
         });
         setActiveFileMentionIndex(0);
       })
@@ -2928,7 +3016,7 @@ export default function AIDock({
         if (cancelled) return;
         setFileMentionListing({
           status: 'error',
-          rootPath,
+          rootPath: listingKey,
           directory,
           entries: [],
           message: fileMentionErrorMessage(err),
@@ -2938,7 +3026,7 @@ export default function AIDock({
     return () => {
       cancelled = true;
     };
-  }, [fileMentionTrigger?.directory, isReadOnly, workspaceCwd]);
+  }, [fileMentionRootFolders, fileMentionRootKey, fileMentionTrigger?.directory, isReadOnly, locale]);
 
   const onOpenFile = useCallback(
     (ref: FileRef, intent?: OpenFileIntent) => {
@@ -3041,12 +3129,77 @@ export default function AIDock({
     });
   }, []);
 
+  useEffect(() => {
+    const handleAssetSessionJump = (event: Event) => {
+      const detail = (event as CustomEvent<AssetSessionJumpDetail>).detail;
+      if (!detail?.sessionId) return;
+      setAssetJumpTarget({
+        assetId: detail.assetId,
+        sessionId: detail.sessionId,
+        workspaceId: detail.workspaceId ?? null,
+        messageId: detail.messageId ?? null,
+      });
+    };
+    window.addEventListener(ASSET_SESSION_JUMP_EVENT, handleAssetSessionJump);
+    return () => {
+      window.removeEventListener(ASSET_SESSION_JUMP_EVENT, handleAssetSessionJump);
+      if (assetJumpHighlightTimerRef.current != null) {
+        window.clearTimeout(assetJumpHighlightTimerRef.current);
+        assetJumpHighlightTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!assetJumpTarget) return;
+    if (activeSessionId !== assetJumpTarget.sessionId) return;
+    if (
+      assetJumpTarget.workspaceId != null &&
+      activeWorkspaceId !== assetJumpTarget.workspaceId
+    ) {
+      return;
+    }
+    const stream = streamRef.current;
+    if (!stream) return;
+    const targetMessageId =
+      assetJumpTarget.messageId &&
+      messages.some((message) => message.id === assetJumpTarget.messageId)
+        ? assetJumpTarget.messageId
+        : (messages[messages.length - 1]?.id ?? null);
+    if (!targetMessageId) return;
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const node = messageRefs.current.get(targetMessageId);
+        if (node) {
+          node.scrollIntoView({
+            block: 'center',
+            inline: 'nearest',
+            behavior: 'smooth',
+          });
+        } else {
+          scrollStreamToBottom(stream);
+        }
+        setAssetJumpHighlightId(targetMessageId);
+        if (assetJumpHighlightTimerRef.current != null) {
+          window.clearTimeout(assetJumpHighlightTimerRef.current);
+        }
+        assetJumpHighlightTimerRef.current = window.setTimeout(() => {
+          setAssetJumpHighlightId(null);
+          assetJumpHighlightTimerRef.current = null;
+        }, 1800);
+        setAssetJumpTarget(null);
+      });
+    });
+  }, [activeSessionId, activeWorkspaceId, assetJumpTarget, messages]);
+
   // Re-pin the active stream to the bottom. Called when the user sends a
   // message so the new entry is guaranteed to scroll into view, even if the
   // stored snapshot recorded a non-bottom position (line auto-scroll prefers
   // the snapshot's atBottom over stickToBottomRef, so we must clear it too).
   const pinActiveStreamToBottom = useCallback(() => {
     stickToBottomRef.current = true;
+    forceNextMessageBottomRef.current = true;
     const key = activeStreamScrollKeyRef.current;
     const snapshot = streamScrollSnapshotsRef.current.get(key);
     if (snapshot) {
@@ -3581,6 +3734,24 @@ export default function AIDock({
     restoreStreamScrollSnapshotForKey,
   ]);
 
+  useLayoutEffect(() => {
+    if (!forceNextMessageBottomRef.current) return;
+    const stream = streamRef.current;
+    if (!stream) return;
+
+    scrollStreamToBottom(stream);
+    stickToBottomRef.current = true;
+    streamScrollSnapshotsRef.current.set(activeStreamScrollKeyRef.current, {
+      atBottom: true,
+      scrollTop: stream.scrollTop,
+      scrollHeight: stream.scrollHeight,
+      clientHeight: stream.clientHeight,
+      anchorMessageId: null,
+      anchorOffsetTop: 0,
+    });
+    forceNextMessageBottomRef.current = false;
+  }, [messages.length]);
+
   // Keep the latest message in view unless return search is active or the user
   // has scrolled away from the bottom. `stickToBottomRef` is updated by the
   // stream's onScroll handler — when the user is near the bottom we keep
@@ -4040,9 +4211,8 @@ export default function AIDock({
     if (!text) return;
     closeComposerSuggestions();
     // The user is sending something — always follow the new content to the
-    // bottom regardless of where they had scrolled. The actual scroll happens
-    // once the message renders (ResizeObserver-driven sync), but we pin intent
-    // here so a stale non-bottom snapshot can't suppress it.
+    // bottom regardless of where they had scrolled. We pin intent here so a
+    // stale non-bottom snapshot can't suppress the post-render scroll.
     pinActiveStreamToBottom();
     const clearDraftIfNeeded = () => {
       if (overrideText === undefined || options.clearDraft) {
@@ -4669,7 +4839,7 @@ export default function AIDock({
           : generationMode === 'video'
             ? videoChannelOptions
             : generationMode === 'sprite'
-              ? spriteChannelOptions
+              ? imageChannelOptions
               : generationMode === 'speech'
                 ? speechChannelOptions
                 : channelSelectOptions;
@@ -4683,7 +4853,7 @@ export default function AIDock({
           : generationMode === 'video'
             ? videoChannelValue
             : generationMode === 'sprite'
-              ? spriteChannelValue
+              ? imageChannelValue
               : generationMode === 'speech'
                 ? speechChannelValue
                 : channelSelectValue;
@@ -4697,7 +4867,7 @@ export default function AIDock({
           : generationMode === 'video'
             ? onVideoChannelChange
             : generationMode === 'sprite'
-              ? onSpriteChannelChange
+              ? onImageChannelChange
               : generationMode === 'speech'
                 ? onSpeechChannelChange
                 : onChannelChange;
@@ -4711,7 +4881,7 @@ export default function AIDock({
           : generationMode === 'video'
             ? videoModelOptions
             : generationMode === 'sprite'
-              ? spriteModelOptions
+              ? imageModelOptions
               : generationMode === 'speech'
                 ? speechModelOptions
                 : modelSelectOptions;
@@ -4725,7 +4895,7 @@ export default function AIDock({
           : generationMode === 'video'
             ? videoModelValue
             : generationMode === 'sprite'
-              ? spriteModelValue
+              ? imageModelValue
               : generationMode === 'speech'
                 ? speechModelValue
                 : modelSelectValue;
@@ -4739,7 +4909,7 @@ export default function AIDock({
           : generationMode === 'video'
             ? onVideoModelChange
             : generationMode === 'sprite'
-              ? onSpriteModelChange
+              ? onImageModelChange
               : generationMode === 'speech'
                 ? onSpeechModelChange
                 : onModelChange;
@@ -4751,7 +4921,7 @@ export default function AIDock({
       : generationMode === 'video'
         ? t(locale, 'dock.videoModelTitle')
         : generationMode === 'sprite'
-          ? t(locale, 'dock.spriteModelTitle')
+          ? t(locale, 'dock.imageModelTitle')
           : generationMode === 'speech'
             ? t(locale, 'dock.speechModelTitle')
             : generationMode === 'image'
@@ -5042,6 +5212,7 @@ export default function AIDock({
                   const isSystem = m.role === 'system';
                   const isSearchHit = searchMatchMessageIds.has(m.id);
                   const isCurrentSearchHit = activeSearchMatchMessageId === m.id;
+                  const isAssetJumpHit = assetJumpHighlightId === m.id;
                   const assistantLabel =
                     !isUser && !isSystem ? assistantHeaderLabel(m) : '';
                   const roleLabel = isUser
@@ -5081,7 +5252,7 @@ export default function AIDock({
                       className={
                         'group/msg flex flex-col gap-1 rounded-md px-1 py-0.5 transition-colors ' +
                         (isChatUser ? 'items-end ' : '') +
-                        (isCurrentSearchHit
+                        (isCurrentSearchHit || isAssetJumpHit
                           ? 'bg-accent/5 ring-1 ring-inset ring-accent-3/40'
                           : isSearchHit
                             ? 'ring-1 ring-inset ring-accent/20'

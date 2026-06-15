@@ -16,6 +16,7 @@ import {
 import { cn } from '@/lib/cn';
 import {
   isTauri,
+  installSkillFromText,
   installSkillFromUrl,
   openExternal,
   refreshSlashCatalog,
@@ -23,6 +24,7 @@ import {
   type SkillInstallTarget,
 } from '@/lib/tauri';
 import {
+  buildSkillInstallTextFromMarkdown,
   filterPluginStoreItems,
   loadPluginStoreCatalog,
   pluginStoreSources,
@@ -104,6 +106,10 @@ function pluginStoreActionLabel(item: PluginStoreItem): string {
 
 export interface PluginStorePanelProps {
   locale: Locale;
+  title?: string;
+  description?: string;
+  defaultKind?: PluginStoreKind | 'all';
+  defaultSourceId?: string;
   /** Notified after a skill is installed so callers can refresh local views. */
   onSkillInstalled?: () => void;
   /**
@@ -115,6 +121,10 @@ export interface PluginStorePanelProps {
 
 export function PluginStorePanel({
   locale,
+  title,
+  description,
+  defaultKind = 'all',
+  defaultSourceId = 'all',
   onSkillInstalled,
   projectRoot,
 }: PluginStorePanelProps) {
@@ -127,8 +137,8 @@ export function PluginStorePanel({
   }));
   const [loading, setLoading] = useState(true);
   const [query, setQuery] = useState('');
-  const [kind, setKind] = useState<PluginStoreKind | 'all'>('all');
-  const [sourceId, setSourceId] = useState('all');
+  const [kind, setKind] = useState<PluginStoreKind | 'all'>(defaultKind);
+  const [sourceId, setSourceId] = useState(defaultSourceId);
   const [targets, setTargets] = useState<SkillInstallTarget[]>([]);
   const [targetId, setTargetId] = useState('');
   const [installingId, setInstallingId] = useState<string | null>(null);
@@ -210,15 +220,32 @@ export function PluginStorePanel({
       setInstallingId(item.id);
       setStatus(null);
       try {
-        const installed = await installSkillFromUrl({
-          url: item.installUrl,
+        const installParams = {
           name: item.title,
           slug: item.name || slugFromName(item.title),
           targetId: selectedTargetId,
           overwrite,
           sourceUrl: item.sourceUrl ?? null,
           projectRoot,
-        });
+        };
+        const installed =
+          item.installTransform === 'wrapMarkdownAsSkill'
+            ? await installSkillFromText({
+                ...installParams,
+                text: buildSkillInstallTextFromMarkdown(
+                  item,
+                  await fetch(item.installUrl, { cache: 'no-store' }).then((response) => {
+                    if (!response.ok) {
+                      throw new Error(`${response.status} ${response.statusText}`);
+                    }
+                    return response.text();
+                  }),
+                ),
+              })
+            : await installSkillFromUrl({
+                ...installParams,
+                url: item.installUrl,
+              });
         await refreshSlashCatalog();
         await loadTargets();
         onSkillInstalled?.();
@@ -279,10 +306,10 @@ export function PluginStorePanel({
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
           <h3 className="text-lg font-semibold text-fg">
-            {t(locale, 'settings.pluginStoreTitle')}
+            {title ?? t(locale, 'settings.pluginStoreTitle')}
           </h3>
           <p className="mt-1 text-xs leading-relaxed text-fg-faint">
-            {t(locale, 'settings.pluginStoreDescription')}
+            {description ?? t(locale, 'settings.pluginStoreDescription')}
           </p>
         </div>
         <div className="flex w-full flex-wrap items-center gap-2 sm:w-auto">

@@ -6,6 +6,8 @@ export type ImageProviderId =
   | 'ai-horde'
   | 'local-comfyui'
   | 'local-vllm-image'
+  | 'openai-image'
+  | 'openai-compatible-image-router'
   | 'google-gemini-image'
   | 'google-imagen'
   | 'bfl-flux'
@@ -260,6 +262,55 @@ export const IMAGE_PROVIDERS: ImageProviderDefinition[] = [
     endpointPlaceholder: 'http://127.0.0.1:8000/v1',
     credentialUrl: 'https://docs.vllm.ai',
     note: 'Self-hosted OpenAI-compatible image endpoint. Use it for FLUX.2, Qwen-Image, HunyuanImage-3.0, Sana, OmniGen2, HiDream, BAGEL, Kolors, SD3.5, and lower-priority research models when your local server exposes /v1/images/generations.',
+  },
+  {
+    id: 'openai-image',
+    label: 'OpenAI Images',
+    category: 'commercial',
+    apiKind: 'openai-images',
+    defaultModel: 'gpt-image-2',
+    models: ['gpt-image-2', 'gpt-image-1.5', 'gpt-image-1'],
+    needsKey: true,
+    local: false,
+    defaultBaseUrl: 'https://api.openai.com/v1',
+    supportsBaseUrl: true,
+    endpointPlaceholder: 'https://api.openai.com/v1',
+    credentialUrl: 'https://platform.openai.com/api-keys',
+    keyPlaceholder: 'sk-...',
+    note: 'OpenAI 官方图片生成接口，走 OpenAI-compatible /images/generations；可改 Base URL 指向兼容代理。',
+  },
+  {
+    id: 'openai-compatible-image-router',
+    label: 'OpenAI 兼容图片聚合',
+    category: 'commercial',
+    apiKind: 'openai-images',
+    defaultModel: 'gpt-image-2',
+    models: [
+      'gpt-image-2',
+      'gpt-image-1.5',
+      'gpt-image-1',
+      'Banana-Pro',
+      'Banana-2',
+      'Banana-1',
+      'Midjourney v8.1',
+      'Midjourney v8',
+      'Midjourney v7',
+      'Midjourney v6.1',
+      'Midjourney v6',
+      'niji-6',
+      'niji-5',
+      'Jimeng-4.0',
+      'Jimeng-3.0pro',
+      'Mingmou-1.0',
+      'Qwen-0925',
+    ],
+    needsKey: true,
+    local: false,
+    defaultBaseUrl: '',
+    supportsBaseUrl: true,
+    endpointPlaceholder: '粘贴 OpenAI-compatible /v1 Base URL',
+    keyPlaceholder: 'API Key',
+    note: '通用图片聚合/代理入口。用于 Midjourney、Jimeng、Banana、Qwen 等非官方或聚合商别名；需填写支持 /images/generations 的 Base URL。',
   },
   {
     id: 'google-gemini-image',
@@ -750,6 +801,13 @@ export function imageProviderReady(
   if (
     provider.needsAccountId &&
     !settings.providerAccountIds[providerId]?.trim()
+  ) {
+    return false;
+  }
+  if (
+    provider.supportsBaseUrl &&
+    provider.defaultBaseUrl === '' &&
+    !imageProviderBaseUrl(providerId, settings)
   ) {
     return false;
   }

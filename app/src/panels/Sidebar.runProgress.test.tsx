@@ -41,6 +41,7 @@ type MockWorkspace = {
   updatedAt: number;
   sessionCount: number;
   lastActiveSessionId: string | null;
+  metadata?: Record<string, unknown>;
 };
 
 type MockStoreState = {
@@ -603,6 +604,60 @@ describe('Sidebar workflow rename', () => {
       expect(view.container.textContent).toContain('打开工作区目录');
       expect(view.container.textContent).toContain('项目设置');
       expect(view.container.textContent).toContain('从历史中移除');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('shows two workspace folders and collapses additional ones in the workspace row', async () => {
+    resetSidebarStore();
+    mockState.workspaces = [
+      {
+        ...WORKSPACE,
+        metadata: {
+          projectSettings: {
+            folders: ['E:\\UnrealEngine', 'E:\\SharedDepot'],
+          },
+        },
+      },
+    ];
+    const view = await renderSidebar();
+
+    try {
+      const button = workspaceButton(view.container, WORKSPACE.name);
+
+      expect(button.textContent).toContain(WORKSPACE.path);
+      expect(button.textContent).toContain('E:\\UnrealEngine');
+      expect(button.textContent).toContain('...');
+      expect(button.textContent).not.toContain('E:\\SharedDepot');
+      expect(button.getAttribute('title')).toBe(
+        `${WORKSPACE.path}\nE:\\UnrealEngine\nE:\\SharedDepot`,
+      );
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('does not add an ellipsis when a workspace row has exactly two folders', async () => {
+    resetSidebarStore();
+    mockState.workspaces = [
+      {
+        ...WORKSPACE,
+        metadata: {
+          projectSettings: {
+            folders: ['E:\\UnrealEngine'],
+          },
+        },
+      },
+    ];
+    const view = await renderSidebar();
+
+    try {
+      const button = workspaceButton(view.container, WORKSPACE.name);
+
+      expect(button.textContent).toContain(WORKSPACE.path);
+      expect(button.textContent).toContain('E:\\UnrealEngine');
+      expect(button.textContent).not.toContain('...');
     } finally {
       await view.cleanup();
     }

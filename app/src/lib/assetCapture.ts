@@ -31,9 +31,13 @@ export interface CaptureGeneratedAssetsInput {
   model?: string;
   prompt?: string;
   sessionId?: string;
+  workspaceId?: string | null;
+  messageId?: string;
   cwd?: string;
   /** Human title stem; an index is appended when there is more than one item. */
   titlePrefix?: string;
+  /** Existing pending entry to complete with the first generated source. */
+  pendingAssetId?: string;
   /** Extra type-specific fields stored on each entry. */
   meta?: Record<string, unknown>;
 }
@@ -91,7 +95,10 @@ export async function captureGeneratedAssets(
   input: CaptureGeneratedAssetsInput,
 ): Promise<void> {
   const { kind, sources } = input;
-  if (!sources?.length) return;
+  if (!sources?.length) {
+    if (input.pendingAssetId) markAssetFailed(input.pendingAssetId, 'No generated asset output.');
+    return;
+  }
   const prefix = input.titlePrefix ?? `generated-${kind}`;
   const total = sources.length;
 
@@ -100,8 +107,18 @@ export async function captureGeneratedAssets(
       if (typeof src !== 'string' || !src.trim()) return;
       const title = titleFor(prefix, kind, index, total);
       const isRemote = /^https?:\/\//i.test(src);
+      const pendingId = index === 0 ? input.pendingAssetId : undefined;
 
       if (isRemote) {
+        if (pendingId) {
+          markAssetDone(pendingId, {
+            remoteUrl: src,
+            previewUrl: src,
+            title,
+            meta: input.meta,
+          });
+          return;
+        }
         registerAsset({
           kind,
           source: 'generated',
@@ -114,6 +131,8 @@ export async function captureGeneratedAssets(
           model: input.model,
           prompt: input.prompt,
           sessionId: input.sessionId,
+          workspaceId: input.workspaceId,
+          messageId: input.messageId,
           meta: input.meta,
         });
         return;
@@ -124,6 +143,14 @@ export async function captureGeneratedAssets(
       // No desktop backend (browser/tests) or non-persistable source: keep the
       // inline preview so the asset is still discoverable in the hub.
       if (!parsed || !tauriAvailable()) {
+        if (pendingId) {
+          markAssetDone(pendingId, {
+            previewUrl: src.startsWith('data:') ? src : undefined,
+            title,
+            meta: input.meta,
+          });
+          return;
+        }
         registerAsset({
           kind,
           source: 'generated',
@@ -135,23 +162,29 @@ export async function captureGeneratedAssets(
           model: input.model,
           prompt: input.prompt,
           sessionId: input.sessionId,
+          workspaceId: input.workspaceId,
+          messageId: input.messageId,
           meta: input.meta,
         });
         return;
       }
 
-      const id = registerAsset({
-        kind,
-        source: 'generated',
-        origin: input.origin ?? 'local',
-        title,
-        previewUrl: src,
-        provider: input.provider,
-        model: input.model,
-        prompt: input.prompt,
-        sessionId: input.sessionId,
-        meta: input.meta,
-      });
+      const id =
+        pendingId ??
+        registerAsset({
+          kind,
+          source: 'generated',
+          origin: input.origin ?? 'local',
+          title,
+          previewUrl: src,
+          provider: input.provider,
+          model: input.model,
+          prompt: input.prompt,
+          sessionId: input.sessionId,
+          workspaceId: input.workspaceId,
+          messageId: input.messageId,
+          meta: input.meta,
+        });
       try {
         const saved = await saveGeneratedAsset({
           bytesBase64: parsed.base64,

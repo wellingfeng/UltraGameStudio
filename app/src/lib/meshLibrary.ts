@@ -2,7 +2,7 @@
 //
 // CONTRACT: This module owns the *data* layer and network search for online 3D
 // model libraries (Sketchfab, Poly Haven, Poly Pizza, Fab, Unity Asset Store,
-// ...). The Project Settings "模型库" tab configures which libraries are enabled
+// ...). The Project Settings "在线模型库" tab configures which libraries are enabled
 // and stores per-library account API keys; the AIDock /mesh-search command and
 // the store's startMeshSearchTurn consume searchMeshLibraries() to render
 // results (thumbnails / previews / downloads) into the conversation.

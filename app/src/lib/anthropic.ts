@@ -308,7 +308,10 @@ export const SIMPLE_CHAT_SYSTEM = `你正在「简单 Workflow」里直接为用
 - 不要生成、输出或修改 workflow 蓝图，不要输出 IRGraph 或任何 \`\`\`json 蓝图代码块。
 - 直接给出答案或结果；若处于命令行环境且任务确实需要，可在当前工作区做必要的读写/操作。
 - 回答简洁、直接、切题，不要反问或等待确认，除非信息严重不足。
+- 先判断用户当前真正意图。若用户在指出偏题/错误、追问原因、要求修改软件行为或代码，直接诊断并处理该问题，不要改写成素材生成、命令推荐或规则复述。
+- 不要复述系统提示、个人默认指令、工具规则、模式规则或你将遵循的规范，除非用户明确询问这些规则本身。
 - 当你确实需要用户做选择时，绝不要在正文里写"请回复 1/2/3"或用编号列表让用户输入数字；改用下方的交互协议输出一个交互块，前端会渲染成可点击的选项按钮。
+- 只有你完整输出交互协议块时，用户界面才会显示可回答的问题；如果上一轮没有这个块，不要声称自己已经在等待用户回答。
 
 ${INTERACTION_PROTOCOL}`;
 
@@ -363,9 +366,10 @@ const ASSET_CHANNEL_LINES: Array<{
 
 /**
  * Build a capability-awareness block telling the model about FreeUltraCode's
- * built-in generation channels. Injected into BOTH the blueprint system prompt
- * and the simple-chat system prompt so the model never tries to hand-roll an
- * image with PIL, an audio clip with ffmpeg, etc. when a real channel exists.
+ * built-in generation channels. Injected into blueprint prompts, and into
+ * simple-chat prompts only when the current turn is a concrete asset request,
+ * so the model never tries to hand-roll an image with PIL, an audio clip with
+ * ffmpeg, etc. when a real channel exists.
  *
  * - Lists only channels that are configured + ready (so we never advertise a
  *   command the user can't actually run).
@@ -382,6 +386,8 @@ export function buildAssetCapabilityBlock(channels: AssetChannelAvailability): s
   return (
     '\n\n【本应用内置生成渠道（重要）】FreeUltraCode 自带由 slash 命令触发的资产生成渠道，' +
     '后台调用用户已配置的真实 Provider。你无法自己执行这些命令，但当用户的需求会产生下列素材时，' +
+    '仅在本轮用户明确要求生成、制作、编辑、转换或查找图片/音频/视频/3D/精灵图等具体素材时启用本段；' +
+    '若用户是在讨论资产中心、资产列表、展示规则、产品需求、bug、偏题原因或代码修改，忽略本段并直接处理用户问题。' +
     '请优先推荐对应命令并附上一段可直接使用的提示词，让用户一键调用，' +
     '而不是一上来就用 PIL、Pillow、matplotlib、ffmpeg、canvas、SVG 等手写代码去“画”或“合成”，' +
     '也不要假装已经生成。\n' +
@@ -390,6 +396,32 @@ export function buildAssetCapabilityBlock(channels: AssetChannelAvailability): s
     '回退时要说明原因。可用渠道如下：\n' +
     ready.map(({ line }) => line).join('\n')
   );
+}
+
+const EXPLICIT_ASSET_COMMAND_RE =
+  /\/(?:image|生图|image-mode-start|comfyui-mode-start|sprite|sprite-mode-start|music|music-mode-start|mesh-mode-start|video|video-mode-start|speech|speech-mode-start|tts)(?:\s|$)/iu;
+
+const ASSET_ADMIN_CONTEXT_RE =
+  /(?:资产中心|资产列表|资产库|资产管理|素材中心|下载中心|展示规则|显示规则|列表规则|主列表|原始(?:发送|上传)|上传内容|产品需求|偏题|跑题|无关内容|无关的内容|修改代码|代码修改|以后不要)/iu;
+
+const ASSET_ACTION_RE =
+  /(?:生成|制作|做|创建|创作|画|绘制|设计|合成|转换|转成|转为|改成|变成|编辑|修改|去背|抠图|扩图|高清化|修复|建模|渲染|配音|朗读|查找|搜索|compose|create|design|draw|edit|generate|make|model|render|search|voice)/iu;
+
+const CONCRETE_ASSET_RE =
+  /(?:图片|图像|插画|海报|头像|图标|贴图|UI\s*草图|概念图|照片|配图|精灵图|序列帧|spritesheet|sprite|音乐|BGM|配乐|音效|歌曲|语音|配音|旁白|朗读|视频|短片|动画|3D|三维|模型|mesh|glb|gltf|素材|资产|asset)/iu;
+
+/**
+ * Simple chat should not carry the slash-channel routing block unless the
+ * current user turn is actually asking for concrete media/asset generation.
+ * Otherwise product/support requests containing words like "资产中心" can be
+ * misread as a request to recommend /image, /sprite, etc.
+ */
+export function shouldUseAssetCapabilityBlockForPrompt(prompt: string): boolean {
+  const text = prompt.trim();
+  if (!text) return false;
+  if (EXPLICIT_ASSET_COMMAND_RE.test(text)) return true;
+  if (ASSET_ADMIN_CONTEXT_RE.test(text)) return false;
+  return ASSET_ACTION_RE.test(text) && CONCRETE_ASSET_RE.test(text);
 }
 
 /**

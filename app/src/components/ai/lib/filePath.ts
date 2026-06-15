@@ -226,12 +226,13 @@ export function parseFileRef(
   const trimmed = raw.trim();
   const s = pathFromFileUrl(trimmed) ?? decodePercentPath(trimmed);
   if (!looksLikePath(s, opts)) return null;
+  const candidate = stripFileMentionPrefix(s);
 
-  const m = FILE_REF.exec(s);
+  const m = FILE_REF.exec(candidate);
   if (!m) return null;
 
   const rawPath = m[1];
-  const path = stripFileMentionPrefix(rawPath);
+  const path = rawPath;
   // The path on its own must still look like a file (the line/col may have
   // consumed a trailing number, so re-check the captured path part): a
   // separator, or a recognised file extension.
@@ -256,7 +257,7 @@ export function parseFileRef(
   let endLine: number | undefined;
   let col: number | undefined;
   if (second !== undefined) {
-    const tail = s.slice(rawPath.length);
+    const tail = candidate.slice(rawPath.length);
     if (/-/.test(tail)) endLine = second;
     else col = second;
   }

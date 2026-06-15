@@ -14,6 +14,8 @@
 <p align="center">
   <strong>توليد نموذج ثلاثي الأبعاد بنقرة واحدة</strong><br>
   <img src="images/game/noYfqPt.png" alt="FreeUltraCode يولّد نموذجًا ثلاثي الأبعاد بنقرة واحدة" width="960">
+  <br><br>
+  <img src="images/20260615-214236.jpg" alt="معاينة النموذج ثلاثي الأبعاد الذي أنشأه FreeUltraCode" width="960">
 </p>
 
 <p align="center">

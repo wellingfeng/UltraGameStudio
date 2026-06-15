@@ -5,7 +5,7 @@ import {
   mergeUsageReports,
   recordModelUsageForRoute,
   type ModelUsageReport,
-  usageReportFromCodex,
+  usageReportFromCliUsage,
 } from '@/lib/usageMeter';
 import { completeAnthropic } from './adapters/anthropic';
 import { completeOpenAICompatible } from './adapters/openaiCompatible';
@@ -101,7 +101,7 @@ async function completeGatewayTextViaCli(
     idleTimeoutSeconds: request.idleTimeoutSeconds,
     runId: request.runId,
     onUsage: (rawUsage) => {
-      const report = usageReportFromCodex(rawUsage);
+      const report = usageReportFromCliUsage(rawUsage);
       if (!report) return;
       usage = mergeUsageReports(usage, report);
       request.onUsage?.(report);

@@ -247,16 +247,12 @@ import {
   type SpeechProviderId,
 } from '@/lib/speechGeneration';
 import {
-  SPRITE_PROVIDERS,
   loadSpriteGenerationSettings,
   saveSpriteGenerationSettings,
-  spriteProviderBaseUrl,
-  spriteProviderModel,
-  spriteProviderReady,
   type SpriteGenerationSettings,
-  type SpriteProviderCategory,
-  type SpriteProviderDefinition,
-  type SpriteProviderId,
+  type SpriteComponentMode,
+  type SpriteFrameAnchor,
+  type SpriteSheetPreset,
 } from '@/lib/spriteGeneration';
 import {
   THREE_D_RIGGING_PROVIDERS,
@@ -5113,53 +5109,19 @@ function SpeechProviderSettingsRow({
 export function SpriteGenerationSettingsPanel({
   locale,
   embedded = false,
-  defaultProviderId,
-  onDefaultProviderIdChange,
 }: {
   locale: Locale;
   embedded?: boolean;
-  /**
-   * When provided, the "default provider" select binds to this value (a single
-   * project-wide default shared across commercial and local-open) instead of the
-   * runtime `preferredProviderId`. Choosing a default never changes the viewed
-   * category tab.
-   */
-  defaultProviderId?: SpriteProviderId;
-  onDefaultProviderIdChange?: (id: SpriteProviderId) => void;
 }) {
   const [settings, setSettings] = useState<SpriteGenerationSettings>(() =>
     loadSpriteGenerationSettings(),
   );
-  const [category, setCategory] = useState<SpriteProviderCategory>('commercial');
 
   const update = (patch: Partial<SpriteGenerationSettings>) => {
     const next = { ...settings, ...patch };
     saveSpriteGenerationSettings(next);
     setSettings(loadSpriteGenerationSettings());
   };
-
-  const boundDefaultProviderId = defaultProviderId ?? settings.preferredProviderId;
-  const setDefaultProviderId = (id: SpriteProviderId) => {
-    if (onDefaultProviderIdChange) {
-      onDefaultProviderIdChange(id);
-      return;
-    }
-    update({ preferredProviderId: id });
-  };
-
-  const providerOptions = SPRITE_PROVIDERS.map((provider) => ({
-    id: provider.id,
-    label: provider.label,
-    hint: `${spriteProviderCategoryLabel(provider.category, locale)} · ${spriteProviderStatusLabel(
-      provider,
-      settings,
-      locale,
-    )}`,
-    group: spriteProviderCategoryLabel(provider.category, locale),
-  }));
-  const activeProviders = SPRITE_PROVIDERS.filter(
-    (provider) => provider.category === category,
-  );
 
   return (
     <div className="space-y-5">
@@ -5185,20 +5147,6 @@ export function SpriteGenerationSettingsPanel({
           />
         </SettingRow>
       )}
-
-      <SettingRow
-        title={t(locale, 'settings.spriteGeneration.defaultProviderLabel')}
-        description={t(locale, 'settings.spriteGeneration.defaultProviderDesc')}
-      >
-        <div className="w-full min-w-[14rem]">
-          <SelectControl
-            value={boundDefaultProviderId}
-            options={providerOptions}
-            onChange={(id) => setDefaultProviderId(id as SpriteProviderId)}
-            icon={<Boxes size={15} strokeWidth={2.1} />}
-          />
-        </div>
-      </SettingRow>
 
       <div className="grid gap-3 rounded-lg border border-border bg-bg-alt p-4 md:grid-cols-2">
         <label className="block space-y-1">
@@ -5232,6 +5180,126 @@ export function SpriteGenerationSettingsPanel({
             className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 text-sm text-fg outline-none transition-colors focus:border-accent"
           />
         </label>
+        <label className="block space-y-1">
+          <span className="text-[11px] font-medium text-fg-dim">
+            {t(locale, 'settings.spriteGeneration.sheetPresetLabel')}
+          </span>
+          <select
+            value={settings.sheetPreset}
+            onChange={(event) =>
+              update(spriteSheetPresetPatch(event.currentTarget.value as SpriteSheetPreset))
+            }
+            className="h-[35px] w-full rounded-md border border-border bg-panel px-2 text-sm text-fg outline-none transition-colors focus:border-accent"
+          >
+            {spriteSheetPresetOptions.map((preset) => (
+              <option key={preset} value={preset}>
+                {spriteSheetPresetLabel(preset, locale)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="grid gap-2 sm:grid-cols-2">
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.spriteGeneration.sheetRowsLabel')}
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={8}
+              value={settings.sheetRows}
+              disabled={settings.sheetPreset !== 'custom'}
+              onChange={(event) =>
+                update({ sheetRows: Number(event.currentTarget.value) })
+              }
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 text-sm text-fg outline-none transition-colors focus:border-accent disabled:cursor-not-allowed disabled:opacity-55"
+            />
+          </label>
+          <label className="block space-y-1">
+            <span className="text-[11px] font-medium text-fg-dim">
+              {t(locale, 'settings.spriteGeneration.sheetColumnsLabel')}
+            </span>
+            <input
+              type="number"
+              min={1}
+              max={8}
+              value={settings.sheetColumns}
+              disabled={settings.sheetPreset !== 'custom'}
+              onChange={(event) =>
+                update({ sheetColumns: Number(event.currentTarget.value) })
+              }
+              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 text-sm text-fg outline-none transition-colors focus:border-accent disabled:cursor-not-allowed disabled:opacity-55"
+            />
+          </label>
+        </div>
+        <label className="block space-y-1">
+          <span className="text-[11px] font-medium text-fg-dim">
+            {t(locale, 'settings.spriteGeneration.chromaKeyLabel')}
+          </span>
+          <div className="flex h-[35px] items-center gap-2 rounded-md border border-border bg-panel px-2.5">
+            <input
+              type="color"
+              value={settings.chromaKey}
+              onChange={(event) => update({ chromaKey: event.currentTarget.value })}
+              className="h-5 w-8 cursor-pointer border-0 bg-transparent p-0"
+            />
+            <span className="font-mono text-xs text-fg">{settings.chromaKey}</span>
+          </div>
+        </label>
+        <label className="block space-y-1">
+          <span className="text-[11px] font-medium text-fg-dim">
+            {t(locale, 'settings.spriteGeneration.frameAnchorLabel')}
+          </span>
+          <select
+            value={settings.frameAnchor}
+            onChange={(event) =>
+              update({ frameAnchor: event.currentTarget.value as SpriteFrameAnchor })
+            }
+            className="h-[35px] w-full rounded-md border border-border bg-panel px-2 text-sm text-fg outline-none transition-colors focus:border-accent"
+          >
+            {spriteFrameAnchorOptions.map((anchor) => (
+              <option key={anchor} value={anchor}>
+                {spriteFrameAnchorLabel(anchor, locale)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block space-y-1">
+          <span className="text-[11px] font-medium text-fg-dim">
+            {t(locale, 'settings.spriteGeneration.componentModeLabel')}
+          </span>
+          <select
+            value={settings.componentMode}
+            onChange={(event) =>
+              update({
+                componentMode: event.currentTarget.value as SpriteComponentMode,
+              })
+            }
+            className="h-[35px] w-full rounded-md border border-border bg-panel px-2 text-sm text-fg outline-none transition-colors focus:border-accent"
+          >
+            {spriteComponentModeOptions.map((mode) => (
+              <option key={mode} value={mode}>
+                {spriteComponentModeLabel(mode, locale)}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="block space-y-1">
+          <span className="text-[11px] font-medium text-fg-dim">
+            {t(locale, 'settings.spriteGeneration.fitScaleLabel')}
+          </span>
+          <input
+            type="number"
+            min={0.5}
+            max={1}
+            step={0.01}
+            value={settings.fitScale}
+            onChange={(event) =>
+              update({ fitScale: Number(event.currentTarget.value) })
+            }
+            className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 text-sm text-fg outline-none transition-colors focus:border-accent"
+          />
+        </label>
         <SwitchLine
           label={t(locale, 'settings.spriteGeneration.removeBackgroundLabel')}
           checked={settings.removeBackground}
@@ -5252,118 +5320,66 @@ export function SpriteGenerationSettingsPanel({
           checked={settings.packSpritesheet}
           onChange={(packSpritesheet) => update({ packSpritesheet })}
         />
+        <SwitchLine
+          label={t(locale, 'settings.spriteGeneration.rejectEdgeTouchLabel')}
+          checked={settings.rejectEdgeTouch}
+          onChange={(rejectEdgeTouch) => update({ rejectEdgeTouch })}
+        />
       </div>
 
-      <div>
-        <div
-          role="tablist"
-          aria-orientation="horizontal"
-          className={SETTINGS_INNER_TABLIST_CLASS}
-        >
-          {spriteProviderCategoryOrder.map((item) => {
-            const active = category === item;
-            return (
-              <button
-                key={item}
-                type="button"
-                role="tab"
-                aria-selected={active}
-                onClick={() => setCategory(item)}
-                className={cn(
-                  SETTINGS_INNER_TAB_CLASS,
-                  active
-                    ? '-mb-px border-b-2 border-accent text-fg'
-                    : 'text-fg-faint hover:text-fg',
-                )}
-              >
-                {t(locale, spriteProviderCategoryTitleKey(item))}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      <section role="tabpanel" className="rounded-lg border border-border bg-bg-alt p-4">
-        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0 space-y-1">
-            <h4 className="text-sm font-semibold text-fg">
-              {t(locale, spriteProviderCategoryTitleKey(category))}
-            </h4>
-            <p className="text-xs leading-relaxed text-fg-faint">
-              {t(locale, spriteProviderCategoryDescKey(category))}
-            </p>
-          </div>
-          <StatusBadge state="default" label={String(activeProviders.length)} />
-        </div>
-        <div className={SETTINGS_PROVIDER_GRID_CLASS}>
-          {activeProviders.map((provider) => (
-            <SpriteProviderSettingsRow
-              key={provider.id}
-              provider={provider}
-              settings={settings}
-              locale={locale}
-              onChange={(next) => {
-                saveSpriteGenerationSettings(next);
-                setSettings(loadSpriteGenerationSettings());
-              }}
-            />
-          ))}
-        </div>
-      </section>
     </div>
   );
 }
 
-const spriteProviderCategoryOrder: SpriteProviderCategory[] = [
-  'commercial',
-  'local-open',
+const spriteSheetPresetOptions: SpriteSheetPreset[] = [
+  'auto',
+  '2x2',
+  '2x3',
+  '4x4',
+  'custom',
 ];
 
-function spriteProviderCategoryTitleKey(
-  category: SpriteProviderCategory,
-): TranslationKey {
-  return category === 'local-open'
-    ? 'settings.spriteGeneration.localOpenProviders'
-    : 'settings.spriteGeneration.commercialProviders';
-}
+const spriteFrameAnchorOptions: SpriteFrameAnchor[] = [
+  'feet',
+  'bottom',
+  'center',
+];
 
-function spriteProviderCategoryDescKey(
-  category: SpriteProviderCategory,
-): TranslationKey {
-  return category === 'local-open'
-    ? 'settings.spriteGeneration.localOpenProvidersDesc'
-    : 'settings.spriteGeneration.commercialProvidersDesc';
-}
+const spriteComponentModeOptions: SpriteComponentMode[] = [
+  'largest',
+  'all',
+];
 
-function spriteProviderCategoryLabel(
-  category: SpriteProviderCategory,
-  locale: Locale,
-): string {
-  return t(
-    locale,
-    category === 'local-open'
-      ? 'settings.spriteGeneration.categoryLocalOpen'
-      : 'settings.spriteGeneration.categoryCommercial',
-  );
-}
-
-function spriteProviderCategoryBadgeClass(category: SpriteProviderCategory): string {
-  return category === 'local-open'
-    ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
-    : 'border-sky-500/30 bg-sky-500/10 text-sky-300';
-}
-
-function spriteProviderStatusLabel(
-  provider: SpriteProviderDefinition,
-  settings: SpriteGenerationSettings,
-  locale: Locale,
-): string {
-  if (spriteProviderReady(provider.id, settings)) {
-    return t(locale, 'settings.freeChannels.ready');
+function spriteSheetPresetPatch(
+  sheetPreset: SpriteSheetPreset,
+): Partial<SpriteGenerationSettings> {
+  switch (sheetPreset) {
+    case '2x2':
+      return { sheetPreset, sheetRows: 2, sheetColumns: 2, defaultFrameCount: 4 };
+    case '2x3':
+      return { sheetPreset, sheetRows: 2, sheetColumns: 3, defaultFrameCount: 6 };
+    case '4x4':
+      return { sheetPreset, sheetRows: 4, sheetColumns: 4, defaultFrameCount: 16 };
+    default:
+      return { sheetPreset };
   }
-  if (provider.local) return t(locale, 'settings.freeChannels.localNeedsSetup');
-  if (provider.needsKey) return t(locale, 'settings.freeChannels.needsKey');
-  return t(locale, 'settings.imageGeneration.noKeyRequired');
+}
+
+function spriteSheetPresetLabel(preset: SpriteSheetPreset, locale: Locale): string {
+  if (preset === 'auto') return locale === 'zh-CN' ? '自动网格' : 'Auto grid';
+  if (preset === 'custom') return locale === 'zh-CN' ? '自定义' : 'Custom';
+  return preset;
+}
+
+function spriteFrameAnchorLabel(anchor: SpriteFrameAnchor, locale: Locale): string {
+  if (anchor === 'feet') return locale === 'zh-CN' ? '脚底锚点' : 'Feet anchor';
+  if (anchor === 'bottom') return locale === 'zh-CN' ? '底部锚点' : 'Bottom anchor';
+  return locale === 'zh-CN' ? '中心锚点' : 'Center anchor';
+}
+
+function spriteComponentModeLabel(mode: SpriteComponentMode, locale: Locale): string {
+  if (mode === 'largest') return locale === 'zh-CN' ? '最大主体' : 'Largest subject';
+  return locale === 'zh-CN' ? '保留全部' : 'Keep all';
 }
 
 function SwitchLine({
@@ -5380,248 +5396,6 @@ function SwitchLine({
       <span>{label}</span>
       <SwitchControl checked={checked} onChange={onChange} />
     </label>
-  );
-}
-
-function SpriteProviderSettingsRow({
-  provider,
-  settings,
-  locale,
-  onChange,
-}: {
-  provider: SpriteProviderDefinition;
-  settings: SpriteGenerationSettings;
-  locale: Locale;
-  onChange: (settings: SpriteGenerationSettings) => void;
-}) {
-  const [showKey, setShowKey] = useState(false);
-  const [modelRefresh, setModelRefresh] = useState<{
-    loading: boolean;
-    error: string | null;
-  }>({ loading: false, error: null });
-  const keyValue = settings.providerKeys[provider.id] ?? '';
-  const baseUrl = settings.providerBaseUrls[provider.id] ?? '';
-  const effectiveBaseUrl = spriteProviderBaseUrl(provider.id, settings);
-  const model = spriteProviderModel(provider.id, settings);
-  const ready = spriteProviderReady(provider.id, settings);
-  const KeyIcon = showKey ? EyeOff : Eye;
-  const cacheKey = endpointModelCacheKey('sprite', provider.id, effectiveBaseUrl);
-  const cachedModels = getCachedModels(cacheKey)?.models ?? [];
-  const modelOptions = useMemo(() => {
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const item of [model, ...cachedModels, ...provider.models]) {
-      const value = item?.trim();
-      if (!value || seen.has(value)) continue;
-      seen.add(value);
-      out.push(value);
-    }
-    return out;
-  }, [model, cachedModels, provider.models]);
-  const canRefresh =
-    !!effectiveBaseUrl && (!provider.needsKey || keyValue.trim().length > 0);
-
-  const patchProvider = (
-    patch: Partial<{
-      key: string;
-      baseUrl: string;
-      model: string;
-    }>,
-  ) => {
-    const next: SpriteGenerationSettings = {
-      ...settings,
-      providerKeys: { ...settings.providerKeys },
-      providerBaseUrls: { ...settings.providerBaseUrls },
-      providerModels: { ...settings.providerModels },
-    };
-    if (patch.key !== undefined) {
-      const value = patch.key.trim();
-      if (value) next.providerKeys[provider.id] = value;
-      else delete next.providerKeys[provider.id];
-    }
-    if (patch.baseUrl !== undefined) {
-      const value = patch.baseUrl.trim();
-      if (value) next.providerBaseUrls[provider.id] = value;
-      else delete next.providerBaseUrls[provider.id];
-    }
-    if (patch.model !== undefined) {
-      const value = patch.model.trim();
-      if (value) next.providerModels[provider.id] = value;
-      else delete next.providerModels[provider.id];
-    }
-    if (
-      !spriteProviderReady(next.preferredProviderId, next) &&
-      spriteProviderReady(provider.id, next)
-    ) {
-      next.preferredProviderId = provider.id;
-    }
-    onChange(next);
-  };
-
-  const refreshModels = async () => {
-    if (!canRefresh || modelRefresh.loading) return;
-    setModelRefresh({ loading: true, error: null });
-    try {
-      const result = await refreshEndpointModels({
-        cacheKey,
-        baseUrl: effectiveBaseUrl,
-        apiKey: keyValue,
-        fallback: [model, ...provider.models],
-      });
-      setModelRefresh({ loading: false, error: result.error ?? null });
-    } catch (err) {
-      setModelRefresh({
-        loading: false,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
-
-  return (
-    <div className="space-y-3 rounded-lg border border-border bg-bg-alt p-4">
-      <div className="flex flex-wrap items-start gap-2">
-        <div className="min-w-0 flex-1">
-          <div className="flex flex-wrap items-center gap-2">
-            <span className="text-sm font-semibold text-fg">{provider.label}</span>
-            <span
-              className={cn(
-                'inline-flex shrink-0 rounded-full border px-2 py-0.5 text-[10px] font-medium',
-                spriteProviderCategoryBadgeClass(provider.category),
-              )}
-            >
-              {spriteProviderCategoryLabel(provider.category, locale)}
-            </span>
-            <StatusBadge
-              state={ready ? 'direct' : 'unavailable'}
-              label={spriteProviderStatusLabel(provider, settings, locale)}
-            />
-          </div>
-          <p className="mt-1 text-[11px] leading-relaxed text-fg-faint">
-            {provider.note}
-          </p>
-        </div>
-        {provider.credentialUrl && (
-          <button
-            type="button"
-            onClick={() => void openExternal(provider.credentialUrl as string)}
-            className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
-          >
-            <ExternalLink size={13} strokeWidth={2.2} />
-            {provider.local
-              ? t(locale, 'dock.localModelDownload')
-              : t(
-                  locale,
-                  ready
-                    ? 'settings.freeChannels.manageKey'
-                    : 'settings.freeChannels.getKey',
-                )}
-          </button>
-        )}
-      </div>
-
-      <div className="grid gap-3 lg:grid-cols-2">
-        {provider.supportsBaseUrl && (
-          <label className="block space-y-1">
-            <span className="text-[11px] font-medium text-fg-dim">
-              {t(locale, 'settings.models.baseUrl')}
-            </span>
-            <input
-              type="text"
-              value={baseUrl}
-              onChange={(event) => patchProvider({ baseUrl: event.target.value })}
-              placeholder={effectiveBaseUrl || provider.endpointPlaceholder}
-              autoComplete="off"
-              spellCheck={false}
-              className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
-            />
-          </label>
-        )}
-
-        {provider.needsKey && (
-          <label className="block space-y-1">
-            <span className="text-[11px] font-medium text-fg-dim">
-              {provider.keyLabel ?? t(locale, 'settings.models.apiKey')}
-            </span>
-            <div className="relative">
-              <input
-                type={showKey ? 'text' : 'password'}
-                value={keyValue}
-                onChange={(event) => patchProvider({ key: event.target.value })}
-                placeholder={provider.keyPlaceholder ?? 'sk-...'}
-                autoComplete="off"
-                spellCheck={false}
-                className="w-full rounded-md border border-border bg-panel px-2.5 py-1.5 pr-14 font-mono text-sm text-fg outline-none transition-colors focus:border-accent"
-              />
-              <div className="absolute inset-y-0 right-1 flex items-center gap-0.5">
-                <button
-                  type="button"
-                  onClick={() => setShowKey((v) => !v)}
-                  title={t(
-                    locale,
-                    showKey ? 'settings.models.hideKey' : 'settings.models.showKey',
-                  )}
-                  className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-fg"
-                >
-                  <KeyIcon size={13} strokeWidth={2} />
-                </button>
-                {keyValue && (
-                  <button
-                    type="button"
-                    onClick={() => patchProvider({ key: '' })}
-                    title={t(locale, 'settings.models.clear')}
-                    className="flex h-6 w-6 items-center justify-center rounded text-fg-faint transition-colors hover:text-rose-300"
-                  >
-                    <Trash2 size={13} strokeWidth={2} />
-                  </button>
-                )}
-              </div>
-            </div>
-          </label>
-        )}
-
-        <label className="block space-y-1 lg:col-span-2">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] font-medium text-fg-dim">
-              {t(locale, 'settings.freeChannels.modelLabel')}
-            </span>
-            <button
-              type="button"
-              onClick={() => void refreshModels()}
-              disabled={!canRefresh || modelRefresh.loading}
-              title={
-                canRefresh
-                  ? t(locale, 'settings.models.fetchModels')
-                  : t(locale, 'settings.models.fetchModelsUnavailable')
-              }
-              className="inline-flex items-center gap-1 rounded border border-border bg-panel px-2 py-0.5 text-[11px] text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-45"
-            >
-              <RefreshCw
-                size={11}
-                strokeWidth={2}
-                className={modelRefresh.loading ? 'animate-spin' : undefined}
-              />
-              {t(locale, 'settings.models.fetchModels')}
-            </button>
-          </div>
-          <select
-            value={model}
-            onChange={(event) => patchProvider({ model: event.target.value })}
-            className="h-[35px] w-full rounded-md border border-border bg-panel px-2 font-mono text-xs text-fg outline-none transition-colors focus:border-accent"
-          >
-            {modelOptions.map((item) => (
-              <option key={item} value={item}>
-                {item}
-              </option>
-            ))}
-          </select>
-          {modelRefresh.error && (
-            <p className="text-[11px] leading-relaxed text-amber-300">
-              {modelRefresh.error}
-            </p>
-          )}
-        </label>
-      </div>
-    </div>
   );
 }
 

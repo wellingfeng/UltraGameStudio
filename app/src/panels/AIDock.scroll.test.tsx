@@ -100,6 +100,14 @@ function streamElement(container: HTMLElement): HTMLElement {
   return el;
 }
 
+function composerTextarea(container: HTMLElement): HTMLTextAreaElement {
+  const el = container.querySelector('textarea');
+  if (!(el instanceof HTMLTextAreaElement)) {
+    throw new Error('Missing composer textarea');
+  }
+  return el;
+}
+
 function setScrollMetrics(
   el: HTMLElement,
   metrics: { scrollHeight: number; clientHeight: number },
@@ -136,6 +144,27 @@ async function triggerResizeObservers(): Promise<void> {
 async function appendMessage(message: Message): Promise<void> {
   await act(async () => {
     useStore.setState((state) => ({ messages: [...state.messages, message] }));
+  });
+}
+
+async function setDraft(text: string): Promise<void> {
+  await act(async () => {
+    useStore.setState({ composerDraft: text });
+  });
+}
+
+async function pressCtrlEnter(el: HTMLTextAreaElement): Promise<void> {
+  await act(async () => {
+    el.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
   });
 }
 
@@ -225,6 +254,49 @@ describe('AIDock stream scroll state', () => {
 
       expect(stream.scrollTop).toBe(1400);
     } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('scrolls to a Ctrl+Enter user message even before resize observers fire', async () => {
+    resetChatSession('s1', chatMessages('s1'));
+    const originalSendPrompt = useStore.getState().sendPrompt;
+    const view = await renderChatDock();
+
+    try {
+      const stream = streamElement(view.container);
+      setScrollMetrics(stream, { scrollHeight: 1000, clientHeight: 200 });
+
+      await userScrollTo(stream, 320);
+      await act(async () => {
+        useStore.setState({
+          sendPrompt: vi.fn((text: string) => {
+            setScrollMetrics(stream, { scrollHeight: 1400, clientHeight: 200 });
+            useStore.setState((state) => ({
+              messages: [
+                ...state.messages,
+                {
+                  id: 's1_new_user',
+                  role: 'user',
+                  text,
+                  createdAt: 99,
+                } as Message,
+              ],
+            }));
+            return true;
+          }),
+        });
+      });
+      await setDraft('fresh question');
+
+      await pressCtrlEnter(composerTextarea(view.container));
+
+      expect(useStore.getState().messages.at(-1)?.text).toBe('fresh question');
+      expect(stream.scrollTop).toBe(1400);
+    } finally {
+      await act(async () => {
+        useStore.setState({ sendPrompt: originalSendPrompt });
+      });
       await view.cleanup();
     }
   });

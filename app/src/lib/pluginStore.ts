@@ -16,6 +16,7 @@ export interface PluginStoreItem {
   sourceName: string;
   sourceUrl?: string;
   installUrl?: string;
+  installTransform?: 'wrapMarkdownAsSkill';
   installKind: PluginStoreInstallKind;
   category?: string;
   author?: string;
@@ -73,9 +74,84 @@ interface AwesomeCodexPluginCatalog {
   plugins?: AwesomeCodexPlugin[];
 }
 
+interface GitHubTreeEntry {
+  path: string;
+  type: 'blob' | 'tree' | string;
+}
+
+interface GitHubTree {
+  tree?: GitHubTreeEntry[];
+  truncated?: boolean;
+}
+
+interface GameSkillRepository {
+  owner: string;
+  repo: string;
+  branch: string;
+  skillRootPrefix: string;
+  skillFileSuffix?: string;
+  installTransform?: PluginStoreItem['installTransform'];
+  engineLabel: string;
+  author: string;
+  tags: string[];
+}
+
 const OPENAI_SKILL_ROOTS = ['skills/.curated', 'skills/.system'];
 const OPENAI_REPO_RAW = 'https://raw.githubusercontent.com/openai/skills/main';
 const OPENAI_REPO_API = 'https://api.github.com/repos/openai/skills/contents';
+export const GAME_SKILL_RECOMMENDATION_SOURCE_ID = 'game-skill-recommendations';
+
+const GAME_SKILL_RECOMMENDATION_SOURCE_NAME = '游戏 Skill 推荐';
+
+const GAME_SKILL_RECOMMENDATION_REPOSITORIES: GameSkillRepository[] = [
+  {
+    owner: 'UnrealXu',
+    repo: 'UnrealEngine5-Skills',
+    branch: 'main',
+    skillRootPrefix: 'skills/',
+    engineLabel: 'Unreal Engine 5',
+    author: 'UnrealXu',
+    tags: ['unreal', 'ue5', 'blueprint', 'cpp', 'game'],
+  },
+  {
+    owner: 'quodsoler',
+    repo: 'unreal-engine-skills',
+    branch: 'main',
+    skillRootPrefix: 'skills/',
+    engineLabel: 'Unreal Engine',
+    author: 'Quod Soler',
+    tags: ['unreal', 'ue', 'gameplay', 'engine', 'game'],
+  },
+  {
+    owner: 'Besty0728',
+    repo: 'Unity-Skills',
+    branch: 'main',
+    skillRootPrefix: 'SkillsForUnity/unity-skills~/skills/',
+    engineLabel: 'Unity',
+    author: 'Besty0728',
+    tags: ['unity', 'csharp', 'editor', 'game'],
+  },
+  {
+    owner: 'thedivergentai',
+    repo: 'gd-agentic-skills',
+    branch: 'main',
+    skillRootPrefix: 'skills/',
+    engineLabel: 'Godot',
+    author: 'Divergent AI',
+    tags: ['godot', 'gdscript', 'godot4', 'game'],
+  },
+  {
+    owner: 'mrSutivu',
+    repo: 'Unreal-Engine-5-C-Expert-Skills',
+    branch: 'main',
+    skillRootPrefix: 'skills/unreal-engine-5/',
+    skillFileSuffix: '.md',
+    installTransform: 'wrapMarkdownAsSkill',
+    engineLabel: 'Unreal Engine 5 C++',
+    author: 'mrSutivu',
+    tags: ['unreal', 'ue5', 'cpp', 'performance', 'game'],
+  },
+];
 
 const BUILT_IN_PLUGIN_STORE_ITEMS: PluginStoreItem[] = [
   {
@@ -269,6 +345,75 @@ function humanizeSlug(value: string): string {
     .join(' ');
 }
 
+function githubPathUrl(path: string): string {
+  return path.split('/').map(encodeURIComponent).join('/');
+}
+
+export function buildSkillInstallTextFromMarkdown(
+  item: PluginStoreItem,
+  markdown: string,
+): string {
+  const description =
+    normalizeWhitespace(item.description) || `${item.title} Skill.`;
+  return [
+    '---',
+    `name: ${item.name || slugFromName(item.title)}`,
+    'description: >-',
+    `  ${description}`,
+    '---',
+    '',
+    `# ${item.title}`,
+    '',
+    item.sourceUrl ? `Source: ${item.sourceUrl}` : '',
+    '',
+    markdown.trim(),
+    '',
+  ]
+    .filter((line, index, lines) => line || lines[index - 1] !== '')
+    .join('\n');
+}
+
+function gameSkillItemFromPath(
+  repo: GameSkillRepository,
+  skillPath: string,
+): PluginStoreItem | null {
+  const skillFileSuffix = repo.skillFileSuffix ?? '/SKILL.md';
+  if (!skillPath.startsWith(repo.skillRootPrefix) || !skillPath.endsWith(skillFileSuffix)) {
+    return null;
+  }
+  const slug = skillPath.slice(repo.skillRootPrefix.length, -skillFileSuffix.length);
+  if (!slug || slug.includes('/')) return null;
+  const title = humanizeSlug(slug);
+  const encodedPath = githubPathUrl(skillPath);
+  const lastSlash = skillPath.lastIndexOf('/');
+  const encodedDir = githubPathUrl(lastSlash >= 0 ? skillPath.slice(0, lastSlash) : '');
+  const sourceUrl =
+    repo.installTransform === 'wrapMarkdownAsSkill'
+      ? `https://github.com/${repo.owner}/${repo.repo}/blob/${repo.branch}/${encodedPath}`
+      : `https://github.com/${repo.owner}/${repo.repo}/tree/${repo.branch}/${encodedDir}`;
+  return {
+    id: `skill:game:${repo.owner}/${repo.repo}:${skillPath}`,
+    name: slugFromName(slug),
+    title,
+    description: `${repo.engineLabel} 游戏开发 Skill：${title}。`,
+    kind: 'skill',
+    sourceId: GAME_SKILL_RECOMMENDATION_SOURCE_ID,
+    sourceName: GAME_SKILL_RECOMMENDATION_SOURCE_NAME,
+    sourceUrl,
+    installUrl: `https://raw.githubusercontent.com/${repo.owner}/${repo.repo}/${repo.branch}/${encodedPath}`,
+    installTransform: repo.installTransform,
+    installKind: 'skill',
+    category: repo.engineLabel,
+    author: repo.author,
+    tags: [
+      ...repo.tags,
+      ...slug.split(/[-_]+/).filter(Boolean),
+      repo.repo.toLowerCase(),
+    ],
+    trust: 'curated',
+  };
+}
+
 function firstMarkdownSummary(text: string): string {
   let inFrontmatter = false;
   let first = true;
@@ -421,6 +566,20 @@ async function fetchOpenAiSkills(signal?: AbortSignal): Promise<PluginStoreItem[
   });
 }
 
+async function fetchGameSkillRepository(
+  repo: GameSkillRepository,
+  signal?: AbortSignal,
+): Promise<PluginStoreItem[]> {
+  const tree = await fetchJson<GitHubTree>(
+    `https://api.github.com/repos/${repo.owner}/${repo.repo}/git/trees/${repo.branch}?recursive=1`,
+    signal,
+  );
+  return (tree.tree ?? [])
+    .filter((entry) => entry.type === 'blob')
+    .map((entry) => gameSkillItemFromPath(repo, entry.path))
+    .filter((item): item is PluginStoreItem => Boolean(item));
+}
+
 async function fetchClaudeCodeMarketplace(
   signal?: AbortSignal,
 ): Promise<PluginStoreItem[]> {
@@ -536,6 +695,11 @@ export async function loadPluginStoreCatalog(
   signal?: AbortSignal,
 ): Promise<PluginStoreLoadResult> {
   const loaders = [
+    ...GAME_SKILL_RECOMMENDATION_REPOSITORIES.map((repo) => ({
+      sourceId: GAME_SKILL_RECOMMENDATION_SOURCE_ID,
+      sourceName: `${GAME_SKILL_RECOMMENDATION_SOURCE_NAME}: ${repo.repo}`,
+      load: (nextSignal?: AbortSignal) => fetchGameSkillRepository(repo, nextSignal),
+    })),
     {
       sourceId: 'openai-skills',
       sourceName: 'OpenAI Skills',

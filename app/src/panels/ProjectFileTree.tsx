@@ -28,11 +28,20 @@ import {
 } from 'lucide-react';
 import FilePreviewDrawer from '@/components/ai/FilePreviewDrawer';
 import type { FileRef } from '@/components/ai/lib/filePath';
-import { t } from '@/lib/i18n';
+import { t, type Locale } from '@/lib/i18n';
 import {
+  buildSessionFileTree,
+  countSessionFileChanges,
   extractSessionFiles,
+  mergeSessionFilesWithWorkspaceChanges,
   type SessionFileEntry,
+  type SessionFileTreeNode,
 } from '@/lib/sessionFiles';
+import {
+  SESSION_CHANGES_UPDATED_EVENT,
+  readPersistedSessionChanges,
+  sessionChangesCacheKey,
+} from '@/lib/sessionChanges';
 import {
   buildSessionIgnorePredicate,
   sessionIgnoreRootFromContents,
@@ -710,25 +719,68 @@ function treeVcsStatusLine(
   return workspaceLabel;
 }
 
+function sessionFileBadgeLabel(locale: Locale, entry: SessionFileEntry): string {
+  if (entry.changeStatus === 'added') return t(locale, 'sessionFiles.statusAdded');
+  if (entry.changeStatus === 'deleted') return t(locale, 'sessionFiles.statusDeleted');
+  if (entry.changeStatus === 'renamed') return t(locale, 'sessionFiles.statusRenamed');
+  if (entry.changeStatus === 'modified') return t(locale, 'sessionFiles.statusModified');
+  return entry.action === 'edited'
+    ? t(locale, 'sessionFiles.actionEdited')
+    : t(locale, 'sessionFiles.actionRead');
+}
+
+function sessionFileBadgeClass(entry: SessionFileEntry): string {
+  if (entry.changeStatus === 'added') return 'border-emerald-400/45 text-emerald-300';
+  if (entry.changeStatus === 'deleted') return 'border-status-error/45 text-status-error';
+  if (entry.changeStatus === 'renamed') return 'border-amber-300/45 text-amber-300';
+  if (entry.changeStatus === 'modified') return 'border-accent/45 text-accent';
+  return entry.action === 'edited'
+    ? 'border-accent/45 text-accent'
+    : 'border-border-soft text-fg-faint';
+}
+
+function sessionFileCountLine(
+  locale: Locale,
+  total: number,
+  counts: ReturnType<typeof countSessionFileChanges>,
+): string {
+  const base = t(locale, 'sessionFiles.count').replace('{count}', String(total));
+  const changed = counts.added + counts.modified + counts.deleted + counts.renamed;
+  if (changed === 0) return base;
+  const parts = [
+    `${t(locale, 'sessionFiles.statusAdded')} ${counts.added}`,
+    `${t(locale, 'sessionFiles.statusModified')} ${counts.modified}`,
+    `${t(locale, 'sessionFiles.statusDeleted')} ${counts.deleted}`,
+  ];
+  if (counts.renamed > 0) {
+    parts.push(`${t(locale, 'sessionFiles.statusRenamed')} ${counts.renamed}`);
+  }
+  return `${base} · ${parts.join(' · ')}`;
+}
+
 export default function ProjectFileTree() {
   const locale = useStore((s) => s.locale);
   const workspaces = useStore((s) => s.workspaces);
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
+  const activeSessionId = useStore((s) => s.activeSessionId);
   const composerWorkspace = useStore((s) => s.composer.workspace);
   const composerWorkspaceFolders = useStore((s) => s.composer.workspaceFolders);
   // 「会话文件」标签的数据来源：当前会话里 AI 工具调用（<<FUC_TOOL>> 内联事件）
-  // 读取/修改过的文件。完全不依赖 git/p4/svn 等版本管理指令。
+  // 修改过的文件，并合并运行结束时已经持久化的会话改动缓存。
   const sessionMessages = useStore((s) => s.messages);
   // 文件修改状态扫描已停用，会话忙/闲状态不再用于触发自动重扫。
-  // const activeSessionId = useStore((s) => s.activeSessionId);
   // const aiEditingSessions = useStore((s) => s.aiEditingSessions);
   // const chattingSessions = useStore((s) => s.chattingSessions);
   // const runningSessions = useStore((s) => s.runningSessions);
+  const sessionActivityVersion = useStore(
+    (s) =>
+      `${s.aiEditingSessions.length}:${s.chattingSessions.length}:${s.runningSessions.length}`,
+  );
   const [cache, setCache] = useState<WorkspaceTreeCache>({});
   const cacheRef = useRef(cache);
   const [previewRef, setPreviewRef] = useState<FileRef | null>(null);
   // 「工作区改动」tab 已停用（会触发 P4 reconcile 洪水）。改为「会话文件」tab：
-  // 只展示当前会话里 AI 读取/修改过的文件，纯前端解析消息流，不碰版本管理。
+  // 只展示当前会话里 AI 修改过的文件；新增/修改/删除来自已落盘缓存。
   const [panelTab, setPanelTab] = useState<ProjectPanelTab>(() => {
     if (typeof window === 'undefined') return 'files';
     return window.localStorage.getItem('freeultracode.projectRightPanelTab.v1') ===
@@ -760,6 +812,7 @@ export default function ProjectFileTree() {
   const [thumbnailCache, setThumbnailCache] = useState<ThumbnailCache>({});
   const [visibleThumbnails, setVisibleThumbnails] = useState<ThumbnailVisibility>({});
   const [contextMenu, setContextMenu] = useState<ProjectEntryContextMenuState>(null);
+  const [collapsedSessionDirs, setCollapsedSessionDirs] = useState<Record<string, true>>({});
   const visibleThumbnailsRef = useRef<ThumbnailVisibility>({});
   // 文件修改状态扫描已停用，相关序列号 / in-flight 标记不再需要。
   // const vcsTreeLoadSeqRef = useRef(0);
@@ -811,6 +864,60 @@ export default function ProjectFileTree() {
     ]);
     return folders;
   }, [composerWorkspace, composerWorkspaceFolders, activeWorkspacePath]);
+  const sessionChangesRootPath = rootFolders[0] ?? '';
+  const activeSessionChangesCacheKey = useMemo(
+    () =>
+      sessionChangesCacheKey(
+        activeWorkspaceId,
+        activeSessionId,
+        sessionChangesRootPath,
+      ),
+    [activeWorkspaceId, activeSessionId, sessionChangesRootPath],
+  );
+  const [sessionChangesSnapshot, setSessionChangesSnapshot] =
+    useState<WorkspaceChanges | null>(null);
+  const [sessionChangesVersion, setSessionChangesVersion] = useState(0);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || !activeSessionChangesCacheKey) return;
+    const onUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<{ cacheKey?: string }>).detail;
+      if (detail?.cacheKey === activeSessionChangesCacheKey) {
+        setSessionChangesVersion((value) => value + 1);
+      }
+    };
+    window.addEventListener(SESSION_CHANGES_UPDATED_EVENT, onUpdated);
+    return () => {
+      window.removeEventListener(SESSION_CHANGES_UPDATED_EVENT, onUpdated);
+    };
+  }, [activeSessionChangesCacheKey]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!sessionChangesRootPath || !activeSessionChangesCacheKey) {
+      setSessionChangesSnapshot(null);
+      return;
+    }
+    void readPersistedSessionChanges(
+      sessionChangesRootPath,
+      activeSessionChangesCacheKey,
+    )
+      .then((snapshot) => {
+        if (!cancelled) setSessionChangesSnapshot(snapshot);
+      })
+      .catch(() => {
+        if (!cancelled) setSessionChangesSnapshot(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    sessionChangesRootPath,
+    activeSessionChangesCacheKey,
+    sessionChangesVersion,
+    sessionActivityVersion,
+    sessionMessages.length,
+  ]);
 
   // 会话文件过滤：读取每个根目录下的 .gitignore/.p4ignore/.svnignore（纯文本读取，
   // 不调用任何 git/p4/svn 指令），编译成忽略匹配器，用于隐藏不在版本管理中的文件。
@@ -852,12 +959,25 @@ export default function ProjectFileTree() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rootFoldersKey]);
 
-  // 当前会话相关文件：从消息流里的 AI 工具调用事件解析得到，纯前端、零 VCS 请求。
-  // 再用上面读取到的 ignore 规则过滤掉不受版本管理的文件。
+  // 当前会话修改文件：从消息流里的 AI 工具调用事件解析，并合并运行结束时
+  // 已持久化的会话改动快照；读取行为不进入右侧“会话文件”列表。
   const sessionFiles = useMemo(() => {
     const isIgnored = buildSessionIgnorePredicate(ignoreRoots);
-    return extractSessionFiles(sessionMessages, { isIgnored });
-  }, [sessionMessages, ignoreRoots]);
+    const activityFiles = extractSessionFiles(sessionMessages, { isIgnored });
+    return mergeSessionFilesWithWorkspaceChanges(
+      activityFiles,
+      sessionChangesSnapshot,
+      { isIgnored },
+    ).filter((entry) => entry.action === 'edited' || entry.changeStatus);
+  }, [sessionMessages, ignoreRoots, sessionChangesSnapshot]);
+  const sessionFileChangeCounts = useMemo(
+    () => countSessionFileChanges(sessionFiles),
+    [sessionFiles],
+  );
+  const sessionFileTree = useMemo(
+    () => buildSessionFileTree(sessionFiles),
+    [sessionFiles],
+  );
   const [selectedRootKey, setSelectedRootKey] = useState<string>('');
   const selectedRootPath = useMemo(() => {
     if (rootFolders.length === 0) return '';
@@ -908,7 +1028,10 @@ export default function ProjectFileTree() {
     : '';
   const previewDirectoryKey = directoryKey(previewDirectory);
   const previewDirectoryState = activeTree?.directories[previewDirectoryKey];
-  const previewDirectoryEntries = previewDirectoryState?.entries ?? [];
+  const previewDirectoryEntries = useMemo(
+    () => previewDirectoryState?.entries ?? [],
+    [previewDirectoryState?.entries],
+  );
   const vcsTreeStatusIndex = useMemo(
     () => buildWorkspaceVcsTreeStatus(vcsTreeState.snapshot),
     [vcsTreeState.snapshot],
@@ -1039,6 +1162,17 @@ export default function ProjectFileTree() {
 
   const openSessionFile = useCallback((entry: SessionFileEntry) => {
     setPreviewRef({ path: entry.path, basename: entry.basename });
+  }, []);
+
+  const toggleSessionDirectory = useCallback((key: string) => {
+    setCollapsedSessionDirs((prev) => {
+      if (prev[key]) {
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      }
+      return { ...prev, [key]: true };
+    });
   }, []);
 
   // ===========================================================================
@@ -1770,81 +1904,126 @@ export default function ProjectFileTree() {
       );
     }
 
+    const renderNodes = (nodes: SessionFileTreeNode[], level: number): ReactNode =>
+      nodes.map((node) => {
+        if (node.type === 'directory') {
+          const expanded = collapsedSessionDirs[node.key] !== true;
+          return (
+            <div key={node.key}>
+              <button
+                type="button"
+                onClick={() => toggleSessionDirectory(node.key)}
+                title={node.path}
+                className="group flex h-7 w-full min-w-0 items-center gap-1.5 px-2 text-left text-xs text-fg-dim transition-colors hover:bg-panel-2 hover:text-fg"
+                style={{ paddingLeft: 8 + level * 14 }}
+              >
+                <ChevronRight
+                  size={13}
+                  className={
+                    'shrink-0 text-fg-faint transition-transform ' +
+                    (expanded ? 'rotate-90' : '')
+                  }
+                />
+                <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+                  {expanded ? (
+                    <FolderOpen size={14} className="shrink-0 text-accent-2" />
+                  ) : (
+                    <Folder size={14} className="shrink-0 text-accent-2" />
+                  )}
+                </span>
+                <span className="min-w-0 flex-1 truncate">{node.name}</span>
+                <span className="shrink-0 font-mono text-[10px] text-fg-faint">
+                  {node.fileCount}
+                </span>
+              </button>
+              {expanded && renderNodes(node.children, level + 1)}
+            </div>
+          );
+        }
+
+        const entry = node.entry;
+        const dragEntry: WorkspaceTreeEntry = {
+          name: entry.basename,
+          path: entry.path,
+          relativePath: entry.path,
+          kind: 'file',
+          hidden: false,
+          sizeBytes: null,
+          modifiedAtMs: null,
+        };
+        const edited = entry.action === 'edited';
+        const deleted = entry.changeStatus === 'deleted';
+        const badgeLabel = sessionFileBadgeLabel(locale, entry);
+        return (
+          <button
+            key={node.key}
+            type="button"
+            draggable
+            onDragStart={(event) => startEntryDrag(event, dragEntry)}
+            onDrag={trackEntryDrag}
+            onDragEnd={finishEntryDrag}
+            onClick={() => openSessionFile(entry)}
+            title={entry.path}
+            className={
+              'group flex h-7 w-full min-w-0 cursor-grab items-center gap-1.5 px-2 text-left text-xs text-fg-dim transition-colors hover:bg-panel-2 hover:text-fg active:cursor-grabbing ' +
+              (deleted ? 'opacity-80' : '')
+            }
+            style={{ paddingLeft: 8 + level * 14 }}
+          >
+            <span className="w-[13px] shrink-0" />
+            <span className="flex h-4 w-4 shrink-0 items-center justify-center">
+              {edited ? (
+                <FilePen size={14} className="shrink-0 text-accent" />
+              ) : (
+                <FileText size={14} className="shrink-0 text-fg-faint" />
+              )}
+            </span>
+            <span
+              className={
+                'min-w-0 flex-1 truncate font-mono text-[11px] ' +
+                (deleted ? 'line-through' : '')
+              }
+            >
+              {node.name}
+            </span>
+            <span
+              className={
+                'shrink-0 rounded border px-1.5 py-0.5 text-[10px] leading-none ' +
+                sessionFileBadgeClass(entry)
+              }
+            >
+              {badgeLabel}
+            </span>
+            {entry.touchCount > 1 && (
+              <span className="shrink-0 font-mono text-[10px] text-fg-faint">
+                {t(locale, 'sessionFiles.touchCount').replace(
+                  '{count}',
+                  String(entry.touchCount),
+                )}
+              </span>
+            )}
+          </button>
+        );
+      });
+
     return (
-      <div className="space-y-1.5 px-2 py-2">
+      <div className="px-2 py-2">
         <p className="px-1 text-[10px] leading-relaxed text-fg-faint">
           {t(locale, 'sessionFiles.hint')}
         </p>
-        {sessionFiles.map((entry) => {
-          const dragEntry: WorkspaceTreeEntry = {
-            name: entry.basename,
-            path: entry.path,
-            relativePath: entry.path,
-            kind: 'file',
-            hidden: false,
-            sizeBytes: null,
-            modifiedAtMs: null,
-          };
-          const edited = entry.action === 'edited';
-          return (
-            <button
-              key={entry.path}
-              type="button"
-              draggable
-              onDragStart={(event) => startEntryDrag(event, dragEntry)}
-              onDrag={trackEntryDrag}
-              onDragEnd={finishEntryDrag}
-              onClick={() => openSessionFile(entry)}
-              title={entry.path}
-              className="group flex w-full min-w-0 cursor-grab items-center gap-2 rounded-md border border-border-soft bg-panel-2/60 px-2 py-2 text-left transition-colors hover:border-accent/45 hover:bg-panel-2 active:cursor-grabbing"
-            >
-              <span className="relative flex h-4 w-4 shrink-0 items-center justify-center">
-                {edited ? (
-                  <FilePen size={14} className="text-accent" />
-                ) : (
-                  <FileText size={14} className="text-fg-faint" />
-                )}
-              </span>
-              <span className="min-w-0 flex-1">
-                <span className="block truncate font-mono text-[11px] text-fg" title={entry.path}>
-                  {entry.basename}
-                </span>
-                <span className="mt-0.5 block truncate text-[10px] text-fg-faint">
-                  {entry.path}
-                </span>
-              </span>
-              <span
-                className={
-                  'shrink-0 rounded border px-1.5 py-0.5 text-[10px] leading-none ' +
-                  (edited
-                    ? 'border-accent/45 text-accent'
-                    : 'border-border-soft text-fg-faint')
-                }
-              >
-                {edited
-                  ? t(locale, 'sessionFiles.actionEdited')
-                  : t(locale, 'sessionFiles.actionRead')}
-              </span>
-              {entry.touchCount > 1 && (
-                <span className="shrink-0 font-mono text-[10px] text-fg-faint">
-                  {t(locale, 'sessionFiles.touchCount').replace(
-                    '{count}',
-                    String(entry.touchCount),
-                  )}
-                </span>
-              )}
-            </button>
-          );
-        })}
+        <div className="mt-1">{renderNodes(sessionFileTree, 0)}</div>
       </div>
     );
   }, [
+    collapsedSessionDirs,
     locale,
+    sessionFileTree,
     sessionFiles,
     startEntryDrag,
     trackEntryDrag,
     finishEntryDrag,
     openSessionFile,
+    toggleSessionDirectory,
   ]);
 
   const rootLoading = rootState?.status === 'loading';
@@ -1896,9 +2075,8 @@ export default function ProjectFileTree() {
                 <FolderOpen size={13} className="shrink-0 text-accent-2" />
                 <span className="truncate">{t(locale, 'projectTree.title')}</span>
               </button>
-              {/* 「会话文件」tab：只展示当前会话里 AI 读取/修改过的文件，纯前端解析消息流，
-                  不触发任何 git/p4/svn 等版本管理指令（旧的「工作区改动」tab 会触发 P4
-                  reconcile 洪水，已彻底移除）。 */}
+              {/* 「会话文件」tab：只展示当前会话里 AI 修改过的文件；新增/修改/删除
+                  来自已持久化的会话改动缓存，不在面板渲染时发起 VCS 扫描。 */}
               <button
                 type="button"
                 role="tab"
@@ -1953,9 +2131,10 @@ export default function ProjectFileTree() {
             title={panelTab === 'session' ? t(locale, 'sessionFiles.title') : selectedRootPath}
           >
             {panelTab === 'session'
-              ? t(locale, 'sessionFiles.count').replace(
-                  '{count}',
-                  String(sessionFiles.length),
+              ? sessionFileCountLine(
+                  locale,
+                  sessionFiles.length,
+                  sessionFileChangeCounts,
                 )
               : projectTreeStatusTitle}
           </div>

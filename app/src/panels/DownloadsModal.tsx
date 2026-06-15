@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type RefObject,
+} from 'react';
 import {
   Boxes,
   CheckCircle2,
@@ -24,22 +32,37 @@ import type { Locale } from '@/lib/i18n';
 import {
   clearFinishedAssets,
   getAssets,
+  linkKnownManagedAssetsFromMessageText,
+  linkManagedAssetsFromMessageText,
+  mergeCachedAssetsFromDisk,
   removeAsset,
   subscribeAssets,
   type AssetEntry,
   type AssetKind,
-  type AssetSource,
 } from '@/lib/downloadRegistry';
-import { openExternal, openLocalPath, previewLocalFile, tauriAvailable } from '@/lib/tauri';
+import {
+  listCachedAssets,
+  openExternal,
+  openLocalPath,
+  previewLocalFile,
+  tauriAvailable,
+} from '@/lib/tauri';
+import { useStore } from '@/store/useStore';
+import { historyStore } from '@/store/history/store';
 import VideoPlayer from '@/components/ai/VideoPlayer';
 
 /**
  * CONTRACT: the unified Asset Hub modal. Lists every tracked asset (see
  * lib/downloadRegistry) regardless of source — generated, downloaded, searched
  * or installed. Supports filtering by kind + source, free-text search, inline
- * media previews, and per-source row actions (open file / reveal / open
- * source). Splits entries into "in progress" and "ready" sections.
+ * media previews, per-source row actions (open file / reveal / open source),
+ * and conversation jumps for session-backed assets. Splits entries into "in
+ * progress" and "ready" sections.
  */
+
+const ASSET_SESSION_JUMP_EVENT = 'fuc:asset-session-jump';
+const INITIAL_RENDERED_ASSETS = 40;
+const RENDER_ASSET_PAGE_SIZE = 40;
 
 const KIND_ICON: Record<AssetKind, LucideIcon> = {
   image: ImageIcon,
@@ -55,48 +78,6 @@ const KIND_ICON: Record<AssetKind, LucideIcon> = {
   plugin: Puzzle,
   file: FileDown,
 };
-
-/** Coarse kind buckets used by the filter bar (music/speech fold into audio). */
-type KindFilter =
-  | 'all'
-  | 'image'
-  | 'video'
-  | 'audio'
-  | 'mesh'
-  | 'sprite'
-  | 'skill'
-  | 'mcp'
-  | 'plugin'
-  | 'file';
-
-const KIND_FILTERS: KindFilter[] = [
-  'all',
-  'image',
-  'video',
-  'audio',
-  'mesh',
-  'sprite',
-  'skill',
-  'mcp',
-  'plugin',
-  'file',
-];
-
-const SOURCE_FILTERS: Array<'all' | AssetSource> = [
-  'all',
-  'generated',
-  'downloaded',
-  'searched',
-  'installed',
-];
-
-function matchesKindFilter(entry: AssetEntry, filter: KindFilter): boolean {
-  if (filter === 'all') return true;
-  if (filter === 'audio')
-    return entry.kind === 'audio' || entry.kind === 'music' || entry.kind === 'speech';
-  if (filter === 'mesh') return entry.kind === 'mesh' || entry.kind === 'model';
-  return entry.kind === filter;
-}
 
 function formatBytes(bytes: number | undefined): string | null {
   if (bytes == null || !Number.isFinite(bytes) || bytes <= 0) return null;
@@ -120,7 +101,50 @@ function formatTime(ts: number | undefined): string {
   ).padStart(2, '0')}`;
 }
 
-// __APPEND_1__
+function isManagedLocalAsset(entry: AssetEntry): boolean {
+  return Boolean(
+    entry.localPath?.toLowerCase().includes('.freeultracode'),
+  );
+}
+
+async function linkKnownManagedAssetsFromHistory(
+  workspaceIds: string[],
+  isCancelled: () => boolean = () => false,
+): Promise<void> {
+  for (const workspaceId of workspaceIds) {
+    let sessions: Awaited<ReturnType<typeof historyStore.listSessions>>;
+    try {
+      sessions = await historyStore.listSessions(workspaceId);
+    } catch {
+      continue;
+    }
+
+    for (const session of sessions) {
+      if (isCancelled()) return;
+      let record: Awaited<ReturnType<typeof historyStore.getSession>>;
+      try {
+        record = await historyStore.getSession(workspaceId, session.id);
+      } catch {
+        continue;
+      }
+      if (!record) continue;
+
+      for (const message of record.messages) {
+        if (isCancelled()) return;
+        // Only AI-produced messages count: the Asset Hub tracks what the
+        // assistant generated/downloaded/modified, not paths the user typed.
+        if (message.role !== 'assistant') continue;
+        if (!message.text.includes('.freeultracode')) continue;
+        linkKnownManagedAssetsFromMessageText({
+          text: message.text,
+          sessionId: record.id,
+          workspaceId,
+          messageId: message.id,
+        });
+      }
+    }
+  }
+}
 
 function StatusBadge({
   entry,
@@ -149,29 +173,6 @@ function StatusBadge({
     <span className="inline-flex items-center gap-1 text-[11px] text-rose-400">
       <XCircle size={12} aria-hidden="true" />
       {t(locale, 'downloads.statusError')}
-    </span>
-  );
-}
-
-function MetaTags({ entry, locale }: { entry: AssetEntry; locale: Locale }) {
-  const sourceLabel = t(locale, `downloads.filterSource.${entry.source}` as const);
-  const originLabel = t(
-    locale,
-    entry.origin === 'local' ? 'downloads.originLocal' : 'downloads.originRemote',
-  );
-  return (
-    <span className="inline-flex flex-wrap items-center gap-1">
-      <span className="rounded bg-panel-2 px-1.5 py-0.5 text-[10px] text-fg-dim">
-        {sourceLabel}
-      </span>
-      <span className="rounded bg-panel-2 px-1.5 py-0.5 text-[10px] text-fg-faint">
-        {originLabel}
-      </span>
-      {entry.provider && (
-        <span className="rounded bg-panel-2 px-1.5 py-0.5 text-[10px] text-fg-faint">
-          {entry.provider}
-        </span>
-      )}
     </span>
   );
 }
@@ -265,13 +266,18 @@ function AssetPreview({ entry }: { entry: AssetEntry }) {
 function DownloadRow({
   entry,
   locale,
+  onJumpToSession,
 }: {
   entry: AssetEntry;
   locale: Locale;
+  onJumpToSession?: (entry: AssetEntry) => void | Promise<void>;
 }) {
   const Icon = KIND_ICON[entry.kind] ?? FileDown;
   const size = formatBytes(entry.sizeBytes);
   const isTerminal = entry.status !== 'pending';
+  const canJumpToSession = Boolean(
+    onJumpToSession && (entry.sessionId || isManagedLocalAsset(entry)),
+  );
 
   const handleOpen = useCallback(
     async (reveal: boolean) => {
@@ -290,7 +296,27 @@ function DownloadRow({
   }, [entry.remoteUrl]);
 
   return (
-    <li className="flex items-start gap-3 rounded-md border border-border-soft bg-bg-alt px-3 py-2.5">
+    <li
+      role={canJumpToSession ? 'button' : undefined}
+      tabIndex={canJumpToSession ? 0 : undefined}
+      aria-label={canJumpToSession ? t(locale, 'downloads.openSession') : undefined}
+      onClick={canJumpToSession ? () => void onJumpToSession?.(entry) : undefined}
+      onKeyDown={
+        canJumpToSession
+          ? (event) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return;
+              event.preventDefault();
+              void onJumpToSession?.(entry);
+            }
+          : undefined
+      }
+      className={`flex items-start gap-3 rounded-md border border-border-soft bg-bg-alt px-3 py-2.5 ${
+        canJumpToSession
+          ? 'cursor-pointer transition-colors hover:border-accent/50 hover:bg-panel-2/75 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60'
+          : ''
+      }`}
+      style={{ contentVisibility: 'auto', containIntrinsicSize: '0 220px' }}
+    >
       <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border-soft bg-panel-2 text-fg-faint">
         <Icon size={15} aria-hidden="true" />
       </span>
@@ -304,10 +330,8 @@ function DownloadRow({
           </span>
           <StatusBadge entry={entry} locale={locale} />
         </div>
-        <div className="mt-1">
-          <MetaTags entry={entry} locale={locale} />
-        </div>
         <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[10px] text-fg-faint">
+          {entry.provider && <span>{entry.provider}</span>}
           {entry.model && <span>{entry.model}</span>}
           {size && <span>{size}</span>}
           <span>{formatTime(entry.finishedAt ?? entry.startedAt)}</span>
@@ -335,7 +359,10 @@ function DownloadRow({
           </div>
         )}
       </div>
-      <div className="flex shrink-0 items-center gap-1">
+      <div
+        className="flex shrink-0 items-center gap-1"
+        onClick={(event) => event.stopPropagation()}
+      >
         {entry.status === 'success' && entry.localPath && (
           <>
             <button
@@ -385,31 +412,94 @@ function DownloadRow({
   );
 }
 
-function FilterChip({
-  active,
-  label,
-  onClick,
+function AssetSection({
+  title,
+  count,
+  countClassName,
+  entries,
+  locale,
+  scrollRootRef,
+  onJumpToSession,
 }: {
-  active: boolean;
-  label: string;
-  onClick: () => void;
+  title: string;
+  count: number;
+  countClassName: string;
+  entries: AssetEntry[];
+  locale: Locale;
+  scrollRootRef: RefObject<HTMLDivElement>;
+  onJumpToSession: (entry: AssetEntry) => void;
 }) {
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const [visibleCount, setVisibleCount] = useState(INITIAL_RENDERED_ASSETS);
+  const resetKey = `${entries.length}:${entries[0]?.id ?? ''}:${
+    entries[entries.length - 1]?.id ?? ''
+  }`;
+  const visibleEntries = entries.slice(0, visibleCount);
+  const hasMore = visibleCount < entries.length;
+
+  useEffect(() => {
+    setVisibleCount(INITIAL_RENDERED_ASSETS);
+  }, [resetKey]);
+
+  useEffect(() => {
+    if (!hasMore) return;
+    if (typeof window === 'undefined' || typeof window.IntersectionObserver === 'undefined') {
+      return;
+    }
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+    const observer = new window.IntersectionObserver(
+      (items) => {
+        if (!items.some((item) => item.isIntersecting)) return;
+        setVisibleCount((current) =>
+          Math.min(entries.length, current + RENDER_ASSET_PAGE_SIZE),
+        );
+      },
+      {
+        root: scrollRootRef.current,
+        rootMargin: '360px 0px',
+      },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [entries.length, hasMore, scrollRootRef]);
+
+  const loadMore = useCallback(() => {
+    setVisibleCount((current) =>
+      Math.min(entries.length, current + RENDER_ASSET_PAGE_SIZE),
+    );
+  }, [entries.length]);
+
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      className={`shrink-0 rounded-full border px-2.5 py-1 text-xs transition-colors ${
-        active
-          ? 'border-accent bg-accent/15 text-fg'
-          : 'border-border-soft bg-panel-2 text-fg-faint hover:border-accent hover:text-fg'
-      }`}
-    >
-      {label}
-    </button>
+    <section>
+      <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-fg-faint">
+        {title}
+        <span className={`ml-1.5 ${countClassName}`}>{count}</span>
+      </h3>
+      <ul className="flex flex-col gap-2">
+        {visibleEntries.map((entry) => (
+          <DownloadRow
+            key={entry.id}
+            entry={entry}
+            locale={locale}
+            onJumpToSession={onJumpToSession}
+          />
+        ))}
+      </ul>
+      {hasMore && (
+        <div ref={sentinelRef} className="mt-3 flex justify-center">
+          <button
+            type="button"
+            onClick={loadMore}
+            className="rounded-md border border-border-soft bg-panel-2 px-3 py-1.5 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
+          >
+            {t(locale, 'downloads.loadMore')}
+          </button>
+        </div>
+      )}
+    </section>
   );
 }
-
-// __APPEND_2__
 
 export default function DownloadsModal({
   locale,
@@ -419,9 +509,42 @@ export default function DownloadsModal({
   onClose: () => void;
 }) {
   const assets = useSyncExternalStore(subscribeAssets, getAssets);
-  const [kindFilter, setKindFilter] = useState<KindFilter>('all');
-  const [sourceFilter, setSourceFilter] = useState<'all' | AssetSource>('all');
+  const selectSession = useStore((s) => s.selectSession);
+  const historyReady = useStore((s) => s.historyReady);
+  const workspaces = useStore((s) => s.workspaces);
+  const activeSessionId = useStore((s) => s.activeSessionId);
+  const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
+  const composerWorkspace = useStore((s) => s.composer.workspace);
+  const messages = useStore((s) => s.messages);
   const [query, setQuery] = useState('');
+  const scrollRootRef = useRef<HTMLDivElement | null>(null);
+
+  const assetCacheCwd = useMemo(() => {
+    const activeWorkspace = activeWorkspaceId
+      ? workspaces.find((workspace) => workspace.id === activeWorkspaceId)
+      : null;
+    return activeWorkspace?.path?.trim() || composerWorkspace.trim() || null;
+  }, [activeWorkspaceId, composerWorkspace, workspaces]);
+  const historyWorkspaceIds = useMemo(
+    () =>
+      activeWorkspaceId
+        ? [activeWorkspaceId]
+        : workspaces.map((workspace) => workspace.id),
+    [activeWorkspaceId, workspaces],
+  );
+  const unlinkedManagedAssetScanKey = useMemo(
+    () =>
+      assets
+        .filter(
+          (entry) =>
+            entry.localPath &&
+            !entry.sessionId &&
+            entry.localPath.toLowerCase().includes('.freeultracode'),
+        )
+        .map((entry) => entry.id)
+        .join('|'),
+    [assets],
+  );
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -431,11 +554,83 @@ export default function DownloadsModal({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [onClose]);
 
+  useEffect(() => {
+    if (!tauriAvailable()) return;
+    let cancelled = false;
+    void listCachedAssets(assetCacheCwd)
+      .then((files) => {
+        if (!cancelled) mergeCachedAssetsFromDisk(files);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [assetCacheCwd]);
+
+  useEffect(() => {
+    if (!activeSessionId) return;
+    for (const message of messages) {
+      // Skip user messages: a path the user mentions is not an AI-handled asset.
+      if (message.role !== 'assistant') continue;
+      if (!message.text.includes('.freeultracode')) continue;
+      linkManagedAssetsFromMessageText({
+        text: message.text,
+        sessionId: activeSessionId,
+        workspaceId: activeWorkspaceId,
+        messageId: message.id,
+      });
+    }
+  }, [activeSessionId, activeWorkspaceId, messages]);
+
+  useEffect(() => {
+    if (!historyReady || !unlinkedManagedAssetScanKey || historyWorkspaceIds.length === 0) {
+      return;
+    }
+    let cancelled = false;
+    void linkKnownManagedAssetsFromHistory(
+      historyWorkspaceIds,
+      () => cancelled,
+    );
+
+    return () => {
+      cancelled = true;
+    };
+  }, [historyReady, historyWorkspaceIds, unlinkedManagedAssetScanKey]);
+
+  const handleJumpToSession = useCallback(
+    async (entry: AssetEntry) => {
+      if (typeof window === 'undefined') return;
+      let target = entry;
+      if (!target.sessionId && isManagedLocalAsset(target)) {
+        await linkKnownManagedAssetsFromHistory(historyWorkspaceIds);
+        target =
+          getAssets().find(
+            (item) =>
+              item.id === entry.id ||
+              (entry.localPath && item.localPath === entry.localPath),
+          ) ?? entry;
+      }
+      if (!target.sessionId) return;
+
+      selectSession(target.sessionId, target.workspaceId ?? undefined);
+      window.dispatchEvent(
+        new CustomEvent(ASSET_SESSION_JUMP_EVENT, {
+          detail: {
+            assetId: target.id,
+            sessionId: target.sessionId,
+            workspaceId: target.workspaceId ?? null,
+            messageId: target.messageId ?? null,
+          },
+        }),
+      );
+      onClose();
+    },
+    [historyWorkspaceIds, onClose, selectSession],
+  );
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     return assets.filter((entry) => {
-      if (!matchesKindFilter(entry, kindFilter)) return false;
-      if (sourceFilter !== 'all' && entry.source !== sourceFilter) return false;
       if (q) {
         const haystack = [
           entry.title,
@@ -451,7 +646,7 @@ export default function DownloadsModal({
       }
       return true;
     });
-  }, [assets, kindFilter, sourceFilter, query]);
+  }, [assets, query]);
 
   const active = filtered.filter((entry) => entry.status === 'pending');
   const finished = filtered.filter((entry) => entry.status !== 'pending');
@@ -508,7 +703,7 @@ export default function DownloadsModal({
           </div>
 
           {!isEmpty && (
-            <div className="mt-3 flex flex-col gap-2">
+            <div className="mt-3">
               <input
                 type="text"
                 value={query}
@@ -516,31 +711,11 @@ export default function DownloadsModal({
                 placeholder={t(locale, 'downloads.searchPlaceholder')}
                 className="w-full rounded-md border border-border-soft bg-panel-2 px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
               />
-              <div className="flex flex-wrap gap-1.5">
-                {KIND_FILTERS.map((filter) => (
-                  <FilterChip
-                    key={filter}
-                    active={kindFilter === filter}
-                    label={t(locale, `downloads.filterKind.${filter}` as const)}
-                    onClick={() => setKindFilter(filter)}
-                  />
-                ))}
-              </div>
-              <div className="flex flex-wrap gap-1.5">
-                {SOURCE_FILTERS.map((filter) => (
-                  <FilterChip
-                    key={filter}
-                    active={sourceFilter === filter}
-                    label={t(locale, `downloads.filterSource.${filter}` as const)}
-                    onClick={() => setSourceFilter(filter)}
-                  />
-                ))}
-              </div>
             </div>
           )}
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        <div ref={scrollRootRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {isEmpty ? (
             <div className="flex flex-col items-center justify-center gap-2 py-12 text-center text-sm text-fg-faint">
               <Boxes
@@ -557,41 +732,27 @@ export default function DownloadsModal({
           ) : (
             <div className="flex flex-col gap-5">
               {active.length > 0 && (
-                <section>
-                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-fg-faint">
-                    {t(locale, 'downloads.active')}
-                    <span className="ml-1.5 text-accent">{active.length}</span>
-                  </h3>
-                  <ul className="flex flex-col gap-2">
-                    {active.map((entry) => (
-                      <DownloadRow
-                        key={entry.id}
-                        entry={entry}
-                        locale={locale}
-                      />
-                    ))}
-                  </ul>
-                </section>
+                <AssetSection
+                  title={t(locale, 'downloads.active')}
+                  count={active.length}
+                  countClassName="text-accent"
+                  entries={active}
+                  locale={locale}
+                  scrollRootRef={scrollRootRef}
+                  onJumpToSession={handleJumpToSession}
+                />
               )}
 
               {finished.length > 0 && (
-                <section>
-                  <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-fg-faint">
-                    {t(locale, 'downloads.completed')}
-                    <span className="ml-1.5 text-fg-dim">
-                      {finished.length}
-                    </span>
-                  </h3>
-                  <ul className="flex flex-col gap-2">
-                    {finished.map((entry) => (
-                      <DownloadRow
-                        key={entry.id}
-                        entry={entry}
-                        locale={locale}
-                      />
-                    ))}
-                  </ul>
-                </section>
+                <AssetSection
+                  title={t(locale, 'downloads.completed')}
+                  count={finished.length}
+                  countClassName="text-fg-dim"
+                  entries={finished}
+                  locale={locale}
+                  scrollRootRef={scrollRootRef}
+                  onJumpToSession={handleJumpToSession}
+                />
               )}
             </div>
           )}

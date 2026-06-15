@@ -37,7 +37,7 @@ class ResizeObserverStub {
 (globalThis as { ResizeObserver?: typeof ResizeObserver }).ResizeObserver =
   ResizeObserverStub as typeof ResizeObserver;
 
-function resetStore(): void {
+function resetStore(options: { workspaceFolders?: string[] } = {}): void {
   useStore.setState({
     mode: 'design',
     workflow: defaultBlueprint('File mention'),
@@ -47,7 +47,11 @@ function resetStore(): void {
     chattingSessions: [],
     locale: 'zh-CN',
     promptGroups: samplePromptGroups,
-    composer: { ...defaultComposer, workspace: 'E:\\OpenWorkflows' },
+    composer: {
+      ...defaultComposer,
+      workspace: 'E:\\OpenWorkflows',
+      workspaceFolders: options.workspaceFolders ?? [],
+    },
     composerDraft: '',
     composerDrafts: {},
     composerFocusVersion: 0,
@@ -225,6 +229,95 @@ describe('AIDock file mentions', () => {
       });
 
       expect(input.value).toBe('@app/src/App.tsx ');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('lists additional workspace folders and inserts absolute @ file paths', async () => {
+    resetStore({ workspaceFolders: ['E:\\ProjectMoon\\MoonEngine'] });
+    tauriMocks.listWorkspaceDirectory.mockImplementation(
+      async (rootPath: string, relativePath = '') => ({
+        rootPath,
+        relativePath,
+        truncated: false,
+        totalEntries: 1,
+        entries:
+          rootPath === 'E:\\OpenWorkflows'
+            ? [
+                {
+                  name: 'app',
+                  path: 'E:\\OpenWorkflows\\app',
+                  relativePath: 'app',
+                  kind: 'directory',
+                  hidden: false,
+                },
+              ]
+            : relativePath === ''
+              ? [
+                  {
+                    name: 'Engine',
+                    path: 'E:\\ProjectMoon\\MoonEngine\\Engine',
+                    relativePath: 'Engine',
+                    kind: 'directory',
+                    hidden: false,
+                  },
+                ]
+              : [
+                  {
+                    name: 'Runtime.cpp',
+                    path: 'E:\\ProjectMoon\\MoonEngine\\Engine\\Runtime.cpp',
+                    relativePath: 'Engine/Runtime.cpp',
+                    kind: 'file',
+                    hidden: false,
+                  },
+                ],
+      }),
+    );
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '@');
+        await flushAsync();
+      });
+
+      expect(tauriMocks.listWorkspaceDirectory).toHaveBeenCalledWith(
+        'E:\\OpenWorkflows',
+        '',
+      );
+      expect(tauriMocks.listWorkspaceDirectory).toHaveBeenCalledWith(
+        'E:\\ProjectMoon\\MoonEngine',
+        '',
+      );
+
+      const engineOption = Array.from(
+        view.container.querySelectorAll('[role="option"]'),
+      ).find((option) =>
+        option.textContent?.includes('E:/ProjectMoon/MoonEngine/Engine'),
+      );
+      expect(engineOption).toBeInstanceOf(HTMLElement);
+
+      await act(async () => {
+        engineOption?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        await flushAsync();
+      });
+
+      expect(input.value).toBe('@E:/ProjectMoon/MoonEngine/Engine/');
+      await waitForExpect(() => {
+        expect(tauriMocks.listWorkspaceDirectory).toHaveBeenCalledWith(
+          'E:\\ProjectMoon\\MoonEngine',
+          'Engine',
+        );
+      });
+
+      await act(async () => {
+        keyDown(input, 'Enter');
+      });
+
+      expect(input.value).toBe('@E:/ProjectMoon/MoonEngine/Engine/Runtime.cpp ');
     } finally {
       await view.cleanup();
     }

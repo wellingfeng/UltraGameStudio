@@ -64,6 +64,24 @@ describe('usage meter', () => {
       .toBe(0);
   });
 
+  it('falls back to the default-workspace bucket when a session gains a workspace id later', () => {
+    recordEstimatedModelUsageForSelection(
+      selection,
+      'created before workspace resolved',
+      'reply',
+      { providerName: 'Claude Code', model: 'sonnet' },
+      { context: { sessionId: 's1' } },
+    );
+
+    const snapshot = readUsageMeterSnapshot({
+      workspaceId: 'w1',
+      sessionId: 's1',
+    });
+
+    expect(snapshot.totals.calls).toBe(1);
+    expect(snapshot.totals.totalTokens).toBeGreaterThan(0);
+  });
+
   it('records OpenAI-compatible cached token usage as real data', () => {
     const report = usageReportFromOpenAI({
       prompt_tokens: 100,
@@ -143,6 +161,22 @@ describe('usage meter', () => {
     // No cache_read/creation keys -> Codex style, input stays as reported.
     expect(report!.inputTokens).toBe(22451);
     expect(report!.cacheReadInputTokens).toBe(11648);
+  });
+
+  it('reads nested CLI usage payloads from newer JSON event shapes', () => {
+    const report = usageReportFromCliUsage({
+      total_token_usage: {
+        input_tokens: 1000,
+        output_tokens: 50,
+        input_tokens_details: { cached_tokens: 640 },
+      },
+    });
+
+    expect(report).not.toBeNull();
+    expect(report!.inputTokens).toBe(1000);
+    expect(report!.outputTokens).toBe(50);
+    expect(report!.totalTokens).toBe(1050);
+    expect(report!.cacheReadInputTokens).toBe(640);
   });
 
   it('returns null for usage payloads without recognizable token counts', () => {

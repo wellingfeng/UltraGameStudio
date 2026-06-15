@@ -280,6 +280,50 @@ describe('AIDock slash suggestions', () => {
     }
   });
 
+  it('keeps app-only commands visible in the default slash menu when the adapter catalog is long', async () => {
+    const originalEntries = slashCatalogMock.entries;
+    slashCatalogMock.entries = Array.from({ length: 14 }, (_, index) => ({
+      id: `command:codex:/codex-${index}`,
+      kind: 'command',
+      name: `/codex-${index}`,
+      label: {
+        'zh-CN': `Codex 命令 ${index}`,
+        'en-US': `Codex Command ${index}`,
+      },
+      detail: {
+        'zh-CN': 'Codex CLI 命令',
+        'en-US': 'Codex CLI command',
+      },
+      insertText: {
+        'zh-CN': `/codex-${index}`,
+        'en-US': `/codex-${index}`,
+      },
+      source: 'codex',
+      sourceAdapter: 'codex',
+    }));
+    resetStore('codex');
+    const view = await renderDock();
+
+    try {
+      const input = textarea(view.container);
+
+      await act(async () => {
+        typeTextarea(input, '/');
+      });
+
+      const menu = view.container.querySelector('#fuc-slash-suggestions');
+      const menuText = menu?.textContent ?? '';
+      expect(menuText).toContain('/codex-13');
+      expect(menuText).toContain('/image-mode-start');
+      expect(menu?.querySelectorAll('[role="option"]').length).toBeGreaterThan(
+        10,
+      );
+    } finally {
+      slashCatalogMock.entries = originalEntries;
+      await view.cleanup();
+    }
+  });
+
   it('renders the flat segmented permission control in the input card', async () => {
     resetStore();
     useStore.setState({
@@ -968,7 +1012,7 @@ describe('AIDock slash suggestions', () => {
     }
   });
 
-  it('switches the bottom channel/model selectors to sprite providers in sprite mode', async () => {
+  it('reuses image channel/model selectors in sprite mode', async () => {
     resetStore();
     useStore.setState({ composer: { ...defaultComposer, spriteMode: true } });
     const view = await renderDock();
@@ -986,21 +1030,23 @@ describe('AIDock slash suggestions', () => {
       const menuText =
         channelTrigger?.parentElement?.querySelector('[role="listbox"]')
           ?.textContent ?? '';
-      expect(menuText).toContain('Ludo.ai Sprite Generator');
-      expect(menuText).toContain('本地 ComfyUI Sprite');
+      expect(menuText).toContain('硅基流动');
+      expect(menuText).not.toContain('Ludo.ai Sprite Generator');
+      expect(menuText).not.toContain('本地 ComfyUI Sprite');
 
-      const localComfy = Array.from(
+      const volcengine = Array.from(
         view.container.querySelectorAll<HTMLElement>('[role="option"]'),
-      ).find((opt) => opt.textContent?.includes('本地 ComfyUI Sprite'));
-      expect(localComfy).toBeInstanceOf(HTMLElement);
+      ).find((opt) => opt.textContent?.includes('火山方舟'));
+      expect(volcengine).toBeInstanceOf(HTMLElement);
       await act(async () => {
-        localComfy?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        volcengine?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
       });
 
       const saved = JSON.parse(
-        window.localStorage.getItem('freeultracode.spriteGeneration.v1') ?? '{}',
+        window.localStorage.getItem('freeultracode.imageGeneration.v1') ?? '{}',
       );
-      expect(saved.preferredProviderId).toBe('local-comfyui-sprite');
+      expect(saved.preferredProviderId).toBe('volcengine-seedream');
+      expect(window.localStorage.getItem('freeultracode.spriteGeneration.v1')).toBeNull();
     } finally {
       await view.cleanup();
     }

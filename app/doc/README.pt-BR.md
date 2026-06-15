@@ -14,6 +14,8 @@ Em uma game engine, o código é só uma pequena parte do trabalho. O resto são
 <p align="center">
   <strong>Geração de modelo 3D em um clique</strong><br>
   <img src="images/game/noYfqPt.png" alt="O FreeUltraCode gera um modelo 3D em um clique" width="960">
+  <br><br>
+  <img src="images/20260615-214236.jpg" alt="Prévia do modelo 3D gerado pelo FreeUltraCode" width="960">
 </p>
 
 <p align="center">

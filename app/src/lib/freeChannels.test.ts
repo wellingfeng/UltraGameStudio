@@ -218,6 +218,23 @@ describe('model override', () => {
 
   it('returns de-duplicated fallback models after the active model', () => {
     expect(getFreeChannelFallbackModels('open_router')).toEqual([
+      'openai/gpt-5.4-codex',
+      'openai/gpt-5.4',
+      'openai/gpt-5.2',
+      'openai/gpt-5-nano',
+      'anthropic/claude-fable-5',
+      'anthropic/claude-opus-4.7',
+      'google/gemini-3.5-flash',
+      'google/gemini-3.1-pro',
+      'google/gemini-3.1-flash',
+      'moonshotai/kimi-k2.6',
+      'moonshotai/kimi-k2-thinking',
+      'qwen/qwen3.6-coder',
+      'qwen/qwen3.6-235b-a22b',
+      'qwen/qwen3.5-27b',
+      'qwen/qwen-flash',
+      'minimax/minimax-m2.7',
+      'minimax/minimax-m2.5',
       'z-ai/glm-5.1',
       'z-ai/glm-4.7',
       'z-ai/glm-4.5-air:free',

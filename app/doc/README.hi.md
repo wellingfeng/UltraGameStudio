@@ -14,6 +14,8 @@
 <p align="center">
   <strong>एक क्लिक में 3D model generation</strong><br>
   <img src="images/game/noYfqPt.png" alt="FreeUltraCode एक क्लिक में 3D model बनाता है" width="960">
+  <br><br>
+  <img src="images/20260615-214236.jpg" alt="FreeUltraCode द्वारा बनाया गया 3D model preview" width="960">
 </p>
 
 <p align="center">

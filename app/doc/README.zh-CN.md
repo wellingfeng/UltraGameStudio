@@ -14,6 +14,8 @@
 <p align="center">
   <strong>一键生成 3D 模型</strong><br>
   <img src="images/game/noYfqPt.png" alt="FreeUltraCode 一键生成 3D 模型" width="960">
+  <br><br>
+  <img src="images/20260615-214236.jpg" alt="FreeUltraCode 生成的 3D 模型预览" width="960">
 </p>
 
 <p align="center">

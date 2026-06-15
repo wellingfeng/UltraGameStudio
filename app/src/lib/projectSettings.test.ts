@@ -39,6 +39,7 @@ describe('project settings game features', () => {
       isGameProject: false,
       meshGeneration: false,
       rigging: false,
+      capturePerf: false,
       gameExperts: false,
       gameExpertEngine: 'auto',
     });
@@ -74,6 +75,7 @@ describe('project settings game features', () => {
       isGameProject: true,
       meshGeneration: true,
       rigging: true,
+      capturePerf: true,
       gameExperts: true,
       gameExpertEngine: 'unity',
     });
@@ -95,6 +97,7 @@ describe('project settings game features', () => {
       isGameProject: true,
       meshGeneration: true,
       rigging: true,
+      capturePerf: true,
       gameExperts: true,
       gameExpertEngine: 'auto',
     });
@@ -132,6 +135,7 @@ describe('project settings game features', () => {
         isGameProject: true,
         meshGeneration: true,
         rigging: false,
+        capturePerf: true,
         gameExperts: true,
         gameExpertEngine: 'godot' as const,
       },
@@ -152,6 +156,7 @@ describe('project settings game features', () => {
           isGameProject: true,
           meshGeneration: true,
           rigging: true,
+          capturePerf: true,
           gameExperts: true,
           gameExpertEngine: 'unreal',
         },
@@ -162,6 +167,7 @@ describe('project settings game features', () => {
       isGameProject: true,
       meshGeneration: true,
       rigging: true,
+      capturePerf: true,
       gameExperts: true,
       gameExpertEngine: 'unreal',
     });
@@ -174,6 +180,7 @@ describe('project settings game features', () => {
           isGameProject: false,
           meshGeneration: true,
           rigging: true,
+          capturePerf: true,
           gameExperts: true,
           gameExpertEngine: 'unreal',
         },
@@ -184,6 +191,7 @@ describe('project settings game features', () => {
       isGameProject: false,
       meshGeneration: false,
       rigging: false,
+      capturePerf: false,
       gameExperts: false,
       gameExpertEngine: 'unreal',
     });

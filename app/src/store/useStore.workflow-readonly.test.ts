@@ -13,6 +13,12 @@ import {
 } from './useStore';
 import { workflowDefaultGatewaySelection } from '@/lib/modelGateway/resolver';
 import { ACTIVE_GATEWAY_SELECTION_STORAGE } from '@/lib/gatewayConfig';
+import {
+  ACTIVE_PROVIDER_BY_KIND_STORAGE,
+  PROVIDERS_STORAGE,
+  getActiveProviderId,
+  type Provider,
+} from '@/lib/apiConfig';
 import { historyStore } from './history/store';
 import type { SessionRecord, WorkspaceSummary } from './history/types';
 import type { Session } from './types';
@@ -136,6 +142,34 @@ function testWorkspace(
 
 function workflowSnapshot(): string {
   return JSON.stringify(useStore.getState().workflow);
+}
+
+function seedDefaultChannelProviders(): void {
+  const providers: Provider[] = [
+    {
+      id: 'p_packy',
+      kind: 'anthropic',
+      name: 'PackyCode',
+      apiKey: 'sk-packy',
+      baseUrl: 'https://packy.example/v1',
+      transport: 'cli',
+      model: 'packy-code',
+    },
+    {
+      id: 'p_sss',
+      kind: 'anthropic',
+      name: 'SSSAiCode',
+      apiKey: 'sk-sss',
+      baseUrl: 'https://sss.example/v1',
+      transport: 'cli',
+      model: 'claude-opus-4-8',
+    },
+  ];
+  window.localStorage.setItem(PROVIDERS_STORAGE, JSON.stringify(providers));
+  window.localStorage.setItem(
+    ACTIVE_PROVIDER_BY_KIND_STORAGE,
+    JSON.stringify({ anthropic: 'p_packy' }),
+  );
 }
 
 function tryEveryPublicWorkflowWrite(): void {
@@ -852,6 +886,34 @@ describe('workflow read-only guard', () => {
     expect(
       JSON.parse(window.localStorage.getItem(ACTIVE_GATEWAY_SELECTION_STORAGE)!),
     ).toEqual({ adapter: 'claude-code', modelClass: 'sonnet' });
+  });
+
+  it('persists Settings default channel changes while the current workflow is read-only', () => {
+    seedDefaultChannelProviders();
+    resetStore('running', false);
+    const before = workflowSnapshot();
+
+    useStore.getState().setGlobalRunSelection({
+      adapter: 'claude-code',
+      modelClass: 'claude-opus-4-8',
+      providerId: 'p_sss',
+      channelId: 'default',
+    });
+
+    expect(getActiveProviderId('anthropic')).toBe('p_sss');
+    expect(
+      JSON.parse(window.localStorage.getItem(ACTIVE_GATEWAY_SELECTION_STORAGE)!),
+    ).toEqual({
+      adapter: 'claude-code',
+      modelClass: 'claude-opus-4-8',
+      providerId: 'p_sss',
+      channelId: 'default',
+    });
+    expect(workflowSnapshot()).toBe(before);
+    expect(workflowDefaultGatewaySelection(useStore.getState().workflow)).toEqual({
+      adapter: 'claude-code',
+      modelClass: 'sonnet',
+    });
   });
 
   it.each([

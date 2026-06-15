@@ -14,6 +14,8 @@ En un motor de juego, el código es solo una pequeña parte del trabajo. El rest
 <p align="center">
   <strong>Generación de modelo 3D en un clic</strong><br>
   <img src="images/game/noYfqPt.png" alt="FreeUltraCode genera un modelo 3D en un clic" width="960">
+  <br><br>
+  <img src="images/20260615-214236.jpg" alt="Vista previa del modelo 3D generado por FreeUltraCode" width="960">
 </p>
 
 <p align="center">

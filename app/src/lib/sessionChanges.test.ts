@@ -5,7 +5,11 @@ import {
   readWorkspaceChangesCache,
   type WorkspaceChanges,
 } from './tauri';
-import { refreshCachedSessionChanges, sessionChangesCacheKey } from './sessionChanges';
+import {
+  SESSION_CHANGES_UPDATED_EVENT,
+  refreshCachedSessionChanges,
+  sessionChangesCacheKey,
+} from './sessionChanges';
 
 vi.mock('./tauri', () => ({
   ensureWorkspaceChangesBaseline: vi.fn(),
@@ -63,5 +67,29 @@ describe('refreshCachedSessionChanges', () => {
       'cache-key',
       undefined,
     );
+  });
+
+  it('notifies same-window readers after writing the refreshed cache', async () => {
+    const snapshot: WorkspaceChanges = {
+      rootPath: 'E:/MoonEngine',
+      generatedAtMs: 2,
+      source: 'git',
+      files: [],
+      truncated: false,
+    };
+    mockedListWorkspaceChanges.mockResolvedValue(snapshot);
+    const events: Array<{ cacheKey: string; rootPath: string }> = [];
+    const listener = (event: Event) => {
+      events.push((event as CustomEvent).detail);
+    };
+    window.addEventListener(SESSION_CHANGES_UPDATED_EVENT, listener);
+
+    try {
+      await refreshCachedSessionChanges('E:\\MoonEngine', 'cache-key');
+    } finally {
+      window.removeEventListener(SESSION_CHANGES_UPDATED_EVENT, listener);
+    }
+
+    expect(events).toEqual([{ cacheKey: 'cache-key', rootPath: 'E:/MoonEngine' }]);
   });
 });

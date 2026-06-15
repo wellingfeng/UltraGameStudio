@@ -71,6 +71,8 @@
 <p align="center">
   <strong>One-click 3D model generation</strong><br>
   <img src="app/doc/images/game/noYfqPt.png" alt="FreeUltraCode generates a 3D model in one click" width="960">
+  <br><br>
+  <img src="app/doc/images/20260615-214236.jpg" alt="FreeUltraCode generated 3D model preview" width="960">
 </p>
 
 <p align="center">

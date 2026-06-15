@@ -71,6 +71,16 @@ function toolResultText(content: unknown): string {
   return '';
 }
 
+/** Keep structured Codex item metadata useful for file tracking, without huge outputs. */
+function codexToolArgs(item: Record<string, unknown>): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(item)) {
+    if (key === 'output' || key === 'text') continue;
+    if (value !== undefined) out[key] = value;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
 /** Default hard timeout (s) before the child is killed (mirrors lib.rs). */
 const DEFAULT_TIMEOUT_SECS = 1800;
 /** Default "no observable progress" timeout (s) (mirrors lib.rs). */
@@ -703,6 +713,7 @@ export function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Promise<
                 id,
                 name: itemType,
                 subject,
+                args: codexToolArgs(item),
                 status: isError ? 'error' : 'done',
                 result: resultText.slice(0, TOOL_RESULT_CLAMP),
                 truncated: resultText.length >= TOOL_RESULT_CLAMP,

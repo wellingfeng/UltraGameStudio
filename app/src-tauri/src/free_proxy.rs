@@ -159,7 +159,11 @@ fn encode_free_proxy_tool_patch(log: &FreeProxyRouteLog) -> String {
             obj.insert("result".to_string(), Value::String(brief_detail(detail)));
         }
     }
-    format!("\n{TOOL_OPEN}{}{TOOL_CLOSE}\n", patch)
+    // Escape `<`/`>` in the payload (the render layer's JSON parse restores
+    // them) so a detail string containing the literal sentinel markers can't
+    // emit a stray `<<FUC_TOOL_END>>` that prematurely closes the block.
+    let payload = patch.to_string().replace('<', "\\u003c").replace('>', "\\u003e");
+    format!("\n{TOOL_OPEN}{}{TOOL_CLOSE}\n", payload)
 }
 
 fn encode_free_proxy_logs(logs: &[FreeProxyRouteLog]) -> Option<String> {

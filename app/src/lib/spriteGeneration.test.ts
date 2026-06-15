@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { DEFAULT_IMAGE_GENERATION_SETTINGS } from './imageGeneration';
 import {
   DEFAULT_SPRITE_GENERATION_SETTINGS,
   SPRITE_PROVIDERS,
@@ -20,13 +21,16 @@ afterEach(() => {
 });
 
 describe('sprite generation settings and routing', () => {
-  it('exposes commercial and local-open providers', () => {
+  it('keeps legacy sprite provider metadata only for persisted settings compatibility', () => {
     expect(SPRITE_PROVIDERS.map((provider) => provider.id)).toEqual([
       'ludo-sprite',
       'local-comfyui-sprite',
     ]);
-    expect(SPRITE_PROVIDERS.some((provider) => provider.category === 'commercial')).toBe(true);
-    expect(SPRITE_PROVIDERS.some((provider) => provider.category === 'local-open')).toBe(true);
+    expect(spriteProviderById('ludo-sprite').label).toContain('Ludo');
+    expect(spriteProviderBaseUrl('ludo-sprite', DEFAULT_SPRITE_GENERATION_SETTINGS)).toBe(
+      'https://api.ludo.ai',
+    );
+    expect(spriteProviderModel('local-comfyui-sprite')).toBe('AnimateDiff');
   });
 
   it('normalizes unknown settings to defaults', () => {
@@ -49,35 +53,52 @@ describe('sprite generation settings and routing', () => {
     expect(normalized.defaultFrameCount).toBe(64);
     expect(normalized.defaultFrameSize).toBe(16);
     expect(normalized.removeBackground).toBe(false);
+    expect(normalized.sheetPreset).toBe('4x4');
+    expect(normalized.chromaKey).toBe('#FF00FF');
   });
 
-  it('requires a key for Ludo and treats the default local ComfyUI endpoint as ready', () => {
+  it('normalizes Sprite Forge advanced options', () => {
+    const normalized = normalizeSpriteGenerationSettings({
+      sheetPreset: 'custom',
+      sheetRows: 99,
+      sheetColumns: 0,
+      chromaKey: '#00ff00',
+      frameAnchor: 'bottom',
+      componentMode: 'all',
+      rejectEdgeTouch: false,
+      fitScale: 2,
+    });
+
+    expect(normalized.sheetPreset).toBe('custom');
+    expect(normalized.sheetRows).toBe(8);
+    expect(normalized.sheetColumns).toBe(1);
+    expect(normalized.chromaKey).toBe('#00FF00');
+    expect(normalized.frameAnchor).toBe('bottom');
+    expect(normalized.componentMode).toBe('all');
+    expect(normalized.rejectEdgeTouch).toBe(false);
+    expect(normalized.fitScale).toBe(1);
+  });
+
+  it('legacy sprite provider readiness is not used by Sprite generation routing', () => {
     expect(spriteProviderReady('ludo-sprite', DEFAULT_SPRITE_GENERATION_SETTINGS)).toBe(false);
-    expect(
-      spriteProviderReady('ludo-sprite', {
-        ...DEFAULT_SPRITE_GENERATION_SETTINGS,
-        providerKeys: { 'ludo-sprite': 'ludo-key' },
-      }),
-    ).toBe(true);
     expect(
       spriteProviderReady('local-comfyui-sprite', DEFAULT_SPRITE_GENERATION_SETTINGS),
     ).toBe(true);
-    expect(
-      spriteProviderReady('local-comfyui-sprite', {
-        ...DEFAULT_SPRITE_GENERATION_SETTINGS,
-        providerBaseUrls: {
-          'local-comfyui-sprite': 'http://127.0.0.1:8190/generate-sprite',
-        },
-      }),
-    ).toBe(true);
-  });
 
-  it('falls back to another ready provider when the default is not configured', () => {
-    const settings = {
-      ...DEFAULT_SPRITE_GENERATION_SETTINGS,
-      preferredProviderId: 'ludo-sprite' as const,
-    };
-    expect(preferredReadySpriteProviderId(settings)).toBe('local-comfyui-sprite');
+    expect(
+      preferredReadySpriteProviderId({
+        ...DEFAULT_IMAGE_GENERATION_SETTINGS,
+        preferredProviderId: 'pollinations',
+        providerKeys: { pollinations: 'pollinations-key' },
+      }),
+    ).toBe('pollinations');
+    expect(
+      preferredReadySpriteProviderId({
+        ...DEFAULT_IMAGE_GENERATION_SETTINGS,
+        preferredProviderId: 'zhipu-cogview',
+        providerKeys: { 'agnes-image': 'agnes-key' },
+      }),
+    ).toBeNull();
   });
 
   it('detects sprite generation intent and strips commands', () => {
@@ -88,14 +109,11 @@ describe('sprite generation settings and routing', () => {
     expect(stripSpriteCommand('请帮我生成一个精灵图小火球')).toContain('小火球');
   });
 
-  it('calls the local sprite endpoint with postprocess options', async () => {
+  it('reuses the configured image provider and wraps its output as a spritesheet', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(
         JSON.stringify({
-          spritesheet_url: 'http://127.0.0.1:8190/out/sheet.png',
-          frame_urls: ['http://127.0.0.1:8190/out/frame-01.png'],
-          gif_url: 'http://127.0.0.1:8190/out/preview.gif',
-          status: 'succeeded',
+          data: [{ url: 'https://cdn.example.test/sprite-sheet.png' }],
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       ),
@@ -104,50 +122,39 @@ describe('sprite generation settings and routing', () => {
     const result = await generateSprite(
       {
         prompt: '/sprite idle robot',
-        providerId: 'local-comfyui-sprite',
-        model: 'AnimateDiff',
+        providerId: 'pollinations',
+        model: 'flux',
       },
+      DEFAULT_SPRITE_GENERATION_SETTINGS,
       {
-        ...DEFAULT_SPRITE_GENERATION_SETTINGS,
-        providerBaseUrls: {
-          'local-comfyui-sprite': 'http://127.0.0.1:8190/generate-sprite',
-        },
+        ...DEFAULT_IMAGE_GENERATION_SETTINGS,
+        preferredProviderId: 'pollinations',
+        providerKeys: { pollinations: 'pollinations-key' },
       },
     );
 
-    expect(result.providerId).toBe('local-comfyui-sprite');
-    expect(result.spritesheets).toEqual(['http://127.0.0.1:8190/out/sheet.png']);
-    expect(result.frames).toEqual(['http://127.0.0.1:8190/out/frame-01.png']);
-    expect(result.gifs).toEqual(['http://127.0.0.1:8190/out/preview.gif']);
-    expect(fetchMock.mock.calls[0][0]).toBe('http://127.0.0.1:8190/generate-sprite');
-    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
-    expect(body).toEqual(
-      expect.objectContaining({
-        action: 'createImage',
-        frame_count: 16,
-        frame_size: 128,
-        remove_background: true,
-        align_frames: true,
-        pack_spritesheet: true,
-      }),
+    expect(result.providerId).toBe('pollinations');
+    expect(result.providerLabel).toBe('Pollinations');
+    expect(result.spritesheets).toEqual(['https://cdn.example.test/sprite-sheet.png']);
+    expect(result.frames).toEqual([]);
+    expect(result.gifs).toEqual([]);
+    expect(result.videos).toEqual([]);
+    expect(String(fetchMock.mock.calls[0][0])).toContain(
+      'https://gen.pollinations.ai/image/',
     );
-    expect(body.postprocess).toEqual(
-      expect.objectContaining({
-        ffmpeg_extract_frames: true,
-        remove_background: true,
-        align_frames: true,
-        pack_spritesheet: true,
-      }),
-    );
+    const url = new URL(String(fetchMock.mock.calls[0][0]));
+    const imagePrompt = decodeURIComponent(url.pathname.replace(/^\/image\//, ''));
+    expect(imagePrompt).toContain('Sprite Forge compatible raw spritesheet constraints');
+    expect(imagePrompt).toContain('exact layout: 4 rows x 4 columns, 16 frames');
+    expect(imagePrompt).toContain('solid #FF00FF chroma key');
+    expect(url.searchParams.get('model')).toBe('flux');
   });
 
-  it('posts to Ludo with bearer auth and maps animation mode', async () => {
+  it('uses the image default provider when Sprite gets no explicit provider', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(
         JSON.stringify({
-          spritesheetUrl: 'https://cdn.example.com/sheet.png',
-          videoUrl: 'https://cdn.example.com/clip.mp4',
-          status: 'succeeded',
+          data: [{ url: 'https://cdn.example.test/sprite-sheet.png' }],
         }),
         { status: 200, headers: { 'content-type': 'application/json' } },
       ),
@@ -155,47 +162,94 @@ describe('sprite generation settings and routing', () => {
 
     const result = await generateSprite(
       {
-        prompt: '/sprite 首帧参考图生成 walk 动画',
-        providerId: 'ludo-sprite',
+        prompt: '/sprite idle robot',
       },
+      DEFAULT_SPRITE_GENERATION_SETTINGS,
       {
-        ...DEFAULT_SPRITE_GENERATION_SETTINGS,
-        providerKeys: { 'ludo-sprite': 'ludo-key' },
+        ...DEFAULT_IMAGE_GENERATION_SETTINGS,
+        preferredProviderId: 'zhipu-cogview',
+        providerKeys: { 'zhipu-cogview': 'zhipu-key' },
       },
     );
 
-    expect(result.providerId).toBe('ludo-sprite');
-    expect(result.mode).toBe('image-to-animation');
-    expect(result.spritesheets).toEqual(['https://cdn.example.com/sheet.png']);
-    expect(result.videos).toEqual(['https://cdn.example.com/clip.mp4']);
-    expect(fetchMock.mock.calls[0][0]).toBe('https://api.ludo.ai/sprite/generations');
-    expect(fetchMock.mock.calls[0][1]).toEqual(
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.objectContaining({
-          Authorization: 'Bearer ludo-key',
-          'Content-Type': 'application/json',
-        }),
-      }),
+    expect(result.providerId).toBe('zhipu-cogview');
+    expect(result.providerLabel).toBe('智谱 CogView');
+    expect(String(fetchMock.mock.calls[0][0])).toContain(
+      'https://open.bigmodel.cn/api/paas/v4/images/generations',
     );
-    const body = JSON.parse(String(fetchMock.mock.calls[0][1]?.body));
-    expect(body.action).toBe('animateSprite');
+  });
+
+  it('does not fall back to Agnes when the image default provider is missing', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [{ url: 'https://cdn.example.test/sprite-sheet.png' }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    await expect(
+      generateSprite(
+        {
+          prompt: '/sprite idle robot',
+        },
+        DEFAULT_SPRITE_GENERATION_SETTINGS,
+        {
+          ...DEFAULT_IMAGE_GENERATION_SETTINGS,
+          preferredProviderId: 'zhipu-cogview',
+          providerKeys: { 'agnes-image': 'agnes-key' },
+        },
+      ),
+    ).rejects.toThrow('IMAGE_PROVIDER_NOT_READY:zhipu-cogview');
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('uses fixed sheet presets as the image prompt grid contract', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          data: [{ url: 'https://cdn.example.test/sprite-sheet.png' }],
+        }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+
+    const result = await generateSprite(
+      {
+        prompt: '/sprite attack fx',
+        providerId: 'pollinations',
+      },
+      {
+        ...DEFAULT_SPRITE_GENERATION_SETTINGS,
+        sheetPreset: '2x3',
+        sheetRows: 2,
+        sheetColumns: 3,
+      },
+      {
+        ...DEFAULT_IMAGE_GENERATION_SETTINGS,
+        preferredProviderId: 'pollinations',
+        providerKeys: { pollinations: 'pollinations-key' },
+      },
+    );
+
+    const url = new URL(String(fetchMock.mock.calls[0][0]));
+    const imagePrompt = decodeURIComponent(url.pathname.replace(/^\/image\//, ''));
+    expect(result.frameCount).toBe(6);
+    expect(imagePrompt).toContain('exact layout: 2 rows x 3 columns, 6 frames');
   });
 
   it('throws when generation is disabled', async () => {
     await expect(
       generateSprite(
-        { prompt: 'idle robot', providerId: 'ludo-sprite' },
+        { prompt: 'idle robot', providerId: 'pollinations' },
         { ...DEFAULT_SPRITE_GENERATION_SETTINGS, enabled: false },
+        {
+          ...DEFAULT_IMAGE_GENERATION_SETTINGS,
+          preferredProviderId: 'pollinations',
+          providerKeys: { pollinations: 'pollinations-key' },
+        },
       ),
     ).rejects.toThrow('SPRITE_GENERATION_DISABLED');
-  });
-
-  it('resolves provider metadata by id with a safe fallback', () => {
-    expect(spriteProviderById('ludo-sprite').label).toContain('Ludo');
-    expect(spriteProviderBaseUrl('ludo-sprite', DEFAULT_SPRITE_GENERATION_SETTINGS)).toBe(
-      'https://api.ludo.ai',
-    );
-    expect(spriteProviderModel('local-comfyui-sprite')).toBe('AnimateDiff');
   });
 });

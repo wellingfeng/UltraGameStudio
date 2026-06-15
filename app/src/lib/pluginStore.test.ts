@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  GAME_SKILL_RECOMMENDATION_SOURCE_ID,
+  buildSkillInstallTextFromMarkdown,
   filterPluginStoreItems,
+  loadPluginStoreCatalog,
   parseSkillFrontmatter,
   slugFromName,
   type PluginStoreItem,
@@ -84,6 +87,99 @@ describe('pluginStore', () => {
     expect(filterPluginStoreItems(items, 'review toolkit', 'plugin', 'claude-code-marketplace')).toHaveLength(1);
     expect(filterPluginStoreItems(items, 'browser', 'skill', 'all')).toHaveLength(1);
     expect(filterPluginStoreItems(items, 'missing', 'all', 'all')).toHaveLength(0);
+  });
+
+  it('loads curated game skill repositories into one recommendation source', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('/UnrealXu/UnrealEngine5-Skills/')) {
+        return new Response(
+          JSON.stringify({
+            tree: [
+              { path: 'skills/ue5-cpp-gameplay/SKILL.md', type: 'blob' },
+              { path: 'skills/README.md', type: 'blob' },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/quodsoler/unreal-engine-skills/')) {
+        return new Response(
+          JSON.stringify({
+            tree: [{ path: 'skills/ue-gameplay-framework/SKILL.md', type: 'blob' }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/Besty0728/Unity-Skills/')) {
+        return new Response(
+          JSON.stringify({
+            tree: [
+              {
+                path: 'SkillsForUnity/unity-skills~/skills/ui/SKILL.md',
+                type: 'blob',
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/thedivergentai/gd-agentic-skills/')) {
+        return new Response(
+          JSON.stringify({
+            tree: [{ path: 'skills/godot-master/SKILL.md', type: 'blob' }],
+          }),
+          { status: 200 },
+        );
+      }
+      if (url.includes('/mrSutivu/Unreal-Engine-5-C-Expert-Skills/')) {
+        return new Response(
+          JSON.stringify({
+            tree: [
+              {
+                path: 'skills/unreal-engine-5/actor-component-modularity.md',
+                type: 'blob',
+              },
+            ],
+          }),
+          { status: 200 },
+        );
+      }
+      return new Response('not found', { status: 404, statusText: 'Not Found' });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    const catalog = await loadPluginStoreCatalog();
+    const gameSkills = catalog.items.filter(
+      (catalogItem) =>
+        catalogItem.sourceId === GAME_SKILL_RECOMMENDATION_SOURCE_ID,
+    );
+
+    expect(new Set(gameSkills.map((catalogItem) => catalogItem.name))).toEqual(
+      new Set([
+        'actor-component-modularity',
+        'godot-master',
+        'ue-gameplay-framework',
+        'ue5-cpp-gameplay',
+        'ui',
+      ]),
+    );
+    expect(gameSkills.every((catalogItem) => catalogItem.installKind === 'skill')).toBe(
+      true,
+    );
+    expect(gameSkills.find((catalogItem) => catalogItem.name === 'ui')?.installUrl).toBe(
+      'https://raw.githubusercontent.com/Besty0728/Unity-Skills/main/SkillsForUnity/unity-skills~/skills/ui/SKILL.md',
+    );
+    const ueMarkdownSkill = gameSkills.find(
+      (catalogItem) => catalogItem.name === 'actor-component-modularity',
+    );
+    expect(ueMarkdownSkill?.installUrl).toBe(
+      'https://raw.githubusercontent.com/mrSutivu/Unreal-Engine-5-C-Expert-Skills/main/skills/unreal-engine-5/actor-component-modularity.md',
+    );
+    expect(ueMarkdownSkill?.installTransform).toBe('wrapMarkdownAsSkill');
+    expect(
+      buildSkillInstallTextFromMarkdown(ueMarkdownSkill!, '# Actor Component Modularity'),
+    ).toContain('Source: https://github.com/mrSutivu/Unreal-Engine-5-C-Expert-Skills/blob/main/skills/unreal-engine-5/actor-component-modularity.md');
   });
 
   it('decides whether plugin descriptions need locale translation', () => {

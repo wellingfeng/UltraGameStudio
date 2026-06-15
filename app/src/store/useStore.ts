@@ -27,7 +27,11 @@ import { normalizeWorkflowNodeNumbers } from '@/core/nodeNumbers';
 //   strictBlueprintRetryAppendix,
 // } from '@/core/genPrompt';
 // import { applyIntent } from '@/core/intentEngine';
-import { extractToolSentinels } from '@/components/ai/lib/toolEvent';
+import {
+  encodeToolPatch,
+  extractToolSentinels,
+  hasToolSentinel,
+} from '@/components/ai/lib/toolEvent';
 import {
   personalInstructionsBlock,
   personalInstructionsForSelection,
@@ -79,7 +83,7 @@ import {
 } from '@/core/startInputs';
 // [dynamic-only refactor] determinism lint 仅用于蓝图 AI 改图分支，已停用。
 // import { findDeterminismHazards } from '@/core/determinism';
-import { readApiKey, readBaseUrl } from '@/lib/apiConfig';
+import { readApiKey, readBaseUrl, setActiveProviderId } from '@/lib/apiConfig';
 import { appendComposerDraftState } from '@/lib/composerEntryPolicy';
 import {
   clearActiveGatewaySelection,
@@ -100,6 +104,7 @@ import {
   generateImage,
   IMAGE_PROVIDERS,
   imageProviderById,
+  imageProviderModel,
   imageProviderReady,
   loadImageGenerationSettings,
   preferredReadyImageProviderId,
@@ -157,10 +162,8 @@ import {
   generateSprite,
   loadSpriteGenerationSettings,
   preferredReadySpriteProviderId,
-  spriteProviderById,
-  spriteProviderModel,
+  spriteSheetGridForSettings,
   stripSpriteCommand,
-  type SpriteProviderId,
 } from '@/lib/spriteGeneration';
 import {
   loadMeshLibrarySettings,
@@ -206,6 +209,14 @@ import {
 } from '@/lib/tauri';
 import { captureGeneratedAssets } from '@/lib/assetCapture';
 import {
+  linkManagedAssetsFromMessageText,
+  markAssetDone,
+  markAssetFailed,
+  registerAsset,
+  type AssetKind,
+  type AssetOrigin,
+} from '@/lib/downloadRegistry';
+import {
   parseUltracodePrompt,
   summarizeUltracodeResult,
   ultracodeAccepted,
@@ -225,6 +236,7 @@ import {
   extractJsonObject,
   modelStrategyGuidance,
   buildAssetCapabilityBlock,
+  shouldUseAssetCapabilityBlockForPrompt,
 } from '@/lib/anthropic';
 import {
   INTERACTION_PROTOCOL,
@@ -628,7 +640,7 @@ export interface StoreState {
   ) => void;
   generateSpritePrompt: (
     text: string,
-    options?: { providerId?: SpriteProviderId; model?: string },
+    options?: { providerId?: ImageProviderId; model?: string },
   ) => void;
   /**
    * ComfyUI mode turn: ask the selected coding model to author a ComfyUI prompt
@@ -646,7 +658,7 @@ export interface StoreState {
    */
   generateUiPrompt: (text: string) => void;
   /**
-   * Search the enabled online 3D model libraries (Project Settings > 模型库) for
+   * Search the enabled online 3D model libraries (Project Settings > 在线模型库) for
    * the given query and render thumbnails / previews / downloads into the active
    * chat. Wired to the `/mesh-search` slash command in AIDock.
    */
@@ -1056,6 +1068,13 @@ function configuredCliGatewaySelection(): GatewaySelection | null {
   const selected = getCliRuntimeSnapshot().config.selected;
   if (selected.kind !== 'known' && selected.kind !== 'path') return null;
   return systemDefaultGatewaySelection(selected.adapter);
+}
+
+function persistGlobalGatewaySelection(selection: GatewaySelection): GatewaySelection {
+  const normalized = normalizeGatewaySelection(selection);
+  if (normalized.providerId) setActiveProviderId(normalized.providerId);
+  setActiveGatewaySelection(normalized);
+  return normalized;
 }
 
 function withNewSessionGatewayDefaults(workflow: IRGraph): IRGraph {
@@ -1665,6 +1684,12 @@ function threeDAssetFileName(src: string, index: number): string {
 async function downloadThreeDAssets(
   assets: string[],
   cwd?: string,
+  context?: {
+    sessionId?: string | null;
+    workspaceId?: string | null;
+    messageId?: string;
+    pendingAssetId?: string | null;
+  },
 ): Promise<{
   downloaded: Array<{ source: string; path: string }>;
   downloadErrors: Array<{ source: string; error: string }>;
@@ -1678,6 +1703,10 @@ async function downloadThreeDAssets(
       const saved = await downloadModelAsset(source, {
         cwd,
         fileName: threeDAssetFileName(source, index),
+        sessionId: context?.sessionId ?? undefined,
+        workspaceId: context?.workspaceId ?? null,
+        messageId: context?.messageId,
+        trackAssetId: downloaded.length === 0 ? (context?.pendingAssetId ?? undefined) : undefined,
       });
       downloaded.push({ source, path: saved.path });
     } catch (err) {
@@ -1754,7 +1783,7 @@ function meshSearchResultMarkdown(
   }
   if (result.items.length === 0 && result.linkOuts.length === 0) {
     if (settings.enabledIds.length === 0) {
-      lines.push('\n没有启用任何在线模型库。请在项目设置 > 模型库中启用并配置账号。');
+      lines.push('\n没有启用任何在线模型库。请在项目设置 > 在线模型库中启用并配置账号。');
     } else {
       lines.push('\n未找到匹配的在线模型结果。可以换成更通用的关键词再试，例如 `cartoon bear`、`low poly bear` 或 `teddy bear`。');
     }
@@ -1766,6 +1795,12 @@ async function downloadMeshSearchAssets(
   result: MeshSearchResult,
   settings: ReturnType<typeof loadMeshLibrarySettings>,
   cwd?: string,
+  context?: {
+    sessionId?: string | null;
+    workspaceId?: string | null;
+    messageId?: string;
+    pendingAssetId?: string | null;
+  },
 ): Promise<Map<string, string>> {
   const downloaded = new Map<string, string>();
   if (!settings.autoDownload) return downloaded;
@@ -1779,6 +1814,10 @@ async function downloadMeshSearchAssets(
       const saved = await downloadModelAsset(item.downloadUrl, {
         cwd,
         fileName: meshSearchAssetFileName(item.downloadUrl, item.format, index),
+        sessionId: context?.sessionId ?? undefined,
+        workspaceId: context?.workspaceId ?? null,
+        messageId: context?.messageId,
+        trackAssetId: downloaded.size === 0 ? (context?.pendingAssetId ?? undefined) : undefined,
       });
       downloaded.set(item.downloadUrl, saved.path);
       index += 1;
@@ -1798,6 +1837,69 @@ function meshSearchAssetFileName(src: string, format: string | undefined, index:
       ? format.toLowerCase()
       : 'glb');
   return `mesh-search-${index + 1}.${ext}`;
+}
+
+function generatedAssetExtension(kind: AssetKind): string {
+  switch (kind) {
+    case 'image':
+    case 'sprite':
+      return 'png';
+    case 'video':
+      return 'mp4';
+    case 'audio':
+    case 'music':
+    case 'speech':
+      return 'mp3';
+    case 'mesh':
+    case 'model':
+      return 'glb';
+    default:
+      return 'bin';
+  }
+}
+
+function registerPendingGeneratedAsset(input: {
+  kind: AssetKind;
+  origin: AssetOrigin;
+  provider?: string;
+  model?: string;
+  prompt: string;
+  sessionId?: string | null;
+  workspaceId?: string | null;
+  messageId: string;
+  titlePrefix: string;
+  meta?: Record<string, unknown>;
+}): string {
+  return registerAsset({
+    kind: input.kind,
+    source: 'generated',
+    origin: input.origin,
+    title: `${input.titlePrefix}.${generatedAssetExtension(input.kind)}`,
+    provider: input.provider,
+    model: input.model,
+    prompt: input.prompt,
+    sessionId: input.sessionId ?? undefined,
+    workspaceId: input.workspaceId ?? null,
+    messageId: input.messageId,
+    meta: input.meta,
+  });
+}
+
+function linkMessageManagedAssets(
+  message: Message,
+  sessionKey: WorkflowSessionKey,
+): void {
+  // The Asset Hub only tracks what the AI produced/handled (generated,
+  // downloaded, modified). Asset paths the user types are not AI-handled
+  // assets, so skip non-assistant messages.
+  if (message.role !== 'assistant') return;
+  if (!message.text.includes('.freeultracode')) return;
+  linkManagedAssetsFromMessageText({
+    text: message.text,
+    sessionId: sessionKey.sessionId,
+    workspaceId: sessionKey.workspaceId,
+    messageId: message.id,
+  });
 }
 
 function threeDFailureHint(message: string): string {
@@ -4685,10 +4787,9 @@ export const useStore = create<StoreState>((set, get) => ({
   },
 
   setGlobalRunSelection: (selection) => {
+    const normalized = persistGlobalGatewaySelection(selection);
     set((state) => {
       if (isWorkflowReadOnly(state)) return state;
-      const normalized = normalizeGatewaySelection(selection);
-      setActiveGatewaySelection(normalized);
       const workflow = workflowWithoutRunSnapshot(
         withSessionGatewayDefaults(state.workflow, normalized),
       );
@@ -4909,6 +5010,7 @@ export const useStore = create<StoreState>((set, get) => ({
       text: `/ultracode ${trimmed}`,
       createdAt: now,
     };
+    linkMessageManagedAssets(userMsg, sessionKey);
     const assistantId = shortId('m');
     const assistantMsg: Message = {
       id: assistantId,
@@ -5243,6 +5345,7 @@ export const useStore = create<StoreState>((set, get) => ({
       text: trimmed,
       createdAt: Date.now(),
     };
+    linkMessageManagedAssets(userMsg, aiEditingSession);
     const promptUpdate = applyPromptTitle(
       state,
       trimmed,
@@ -6089,12 +6192,15 @@ ${previousReply.slice(0, 4000)}
       // (warm context) instead of colliding on the same native --session-id.
       // Favorite reruns mint a fresh session per turn, so they need no queue.
       const runChatTurn = async () => {
+        const simpleAssetCapabilityBlock = shouldUseAssetCapabilityBlockForPrompt(trimmed)
+          ? assetCapabilityBlock
+          : '';
         const chatSystem = [
           SIMPLE_CHAT_SYSTEM,
           languageAdaptationPrompt(state.locale),
           personalBlock,
           gameExpertBlock,
-          assetCapabilityBlock,
+          simpleAssetCapabilityBlock,
           useCli ? projectMcpGuidance : '',
         ].join('');
         // Multi-turn context: the gateway/CLI takes a single string, so fold the
@@ -6159,6 +6265,13 @@ ${previousReply.slice(0, 4000)}
           // asking can't spin forever.
           let continuation = '';
           let finalAnswer = '';
+          // 「会话文件」列表只能从消息文本里的 <<FUC_TOOL>> 哨兵解析出本会话
+          // AI 读/改过的文件。CLI 回合最终化时用的是不含哨兵的纯净答复
+          // （result/acc），会把流式期间出现过的工具事件抹掉，导致文件先显示
+          // 后消失、且下一轮扫不到历史活动。这里把每个回合流式收集到的哨兵
+          // 累加起来，最终化时补回消息文本，保证本会话所有 AI 改动文件持续可见。
+          let streamedToolSentinels = '';
+          let latestCliLive = '';
           for (let round = 0; round < MAX_INTERACTION_ROUNDS; round += 1) {
             let answer = '';
             if (useCli) {
@@ -6230,6 +6343,15 @@ ${previousReply.slice(0, 4000)}
               }
               if (nativeSession) nativeSession.started = true;
               if (!answer.trim() && live.trim()) answer = live;
+              // Preserve any tool-call sentinels the CLI streamed this round so
+              // the session-files list keeps the files this turn read/edited.
+              latestCliLive = live;
+              if (hasToolSentinel(live)) {
+                const { patches } = extractToolSentinels(live);
+                for (const patch of patches) {
+                  streamedToolSentinels += encodeToolPatch(patch);
+                }
+              }
             } else {
               let full = '';
               setActive(withAiTiming(routedBody(routeLine, '⟳ 生成中…')));
@@ -6271,8 +6393,19 @@ ${previousReply.slice(0, 4000)}
             continuation = formatAnswerForPrompt(req, userAnswer);
           }
           const turnMessageId = activeId;
+          // Re-attach the tool sentinels captured while streaming so the answer
+          // bubble keeps its tool cards AND the session-files list keeps the
+          // files this turn touched (it parses <<FUC_TOOL>> sentinels from the
+          // persisted message text). Without this, the clean CLI reply replaces
+          // the streamed text and every read/edited file vanishes from the list.
+          const finalProse = finalAnswer.trim() || '（模型没有返回内容）';
+          const finalBody = finalChatBodyWithStreamedTools(
+            finalProse,
+            latestCliLive,
+            streamedToolSentinels,
+          );
           setActive(
-            withAiTiming(routedBody(routeLine, finalAnswer.trim() || '（模型没有返回内容）')),
+            withAiTiming(routedBody(routeLine, finalBody)),
             true,
           );
           if (useCli && !replayFavoriteSimpleChat && nativeSession) {
@@ -7888,13 +8021,28 @@ const VIDEO_PROMPT_SYSTEM = `你是专业的"视频生成提示词工程师"。�
 const SPRITE_PROMPT_SYSTEM = `你是专业的"Sprite 动画提示词工程师"。用户会给出一句关于想要生成的 sprite、spritesheet、像素角色、技能特效或动作帧的描述，你要把它扩写成一段高质量、可直接喂给 sprite 动画生成模型的提示词。
 要求：
 - 直接输出最终提示词正文，不要任何解释、前后缀、标题、引号或代码块。
-- 补全主体、视角、动作、风格、帧数意图、循环方式、透明背景、裁切、安全边距、角色一致性和导出用途。
+- 补全主体、视角、动作、风格、帧数意图、循环方式、raw spritesheet 背景、裁切、安全边距、角色一致性和导出用途。
 - 优先生成单个主体；除非用户明确要求，不要多角色、复杂背景、文字、UI 或相机移动。
 - 动画需求要说明动作阶段，例如 idle/walk/run/attack/jump/hit/death 或 VFX loop，并强调主体大小、朝向和中心位置稳定。
-- Sprite sheet 要强调 transparent background、clean silhouette、consistent proportions、even frame spacing、game-ready sprite sheet。
+- Sprite sheet 要强调 exact grid、solid chroma key background、clean silhouette、consistent proportions、even frame spacing、game-ready sprite sheet。
+- 如果目标是可抠底 Sprite，优先使用纯 #FF00FF raw 背景；不要要求模型直接画透明背景、格线、边框、文字或标签。
+- 同一张 sheet 只包含一个动作；walk/run/attack/death 等不同动作要拆成不同 sheet。
+- 强调所有帧主体尺度一致、锚点稳定、留安全边距、不贴边，方便后处理切帧、对齐、质检。
 - 保留用户明确指定的内容；用户没提到的细节由你做合理且不喧宾夺主的补充。
 - 不要要求模仿在世真人、受版权角色或受保护 IP；用可授权的风格描述替代。
 - 与用户输入语言保持一致（中文需求输出中文提示词，英文需求输出英文提示词）。`;
+
+function spritePromptSystem(): string {
+  const settings = loadSpriteGenerationSettings();
+  const grid = spriteSheetGridForSettings(settings);
+  return `${SPRITE_PROMPT_SYSTEM}
+
+当前 Sprite Forge 兼容约束：
+- 默认 sheet 网格：${grid.rows} 行 x ${grid.columns} 列，共 ${grid.cells} 帧。
+- 默认单帧尺寸：${settings.defaultFrameSize}px；主体 fit scale：${settings.fitScale}。
+- raw sheet 背景：${settings.removeBackground ? settings.chromaKey : 'transparent-or-clean'}；后处理会按该背景抠底。
+- 帧锚点：${settings.frameAnchor}；主体保留模式：${settings.componentMode}；${settings.rejectEdgeTouch ? '拒绝贴边帧' : '允许贴边帧'}。`;
+}
 
 // ComfyUI authoring instruction. Unlike the image/music/3D prompt refiners
 // (which produce a plain prompt string), this asks the coding model to emit a
@@ -8443,7 +8591,7 @@ async function refineSpritePromptViaModel(
     sessionId: ch.sessionId,
   });
   const preferCliForProjectMcp = isTauri() && !!projectMcpGuidance;
-  const system = `${SPRITE_PROMPT_SYSTEM}${projectMcpGuidance}`;
+  const system = `${spritePromptSystem()}${projectMcpGuidance}`;
   const direct = resolveDirectGatewayRoute(codingSelection);
   if (direct && !preferCliForProjectMcp) {
     let full = '';
@@ -8573,6 +8721,7 @@ function startImageGenerationTurn(
     text,
     createdAt: now,
   };
+  linkMessageManagedAssets(userMsg, sessionKey);
   const assistantId = shortId('m');
   const assistantMsg: Message = {
     id: assistantId,
@@ -8643,6 +8792,7 @@ function startImageGenerationTurn(
       `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(
         Date.now() - startedAt,
       )}`;
+    let pendingAssetId: string | null = null;
     try {
       // ── Step ① — ask the selected coding/text model to author the image
       // prompt. When no text-model backend is reachable (browser without an API
@@ -8681,6 +8831,17 @@ function startImageGenerationTurn(
       const promptModelLine = refineHeader
         ? `✎ 提示词模型：${refineHeader}\n`
         : '';
+      pendingAssetId = registerPendingGeneratedAsset({
+        kind: 'image',
+        origin: imageProviderById(providerId).local ? 'local' : 'remote',
+        provider: providerLabel,
+        model,
+        prompt: imagePrompt,
+        sessionId: ch.sessionId,
+        workspaceId: ch.workspaceId,
+        messageId: assistantId,
+        titlePrefix: 'image',
+      });
       setAssistant(
         `${elapsed()}\n${promptModelLine}② 已生成提示词，正在出图…\n\n生图提示词：${imagePrompt}`,
         false,
@@ -8696,6 +8857,8 @@ function startImageGenerationTurn(
       );
       const body = imageResultMarkdown(result);
       setAssistant(`${elapsed()}\n${promptModelLine}${body}`, true);
+      const capturePendingAssetId = pendingAssetId;
+      pendingAssetId = null;
       void captureGeneratedAssets({
         kind: 'image',
         sources: result.images,
@@ -8704,8 +8867,11 @@ function startImageGenerationTurn(
         model: result.model,
         prompt: result.prompt,
         sessionId: ch.sessionId ?? undefined,
+        workspaceId: ch.workspaceId,
+        messageId: assistantId,
         cwd: ch.workspaceRootPath ?? undefined,
         titlePrefix: 'image',
+        pendingAssetId: capturePendingAssetId ?? undefined,
       });
       commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [text]));
       syncAndPersistSessionRunStatus(sessionKey, 'success');
@@ -8714,6 +8880,7 @@ function startImageGenerationTurn(
       if (ch.abortController.signal.aborted) return;
       const rawMsg = err instanceof Error ? err.message : String(err);
       const msg = friendlyImageGenerationError(rawMsg);
+      if (pendingAssetId) markAssetFailed(pendingAssetId, msg);
       setAssistant(
         `${elapsed()} · 失败\n✗ 图片生成失败: ${msg}\n\n请在设置 > 生图中配置可用的图片 Provider，或切换到本地 ComfyUI。`,
         true,
@@ -8760,6 +8927,7 @@ function startMusicGenerationTurn(
     text,
     createdAt: now,
   };
+  linkMessageManagedAssets(userMsg, sessionKey);
   const assistantId = shortId('m');
   const assistantMsg: Message = {
     id: assistantId,
@@ -8830,6 +8998,7 @@ function startMusicGenerationTurn(
       `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(
         Date.now() - startedAt,
       )}`;
+    let pendingAssetId: string | null = null;
     try {
       let musicPrompt = generationPrompt;
       let refineHeader = '';
@@ -8859,6 +9028,17 @@ function startMusicGenerationTurn(
       const promptModelLine = refineHeader
         ? `✎ 提示词模型：${refineHeader}\n`
         : '';
+      pendingAssetId = registerPendingGeneratedAsset({
+        kind: 'music',
+        origin: provider?.local ? 'local' : 'remote',
+        provider: providerLabel,
+        model,
+        prompt: musicPrompt,
+        sessionId: ch.sessionId,
+        workspaceId: ch.workspaceId,
+        messageId: assistantId,
+        titlePrefix: 'music',
+      });
       setAssistant(
         `${elapsed()}\n${promptModelLine}② 已生成提示词，正在调用${
           provider?.local ? '本地音乐模型' : '音乐 API'
@@ -8877,6 +9057,8 @@ function startMusicGenerationTurn(
         settings,
       );
       setAssistant(`${elapsed()}\n${promptModelLine}${musicResultMarkdown(result)}`, true);
+      const capturePendingAssetId = pendingAssetId;
+      pendingAssetId = null;
       void captureGeneratedAssets({
         kind: 'music',
         sources: result.audios,
@@ -8885,14 +9067,18 @@ function startMusicGenerationTurn(
         model: result.model,
         prompt: result.prompt,
         sessionId: ch.sessionId ?? undefined,
+        workspaceId: ch.workspaceId,
+        messageId: assistantId,
         cwd: ch.workspaceRootPath ?? undefined,
         titlePrefix: 'music',
+        pendingAssetId: capturePendingAssetId ?? undefined,
       });
       commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [text]));
       syncAndPersistSessionRunStatus(sessionKey, 'success');
     } catch (err) {
       if (!aiEditRegistered(ch)) return;
       const msg = err instanceof Error ? err.message : String(err);
+      if (pendingAssetId) markAssetFailed(pendingAssetId, msg);
       setAssistant(
         `${elapsed()} · 失败\n✗ 音乐生成失败: ${msg}\n\n请在设置 > 音乐渠道中配置可用的商用或免费 Provider。`,
         true,
@@ -8940,6 +9126,7 @@ function startThreeDGenerationTurn(
     text,
     createdAt: now,
   };
+  linkMessageManagedAssets(userMsg, sessionKey);
   const assistantId = shortId('m');
   const assistantMsg: Message = {
     id: assistantId,
@@ -9020,6 +9207,7 @@ function startThreeDGenerationTurn(
       `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(
         Date.now() - startedAt,
       )}`;
+    let pendingAssetId: string | null = null;
     try {
       let threeDPrompt = generationPrompt;
       let refineHeader = '';
@@ -9049,6 +9237,18 @@ function startThreeDGenerationTurn(
       const promptModelLine = refineHeader
         ? `✎ 提示词模型：${refineHeader}\n`
         : '';
+      pendingAssetId = registerPendingGeneratedAsset({
+        kind: 'mesh',
+        origin: provider?.local ? 'local' : 'remote',
+        provider: providerLabel,
+        model,
+        prompt: threeDPrompt,
+        sessionId: ch.sessionId,
+        workspaceId: ch.workspaceId,
+        messageId: assistantId,
+        titlePrefix: '3d-model',
+        meta: { rigging },
+      });
       setAssistant(
         `${elapsed()}\n${promptModelLine}② 已生成提示词，正在调用${
           provider?.local ? '本地 3D 模型' : '3D API'
@@ -9071,7 +9271,25 @@ function startThreeDGenerationTurn(
       const downloads = await downloadThreeDAssets(
         result.assets,
         state.composer.workspace || undefined,
+        {
+          sessionId: ch.sessionId,
+          workspaceId: ch.workspaceId,
+          messageId: assistantId,
+          pendingAssetId,
+        },
       );
+      if (pendingAssetId) {
+        if (downloads.downloadErrors.length > 0 && downloads.downloaded.length === 0) {
+          markAssetFailed(pendingAssetId, downloads.downloadErrors[0].error);
+        } else if (downloads.downloaded.length === 0) {
+          markAssetDone(pendingAssetId, {
+            remoteUrl: result.assets[0],
+            title: '3d-model.glb',
+            meta: { rigging },
+          });
+        }
+        pendingAssetId = null;
+      }
       setAssistant(
         `${elapsed()}\n${promptModelLine}${threeDResultMarkdown({
           ...result,
@@ -9084,6 +9302,7 @@ function startThreeDGenerationTurn(
     } catch (err) {
       if (!aiEditRegistered(ch)) return;
       const msg = err instanceof Error ? err.message : String(err);
+      if (pendingAssetId) markAssetFailed(pendingAssetId, msg);
       setAssistant(
         `${elapsed()} · 失败\n✗ 3D 模型生成失败: ${msg}\n\n${threeDFailureHint(msg)}`,
         true,
@@ -9130,6 +9349,7 @@ function startVideoGenerationTurn(
     text,
     createdAt: now,
   };
+  linkMessageManagedAssets(userMsg, sessionKey);
   const assistantId = shortId('m');
   const assistantMsg: Message = {
     id: assistantId,
@@ -9200,6 +9420,7 @@ function startVideoGenerationTurn(
       `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(
         Date.now() - startedAt,
       )}`;
+    let pendingAssetId: string | null = null;
     try {
       let videoPrompt = generationPrompt;
       let refineHeader = '';
@@ -9229,6 +9450,17 @@ function startVideoGenerationTurn(
       const promptModelLine = refineHeader
         ? `✎ 提示词模型：${refineHeader}\n`
         : '';
+      pendingAssetId = registerPendingGeneratedAsset({
+        kind: 'video',
+        origin: provider?.local ? 'local' : 'remote',
+        provider: providerLabel,
+        model,
+        prompt: videoPrompt,
+        sessionId: ch.sessionId,
+        workspaceId: ch.workspaceId,
+        messageId: assistantId,
+        titlePrefix: 'video',
+      });
       setAssistant(
         `${elapsed()}\n${promptModelLine}② 已生成提示词，正在调用${
           provider?.local ? '本地视频模型' : '视频 API'
@@ -9247,6 +9479,8 @@ function startVideoGenerationTurn(
         settings,
       );
       setAssistant(`${elapsed()}\n${promptModelLine}${videoResultMarkdown(result)}`, true);
+      const capturePendingAssetId = pendingAssetId;
+      pendingAssetId = null;
       void captureGeneratedAssets({
         kind: 'video',
         sources: result.videos,
@@ -9255,14 +9489,18 @@ function startVideoGenerationTurn(
         model: result.model,
         prompt: result.prompt,
         sessionId: ch.sessionId ?? undefined,
+        workspaceId: ch.workspaceId,
+        messageId: assistantId,
         cwd: ch.workspaceRootPath ?? undefined,
         titlePrefix: 'video',
+        pendingAssetId: capturePendingAssetId ?? undefined,
       });
       commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [text]));
       syncAndPersistSessionRunStatus(sessionKey, 'success');
     } catch (err) {
       if (!aiEditRegistered(ch)) return;
       const msg = err instanceof Error ? err.message : String(err);
+      if (pendingAssetId) markAssetFailed(pendingAssetId, msg);
       setAssistant(
         `${elapsed()} · 失败\n✗ 视频生成失败: ${msg}\n\n请在设置 > 视频渠道中配置可用的商用或免费 Provider。`,
         true,
@@ -9307,6 +9545,7 @@ function startSpeechGenerationTurn(
     text,
     createdAt: now,
   };
+  linkMessageManagedAssets(userMsg, sessionKey);
   const assistantId = shortId('m');
   const assistantMsg: Message = {
     id: assistantId,
@@ -9379,6 +9618,17 @@ function startSpeechGenerationTurn(
       `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(
         Date.now() - startedAt,
       )}`;
+    let pendingAssetId: string | null = registerPendingGeneratedAsset({
+      kind: 'speech',
+      origin: provider?.local ? 'local' : 'remote',
+      provider: providerLabel,
+      model,
+      prompt: generationPrompt,
+      sessionId: ch.sessionId,
+      workspaceId: ch.workspaceId,
+      messageId: assistantId,
+      titlePrefix: 'speech',
+    });
     try {
       setAssistant(
         `${elapsed()}\n② 正在调用${
@@ -9397,6 +9647,8 @@ function startSpeechGenerationTurn(
         settings,
       );
       setAssistant(`${elapsed()}\n${speechResultMarkdown(result)}`, true);
+      const capturePendingAssetId = pendingAssetId;
+      pendingAssetId = null;
       void captureGeneratedAssets({
         kind: 'speech',
         sources: result.audios,
@@ -9405,14 +9657,18 @@ function startSpeechGenerationTurn(
         model: result.model,
         prompt: result.prompt,
         sessionId: ch.sessionId ?? undefined,
+        workspaceId: ch.workspaceId,
+        messageId: assistantId,
         cwd: ch.workspaceRootPath ?? undefined,
         titlePrefix: 'speech',
+        pendingAssetId: capturePendingAssetId ?? undefined,
       });
       commitAiChannelBlueprint(ch, appendStartUserInputs(ch.workflow, [text]));
       syncAndPersistSessionRunStatus(sessionKey, 'success');
     } catch (err) {
       if (!aiEditRegistered(ch)) return;
       const msg = err instanceof Error ? err.message : String(err);
+      if (pendingAssetId) markAssetFailed(pendingAssetId, msg);
       setAssistant(
         `${elapsed()} · 失败\n✗ 语音合成失败: ${msg}\n\n请在设置 > 语音渠道中配置可用的商用或免费 Provider。`,
         true,
@@ -9426,7 +9682,7 @@ function startSpeechGenerationTurn(
 
 function startSpriteGenerationTurn(
   text: string,
-  options: { providerId?: SpriteProviderId; model?: string } = {},
+  options: { providerId?: ImageProviderId; model?: string } = {},
 ): void {
   const prompt = stripSpriteCommand(text);
   if (!prompt) return;
@@ -9435,8 +9691,18 @@ function startSpriteGenerationTurn(
   const generationPrompt = modeContextPrompt(state, 'sprite', prompt);
   const sessionKey = activeWorkflowSessionKey(state);
   const settings = loadSpriteGenerationSettings();
+  const imageSettings = loadImageGenerationSettings();
   if (!settings.enabled) return;
-  const providerId = options.providerId ?? preferredReadySpriteProviderId(settings);
+  const providerId = options.providerId ?? imageSettings.preferredProviderId;
+  if (!imageProviderReady(providerId, imageSettings)) {
+    useStore
+      .getState()
+      .appendChatNote(
+        `✗ ${friendlyImageGenerationError(`IMAGE_PROVIDER_NOT_READY:${providerId}`)}`,
+        'system',
+      );
+    return;
+  }
   const codingSelection = workflowDefaultGatewaySelection(
     state.workflow,
     state.composer.model,
@@ -9447,11 +9713,10 @@ function startSpriteGenerationTurn(
 
   const now = Date.now();
   const providerLabel = providerId
-    ? spriteProviderById(providerId).label
-    : 'Sprite generation';
-  const provider = providerId ? spriteProviderById(providerId) : null;
+    ? imageProviderById(providerId).label
+    : '图片 Provider';
   const model = providerId
-    ? options.model?.trim() || spriteProviderModel(providerId, settings)
+    ? options.model?.trim() || imageProviderModel(providerId, imageSettings)
     : options.model?.trim() || '';
   const userMsg: Message = {
     id: shortId('m'),
@@ -9459,11 +9724,12 @@ function startSpriteGenerationTurn(
     text,
     createdAt: now,
   };
+  linkMessageManagedAssets(userMsg, sessionKey);
   const assistantId = shortId('m');
   const assistantMsg: Message = {
     id: assistantId,
     role: 'assistant',
-    text: `⚙ Sprite 动画：${providerLabel}${model ? ` · 模型：${model}` : ''}\n① 正在让模型撰写 Sprite 提示词…`,
+    text: `⚙ Sprite 动画：复用生图渠道 ${providerLabel}${model ? ` · 模型：${model}` : ''}\n① 正在让模型撰写 Sprite 提示词…`,
     routeLabel: model ? `${providerLabel} · ${model}` : providerLabel,
     createdAt: now + 1,
   };
@@ -9529,6 +9795,7 @@ function startSpriteGenerationTurn(
       `⏱ ${formatClock(startedAt)} → ${formatClock(Date.now())} · 耗时 ${formatDuration(
         Date.now() - startedAt,
       )}`;
+    let pendingAssetId: string | null = null;
     try {
       let spritePrompt = generationPrompt;
       let refineHeader = '';
@@ -9558,41 +9825,63 @@ function startSpriteGenerationTurn(
       const promptModelLine = refineHeader
         ? `✎ 提示词模型：${refineHeader}\n`
         : '';
+      pendingAssetId = registerPendingGeneratedAsset({
+        kind: 'sprite',
+        origin: providerId && imageProviderById(providerId).local ? 'local' : 'remote',
+        provider: providerLabel,
+        model,
+        prompt: spritePrompt,
+        sessionId: ch.sessionId,
+        workspaceId: ch.workspaceId,
+        messageId: assistantId,
+        titlePrefix: 'sprite',
+      });
       setAssistant(
-        `${elapsed()}\n${promptModelLine}② 已生成提示词，正在调用${
-          provider?.local ? '本地开源 Sprite 管线' : '商用 Sprite API'
-        }…\n\nSprite 提示词：${spritePrompt}`,
+        `${elapsed()}\n${promptModelLine}② 已生成提示词，正在调用生图渠道生成 raw spritesheet…\n\nSprite 提示词：${spritePrompt}`,
         false,
       );
       const result = await generateSprite(
         {
           prompt: spritePrompt,
-          providerId: options.providerId,
+          providerId,
           model: options.model,
           signal: ch.abortController.signal,
         },
         settings,
+        imageSettings,
       );
       setAssistant(
         `${elapsed()}\n${promptModelLine}${spriteResultMarkdown(result)}`,
         true,
       );
       {
-        const spriteOrigin = spriteProviderById(result.providerId).local
+        const spriteOrigin = imageProviderById(result.providerId).local
           ? 'local'
           : 'remote';
-        void captureGeneratedAssets({
-          kind: 'sprite',
-          sources: [...result.spritesheets, ...result.gifs, ...result.frames],
-          origin: spriteOrigin,
-          provider: result.providerLabel,
-          model: result.model,
-          prompt: result.prompt,
-          sessionId: ch.sessionId ?? undefined,
-          cwd: ch.workspaceRootPath ?? undefined,
-          titlePrefix: 'sprite',
-          meta: { mode: result.mode, frameCount: result.frameCount },
-        });
+        const spriteSources = [
+          ...result.spritesheets,
+          ...result.gifs,
+          ...result.frames,
+        ];
+        const capturePendingAssetId = pendingAssetId;
+        pendingAssetId = null;
+        if (spriteSources.length || !result.videos.length) {
+          void captureGeneratedAssets({
+            kind: 'sprite',
+            sources: spriteSources,
+            origin: spriteOrigin,
+            provider: result.providerLabel,
+            model: result.model,
+            prompt: result.prompt,
+            sessionId: ch.sessionId ?? undefined,
+            workspaceId: ch.workspaceId,
+            messageId: assistantId,
+            cwd: ch.workspaceRootPath ?? undefined,
+            titlePrefix: 'sprite',
+            pendingAssetId: capturePendingAssetId ?? undefined,
+            meta: { mode: result.mode, frameCount: result.frameCount },
+          });
+        }
         if (result.videos.length) {
           void captureGeneratedAssets({
             kind: 'video',
@@ -9602,8 +9891,13 @@ function startSpriteGenerationTurn(
             model: result.model,
             prompt: result.prompt,
             sessionId: ch.sessionId ?? undefined,
+            workspaceId: ch.workspaceId,
+            messageId: assistantId,
             cwd: ch.workspaceRootPath ?? undefined,
             titlePrefix: 'sprite-video',
+            pendingAssetId: spriteSources.length
+              ? undefined
+              : (capturePendingAssetId ?? undefined),
           });
         }
       }
@@ -9612,8 +9906,10 @@ function startSpriteGenerationTurn(
     } catch (err) {
       if (!aiEditRegistered(ch)) return;
       const msg = err instanceof Error ? err.message : String(err);
+      const friendlyMsg = friendlyImageGenerationError(msg);
+      if (pendingAssetId) markAssetFailed(pendingAssetId, friendlyMsg);
       setAssistant(
-        `${elapsed()} · 失败\n✗ Sprite 动画生成失败: ${msg}\n\n请在设置 > Sprite 中配置商用或本地开源 Provider。`,
+        `${elapsed()} · 失败\n✗ Sprite 动画生成失败: ${friendlyMsg}\n\nSprite 复用设置 > 生图 的 Provider，请先配置可用生图渠道。`,
         true,
       );
       syncAndPersistSessionRunStatus(sessionKey, 'error');
@@ -9642,6 +9938,7 @@ function startMeshSearchTurn(text: string): void {
     text,
     createdAt: now,
   };
+  linkMessageManagedAssets(userMsg, sessionKey);
   const assistantId = shortId('m');
   const assistantMsg: Message = {
     id: assistantId,
@@ -9767,6 +10064,11 @@ function startMeshSearchTurn(text: string): void {
         result,
         settings,
         state.composer.workspace || undefined,
+        {
+          sessionId: ch.sessionId,
+          workspaceId: ch.workspaceId,
+          messageId: assistantId,
+        },
       );
       if (!aiEditRegistered(ch)) return;
       setAssistant(
@@ -9784,7 +10086,7 @@ function startMeshSearchTurn(text: string): void {
       if (!aiEditRegistered(ch)) return;
       const msg = err instanceof Error ? err.message : String(err);
       setAssistant(
-        `${elapsed()} · 失败\n✗ 在线模型库搜索失败: ${msg}\n\n请检查网络，或在项目设置 > 模型库中配置账号 API Key 后重试。`,
+        `${elapsed()} · 失败\n✗ 在线模型库搜索失败: ${msg}\n\n请检查网络，或在项目设置 > 在线模型库中配置账号 API Key 后重试。`,
         true,
       );
       syncAndPersistSessionRunStatus(sessionKey, 'error');
@@ -10274,6 +10576,129 @@ function gatewayRouteHeader(route: RouteDisplay | null | undefined): string {
 function routedBody(routeLine: string, body: string): string {
   const text = body.trim() ? body : '⟳ 生成中…';
   return routeLine ? `${routeLine}\n${text}` : text;
+}
+
+function finalChatBodyWithStreamedTools(
+  finalProse: string,
+  latestLive: string,
+  fallbackSentinels: string,
+): string {
+  if (!fallbackSentinels) return finalProse;
+  const ordered = orderedFinalBodyFromLiveTools(finalProse, latestLive);
+  if (!ordered) return `${fallbackSentinels}${finalProse}`;
+
+  const orderedKeys = new Set(
+    extractToolSentinels(ordered).patches.map(toolPatchIdentity),
+  );
+  const missingPatches = extractToolSentinels(fallbackSentinels).patches.filter(
+    (patch) => !orderedKeys.has(toolPatchIdentity(patch)),
+  );
+  if (missingPatches.length === 0) return ordered;
+  return `${ordered}${missingPatches.map(encodeToolPatch).join('')}`;
+}
+
+function orderedFinalBodyFromLiveTools(
+  finalProse: string,
+  latestLive: string,
+): string | null {
+  if (!hasToolSentinel(latestLive)) return null;
+  const split = extractToolSentinels(latestLive);
+  if (split.patches.length === 0) return null;
+
+  const answerRange = findTextRangeIgnoringWhitespace(split.text, finalProse);
+  if (!answerRange) return null;
+  const insertions: Array<{ offset: number; text: string }> = [];
+  let cleanOffset = 0;
+
+  for (const part of split.parts) {
+    if ('text' in part) {
+      cleanOffset += part.text.length;
+      continue;
+    }
+    const offset =
+      cleanOffset <= answerRange.start
+        ? 0
+        : cleanOffset >= answerRange.end
+          ? finalProse.length
+          : finalOffsetForCleanOffset(
+              split.text,
+              finalProse,
+              answerRange.start,
+              cleanOffset,
+            );
+    insertions.push({ offset, text: encodeToolPatch(part.patch) });
+  }
+
+  let out = '';
+  let cursor = 0;
+  for (const insertion of insertions.sort((a, b) => a.offset - b.offset)) {
+    out += finalProse.slice(cursor, insertion.offset);
+    out += insertion.text;
+    cursor = insertion.offset;
+  }
+  return out + finalProse.slice(cursor);
+}
+
+function findTextRangeIgnoringWhitespace(
+  haystack: string,
+  needle: string,
+): { start: number; end: number } | null {
+  const target = Array.from(needle).filter(isNonWhitespace).join('');
+  if (!target) return null;
+
+  let best: { start: number; end: number } | null = null;
+  let normalized = '';
+  let start = -1;
+  for (let i = 0; i < haystack.length; i += 1) {
+    const ch = haystack[i];
+    if (!isNonWhitespace(ch)) continue;
+    if (start === -1) start = i;
+    normalized += ch;
+    while (normalized.length > target.length) {
+      start = nextNonWhitespaceIndex(haystack, start + 1);
+      normalized = normalized.slice(1);
+    }
+    if (normalized === target) {
+      best = { start, end: i + 1 };
+    }
+  }
+  return best;
+}
+
+function finalOffsetForCleanOffset(
+  cleanText: string,
+  finalProse: string,
+  cleanStart: number,
+  cleanOffset: number,
+): number {
+  let nonWhitespaceBefore = 0;
+  for (let i = cleanStart; i < cleanOffset && i < cleanText.length; i += 1) {
+    if (isNonWhitespace(cleanText[i])) nonWhitespaceBefore += 1;
+  }
+  if (nonWhitespaceBefore <= 0) return 0;
+
+  let seen = 0;
+  for (let i = 0; i < finalProse.length; i += 1) {
+    if (!isNonWhitespace(finalProse[i])) continue;
+    seen += 1;
+    if (seen === nonWhitespaceBefore) return i + 1;
+  }
+  return finalProse.length;
+}
+
+function nextNonWhitespaceIndex(text: string, from: number): number {
+  for (let i = from; i < text.length; i += 1) {
+    if (isNonWhitespace(text[i])) return i;
+  }
+  return text.length;
+}
+
+function isNonWhitespace(ch: string): boolean {
+  return !/\s/u.test(ch);
+}
+
+function toolPatchIdentity(patch: unknown): string {
+  return JSON.stringify(patch);
 }
 
 function transcriptText(message: Message): string {

@@ -136,7 +136,8 @@ export function parseInteraction(text: string): InteractionRequest | null {
   if (open === -1) return null;
   const afterOpen = text.slice(open + ASK_OPEN.length);
   const close = afterOpen.indexOf(ASK_CLOSE);
-  const body = close === -1 ? afterOpen : afterOpen.slice(0, close);
+  if (close === -1) return null;
+  const body = afterOpen.slice(0, close);
   const jsonSpan = firstJsonObject(body);
   if (!jsonSpan) return null;
 

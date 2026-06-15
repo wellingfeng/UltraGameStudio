@@ -1,10 +1,14 @@
 import type { IRGraph } from '@/core/ir';
 import { runShellPayload } from '@/lib/shellConfig';
 import {
+  markAssetDone,
   markDownloadDone,
   markDownloadFailed,
   registerAsset,
   startDownload,
+  type AssetKind,
+  type AssetOrigin,
+  type AssetSource,
 } from '@/lib/downloadRegistry';
 
 /**
@@ -102,6 +106,13 @@ export interface InstalledSkill {
   skillFile: string;
   sourceUrl?: string | null;
   overwritten: boolean;
+}
+
+export interface SkillUninstallResult {
+  targetId: string;
+  slug: string;
+  path: string;
+  removed: boolean;
 }
 
 export interface UltracodeRunOptions {
@@ -441,6 +452,17 @@ export interface GeneratedAssetSave {
   path: string;
   sizeBytes: number;
   fileName: string;
+}
+
+export interface CachedAssetFile {
+  kind: AssetKind;
+  source: AssetSource;
+  origin: AssetOrigin;
+  title: string;
+  localPath: string;
+  sizeBytes: number;
+  createdAtMs?: number | null;
+  modifiedAtMs?: number | null;
 }
 
 export interface ClipboardImageSaveRequest {
@@ -1479,7 +1501,14 @@ export async function readModelAssetDataUrl(
 /** Download a remote 3D model into the workspace cache. */
 export async function downloadModelAsset(
   url: string,
-  opts?: { cwd?: string; fileName?: string },
+  opts?: {
+    cwd?: string;
+    fileName?: string;
+    sessionId?: string;
+    workspaceId?: string | null;
+    messageId?: string;
+    trackAssetId?: string;
+  },
 ): Promise<ModelAssetDownload> {
   if (!tauriAvailable()) {
     throw new Error('NO_BACKEND');
@@ -1487,21 +1516,35 @@ export async function downloadModelAsset(
   const invoke = await getInvoke();
   // Surface the transfer in the Downloads panel. Tracking is best-effort and
   // must never change the function's success/failure contract.
-  const trackId = startDownload({
-    url,
-    fileName: opts?.fileName,
-    kind: 'model',
-  });
+  const trackId =
+    opts?.trackAssetId ??
+    startDownload({
+      url,
+      fileName: opts?.fileName,
+      kind: 'model',
+      sessionId: opts?.sessionId,
+      workspaceId: opts?.workspaceId,
+      messageId: opts?.messageId,
+    });
   try {
     const result = await invoke<ModelAssetDownload>('download_model_asset', {
       url,
       cwd: opts?.cwd ?? null,
       fileName: opts?.fileName ?? null,
     });
-    markDownloadDone(trackId, {
-      path: result.path,
-      sizeBytes: result.sizeBytes,
-    });
+    if (opts?.trackAssetId) {
+      markAssetDone(trackId, {
+        localPath: result.path,
+        remoteUrl: url,
+        sizeBytes: result.sizeBytes,
+        title: opts.fileName,
+      });
+    } else {
+      markDownloadDone(trackId, {
+        path: result.path,
+        sizeBytes: result.sizeBytes,
+      });
+    }
     return result;
   } catch (err) {
     markDownloadFailed(
@@ -1535,6 +1578,15 @@ export async function saveGeneratedAsset(params: {
     kind: params.kind,
     fileName: params.fileName ?? null,
     cwd: params.cwd ?? null,
+  });
+}
+
+/** List durable files in the workspace `.freeultracode` asset cache. */
+export async function listCachedAssets(cwd?: string | null): Promise<CachedAssetFile[]> {
+  if (!tauriAvailable()) return [];
+  const invoke = await getInvoke();
+  return invoke<CachedAssetFile[]>('list_cached_assets', {
+    cwd: cwd ?? null,
   });
 }
 
@@ -1690,6 +1742,59 @@ export async function installSkillFromUrl(params: {
     meta: { targetId: installed.targetId, slug: installed.slug },
   });
   return installed;
+}
+
+/** Write an app-curated SKILL.md into a local skill root and refresh the slash catalog. */
+export async function installSkillFromText(params: {
+  text: string;
+  name: string;
+  slug: string;
+  targetId: string;
+  overwrite?: boolean;
+  sourceUrl?: string | null;
+  projectRoot?: string | null;
+}): Promise<InstalledSkill> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  const installed = await invoke<InstalledSkill>('install_skill_from_text', {
+    text: params.text,
+    name: params.name,
+    slug: params.slug,
+    targetId: params.targetId,
+    overwrite: params.overwrite ?? false,
+    sourceUrl: params.sourceUrl ?? null,
+    projectRoot: params.projectRoot ?? null,
+  });
+  registerAsset({
+    kind: 'skill',
+    source: 'installed',
+    origin: 'local',
+    title: installed.name || installed.slug,
+    status: 'success',
+    localPath: installed.skillFile || installed.path,
+    remoteUrl: installed.sourceUrl ?? params.sourceUrl ?? undefined,
+    meta: { targetId: installed.targetId, slug: installed.slug },
+  });
+  return installed;
+}
+
+/** Remove a locally installed skill folder from a supported install target. */
+export async function uninstallSkill(params: {
+  targetId: string;
+  slug: string;
+  projectRoot?: string | null;
+}): Promise<SkillUninstallResult> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  return invoke<SkillUninstallResult>('uninstall_skill', {
+    targetId: params.targetId,
+    slug: params.slug,
+    projectRoot: params.projectRoot ?? null,
+  });
 }
 
 /** Scan PATH for supported local model CLIs. Desktop-only. */

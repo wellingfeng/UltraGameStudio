@@ -14,6 +14,8 @@ In einer Game-Engine macht Code nur einen kleinen Teil der Arbeit aus. Der Rest 
 <p align="center">
   <strong>3D-Modell-Generierung per Klick</strong><br>
   <img src="images/game/noYfqPt.png" alt="FreeUltraCode erzeugt ein 3D-Modell per Klick" width="960">
+  <br><br>
+  <img src="images/20260615-214236.jpg" alt="Vorschau eines von FreeUltraCode generierten 3D-Modells" width="960">
 </p>
 
 <p align="center">

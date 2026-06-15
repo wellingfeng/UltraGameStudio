@@ -26,9 +26,52 @@ describe('toolEvent sentinel codec', () => {
     expect(text).toContain('<<FUC_TOOL>>');
   });
 
-  it('drops a malformed sentinel body', () => {
-    const { patches } = extractToolSentinels('<<FUC_TOOL>>not json<<FUC_TOOL_END>>');
+  it('keeps a literal FUC_TOOL marker in prose instead of dropping it', () => {
+    // The model wrote the token itself (e.g. explaining the protocol). Its body
+    // isn't a valid patch, so it must survive as prose rather than be dropped.
+    const { text, patches } = extractToolSentinels(
+      '<<FUC_TOOL>>not json<<FUC_TOOL_END>>',
+    );
     expect(patches).toEqual([]);
+    expect(text).toContain('<<FUC_TOOL>>');
+  });
+
+  it('does not swallow real sentinels after a literal marker in prose', () => {
+    // Regression: a literal `<<FUC_TOOL>>` written in the answer used to pair
+    // with a genuine sentinel's `<<FUC_TOOL_END>>` downstream, treating the
+    // whole span as one unparseable block — which JSON.parse dropped, silently
+    // truncating the rendered message at the literal marker.
+    const real = encodeToolPatch({ id: 'a', name: 'Bash', status: 'done' });
+    const text = `prose mentioning <<FUC_TOOL>> then more prose${real}tail`;
+    const { text: out, patches } = extractToolSentinels(text);
+    expect(patches).toEqual([{ id: 'a', name: 'Bash', status: 'done' }]);
+    expect(out).toContain('<<FUC_TOOL>>');
+    expect(out).toContain('then more prose');
+    expect(out).toContain('tail');
+  });
+
+  it('round-trips a result that contains the literal sentinel markers', () => {
+    // Reading a file whose source mentions <<FUC_TOOL>> / <<FUC_TOOL_END>> must
+    // not let those markers prematurely close the block and leak as prose.
+    const result =
+      'const OPEN = "<<FUC_TOOL>>";\nconst CLOSE = "<<FUC_TOOL_END>>";\n';
+    const block = encodeToolPatch({ id: 'r', name: 'Read', status: 'done', result });
+    const { text, patches } = extractToolSentinels(`before${block}after`);
+    expect(text.replace(/\s/g, '')).toBe('beforeafter');
+    expect(patches).toEqual([{ id: 'r', name: 'Read', status: 'done', result }]);
+  });
+
+  it('keeps a subject with sentinel markers from leaking', () => {
+    const block = encodeToolPatch({
+      id: 's',
+      name: 'Grep',
+      status: 'running',
+      subject: '<<FUC_TOOL_END>>',
+    });
+    const { patches } = extractToolSentinels(block);
+    expect(patches).toEqual([
+      { id: 's', name: 'Grep', status: 'running', subject: '<<FUC_TOOL_END>>' },
+    ]);
   });
 
   it('merges a running + done patch into one event by id', () => {
@@ -118,6 +161,31 @@ describe('segmentMessage tool segments', () => {
 
   it('leaves plain text untouched (no tools)', () => {
     expect(segmentMessage('just prose')).toEqual([{ type: 'answer', text: 'just prose' }]);
+  });
+
+  it('does not leak prose when a tool result embeds sentinel markers', () => {
+    // Mirrors the real bug: reading a source file that contains the literal
+    // <<FUC_TOOL>> / <<FUC_TOOL_END>> strings used to truncate the JSON payload
+    // and spill the file body into the answer with escaped \n / \t.
+    const result =
+      'export const TOOL_OPEN = "<<FUC_TOOL>>";\n' +
+      'export const TOOL_CLOSE = "<<FUC_TOOL_END>>";\n';
+    const text =
+      'Let me read the file.' +
+      encodeToolPatch({ id: 'a', name: 'Read', status: 'running', subject: 'toolEvent.ts' }) +
+      encodeToolPatch({ id: 'a', status: 'done', durationMs: 12, result }) +
+      'Here is what I found.';
+    const segs = segmentMessage(text);
+    expect(segs.map((s) => s.type)).toEqual(['answer', 'tools', 'answer']);
+    const tools = segs.find((s) => s.type === 'tools');
+    expect(tools && tools.type === 'tools' && tools.events[0].result).toBe(result);
+    // No raw sentinel marker or escaped file body bleeds into the answers.
+    for (const s of segs) {
+      if (s.type === 'answer') {
+        expect(s.text).not.toContain('FUC_TOOL');
+        expect(s.text).not.toContain('TOOL_OPEN');
+      }
+    }
   });
 });
 

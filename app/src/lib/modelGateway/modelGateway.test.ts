@@ -1,5 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { completeGatewayText } from './modelGateway';
+import {
+  readUsageMeterSnapshot,
+  sessionCachePercent,
+} from '@/lib/usageMeter';
 
 const mocks = vi.hoisted(() => ({
   aiEditViaCli: vi.fn(),
@@ -30,6 +34,7 @@ vi.mock('./adapters/openaiCompatible', () => ({
 
 describe('completeGatewayText', () => {
   beforeEach(() => {
+    window.localStorage.clear();
     mocks.aiEditViaCli.mockReset();
     mocks.completeAnthropic.mockReset();
     mocks.completeOpenAICompatible.mockReset();
@@ -95,5 +100,42 @@ describe('completeGatewayText', () => {
         permission: 'full',
       }),
     );
+  });
+
+  it('records Anthropic-style CLI cache usage through the generic CLI parser', async () => {
+    mocks.aiEditViaCli.mockImplementation(async (_prompt, _adapter, opts) => {
+      opts.onUsage?.({
+        input_tokens: 120,
+        output_tokens: 40,
+        cache_read_input_tokens: 800,
+        cache_creation_input_tokens: 80,
+      });
+      return 'cli answer';
+    });
+
+    await completeGatewayText({
+      route: {
+        selection: { adapter: 'claude-code', modelClass: 'sonnet' },
+        adapter: 'claude-code',
+        modelClass: 'sonnet',
+        model: 'sonnet',
+        transport: 'cli',
+        mode: 'cli',
+        label: 'Claude Code',
+        source: 'fallback',
+      },
+      system: 'system prompt',
+      userContent: 'user prompt',
+      usageContext: { workspaceId: 'w1', sessionId: 's1' },
+    });
+
+    const snapshot = readUsageMeterSnapshot({
+      workspaceId: 'w1',
+      sessionId: 's1',
+    });
+    expect(snapshot.totals.inputTokens).toBe(1000);
+    expect(snapshot.totals.outputTokens).toBe(40);
+    expect(snapshot.totals.totalTokens).toBe(1040);
+    expect(sessionCachePercent(snapshot)).toBeCloseTo(88, 5);
   });
 });

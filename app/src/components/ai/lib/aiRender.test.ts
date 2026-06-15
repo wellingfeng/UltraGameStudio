@@ -95,6 +95,10 @@ describe('parseFileRef', () => {
       path: 'src/App.tsx',
       basename: 'App.tsx',
     });
+    expect(parseFileRef('@E:/ProjectMoon/MoonEngine/Engine/Runtime.cpp')).toEqual({
+      path: 'E:/ProjectMoon/MoonEngine/Engine/Runtime.cpp',
+      basename: 'Runtime.cpp',
+    });
   });
 
   it('parses a line range', () => {

@@ -14,6 +14,8 @@
 <p align="center">
   <strong>원클릭 3D 모델 생성</strong><br>
   <img src="images/game/noYfqPt.png" alt="FreeUltraCode가 원클릭으로 3D 모델을 생성" width="960">
+  <br><br>
+  <img src="images/20260615-214236.jpg" alt="FreeUltraCode가 생성한 3D 모델 미리보기" width="960">
 </p>
 
 <p align="center">

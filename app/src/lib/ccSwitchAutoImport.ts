@@ -2,6 +2,7 @@ import {
   importProviders,
   listProviders,
   providerMetadataSignature,
+  setActiveProviderId,
   type Provider,
 } from '@/lib/apiConfig';
 import {
@@ -131,6 +132,7 @@ function syncGatewayProviders(
     ? lookup.get(providerMetadataSignature(activeDraft))
     : undefined;
   if (active) {
+    setActiveProviderId(active.id);
     setActiveGatewaySelection({
       adapter: providerToGatewayProvider(active).adapter,
       modelClass: modelClassFromModelId(active.model),

@@ -128,6 +128,8 @@ describe('image generation settings and routing', () => {
       'runware',
     ]);
     expect(commercial).toEqual([
+      'openai-image',
+      'openai-compatible-image-router',
       'google-gemini-image',
       'google-imagen',
       'bfl-flux',

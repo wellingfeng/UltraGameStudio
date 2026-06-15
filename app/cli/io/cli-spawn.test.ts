@@ -326,6 +326,49 @@ process.stdin.on('end', () => {
     expect(argv[argv.length - 1]).toBe('-');
   });
 
+  it('streams codex file_change items as structured tool events with paths', async () => {
+    const argvOut = join(dir, 'argv-codex-file-change.json');
+    const bin = makeFakeCli(
+      'fake-codex-file-change',
+      `
+const fs = require('node:fs');
+const argv = process.argv.slice(2);
+fs.writeFileSync(${JSON.stringify(argvOut)}, JSON.stringify(argv));
+const oi = argv.indexOf('-o');
+const outPath = oi >= 0 ? argv[oi + 1] : null;
+process.stdin.resume();
+process.stdin.on('end', () => {
+  process.stdout.write(JSON.stringify({
+    type: 'item.completed',
+    item: {
+      id: 'fc1',
+      type: 'file_change',
+      status: 'completed',
+      changes: [{ path: 'app/src/lib/sessionFiles.ts', status: 'modified' }],
+      output: '*** Update File: app/src/lib/sessionFiles.ts'
+    }
+  }) + '\\n');
+  if (outPath) fs.writeFileSync(outPath, 'DONE');
+  process.stdout.write(JSON.stringify({ type: 'turn.completed', status: 'completed' }) + '\\n');
+});
+`,
+    );
+    const progress: string[] = [];
+
+    await spawnCliAgent('codex-prompt', {
+      adapter: 'codex',
+      cliCommand: bin,
+      permission: 'full',
+      cwd: dir,
+      onProgress: (t) => progress.push(t),
+    });
+
+    const joined = progress.join('');
+    expect(joined).toContain('<<FUC_TOOL>>');
+    expect(joined).toContain('"name":"file_change"');
+    expect(joined).toContain('"path":"app/src/lib/sessionFiles.ts"');
+  });
+
   it('injects project MCP servers into codex exec config overrides', async () => {
     const projectDir = join(dir, 'codex-mcp-project');
     const fucHome = join(dir, 'fuc-home');

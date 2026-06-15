@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.4.1"
+version = "0.4.2"
 description = "FreeUltraCode - Visual AI Workflow Editor"
 authors = ["FreeUltraCode"]
 license = ""

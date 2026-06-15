@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   patchConfig: vi.fn(),
   providerMetadataSignature: vi.fn(),
   saveGatewayConfig: vi.fn(),
+  setActiveProviderId: vi.fn(),
   setActiveGatewaySelection: vi.fn(),
 }));
 
@@ -18,6 +19,7 @@ vi.mock('@/lib/apiConfig', () => ({
   importProviders: mocks.importProviders,
   listProviders: mocks.listProviders,
   providerMetadataSignature: mocks.providerMetadataSignature,
+  setActiveProviderId: mocks.setActiveProviderId,
 }));
 
 vi.mock('@/lib/gatewayConfig', () => ({
@@ -66,6 +68,7 @@ beforeEach(() => {
   mocks.patchConfig.mockReset();
   mocks.providerMetadataSignature.mockReset();
   mocks.saveGatewayConfig.mockReset();
+  mocks.setActiveProviderId.mockReset();
   mocks.setActiveGatewaySelection.mockReset();
 
   vi.spyOn(console, 'info').mockImplementation(() => undefined);
@@ -169,6 +172,7 @@ describe('maybeRunCcSwitchAutoImportOnFirstRun', () => {
     const outcome = await importCcSwitchProviders({ promoteActiveAnthropic: true });
 
     expect(outcome.status).toBe('imported');
+    expect(mocks.setActiveProviderId).toHaveBeenCalledWith('p_cc_switch');
     expect(mocks.setActiveGatewaySelection).toHaveBeenCalledWith({
       adapter: 'claude-code',
       modelClass: 'sonnet',

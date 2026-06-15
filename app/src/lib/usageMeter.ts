@@ -228,6 +228,20 @@ function readLegacyUsageSnapshot(): UsageMeterSnapshot | null {
   }
 }
 
+function snapshotHasUsage(snapshot: UsageMeterSnapshot | undefined): boolean {
+  if (!snapshot) return false;
+  return snapshot.totals.calls > 0 || snapshot.totals.totalTokens > 0;
+}
+
+function usageContextFallbackKey(
+  context: UsageMeterContext | undefined,
+): string | null {
+  const sessionId = context?.sessionId?.trim();
+  const workspaceId = context?.workspaceId?.trim();
+  if (!sessionId || !workspaceId) return null;
+  return `${USAGE_DEFAULT_WORKSPACE_KEY}:${sessionId}`;
+}
+
 function saveUsageSnapshot(
   snapshot: UsageMeterSnapshot,
   context?: UsageMeterContext,
@@ -248,8 +262,14 @@ export function readUsageMeterSnapshot(
   context?: UsageMeterContext,
 ): UsageMeterSnapshot {
   const key = usageContextKey(context);
-  const snapshot = readUsageSnapshotMap()[key];
-  if (snapshot) return snapshot;
+  const map = readUsageSnapshotMap();
+  const snapshot = map[key];
+  const fallbackKey = usageContextFallbackKey(context);
+  const fallback = fallbackKey ? map[fallbackKey] : undefined;
+  if (snapshotHasUsage(snapshot) || !snapshotHasUsage(fallback)) {
+    if (snapshot) return snapshot;
+  }
+  if (fallback) return fallback;
   if (key === USAGE_GLOBAL_CONTEXT_KEY) {
     return readLegacyUsageSnapshot() ?? EMPTY_SNAPSHOT;
   }
@@ -361,7 +381,28 @@ export function usageReportFromCodex(value: unknown): ModelUsageReport | null {
  */
 export function usageReportFromCliUsage(value: unknown): ModelUsageReport | null {
   if (typeof value !== 'object' || value === null) return null;
-  const raw = value as Record<string, unknown>;
+  const container = value as Record<string, unknown>;
+  const nestedUsage =
+    typeof container.usage === 'object' && container.usage !== null
+      ? (container.usage as Record<string, unknown>)
+      : typeof container.token_usage === 'object' &&
+          container.token_usage !== null
+        ? (container.token_usage as Record<string, unknown>)
+        : typeof container.total_token_usage === 'object' &&
+            container.total_token_usage !== null
+          ? (container.total_token_usage as Record<string, unknown>)
+          : null;
+  const raw = nestedUsage ?? container;
+  const promptDetails =
+    typeof raw.prompt_tokens_details === 'object' &&
+    raw.prompt_tokens_details !== null
+      ? (raw.prompt_tokens_details as Record<string, unknown>)
+      : {};
+  const inputDetails =
+    typeof raw.input_tokens_details === 'object' &&
+    raw.input_tokens_details !== null
+      ? (raw.input_tokens_details as Record<string, unknown>)
+      : {};
   const anthropicStyle =
     raw.cache_read_input_tokens !== undefined ||
     raw.cache_creation_input_tokens !== undefined ||
@@ -370,31 +411,44 @@ export function usageReportFromCliUsage(value: unknown): ModelUsageReport | null
   const cacheRead =
     numberFrom(raw.cache_read_input_tokens) ??
     numberFrom(raw.cached_input_tokens) ??
-    numberFrom(raw.cache_read_tokens);
+    numberFrom(raw.cachedInputTokens) ??
+    numberFrom(promptDetails.cached_tokens) ??
+    numberFrom(inputDetails.cached_tokens) ??
+    numberFrom(raw.cache_read_tokens) ??
+    numberFrom(raw.cached_tokens);
   const cacheCreation =
     numberFrom(raw.cache_creation_input_tokens) ??
+    numberFrom(raw.cacheCreationInputTokens) ??
     numberFrom(raw.cache_creation_tokens);
   const rawInput =
     numberFrom(raw.input_tokens) ??
     numberFrom(raw.inputTokens) ??
-    numberFrom(raw.prompt_tokens);
+    numberFrom(raw.prompt_tokens) ??
+    numberFrom(raw.promptTokens);
   const outputTokens =
     numberFrom(raw.output_tokens) ??
     numberFrom(raw.outputTokens) ??
-    numberFrom(raw.completion_tokens);
+    numberFrom(raw.completion_tokens) ??
+    numberFrom(raw.completionTokens);
   // Anthropic keeps the cached prefix out of `input_tokens`; sum it back in so
   // the gauge reflects cache-of-total. Codex/OpenAI already report the full
   // input, so leave it untouched.
   const inputTokens = anthropicStyle
     ? (rawInput ?? 0) + (cacheRead ?? 0) + (cacheCreation ?? 0)
     : rawInput;
+  const computedTotal =
+    inputTokens !== undefined || outputTokens !== undefined
+      ? (inputTokens ?? 0) + (outputTokens ?? 0)
+      : undefined;
+  const reportedTotal =
+    numberFrom(raw.total_tokens) ?? numberFrom(raw.totalTokens);
   const report: ModelUsageReport = {
     inputTokens,
     outputTokens,
     totalTokens:
-      inputTokens !== undefined || outputTokens !== undefined
-        ? (inputTokens ?? 0) + (outputTokens ?? 0)
-        : undefined,
+      anthropicStyle && computedTotal !== undefined
+        ? Math.max(computedTotal, reportedTotal ?? 0)
+        : (reportedTotal ?? computedTotal),
     cacheReadInputTokens: cacheRead,
     cacheCreationInputTokens: cacheCreation,
   };

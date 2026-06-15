@@ -8,6 +8,8 @@ import {
   type ReactNode,
 } from 'react';
 import {
+  Activity,
+  ArrowRight,
   Bone,
   Box,
   Boxes,
@@ -105,10 +107,6 @@ import {
 import {
   loadSpriteGenerationSettings,
   saveSpriteGenerationSettings,
-  SPRITE_PROVIDERS,
-  spriteProviderById,
-  type SpriteProviderCategory,
-  type SpriteProviderId,
 } from '@/lib/spriteGeneration';
 import {
   MESH_LIBRARIES,
@@ -130,6 +128,8 @@ import {
   cocosMcpSetupProject,
   godotMcpSetupProject,
   installProjectLspServer,
+  installSkillFromText,
+  installSkillFromUrl,
   openExternal,
   openLocalPath,
   probeProjectLspServer,
@@ -144,6 +144,7 @@ import {
   skillInstallTargets,
   slashCatalog,
   onSlashCatalogUpdated,
+  uninstallSkill,
   type ProjectEnvironmentScan,
   type ProjectLspInstallResult,
   type ProjectLspProbeResult,
@@ -154,6 +155,11 @@ import {
   type UnityMcpSetupResult,
   type UeMcpSetupResult,
 } from '@/lib/tauri';
+import {
+  CAPTURE_PERF_SKILLS,
+  capturePerfCategoryLabel,
+  type CapturePerfSkillDefinition,
+} from '@/lib/capturePerfSkills';
 import { historyStore } from '@/store/history/store';
 import type { WorkspaceRecord, WorkspaceSummary } from '@/store/history/types';
 import { useStore } from '@/store/useStore';
@@ -179,6 +185,7 @@ const PROJECT_SETTINGS_EN: Record<string, string> = {
   '安装中': 'Installing',
   '安装中...': 'Installing…',
   '绑定渠道': 'Rigging channel',
+  '抓帧/性能': 'Capture / performance',
   '保存': 'Save',
   '保存中...': 'Saving…',
   '本地开源': 'Local / open source',
@@ -211,8 +218,10 @@ const PROJECT_SETTINGS_EN: Record<string, string> = {
   '开启': 'On',
   '开启后，当前项目的游戏 UI 设计任务会优先使用这里选择的默认渠道。':
     'When enabled, this project’s game UI design tasks prefer the default channel selected here.',
-  '开启后，输入 /sprite-mode-start 或 /sprite 会调用当前项目选择的默认 Sprite 渠道。':
-    'When enabled, /sprite-mode-start or /sprite uses this project’s selected default Sprite channel.',
+  '开启后，输入 /sprite-mode-start 或 /sprite 会复用当前生图渠道。':
+    'When enabled, /sprite-mode-start or /sprite reuses the current image channel.',
+  '开启后，输入 /sprite-mode-start 或 /sprite 会按下方参数生成 raw sheet 并执行后处理。':
+    'When enabled, /sprite-mode-start or /sprite generates a raw sheet with the parameters below, then runs postprocessing.',
   '可用': 'Available',
   '空格分隔；按 LSP stdio 启动参数填写':
     'Space-separated; follow the LSP stdio launch arguments',
@@ -222,6 +231,8 @@ const PROJECT_SETTINGS_EN: Record<string, string> = {
     'Controls whether this project enables the 3D model generation entry point.',
   '控制当前项目是否启用游戏专家，并在游戏项目中自动选择对应引擎。':
     'Controls whether this project enables Game Experts and auto-selects the matching engine for game projects.',
+  '控制当前项目是否启用抓帧、GPU/CPU Trace 和 Android 性能分析 Skill。':
+    'Controls whether this project enables frame capture, GPU/CPU trace, and Android performance analysis Skills.',
   '控制当前项目是否启用自动绑骨流程。':
     'Controls whether this project enables the auto-rigging workflow.',
   '控制当前项目是否允许自动启动/使用已启用的 LSP 配置。':
@@ -236,16 +247,18 @@ const PROJECT_SETTINGS_EN: Record<string, string> = {
   '命令': 'Commands',
   '命令可用': 'Command available',
   '命令已可用，无需安装': 'Command already available, no install needed',
-  '模型库': 'Model library',
-  '默认 Sprite 渠道': 'Default Sprite channel',
+  '在线模型库': 'Online model library',
+  '复用生图渠道': 'Reuse image channel',
   '默认 UI 渠道': 'Default UI channel',
   '配置已同步': 'Settings synced',
   '配置中...': 'Configuring…',
   '启用': 'Enable',
   '启用 Mesh 渠道': 'Enable Mesh channel',
-  '启用 Sprite 渠道': 'Enable Sprite channel',
+  '启用 Sprite 入口': 'Enable Sprite entry',
+  '启用 Sprite 模式': 'Enable Sprite mode',
   '启用 UI 渠道': 'Enable UI channel',
   '启用绑定渠道': 'Enable rigging channel',
+  '启用抓帧/性能': 'Enable capture / performance',
   '启用项目 LSP': 'Enable project LSP',
   '启用项目 MCP': 'Enable project MCP',
   '启用游戏专家': 'Enable Game Experts',
@@ -269,7 +282,7 @@ const PROJECT_SETTINGS_EN: Record<string, string> = {
   '搜索 MCP 名称、用途、命令、URL 或分类...':
     'Search MCP name, purpose, command, URL, or category…',
   '搜索命令或用途...': 'Search command or purpose…',
-  '搜索模型库名称、用途...': 'Search model library name or purpose…',
+  '搜索在线模型库名称、用途...': 'Search online model library name or purpose…',
   '搜索语言、LSP、命令或安装方式...':
     'Search language, LSP, command, or install method…',
   '探测已启用 MCP': 'Probe enabled MCP',
@@ -314,8 +327,8 @@ const PROJECT_SETTINGS_EN: Record<string, string> = {
   '允许自动启动项目 MCP': 'Allow auto-starting project MCP',
   '在文件管理器中显示': 'Reveal in file manager',
   '粘贴 API Key / Token': 'Paste API key / token',
-  '这个项目生成 Sprite 时优先使用的渠道。/sprite-mode-start 会使用这里选择的默认渠道；商用与本地开源共用一个默认。':
-    'The channel this project prefers when generating Sprites. /sprite-mode-start uses the default selected here; commercial and local/open-source share one default.',
+  'Sprite 生成不单独选择渠道；/sprite-mode-start 会复用设置 > 生图渠道中的默认 Provider。':
+    'Sprite generation does not choose a separate channel; /sprite-mode-start reuses the default provider from Settings > Images.',
   '这个项目在进行游戏 UI 设计时优先使用的设计工具或协作平台。/ui-mode-start 会使用这里选择的默认渠道；商用与免费开源共用一个默认。':
     'The design tool or collaboration platform this project prefers for game UI design. /ui-mode-start uses the default selected here; commercial and free/open-source share one default.',
   '正在配置工程（启用插件 / 写入 RemoteControl 与 .mcp.json）...':
@@ -340,6 +353,7 @@ function tr(zh: string, locale: Locale): string {
   if (locale === 'zh-CN') return zh;
   return PROJECT_SETTINGS_EN[zh] ?? zh;
 }
+import { GAME_SKILL_RECOMMENDATION_SOURCE_ID } from '@/lib/pluginStore';
 import {
   cachedPluginDescriptionTranslation,
   shouldTranslatePluginDescription,
@@ -359,6 +373,7 @@ type ProjectSettingsTab =
   | 'uiDesign'
   | 'meshLibrary'
   | 'rigging'
+  | 'capturePerf'
   | 'gameExperts'
   | 'commands'
   | 'mcp'
@@ -369,10 +384,11 @@ type ProjectSettingsTab =
 const tabs: { id: ProjectSettingsTab; label: string; Icon: LucideIcon }[] = [
   { id: 'overview', label: '概览', Icon: Info },
   { id: 'mesh', label: 'Mesh 渠道', Icon: Box },
+  { id: 'meshLibrary', label: '在线模型库', Icon: Boxes },
   { id: 'sprite', label: 'Sprite', Icon: Boxes },
   { id: 'uiDesign', label: 'UI 渠道', Icon: Palette },
-  { id: 'meshLibrary', label: '模型库', Icon: Boxes },
   { id: 'rigging', label: '绑定渠道', Icon: Bone },
+  { id: 'capturePerf', label: '抓帧/性能', Icon: Activity },
   { id: 'gameExperts', label: '游戏专家', Icon: Gamepad2 },
   { id: 'commands', label: '命令', Icon: SlashSquare },
   { id: 'mcp', label: 'MCP', Icon: Terminal },
@@ -430,21 +446,11 @@ function syncProjectGameFeaturesToRuntime(settings: ProjectSettings): void {
   });
 }
 
-function projectSpriteCategoryLabel(
-  category: SpriteProviderCategory,
-  locale: Locale,
-): string {
-  return category === 'local-open'
-    ? tr('本地开源', locale)
-    : tr('商用', locale);
-}
-
 function syncProjectSpriteToRuntime(settings: ProjectSettings): void {
   const currentSprite = loadSpriteGenerationSettings();
   saveSpriteGenerationSettings({
     ...currentSprite,
     enabled: settings.sprite.enabled,
-    preferredProviderId: settings.sprite.defaultProviderId,
   });
 }
 
@@ -463,6 +469,92 @@ function syncProjectSettingsToRuntime(settings: ProjectSettings): void {
   syncProjectUiDesignToRuntime(settings);
 }
 
+function SpritePipelineDiagram({ locale }: { locale: Locale }) {
+  const steps = [
+    {
+      icon: SlashSquare,
+      title: locale === 'zh-CN' ? '进入 Sprite 模式' : 'Enter Sprite mode',
+      desc: '/sprite-mode-start',
+    },
+    {
+      icon: Palette,
+      title: locale === 'zh-CN' ? '复用生图路由' : 'Reuse image route',
+      desc:
+        locale === 'zh-CN'
+          ? '使用当前生图 Provider 出 raw sheet'
+          : 'Use the active image provider for a raw sheet',
+    },
+    {
+      icon: SlidersHorizontal,
+      title: locale === 'zh-CN' ? '套 Sprite 协议' : 'Apply Sprite contract',
+      desc:
+        locale === 'zh-CN'
+          ? 'grid / chroma key / 安全边距'
+          : 'grid / chroma key / safe margin',
+    },
+    {
+      icon: Boxes,
+      title: locale === 'zh-CN' ? '本地后处理' : 'Local postprocess',
+      desc:
+        locale === 'zh-CN'
+          ? '抠底 / 切帧 / 对齐 / 打包'
+          : 'key / slice / align / pack',
+    },
+    {
+      icon: Check,
+      title: locale === 'zh-CN' ? '质检并导出' : 'QC and export',
+      desc:
+        locale === 'zh-CN'
+          ? 'spritesheet / frames / GIF / metadata'
+          : 'spritesheet / frames / GIF / metadata',
+    },
+  ];
+
+  return (
+    <section className="rounded-md border border-border bg-panel-2 p-4">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <div>
+          <div className="text-sm font-semibold text-fg">
+            {locale === 'zh-CN' ? '设计流程' : 'Design flow'}
+          </div>
+          <div className="mt-1 text-xs text-fg-faint">
+            {locale === 'zh-CN'
+              ? 'Sprite 模式只管协议、参数和后处理；底图模型复用生图设置。'
+              : 'Sprite mode owns the contract, parameters, and postprocess; raw image generation reuses image settings.'}
+          </div>
+        </div>
+        <span className="rounded border border-border-soft bg-bg-alt px-2 py-0.5 text-[11px] text-fg-faint">
+          Sprite Forge
+        </span>
+      </div>
+
+      <div className="grid gap-2 lg:grid-cols-[1fr_auto_1fr_auto_1fr_auto_1fr_auto_1fr]">
+        {steps.map((step, index) => {
+          const Icon = step.icon;
+          return (
+            <div key={step.title} className="contents">
+              <div className="min-w-0 rounded-md border border-border-soft bg-bg-alt p-3">
+                <div className="flex items-center gap-2 text-xs font-semibold text-fg">
+                  <Icon size={15} strokeWidth={2.1} />
+                  <span>{step.title}</span>
+                </div>
+                <div className="mt-1 break-words text-[11px] leading-relaxed text-fg-faint">
+                  {step.desc}
+                </div>
+              </div>
+              {index < steps.length - 1 && (
+                <div className="hidden items-center justify-center px-1 text-fg-faint lg:flex">
+                  <ArrowRight size={15} strokeWidth={2.1} />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
 // Game-only tabs are shown from the project-level switch. Auto-detect sets this
 // for Unity / Unreal / Godot / Cocos, and users can enable it manually for other
 // engines that we do not recognize yet.
@@ -472,9 +564,11 @@ function shouldShowGameFeatures(settings: ProjectSettings): boolean {
 
 const GAME_FEATURE_TABS: ReadonlySet<ProjectSettingsTab> = new Set([
   'mesh',
+  'sprite',
   'uiDesign',
   'meshLibrary',
   'rigging',
+  'capturePerf',
   'gameExperts',
   'commands',
 ]);
@@ -1112,6 +1206,17 @@ function UiDesignChannelCard({
   const effectiveBaseUrl = uiDesignChannelBaseUrl(channel.id, settings);
   const status = uiDesignChannelStatus(channel, settings, locale);
   const KeyIcon = showKey ? EyeOff : Eye;
+  const externalLinks =
+    channel.downloadLinks && channel.downloadLinks.length > 0
+      ? channel.downloadLinks
+      : channel.credentialUrl
+        ? [
+            {
+              label: channel.needsKey ? tr('获取 Key', locale) : tr('打开官网', locale),
+              url: channel.credentialUrl,
+            },
+          ]
+        : [];
 
   const patchChannel = (
     patch: Partial<{
@@ -1197,16 +1302,21 @@ function UiDesignChannelCard({
               {locale === 'zh-CN' ? '设为默认' : 'Set as default'}
             </button>
           ) : null}
-          {channel.credentialUrl ? (
+          {externalLinks.map((link) => (
             <button
+              key={link.url}
               type="button"
-              onClick={() => void openExternal(channel.credentialUrl as string)}
+              onClick={() => void openExternal(link.url)}
               className="inline-flex items-center gap-1.5 rounded border border-border bg-panel px-2.5 py-1 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg"
             >
-              <ExternalLink size={13} strokeWidth={2.2} />
-              {channel.needsKey ? tr('获取 Key', locale) : tr('打开官网', locale)}
+              {channel.downloadLinks && channel.downloadLinks.length > 0 ? (
+                <Download size={13} strokeWidth={2.2} />
+              ) : (
+                <ExternalLink size={13} strokeWidth={2.2} />
+              )}
+              {link.label}
             </button>
-          ) : null}
+          ))}
         </div>
       </div>
 
@@ -1738,7 +1848,7 @@ function MeshLibraryRepositoryTab({
           type="text"
           value={query}
           onChange={(event) => onQueryChange(event.currentTarget.value)}
-          placeholder={tr('搜索模型库名称、用途...', locale)}
+          placeholder={tr('搜索在线模型库名称、用途...', locale)}
           className="w-full rounded-lg border border-border bg-bg-alt py-2 pl-9 pr-3 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
         />
       </div>
@@ -2032,6 +2142,40 @@ function requiredEnv(server: McpServerDefinition) {
   return server.requiredEnv ?? [];
 }
 
+const UNITY_MCP_COMMAND_PREVIEW =
+  'uvx --from mcpforunityserver mcp-for-unity --transport stdio';
+const UNITY_MCP_SOURCE_URL = 'https://github.com/wellingfeng/unity-mcp';
+const UE_MCP_COMMAND_PREVIEW = 'ue-mcp-for-all-versions.exe';
+const UE_MCP_SOURCE_URL = 'https://github.com/wellingfeng/ue-mcp-for-all-versions';
+
+function GameMcpCommandSourceInfo({
+  command,
+  sourceUrl,
+}: {
+  command: string;
+  sourceUrl: string;
+}) {
+  const locale = useStore((s) => s.locale);
+  return (
+    <div className="grid gap-2 text-[11px] text-fg-faint sm:grid-cols-2">
+      <div className="rounded border border-border-soft bg-bg-alt px-3 py-2">
+        <span className="text-fg-dim">{tr('命令', locale)}：</span>
+        <code className="font-mono text-fg">{command}</code>
+      </div>
+      <div className="rounded border border-border-soft bg-bg-alt px-3 py-2">
+        <span className="text-fg-dim">{locale === 'zh-CN' ? '来源：' : 'Source: '}</span>
+        <button
+          type="button"
+          onClick={() => void openExternal(sourceUrl)}
+          className="font-mono text-accent hover:underline"
+        >
+          {sourceUrl}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function UnrealMcpQuickSetup({
   busy,
   step,
@@ -2080,7 +2224,7 @@ function UnrealMcpQuickSetup({
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-semibold text-fg">
             <Rocket size={16} className="text-accent" />
-            {locale === 'zh-CN' ? '一键配置 Unreal MCP' : 'One-click Unreal MCP setup'}
+            Unreal MCP
             {current ? (
               <span className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">
                 {locale === 'zh-CN' ? '当前引擎' : 'Current engine'}
@@ -2218,6 +2362,10 @@ function UnrealMcpQuickSetup({
           ) : null}
         </div>
       ) : null}
+      <GameMcpCommandSourceInfo
+        command={result?.serverCommand || result?.binaryPath || UE_MCP_COMMAND_PREVIEW}
+        sourceUrl={UE_MCP_SOURCE_URL}
+      />
     </section>
   );
 }
@@ -2372,22 +2520,7 @@ function GenericGameMcpQuickSetup({
           ) : null}
         </div>
       ) : null}
-      <div className="grid gap-2 text-[11px] text-fg-faint sm:grid-cols-2">
-        <div className="rounded border border-border-soft bg-bg-alt px-3 py-2">
-          <span className="text-fg-dim">{tr('命令', locale)}：</span>
-          <code className="font-mono text-fg">{command}</code>
-        </div>
-        <div className="rounded border border-border-soft bg-bg-alt px-3 py-2">
-          <span className="text-fg-dim">{locale === 'zh-CN' ? '来源：' : 'Source: '}</span>
-          <button
-            type="button"
-            onClick={() => void openExternal(sourceUrl)}
-            className="font-mono text-accent hover:underline"
-          >
-            {sourceUrl}
-          </button>
-        </div>
-      </div>
+      <GameMcpCommandSourceInfo command={command} sourceUrl={sourceUrl} />
     </section>
   );
 }
@@ -2426,7 +2559,7 @@ function UnityMcpQuickSetup({
         <div className="min-w-0">
           <div className="flex items-center gap-2 text-sm font-semibold text-fg">
             <Rocket size={16} className="text-accent" />
-            {locale === 'zh-CN' ? '一键配置 Unity MCP' : 'One-click Unity MCP setup'}
+            Unity MCP
             {current ? (
               <span className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] text-accent">
                 {locale === 'zh-CN' ? '当前引擎' : 'Current engine'}
@@ -2542,7 +2675,128 @@ function UnityMcpQuickSetup({
           ) : null}
         </div>
       ) : null}
+      <GameMcpCommandSourceInfo
+        command={
+          result?.serverCommand
+            ? [result.serverCommand, ...result.serverArgs].join(' ')
+            : UNITY_MCP_COMMAND_PREVIEW
+        }
+        sourceUrl={UNITY_MCP_SOURCE_URL}
+      />
     </section>
+  );
+}
+
+function CapturePerfSkillCard({
+  definition,
+  locale,
+  desktop,
+  installedTarget,
+  installing,
+  onInstall,
+  onUninstall,
+}: {
+  definition: CapturePerfSkillDefinition;
+  locale: Locale;
+  desktop: boolean;
+  installedTarget?: SkillInstallTarget;
+  installing: boolean;
+  onInstall: () => void;
+  onUninstall: () => void;
+}) {
+  const installed = installedTarget != null;
+  return (
+    <div className="flex min-h-[13rem] flex-col rounded-md border border-border bg-bg-alt p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="rounded border border-accent/40 bg-accent/10 px-1.5 py-0.5 text-[10px] font-semibold text-accent">
+              {capturePerfCategoryLabel(definition.category)}
+            </span>
+            <span className="rounded border border-border bg-panel px-1.5 py-0.5 text-[10px] text-fg-faint">
+              {/^\d/.test(definition.version)
+                ? `v${definition.version}`
+                : definition.version}
+            </span>
+            {installed ? (
+              <span className="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/10 px-1.5 py-0.5 text-[10px] text-emerald-300">
+                <Check size={11} />
+                {tr('已安装', locale)}
+              </span>
+            ) : null}
+          </div>
+          <h4 className="mt-2 text-sm font-semibold text-fg">{definition.title}</h4>
+          <p className="mt-1 text-xs leading-relaxed text-fg-faint">
+            {definition.summary}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-3 flex flex-wrap gap-1.5">
+        {definition.tags.map((tag) => (
+          <span
+            key={tag}
+            className="rounded border border-border-soft bg-panel px-1.5 py-0.5 text-[10px] text-fg-faint"
+          >
+            {tag}
+          </span>
+        ))}
+      </div>
+
+      {definition.command ? (
+        <div className="mt-3 truncate rounded border border-border-soft bg-bg px-2 py-1.5 font-mono text-[11px] text-fg-dim">
+          {definition.command}
+        </div>
+      ) : null}
+
+      <div className="mt-auto flex flex-wrap items-center justify-between gap-2 pt-4">
+        <button
+          type="button"
+          onClick={() => void openExternal(definition.sourceUrl)}
+          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-panel px-2.5 py-1.5 text-xs text-fg-dim hover:border-accent hover:text-fg"
+        >
+          <ExternalLink size={13} />
+          {tr('打开来源', locale)}
+        </button>
+        <div className="flex flex-wrap gap-2">
+          {installed ? (
+            <button
+              type="button"
+              onClick={onUninstall}
+              disabled={installing || !desktop}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-panel px-2.5 py-1.5 text-xs text-fg-dim hover:border-red-400 hover:text-red-200 disabled:opacity-50"
+              title={installedTarget?.label}
+            >
+              {installing ? (
+                <RefreshCw size={13} className="animate-spin" />
+              ) : (
+                <Trash2 size={13} />
+              )}
+              {tr('卸载', locale)}
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={onInstall}
+            disabled={installing || !desktop}
+            className="inline-flex items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-2.5 py-1.5 text-xs font-semibold text-fg hover:bg-accent/25 disabled:border-border disabled:bg-panel disabled:text-fg-faint"
+          >
+            {installing ? (
+              <RefreshCw size={13} className="animate-spin" />
+            ) : (
+              <Download size={13} />
+            )}
+            {installing
+              ? tr('安装中...', locale)
+              : installed
+                ? locale === 'zh-CN'
+                  ? '更新'
+                  : 'Update'
+                : tr('一键安装', locale)}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -2635,12 +2889,21 @@ export default function ProjectSettingsModal({
   const [skillSubTab, setSkillSubTab] = useState<'installed' | 'registry'>(
     'installed',
   );
+  const skillSubTabTouchedRef = useRef(false);
   const [globalSkillTargets, setGlobalSkillTargets] = useState<SkillInstallTarget[]>(
     [],
   );
   const [skillCatalogEntries, setSkillCatalogEntries] = useState<SlashCatalogEntry[]>(
     [],
   );
+  const [capturePerfTargets, setCapturePerfTargets] = useState<SkillInstallTarget[]>(
+    [],
+  );
+  const [capturePerfBusyId, setCapturePerfBusyId] = useState<string | null>(null);
+  const [capturePerfStatus, setCapturePerfStatus] = useState<{
+    tone: 'ok' | 'err';
+    msg: string;
+  } | null>(null);
   const [mcpQuery, setMcpQuery] = useState('');
   const [mcpSubTab, setMcpSubTab] = useState<'installed' | 'registry'>('installed');
   const [onlineMcpServers, setOnlineMcpServers] = useState<McpServerDefinition[]>(
@@ -2684,6 +2947,10 @@ export default function ProjectSettingsModal({
     [record?.metadata, scan, workspace],
   );
   const showGameFeatures = shouldShowGameFeatures(settings);
+  const changeSkillSubTab = useCallback((id: ProjectSubTabId) => {
+    skillSubTabTouchedRef.current = true;
+    setSkillSubTab(id);
+  }, []);
   const visibleTabs = useMemo(
     () =>
       tabs.filter((item) => !GAME_FEATURE_TABS.has(item.id) || showGameFeatures),
@@ -2724,6 +2991,24 @@ export default function ProjectSettingsModal({
     () => new Set(settings.mcp.servers.map((server) => server.id)),
     [settings.mcp.servers],
   );
+  const capturePerfInstallTarget = useMemo(
+    () =>
+      capturePerfTargets.find((target) => target.id === 'project-codex') ??
+      capturePerfTargets.find((target) => target.scope === 'project') ??
+      capturePerfTargets.find((target) => target.isDefault) ??
+      capturePerfTargets[0] ??
+      null,
+    [capturePerfTargets],
+  );
+  const installedCapturePerfSkills = useMemo(() => {
+    const installed = new Map<string, SkillInstallTarget>();
+    for (const target of capturePerfTargets) {
+      for (const skill of target.skills) {
+        installed.set(skill.toLowerCase(), target);
+      }
+    }
+    return installed;
+  }, [capturePerfTargets]);
 
   const updateMcp = useCallback(
     (patch: Partial<ProjectSettings['mcp']>) => {
@@ -2775,6 +3060,7 @@ export default function ProjectSettingsModal({
         isGameProject: checked,
         meshGeneration: checked,
         rigging: checked,
+        capturePerf: checked,
         gameExperts: checked,
       },
       uiDesign: {
@@ -2920,6 +3206,11 @@ export default function ProjectSettingsModal({
     void refresh();
   }, [refresh]);
 
+  useEffect(() => {
+    if (!showGameFeatures || skillSubTabTouchedRef.current) return;
+    setSkillSubTab('registry');
+  }, [showGameFeatures]);
+
   const loadGlobalSkillTargets = useCallback(async () => {
     if (!tauriAvailable()) {
       setGlobalSkillTargets([]);
@@ -2937,6 +3228,138 @@ export default function ProjectSettingsModal({
     if (tab !== 'skills') return;
     void loadGlobalSkillTargets();
   }, [tab, loadGlobalSkillTargets]);
+
+  const loadCapturePerfTargets = useCallback(async () => {
+    if (!tauriAvailable()) {
+      setCapturePerfTargets([]);
+      return;
+    }
+    try {
+      setCapturePerfTargets(await skillInstallTargets(workspacePath));
+    } catch (err) {
+      setCapturePerfTargets([]);
+      setCapturePerfStatus({
+        tone: 'err',
+        msg:
+          locale === 'zh-CN'
+            ? `读取安装目标失败：${describeError(err)}`
+            : `Failed to read install targets: ${describeError(err)}`,
+      });
+    }
+  }, [workspacePath, locale]);
+
+  useEffect(() => {
+    if (tab !== 'capturePerf') return;
+    void loadCapturePerfTargets();
+  }, [tab, loadCapturePerfTargets]);
+
+  const installCapturePerfSkill = useCallback(
+    async (definition: CapturePerfSkillDefinition) => {
+      if (!tauriAvailable()) {
+        setCapturePerfStatus({
+          tone: 'err',
+          msg: tr('一键安装需要在桌面应用中运行。', locale),
+        });
+        return;
+      }
+      if (!capturePerfInstallTarget) {
+        setCapturePerfStatus({
+          tone: 'err',
+          msg: locale === 'zh-CN' ? '未找到可用安装目标。' : 'No install target found.',
+        });
+        return;
+      }
+      setCapturePerfBusyId(definition.id);
+      setCapturePerfStatus(null);
+      try {
+        const common = {
+          name: definition.name,
+          slug: definition.slug,
+          targetId: capturePerfInstallTarget.id,
+          overwrite: true,
+          sourceUrl: definition.sourceUrl,
+          projectRoot: workspacePath,
+        };
+        const installed =
+          definition.installKind === 'remote-skill'
+            ? await installSkillFromUrl({
+                ...common,
+                url: definition.skillUrl ?? definition.sourceUrl,
+              })
+            : await installSkillFromText({
+                ...common,
+                text: definition.skillText ?? '',
+              });
+        await loadCapturePerfTargets();
+        updateGameFeatures({ capturePerf: true });
+        setCapturePerfStatus({
+          tone: 'ok',
+          msg:
+            locale === 'zh-CN'
+              ? `${installed.overwritten ? '已更新' : '已安装'} ${definition.title} · ${definition.version}`
+              : `${installed.overwritten ? 'Updated' : 'Installed'} ${definition.title} · ${definition.version}`,
+        });
+      } catch (err) {
+        setCapturePerfStatus({
+          tone: 'err',
+          msg:
+            locale === 'zh-CN'
+              ? `安装失败：${describeError(err)}`
+              : `Install failed: ${describeError(err)}`,
+        });
+      } finally {
+        setCapturePerfBusyId((current) => (current === definition.id ? null : current));
+      }
+    },
+    [
+      capturePerfInstallTarget,
+      loadCapturePerfTargets,
+      locale,
+      updateGameFeatures,
+      workspacePath,
+    ],
+  );
+
+  const uninstallCapturePerfSkill = useCallback(
+    async (definition: CapturePerfSkillDefinition) => {
+      const target = installedCapturePerfSkills.get(definition.slug.toLowerCase());
+      if (!target) {
+        setCapturePerfStatus({
+          tone: 'err',
+          msg: locale === 'zh-CN' ? '未找到已安装目录。' : 'Installed folder not found.',
+        });
+        return;
+      }
+      setCapturePerfBusyId(definition.id);
+      setCapturePerfStatus(null);
+      try {
+        const result = await uninstallSkill({
+          targetId: target.id,
+          slug: definition.slug,
+          projectRoot: workspacePath,
+        });
+        await loadCapturePerfTargets();
+        setCapturePerfStatus({
+          tone: 'ok',
+          msg:
+            locale === 'zh-CN'
+              ? `${result.removed ? '已卸载' : '已移除记录'} ${definition.title}`
+              : `${result.removed ? 'Uninstalled' : 'Removed record for'} ${definition.title}`,
+        });
+      } catch (err) {
+        setCapturePerfStatus({
+          tone: 'err',
+          msg:
+            locale === 'zh-CN'
+              ? `卸载失败：${describeError(err)}`
+              : `Uninstall failed: ${describeError(err)}`,
+        });
+      } finally {
+        setCapturePerfBusyId((current) => (current === definition.id ? null : current));
+      }
+    },
+    [installedCapturePerfSkills, loadCapturePerfTargets, locale, workspacePath],
+  );
 
   const loadOnlineMcpServers = useCallback(async (signal?: AbortSignal) => {
     setOnlineMcpLoading(true);
@@ -4109,8 +4532,8 @@ export default function ProjectSettingsModal({
                 label={locale === 'zh-CN' ? '这是游戏项目' : 'This is a game project'}
                 hint={
                   locale === 'zh-CN'
-                    ? '开启后显示 Mesh、UI、模型库、绑骨、游戏专家和游戏命令等游戏项目 Tab。自动检测会识别 Unity、Unreal Engine、Godot 和 Cocos；其他引擎可在这里手动开启。'
-                    : 'Shows game project tabs such as Mesh, UI, model library, rigging, Game Experts, and game commands. Auto-detect recognizes Unity, Unreal Engine, Godot, and Cocos; enable this manually for other engines.'
+                    ? '开启后显示 Mesh、在线模型库、UI、绑骨、抓帧/性能、游戏专家和游戏命令等游戏项目 Tab。自动检测会识别 Unity、Unreal Engine、Godot 和 Cocos；其他引擎可在这里手动开启。'
+                    : 'Shows game project tabs such as Mesh, online model library, UI, rigging, capture/performance, Game Experts, and game commands. Auto-detect recognizes Unity, Unreal Engine, Godot, and Cocos; enable this manually for other engines.'
                 }
                 checked={settings.gameFeatures.isGameProject}
                 onChange={setGameProjectEnabled}
@@ -4303,7 +4726,6 @@ export default function ProjectSettingsModal({
     }
 
     if (tab === 'sprite') {
-      const defaultProvider = spriteProviderById(settings.sprite.defaultProviderId);
       return (
         <div className="grid gap-4">
           <section className="rounded-md border border-border bg-panel-2 p-4">
@@ -4314,8 +4736,8 @@ export default function ProjectSettingsModal({
                 </div>
                 <div className="mt-1 text-xs leading-relaxed text-fg-faint">
                   {locale === 'zh-CN'
-                    ? '控制当前项目是否启用 Sprite 生成入口，并为项目指定一个默认 Sprite 渠道。商用与本地开源共用同一个默认，只有一个默认渠道。'
-                    : 'Controls whether this project enables the Sprite generation entry point and sets a default Sprite channel. Commercial and local/open-source share a single default channel.'}
+                    ? '控制当前项目是否启用 Sprite 生成入口。生成来源复用生图设置；这里仅维护 Sprite 协议参数和后处理流程。'
+                    : 'Controls whether this project enables Sprite generation. The image source reuses image settings; this tab only owns Sprite contract parameters and postprocess flow.'}
                 </div>
               </div>
               <span className="rounded border border-border-soft bg-bg-alt px-2 py-0.5 text-[11px] text-fg-faint">
@@ -4325,78 +4747,20 @@ export default function ProjectSettingsModal({
           </section>
 
           <ToggleRow
-            label={tr('启用 Sprite 渠道', locale)}
+            label={tr('启用 Sprite 模式', locale)}
             hint={tr(
-              '开启后，输入 /sprite-mode-start 或 /sprite 会调用当前项目选择的默认 Sprite 渠道。',
+              '开启后，输入 /sprite-mode-start 或 /sprite 会按下方参数生成 raw sheet 并执行后处理。',
               locale,
             )}
             checked={settings.sprite.enabled}
             onChange={(checked) => updateSprite({ enabled: checked })}
           />
 
-          <div className="grid gap-3 rounded-md border border-border bg-panel-2 p-4">
-            <SettingsRow
-              label={tr('默认 Sprite 渠道', locale)}
-              hint={tr(
-                '这个项目生成 Sprite 时优先使用的渠道。/sprite-mode-start 会使用这里选择的默认渠道；商用与本地开源共用一个默认。',
-                locale,
-              )}
-            >
-              <select
-                value={settings.sprite.defaultProviderId}
-                onChange={(event: ChangeEvent<HTMLSelectElement>) =>
-                  updateSprite({
-                    defaultProviderId: event.currentTarget
-                      .value as SpriteProviderId,
-                  })
-                }
-                className="h-9 w-full rounded-md border border-border bg-bg-alt px-2.5 text-sm text-fg outline-none transition-colors focus:border-accent"
-              >
-                {(['commercial', 'local-open'] as const).map((category) => {
-                  const providers = SPRITE_PROVIDERS.filter(
-                    (provider) => provider.category === category,
-                  );
-                  if (providers.length === 0) return null;
-                  return (
-                    <optgroup
-                      key={category}
-                      label={projectSpriteCategoryLabel(category, locale)}
-                    >
-                      {providers.map((provider) => (
-                        <option key={provider.id} value={provider.id}>
-                          {provider.label}
-                        </option>
-                      ))}
-                    </optgroup>
-                  );
-                })}
-              </select>
-            </SettingsRow>
-
-            <div className="flex flex-wrap gap-2 text-[11px] text-fg-faint">
-              <span className="inline-flex items-center gap-1 rounded border border-border-soft bg-bg-alt px-2 py-1">
-                <Boxes size={12} />
-                Sprite：
-                {settings.sprite.enabled
-                  ? tr('开启', locale)
-                  : locale === 'zh-CN'
-                    ? '关闭'
-                    : 'Off'}
-              </span>
-              <span className="inline-flex items-center gap-1 rounded border border-border-soft bg-bg-alt px-2 py-1">
-                {locale === 'zh-CN' ? '默认' : 'Default'}：{defaultProvider.label}（
-                {projectSpriteCategoryLabel(defaultProvider.category, locale)}）
-              </span>
-            </div>
-          </div>
+          <SpritePipelineDiagram locale={locale} />
 
           <SpriteGenerationSettingsPanel
             locale={locale}
             embedded
-            defaultProviderId={settings.sprite.defaultProviderId}
-            onDefaultProviderIdChange={(id) =>
-              updateSprite({ defaultProviderId: id })
-            }
           />
         </div>
       );
@@ -4497,6 +4861,104 @@ export default function ProjectSettingsModal({
           </div>
 
           <RiggingSettingsPanel locale={locale} embedded />
+        </div>
+      );
+    }
+
+    if (tab === 'capturePerf') {
+      const detectedEngine = scan?.engine.engine ?? 'unknown';
+      const autoMode = settings.automation.autoDetect;
+      const desktop = tauriAvailable();
+      return (
+        <div className="grid gap-4">
+          <section className="rounded-md border border-border bg-panel-2 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-fg">{tr('抓帧/性能', locale)}</div>
+                <div className="mt-1 text-xs leading-relaxed text-fg-faint">
+                  {locale === 'zh-CN'
+                    ? `当前检测：${scan?.engine.label ?? '未识别'}。这里集中安装 RenderDoc、Nsight Graphics、Unreal Insights、Unity Profiler、Perfetto 和 Android 内存分析 Skill。`
+                    : `Detected: ${scan?.engine.label ?? 'Unrecognized'}. Install RenderDoc, Nsight Graphics, Unreal Insights, Unity Profiler, Perfetto, and Android memory analysis Skills here.`}
+                </div>
+              </div>
+              <span
+                className={cn(
+                  'rounded border px-2 py-0.5 text-[11px]',
+                  detectedEngine === 'unknown'
+                    ? 'border-border-soft bg-bg-alt text-fg-faint'
+                    : 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300',
+                )}
+              >
+                {autoMode ? tr('自动检测', locale) : tr('手动设置', locale)}
+              </span>
+            </div>
+          </section>
+
+          <ToggleRow
+            label={tr('启用抓帧/性能', locale)}
+            hint={tr(
+              '控制当前项目是否启用抓帧、GPU/CPU Trace 和 Android 性能分析 Skill。',
+              locale,
+            )}
+            checked={settings.gameFeatures.capturePerf}
+            onChange={(checked) => updateGameFeatures({ capturePerf: checked })}
+          />
+
+          <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-border bg-panel-2 px-4 py-3 text-xs text-fg-faint">
+            <div className="min-w-0">
+              {locale === 'zh-CN' ? '安装目标：' : 'Install target: '}
+              <span className="text-fg">
+                {capturePerfInstallTarget
+                  ? `${capturePerfInstallTarget.scope === 'project' ? tr('项目', locale) : tr('全局', locale)} · ${capturePerfInstallTarget.label}`
+                  : desktop
+                    ? locale === 'zh-CN'
+                      ? '未找到'
+                      : 'Not found'
+                    : locale === 'zh-CN'
+                      ? '桌面版可安装'
+                      : 'Desktop app required'}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => void loadCapturePerfTargets()}
+              disabled={!desktop}
+              className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-alt px-2.5 py-1.5 text-xs text-fg-dim hover:border-accent hover:text-fg disabled:opacity-50"
+            >
+              <RefreshCw size={13} />
+              {tr('重新检测', locale)}
+            </button>
+          </div>
+
+          {capturePerfStatus ? (
+            <div
+              className={cn(
+                'rounded-md border px-3 py-2 text-[11px] leading-relaxed',
+                capturePerfStatus.tone === 'ok'
+                  ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-200'
+                  : 'border-red-500/30 bg-red-500/10 text-red-200',
+              )}
+            >
+              {capturePerfStatus.msg}
+            </div>
+          ) : null}
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            {CAPTURE_PERF_SKILLS.map((definition) => (
+              <CapturePerfSkillCard
+                key={definition.id}
+                definition={definition}
+                locale={locale}
+                desktop={desktop}
+                installedTarget={installedCapturePerfSkills.get(
+                  definition.slug.toLowerCase(),
+                )}
+                installing={capturePerfBusyId === definition.id}
+                onInstall={() => void installCapturePerfSkill(definition)}
+                onUninstall={() => void uninstallCapturePerfSkill(definition)}
+              />
+            ))}
+          </div>
         </div>
       );
     }
@@ -5473,7 +5935,7 @@ export default function ProjectSettingsModal({
 
           <ProjectSubTabBar
             active={skillSubTab}
-            onChange={setSkillSubTab}
+            onChange={changeSkillSubTab}
             installedCount={projectSkillCount + globalSkillCount}
           />
 
@@ -5652,6 +6114,24 @@ export default function ProjectSettingsModal({
           ) : (
             <PluginStorePanel
               locale={locale}
+              title={
+                showGameFeatures
+                  ? locale === 'zh-CN'
+                    ? '游戏 Skill 推荐'
+                    : 'Recommended Game Skills'
+                  : undefined
+              }
+              description={
+                showGameFeatures
+                  ? locale === 'zh-CN'
+                    ? '默认显示游戏开发相关 Skill；也可以切换来源查看全部仓库。'
+                    : 'Shows game-development Skills by default; switch source to browse all registries.'
+                  : undefined
+              }
+              defaultKind={showGameFeatures ? 'skill' : 'all'}
+              defaultSourceId={
+                showGameFeatures ? GAME_SKILL_RECOMMENDATION_SOURCE_ID : 'all'
+              }
               projectRoot={workspacePath || null}
               onSkillInstalled={() => void loadGlobalSkillTargets()}
             />

@@ -472,6 +472,58 @@ describe('AIDock project file drag', () => {
     }
   });
 
+  it('shows persisted session change counts in the session files tab', async () => {
+    window.localStorage.setItem('freeultracode.projectRightPanelTab.v1', 'session');
+    window.localStorage.setItem(
+      'freeultracode.sessionChanges.v5:v5:ws_project_file_drag:s_project_file_drag:E:/OpenWorkflows',
+      JSON.stringify({
+        rootPath: 'E:/OpenWorkflows',
+        generatedAtMs: 50,
+        source: 'snapshot',
+        truncated: false,
+        files: [
+          {
+            path: 'app/src/ProjectFileTree.tsx',
+            oldPath: null,
+            status: 'modified',
+            binary: false,
+            truncated: false,
+            lines: [],
+          },
+          {
+            path: 'app/src/new.ts',
+            oldPath: null,
+            status: 'added',
+            binary: false,
+            truncated: false,
+            lines: [],
+          },
+          {
+            path: 'app/src/gone.ts',
+            oldPath: null,
+            status: 'deleted',
+            binary: false,
+            truncated: false,
+            lines: [],
+          },
+        ],
+      }),
+    );
+    resetStore({ withWorkspace: true });
+    const view = await renderProjectDragHarness();
+
+    try {
+      expect(view.container.textContent).toContain(
+        '3 个文件 · 新增 1 · 修改 1 · 删除 1',
+      );
+      expect(view.container.textContent).toContain('ProjectFileTree.tsx');
+      expect(view.container.textContent).toContain('new.ts');
+      expect(view.container.textContent).toContain('gone.ts');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   it('falls back to the project drag end point when WebView never delivers drop', async () => {
     resetStore({ withWorkspace: true });
     const view = await renderProjectDragHarness();

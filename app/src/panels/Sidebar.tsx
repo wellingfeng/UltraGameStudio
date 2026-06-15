@@ -3,6 +3,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useSyncExternalStore,
 } from 'react';
 import {
   AlarmClock,
@@ -29,7 +30,10 @@ import {
   remoteWorkspaceIdFromPath,
   type RemoteWorkspaceConfig,
 } from '@/lib/remoteWorkspace';
-import { workspacePathKey } from '@/lib/workspaceHistory';
+import {
+  uniqueWorkspaceHistory,
+  workspacePathKey,
+} from '@/lib/workspaceHistory';
 import { historyStore } from '@/store/history/store';
 import {
   sessionLiveStatus,
@@ -42,7 +46,11 @@ import {
 import type { ScheduledTaskConfig, Session } from '@/store/types';
 import type { WorkspaceSummary } from '@/store/history/types';
 import type { Locale } from '@/lib/i18n';
-import { projectHealth, type ProjectHealthTone } from '@/lib/projectSettings';
+import {
+  projectHealth,
+  projectSettingsFromMetadata,
+  type ProjectHealthTone,
+} from '@/lib/projectSettings';
 import {
   openWorkspaceDirectory,
   scanProjectEnvironment,
@@ -50,6 +58,7 @@ import {
 } from '@/lib/tauri';
 import { useResizableWidth } from '@/lib/useResizableWidth';
 import { t } from '@/lib/i18n';
+import { getAssets, subscribeAssets } from '@/lib/downloadRegistry';
 import SettingsModal from './SettingsModal';
 import ProjectSettingsModal from './ProjectSettingsModal';
 import ScheduledTaskDialog from './ScheduledTaskDialog';
@@ -80,6 +89,7 @@ function formatTime(ts: number): string {
 }
 
 const WORKFLOW_HISTORY_PAGE_SIZE = 5;
+const WORKSPACE_HEADER_VISIBLE_PATHS = 2;
 const MAX_SESSION_RENAME_LENGTH = 80;
 type SidebarTab = 'history' | 'favorites';
 type SidebarLiveState = {
@@ -92,6 +102,13 @@ type ProjectScanCacheEntry = {
   path: string;
   scan: ProjectEnvironmentScan | null;
 };
+
+function workspaceHeaderPaths(workspace: WorkspaceSummary): string[] {
+  return uniqueWorkspaceHistory([
+    workspace.path,
+    ...projectSettingsFromMetadata(workspace.metadata).folders,
+  ]);
+}
 
 function sessionSortTimestamp(session: Session): number {
   return session.updatedAt ?? session.createdAt;
@@ -321,6 +338,7 @@ export default function Sidebar() {
   const selectSession = useStore((s) => s.selectSession);
   const deleteSession = useStore((s) => s.deleteSession);
   const deleteWorkspaceHistory = useStore((s) => s.deleteWorkspaceHistory);
+  const assets = useSyncExternalStore(subscribeAssets, getAssets);
   const renameWorkflowSession = useStore((s) => s.renameWorkflowSession);
   const setWorkflowFavoriteSession = useStore(
     (s) => s.setWorkflowFavoriteSession,
@@ -342,6 +360,10 @@ export default function Sidebar() {
   const [flatLimit, setFlatLimit] = useState(WORKFLOW_HISTORY_PAGE_SIZE);
   const [searchQuery, setSearchQuery] = useState('');
   const [activeTab, setActiveTab] = useState<SidebarTab>('history');
+  const assetTotalCount = assets.length;
+  const assetActiveCount = assets.filter(
+    (asset) => asset.status === 'pending',
+  ).length;
 
   // ── Context menu for session actions ─────────────────────────────────────
   type MenuState =
@@ -1248,6 +1270,14 @@ export default function Sidebar() {
                 const workspaceActive = workspace.id === activeWorkspaceId;
                 const projectScan = projectScanCache[workspace.id]?.scan;
                 const projectState = projectHealth(workspace, projectScan);
+                const headerPaths = workspaceHeaderPaths(workspace);
+                const visibleHeaderPaths = headerPaths.slice(
+                  0,
+                  WORKSPACE_HEADER_VISIBLE_PATHS,
+                );
+                const hiddenHeaderPaths = headerPaths.slice(
+                  WORKSPACE_HEADER_VISIBLE_PATHS,
+                );
                 return (
                   <li key={workspace.id} className="flex flex-col gap-1.5">
                     <div
@@ -1276,6 +1306,11 @@ export default function Sidebar() {
                       <button
                         type="button"
                         onClick={() => setWorkspace(workspace.path)}
+                        title={
+                          headerPaths.length > 0
+                            ? headerPaths.join('\n')
+                            : workspace.name
+                        }
                         className="min-w-0 text-left"
                       >
                         <div className="flex min-w-0 items-center gap-2 text-[11px] font-semibold leading-4 text-fg">
@@ -1287,13 +1322,29 @@ export default function Sidebar() {
                             title={`${projectState.label}：${projectState.detail}`}
                             aria-label={projectState.label}
                           />
-                          <span className="min-w-0 flex-1 truncate" title={workspace.path}>
+                          <span className="min-w-0 flex-1 truncate" title={workspace.name}>
                             {workspace.name}
                           </span>
                         </div>
-                        {workspace.path && (
-                          <div className="truncate pl-8 font-mono text-[9px] text-fg-faint">
-                            {workspace.path}
+                        {visibleHeaderPaths.length > 0 && (
+                          <div className="mt-0.5 flex min-w-0 flex-col gap-0.5 pl-8 font-mono text-[9px] leading-3 text-fg-faint">
+                            {visibleHeaderPaths.map((path) => (
+                              <span
+                                key={workspacePathKey(path)}
+                                className="truncate"
+                                title={path}
+                              >
+                                {path}
+                              </span>
+                            ))}
+                            {hiddenHeaderPaths.length > 0 && (
+                              <span
+                                className="truncate"
+                                title={hiddenHeaderPaths.join('\n')}
+                              >
+                                ...
+                              </span>
+                            )}
                           </div>
                         )}
                       </button>
@@ -1699,7 +1750,17 @@ export default function Sidebar() {
             className="shrink-0 text-fg-faint group-hover:text-fg"
             aria-hidden="true"
           />
-          <span>{t(locale, 'downloads.open')}</span>
+          <span className="min-w-0 flex-1 truncate">{t(locale, 'downloads.open')}</span>
+          <span
+            className={`ml-auto shrink-0 rounded border px-1.5 py-0.5 font-mono text-[10px] leading-none ${
+              assetActiveCount > 0
+                ? 'border-accent/40 bg-accent/10 text-accent'
+                : 'border-border-soft bg-panel-2 text-fg-faint'
+            }`}
+          >
+            {assetTotalCount} {t(locale, 'downloads.countUnit')} ·{' '}
+            {assetActiveCount} {t(locale, 'downloads.activeShort')}
+          </span>
         </button>
       </div>
 
