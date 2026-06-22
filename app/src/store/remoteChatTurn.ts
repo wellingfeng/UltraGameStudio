@@ -73,7 +73,11 @@ function compactLog(line: RemoteJobLogLine): string {
   // Model logs are raw CLI protocol (stream-json, hook responses, warnings).
   // Keep them for final answer parsing, but do not render them live.
   if (line.phase === 'model') return '';
-  const text = line.text?.trimEnd();
+  // Git progress ("Receiving objects: x%") rewrites a single line with carriage
+  // returns rather than newlines. Keep only the final segment so the live view
+  // shows the latest progress instead of a smeared one-liner.
+  const collapsed = line.text?.replace(/\r\n/g, '\n').split('\r').pop();
+  const text = collapsed?.trimEnd();
   if (!text) return '';
   const phase = line.phase ? `[${line.phase}] ` : '';
   const stream = line.stream === 'stderr' ? 'ERR ' : '';

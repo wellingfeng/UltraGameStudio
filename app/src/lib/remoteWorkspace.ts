@@ -268,6 +268,35 @@ function normalizeServerUrl(raw: string): string {
   return normalizeRemoteServerUrl(raw);
 }
 
+/**
+ * 判断 URL 是否指向本机回环地址（127.0.0.1 / localhost / ::1）。
+ * 早期本地联调阶段可能把回环地址存进了 localStorage；这类值视为过期，
+ * 应回退到内置的官方测试 Runner 默认值，而不是覆盖它。
+ */
+function isLoopbackServerUrl(raw: string | null | undefined): boolean {
+  if (!raw) return true;
+  const value = raw.trim().toLowerCase();
+  if (!value) return true;
+  return (
+    /(^|\/\/)(127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1\]|::1)(:|\/|$)/.test(value)
+  );
+}
+
+/** 读取本地保存的连接 serverUrl 原始值（不含内置默认，不做回环过滤）。 */
+function readStoredRunnerServerUrl(): string {
+  if (!hasStorage()) return '';
+  try {
+    const raw = window.localStorage.getItem(REMOTE_RUNNER_CONNECTION_STORAGE_KEY);
+    if (!raw) return '';
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object') return '';
+    const v = parsed as Record<string, unknown>;
+    return typeof v.serverUrl === 'string' ? v.serverUrl : '';
+  } catch {
+    return '';
+  }
+}
+
 /** Read all configured remote workspaces (non-secret data only). */
 export function loadRemoteWorkspaces(): RemoteWorkspaceConfig[] {
   if (!hasStorage()) return [];
@@ -403,6 +432,8 @@ export function readRemoteRunnerConnection(
     if (!parsed || typeof parsed !== 'object') return fallback;
     const v = parsed as Record<string, unknown>;
     if (typeof v.serverUrl !== 'string' || !v.serverUrl.trim()) return fallback;
+    // 早期本地联调可能把回环地址存进了 localStorage；视为过期，回退到内置默认。
+    if (allowDefault && isLoopbackServerUrl(v.serverUrl)) return fallback;
     return {
       serverUrl: normalizeServerUrl(v.serverUrl),
       updatedAt:
@@ -420,7 +451,10 @@ export function readRemoteRunnerConnectionSecrets(
 ): RemoteRunnerConnectionSecrets {
   const allowDefault = opts.allowDefault !== false;
   const record = readSecureRecord(REMOTE_RUNNER_CONNECTION_SECRET);
-  const token = record.token || (allowDefault ? DEFAULT_REMOTE_RUNNER_TOKEN : '');
+  // 若保存的连接指向回环地址，则连同其 Token 一起视为过期，回退到内置默认 Token。
+  const storedIsStale = allowDefault && isLoopbackServerUrl(readStoredRunnerServerUrl());
+  const storedToken = storedIsStale ? '' : record.token;
+  const token = storedToken || (allowDefault ? DEFAULT_REMOTE_RUNNER_TOKEN : '');
   return { token };
 }
 

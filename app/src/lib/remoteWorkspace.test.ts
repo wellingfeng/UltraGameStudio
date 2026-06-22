@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULT_REMOTE_RUNNER_SERVER_URL,
+  DEFAULT_REMOTE_RUNNER_TOKEN,
   REMOTE_WORKSPACE_PREFIX,
   RunnerClient,
   deleteRemoteWorkspace,
@@ -133,6 +135,37 @@ describe('remote workspace persistence', () => {
       'ultragamestudio.remoteWorkspaces.v1',
     );
     expect(rawProjects).not.toContain('runner-token');
+  });
+
+  it('falls back to the built-in default when nothing is saved', () => {
+    expect(readRemoteRunnerConnection()?.serverUrl).toBe(
+      DEFAULT_REMOTE_RUNNER_SERVER_URL,
+    );
+    expect(readRemoteRunnerConnectionSecrets().token).toBe(
+      DEFAULT_REMOTE_RUNNER_TOKEN,
+    );
+  });
+
+  it('treats a stale loopback connection as default (ignores old local testing values)', () => {
+    // 模拟早期本地联调把 127.0.0.1 连接 + 本地 Token 存进了 localStorage。
+    saveRemoteRunnerConnection(
+      { serverUrl: 'http://127.0.0.1:8787' },
+      { token: 'old-local-token' },
+    );
+    // 预填应回退到内置的官方测试默认值，而不是过期的回环值。
+    expect(readRemoteRunnerConnection()?.serverUrl).toBe(
+      DEFAULT_REMOTE_RUNNER_SERVER_URL,
+    );
+    expect(readRemoteRunnerConnectionSecrets().token).toBe(
+      DEFAULT_REMOTE_RUNNER_TOKEN,
+    );
+    // 但显式禁用默认时仍能读到原始保存值（供真实连接解析使用）。
+    expect(
+      readRemoteRunnerConnection({ allowDefault: false })?.serverUrl,
+    ).toBe('http://127.0.0.1:8787');
+    expect(
+      readRemoteRunnerConnectionSecrets({ allowDefault: false }).token,
+    ).toBe('old-local-token');
   });
 });
 

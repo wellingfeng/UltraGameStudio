@@ -7,6 +7,17 @@ import { Buffer } from 'node:buffer';
  * rewriting the remote URL. That keeps tokens out of `.git/config`.
  */
 
+/**
+ * Default per-call git timeout. A network-stalled `git clone` (e.g. a backend
+ * that cannot reach github.com) would otherwise hang forever, leaving the job
+ * stuck in `cloning` with no logs and the client waiting indefinitely. Override
+ * per-call via `opts.timeoutMs`, or globally via `UGS_RUNNER_GIT_TIMEOUT_MS`.
+ */
+const DEFAULT_GIT_TIMEOUT_MS = (() => {
+  const raw = Number(process.env.UGS_RUNNER_GIT_TIMEOUT_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : 180_000;
+})();
+
 /** Run a command, capturing stdout/stderr. Never throws on non-zero exit. */
 export function run(cmd, args, opts = {}) {
   return new Promise((resolve) => {
@@ -17,6 +28,27 @@ export function run(cmd, args, opts = {}) {
     });
     let stdout = '';
     let stderr = '';
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timeoutMs =
+      typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0
+        ? opts.timeoutMs
+        : DEFAULT_GIT_TIMEOUT_MS;
+    const timer = setTimeout(() => {
+      const note = `\n[git] command timed out after ${timeoutMs}ms; killing process`;
+      opts.onLog?.({ stream: 'stderr', text: note });
+      try {
+        child.kill('SIGKILL');
+      } catch {
+        /* already gone */
+      }
+      finish({ code: -1, stdout, stderr: stderr + note });
+    }, timeoutMs);
     child.stdout?.on('data', (d) => {
       stdout += d.toString();
       opts.onLog?.({ stream: 'stdout', text: d.toString() });
@@ -26,9 +58,9 @@ export function run(cmd, args, opts = {}) {
       opts.onLog?.({ stream: 'stderr', text: d.toString() });
     });
     child.on('error', (err) => {
-      resolve({ code: -1, stdout, stderr: stderr + String(err) });
+      finish({ code: -1, stdout, stderr: stderr + String(err) });
     });
-    child.on('close', (code) => resolve({ code: code ?? -1, stdout, stderr }));
+    child.on('close', (code) => finish({ code: code ?? -1, stdout, stderr }));
   });
 }
 
@@ -72,23 +104,120 @@ export function authenticatedUrl(repoUrl, token) {
   }
 }
 
-/** Git env config for one HTTPS host. Token never enters command args/remotes. */
-export function authEnvForUrl(repoUrl, token) {
+/**
+ * Resolve the ordered list of outbound HTTP(S) proxies for git network ops.
+ * Backends that cannot reach github.com directly (e.g. a Tencent Cloud host) can
+ * route clone/pull/push through one or more proxies. Configure via
+ * `UGS_RUNNER_GIT_PROXY` (preferred) as a single URL or a comma-separated list,
+ * e.g. `http://10.0.0.2:7890,http://10.0.0.3:7890`. Standard
+ * `HTTPS_PROXY`/`HTTP_PROXY` are honored as a fallback. Proxies must be
+ * reachable *from the backend host* — a Clash instance on the operator's own
+ * laptop (127.0.0.1) is not, unless the backend runs on that same machine.
+ *
+ * Order matters: callers try a direct connection first, then each proxy in turn
+ * (mirroring MonkeyCode's direct-first, proxy-fallback strategy).
+ */
+export function proxyList() {
+  const raw =
+    process.env.UGS_RUNNER_GIT_PROXY ||
+    process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy ||
+    '';
+  return raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+/** First configured proxy, or null. Kept for callers that want a single value. */
+export function proxyUrl() {
+  return proxyList()[0] ?? null;
+}
+
+/**
+ * Git env config for one HTTPS host. Token never enters command args/remotes.
+ * Pass an explicit `proxy` (string) to route this invocation through it; pass
+ * `null`/omit for a direct connection. The token auth header is always included
+ * (when applicable) regardless of proxy choice.
+ */
+export function authEnvForUrl(repoUrl, token, proxy = null) {
   const env = { GIT_TERMINAL_PROMPT: '0' };
-  if (!token) return env;
-  try {
-    const u = new URL(normalizeRepoUrl(repoUrl, token));
-    if (u.protocol !== 'https:') return env;
-    const encoded = Buffer.from(`x-access-token:${token}`, 'utf8').toString('base64');
-    return {
-      ...env,
-      GIT_CONFIG_COUNT: '1',
-      GIT_CONFIG_KEY_0: `http.${u.origin}/.extraheader`,
-      GIT_CONFIG_VALUE_0: `AUTHORIZATION: basic ${encoded}`,
-    };
-  } catch {
-    return env;
+  const entries = [];
+  if (token) {
+    try {
+      const u = new URL(normalizeRepoUrl(repoUrl, token));
+      if (u.protocol === 'https:') {
+        const encoded = Buffer.from(`x-access-token:${token}`, 'utf8').toString(
+          'base64',
+        );
+        entries.push([
+          `http.${u.origin}/.extraheader`,
+          `AUTHORIZATION: basic ${encoded}`,
+        ]);
+      }
+    } catch {
+      /* leave token out if the URL cannot be parsed */
+    }
   }
+  if (proxy) {
+    entries.push(['http.proxy', proxy]);
+    entries.push(['https.proxy', proxy]);
+  }
+  if (entries.length === 0) return env;
+  env.GIT_CONFIG_COUNT = String(entries.length);
+  entries.forEach(([key, value], i) => {
+    env[`GIT_CONFIG_KEY_${i}`] = key;
+    env[`GIT_CONFIG_VALUE_${i}`] = value;
+  });
+  return env;
+}
+
+/**
+ * Heuristically decide whether a failed git result is a *network* failure worth
+ * retrying through a proxy. Auth errors (403/401), missing repos/branches, and
+ * non-fast-forward rejections are NOT network problems, so we don't waste time
+ * cycling proxies for them. Matches the symptoms seen in the wild: connection
+ * timeouts, DNS failures, refused connections, and mid-transfer disconnects.
+ */
+export function isNetworkFailure(res) {
+  if (!res || res.code === 0) return false;
+  const text = `${res.stderr ?? ''}\n${res.stdout ?? ''}`;
+  return /Connection timed out|Could ?n[o']?t connect|Failed to connect|Couldn't connect to server|Could not resolve host|unable to access|unexpected disconnect|RPC failed|early EOF|Recv failure|Send failure|timed out after \d+ms|TLS connect|SSL_ERROR|Operation timed out|Connection reset/i.test(
+    text,
+  );
+}
+
+/**
+ * Run a network-touching git command with direct-first, proxy-fallback retry.
+ * Tries a direct connection, and only if it fails with a network error does it
+ * retry through each configured proxy in order. Auth/branch/other errors short
+ * -circuit immediately. Returns the last attempt's result plus `attempts`.
+ */
+export async function runGitNet(args, { cwd, repoUrl, token, onLog } = {}) {
+  const attempts = [null, ...proxyList()];
+  let last = null;
+  for (let i = 0; i < attempts.length; i++) {
+    const proxy = attempts[i];
+    if (proxy) {
+      onLog?.({
+        phase: 'git',
+        stream: 'stderr',
+        text: redact(`[git] direct connection failed; retrying via proxy ${proxy}`),
+      });
+    }
+    const res = await run('git', args, {
+      cwd,
+      env: authEnvForUrl(repoUrl, token, proxy),
+      onLog: (l) => onLog?.({ ...l, text: redact(l.text) }),
+    });
+    last = res;
+    if (res.code === 0) return { ...res, proxyUsed: proxy };
+    // Stop retrying on non-network failures (auth, missing branch, etc.).
+    if (!isNetworkFailure(res)) break;
+  }
+  return { ...last, proxyUsed: null };
 }
 
 /** Redact any embedded credentials from a string before it leaves the server. */
@@ -101,13 +230,14 @@ export function redact(text) {
 
 export async function ensureClone({ repoUrl, branch, dir, token, onLog }) {
   const cloneUrl = normalizeRepoUrl(repoUrl, token);
-  const args = ['clone', '--depth', '1'];
+  // `--progress` forces git to emit "Receiving objects: x%" lines even when
+  // stderr is a pipe (not a TTY). Without it, a long clone stays silent until it
+  // finishes or fails, so the client sees no live stream during the slowest
+  // phase. The progress lines flow through onLog -> SSE just like other output.
+  const args = ['clone', '--progress', '--depth', '1'];
   if (branch) args.push('--branch', branch);
   args.push(cloneUrl, dir);
-  const res = await run('git', args, {
-    env: authEnvForUrl(cloneUrl, token),
-    onLog: (l) => onLog?.({ ...l, text: redact(l.text) }),
-  });
+  const res = await runGitNet(args, { repoUrl: cloneUrl, token, onLog });
   if (res.code === 0) {
     await run('git', ['remote', 'set-url', 'origin', cloneUrl], { cwd: dir });
   }
@@ -176,13 +306,9 @@ export async function ensureWorkspace({ repoUrl, branch, dir, token, onLog }) {
 export async function pull({ dir, branch, token, onLog }) {
   const remote = await run('git', ['remote', 'get-url', 'origin'], { cwd: dir });
   const repoUrl = remote.stdout.trim();
-  const args = ['pull', '--ff-only'];
+  const args = ['pull', '--progress', '--ff-only'];
   if (branch) args.push('origin', branch);
-  const res = await run('git', args, {
-    cwd: dir,
-    env: authEnvForUrl(repoUrl, token),
-    onLog: (l) => onLog?.({ ...l, text: redact(l.text) }),
-  });
+  const res = await runGitNet(args, { cwd: dir, repoUrl, token, onLog });
   return { ok: res.code === 0, ...res, stderr: redact(res.stderr) };
 }
 
@@ -213,14 +339,9 @@ export async function commitAndPush({ dir, branch, message, token, onLog }) {
       return { ok: false, stderr: redact(res.stderr) };
     }
   }
-  const push = await run(
-    'git',
+  const push = await runGitNet(
     ['push', '-u', 'origin', branch, '--force-with-lease'],
-    {
-      cwd: dir,
-      env: authEnvForUrl(repoUrl, token),
-      onLog: (l) => onLog?.({ ...l, text: redact(l.text) }),
-    },
+    { cwd: dir, repoUrl, token, onLog },
   );
   return { ok: push.code === 0, stderr: redact(push.stderr), branch };
 }

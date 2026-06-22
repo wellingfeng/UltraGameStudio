@@ -330,7 +330,7 @@ export default function RemoteWorkspaceDialog({
                       setTestState('idle');
                       setRunnerUsage(null);
                     }}
-                    placeholder="https://your-server:8787"
+                    placeholder="http://150.158.47.232:8787"
                   />
                   <p className="mt-1 text-[10px] text-fg-faint">
                     {t(locale, 'remoteWorkspace.serverUrlHint')}
