@@ -29,7 +29,6 @@ jobs:
             artifact_name: ultragamestudio-windows-x64
             asset_glob: |
               app/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*-setup.exe
-              app/src-tauri/target/x86_64-pc-windows-msvc/release/UltraGameStudio.exe
           - name: macOS universal
             runner: macos-latest
             rust_target: aarch64-apple-darwin,x86_64-apple-darwin
