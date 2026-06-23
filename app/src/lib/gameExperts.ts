@@ -2381,6 +2381,9 @@ export function buildGameExpertPrompt(
   const channelLines = channels ? buildChannelGuidance(experts, channels) : [];
 
   const expertNames = experts.map((expert) => expert.name).join(" / ");
+  // 多专家时才需要显式的协作/交接/仲裁规则；单专家场景这层是噪音。
+  const collaborationLines =
+    experts.length > 1 ? buildCollaborationRules(experts) : [];
   return [
     "",
     "【游戏专家系统】",
@@ -2392,7 +2395,38 @@ export function buildGameExpertPrompt(
     `【必须输出】回复的第一行先写一条简短播报：「游戏专家视角：${expertNames}」，再开始正文。这是强制格式，不可省略。`,
     "把以下专家约束融合成一个回答。可以说明你正在使用这些专家视角；不要谎称后台并行运行了多个独立智能体、多人会议或外部进程。",
     "优先贴合当前代码库和用户要求；若专家建议冲突，选择能最快验证核心玩法且风险最低的方案。",
+    "",
+    "【一、角色与边界】每位专家只在自己的 role 与 boundaries 内发声；越界的判断要标注「超出本视角」并交给对应专家，不要替别人拍板。",
     ...expertLines,
-    ...(channelLines.length > 0 ? ["", ...channelLines] : []),
+    ...(channelLines.length > 0
+      ? ["", "【二、可用能力（工具规范）】", ...channelLines]
+      : []),
+    ...(collaborationLines.length > 0 ? ["", ...collaborationLines] : []),
+    "",
+    "【四、交付格式】回答按此结构产出，缺项写「无」：",
+    "  1) 结论：一句话给出落地方案（多视角冲突时这里只留最终选择）。",
+    "  2) 依据：按专家视角分点说明关键取舍，标明各点来自哪个视角。",
+    "  3) 落地步骤：可执行、可验证的有序步骤；涉及素材生成时点名对应 slash 命令。",
+    "  4) 风险与验证：列出主要风险和最小验证方式（如先跑通核心循环 / 加测试）。",
   ].join("\n");
+}
+
+/**
+ * 协作 / 交接 / 仲裁层（4 层规范里的"调用决策规则"在多专家组织下的展开）。
+ * 单专家不调用此函数；多专家时显式约束视角如何交接、冲突时谁优先，
+ * 避免各专家各说各话、或互相越权拍板。
+ */
+function buildCollaborationRules(
+  experts: readonly GameExpertDefinition[],
+): string[] {
+  // 用 defaultRank 作为仲裁优先级线索：rank 越小越靠近最终决策权（如 TD/制作人）。
+  const arbiter = experts.reduce((best, cur) =>
+    cur.defaultRank < best.defaultRank ? cur : best,
+  );
+  return [
+    "【三、协作与仲裁（调用决策规则）】",
+    "  - 交接：上游视角的产物（如设计规则、架构边界）作为下游视角（实现、测试）的输入，下游不得推翻上游已定的硬约束，只能在其内优化。",
+    `  - 仲裁：视角冲突且无法兼得时，以「最快验证核心玩法 + 最低风险」为准；仍僵持则以 ${arbiter.name} 的视角为最终裁决，并在结论里写明被舍弃的方案及原因。`,
+    "  - 缺信息：若关键参数缺失导致无法决策，先给出基于合理默认值的方案，并标出该默认值，不要停下来反问。",
+  ];
 }

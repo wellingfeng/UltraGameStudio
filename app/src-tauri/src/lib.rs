@@ -16239,6 +16239,32 @@ mod tests {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Windows/WebView2: disable native window occlusion detection. WebView2
+    // pauses page rendering/compositing when it thinks the window is fully
+    // occluded — but that heuristic misfires under long-running streamed
+    // updates (the chat SSE stream + frequent requestAnimationFrame repaints)
+    // and when the window sits behind others, freezing the last frame while
+    // React state keeps updating underneath. The window only "unfreezes" once
+    // it regains focus and WebView2 receives an occlusion-state change. Turning
+    // the heuristic off trades a small background power optimisation for a UI
+    // that never stalls mid-stream. Must be set before WebView2 is created.
+    #[cfg(windows)]
+    {
+        const WEBVIEW2_ARGS_VAR: &str = "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS";
+        const DISABLE_OCCLUSION: &str = "--disable-features=msWebOOUI,msPdfOOUI,CalculateNativeWinOcclusion";
+        match std::env::var(WEBVIEW2_ARGS_VAR) {
+            Ok(existing) if !existing.is_empty() => {
+                if !existing.contains("CalculateNativeWinOcclusion") {
+                    std::env::set_var(
+                        WEBVIEW2_ARGS_VAR,
+                        format!("{existing} {DISABLE_OCCLUSION}"),
+                    );
+                }
+            }
+            _ => std::env::set_var(WEBVIEW2_ARGS_VAR, DISABLE_OCCLUSION),
+        }
+    }
+
     let builder =
         tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);

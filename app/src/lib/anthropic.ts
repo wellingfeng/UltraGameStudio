@@ -77,6 +77,12 @@ export interface StreamArgs {
   system: string;
   /** The user turn content. */
   userContent: string;
+  /**
+   * Optional images attached to the user turn for vision prompts. Each entry is
+   * a `data:` URL (preferred; sent as a base64 image block) or an http(s) URL
+   * (sent as a url image block). Non-data, non-http strings are ignored.
+   */
+  userImages?: string[];
   model?: string;
   maxTokens?: number;
   /** Abort signal so a caller can cancel an in-flight stream. */
@@ -85,6 +91,46 @@ export interface StreamArgs {
   onDelta?: (chunk: string) => void;
   /** Best-effort parsed provider token usage. Called once when stream ends. */
   onUsage?: (usage: ModelUsageReport) => void;
+}
+
+type AnthropicContentBlock =
+  | { type: 'text'; text: string }
+  | {
+      type: 'image';
+      source:
+        | { type: 'base64'; media_type: string; data: string }
+        | { type: 'url'; url: string };
+    };
+
+/**
+ * Build the Anthropic user message content. With no images this stays a plain
+ * string (back-compat); with images it becomes a content-block array carrying
+ * the text plus one image block per supported source.
+ */
+function anthropicUserContent(
+  text: string,
+  images?: string[],
+): string | AnthropicContentBlock[] {
+  const blocks: AnthropicContentBlock[] = [];
+  for (const src of images ?? []) {
+    const trimmed = src?.trim();
+    if (!trimmed) continue;
+    const dataMatch = /^data:([^;,]*);base64,(.*)$/s.exec(trimmed);
+    if (dataMatch) {
+      blocks.push({
+        type: 'image',
+        source: {
+          type: 'base64',
+          media_type: dataMatch[1] || 'image/png',
+          data: dataMatch[2] ?? '',
+        },
+      });
+    } else if (/^https?:\/\//i.test(trimmed)) {
+      blocks.push({ type: 'image', source: { type: 'url', url: trimmed } });
+    }
+  }
+  if (blocks.length === 0) return text;
+  return [...blocks, { type: 'text', text }];
 }
 
 /**
@@ -97,6 +143,7 @@ export async function streamAnthropic(args: StreamArgs): Promise<string> {
     baseUrl,
     system,
     userContent,
+    userImages,
     model,
     maxTokens,
     signal,
@@ -104,6 +151,8 @@ export async function streamAnthropic(args: StreamArgs): Promise<string> {
     onUsage,
   } = args;
   if (!apiKey || !apiKey.trim()) throw new Error('NO_API_KEY');
+
+  const userMessageContent = anthropicUserContent(userContent, userImages);
 
   const res = await fetch(resolveEndpoint(baseUrl), {
     method: 'POST',
@@ -119,7 +168,7 @@ export async function streamAnthropic(args: StreamArgs): Promise<string> {
       max_tokens: maxTokens ?? 4096,
       stream: true,
       system,
-      messages: [{ role: 'user', content: userContent }],
+      messages: [{ role: 'user', content: userMessageContent }],
     }),
     signal,
   });

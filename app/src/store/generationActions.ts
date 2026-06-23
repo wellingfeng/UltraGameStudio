@@ -71,6 +71,7 @@ import { formatClock, formatDuration } from '@/runtime';
 
 // --- lib leaf imports (gateway / channels / assets / i18n / id / translation) ---
 import { captureGeneratedAssets } from '@/lib/assetCapture';
+import { verifyAsset, canVerifyAsset } from '@/lib/assetVerify';
 import { markAssetDone, markAssetFailed } from '@/lib/downloadRegistry';
 import { ensureFreeProxy, isFreeChannelSelection } from '@/lib/freeChannels';
 import { shortId } from '@/lib/id';
@@ -1263,17 +1264,65 @@ export function startImageGenerationTurn(
         `${elapsed()}\n${promptModelLine}② 已生成提示词，正在出图…\n\n生图提示词：${imagePrompt}`,
         false,
       );
-      const result = await generateImage(
-        {
-          prompt: imagePrompt,
-          providerId,
-          model,
-          signal: ch.abortController.signal,
-        },
+      // ── Step ③ — generate, then run the visual-QA closed loop: a vision model
+      // judges the image against the prompt; on a low score we fold its defect
+      // feedback into the prompt and regenerate, up to verifyMaxRetries times.
+      // Verification only runs when enabled AND the coding channel resolves to a
+      // direct (vision-capable) route; otherwise it degrades to a single pass.
+      const verifyOn =
+        settings.verifyEnabled && canVerifyAsset(codingSelection);
+      const maxAttempts = verifyOn ? 1 + Math.max(0, settings.verifyMaxRetries) : 1;
+      let attemptPrompt = imagePrompt;
+      let result = await generateImage(
+        { prompt: attemptPrompt, providerId, model, signal: ch.abortController.signal },
         settings,
       );
+      let verifyNote = '';
+      for (let attempt = 1; verifyOn && attempt <= maxAttempts; attempt += 1) {
+        if (!aiEditRegistered(ch) || ch.abortController.signal.aborted) return;
+        setAssistant(
+          `${elapsed()}\n${promptModelLine}③ 正在视觉验证第 ${attempt} 版…`,
+          false,
+        );
+        let verdict;
+        try {
+          verdict = await verifyAsset({
+            kind: 'image',
+            prompt: attemptPrompt,
+            sources: result.images,
+            selection: codingSelection,
+            threshold: settings.verifyThreshold,
+            permission: codingPermission,
+            signal: ch.abortController.signal,
+            cwd: ch.workspaceRootPath ?? undefined,
+            workspaceId: ch.workspaceId,
+            sessionId: ch.sessionId,
+          });
+        } catch {
+          // Verification failed (model/network). Keep the current image rather
+          // than failing the turn or burning more quota.
+          verdict = null;
+        }
+        if (!verdict) break;
+        const defectLine = verdict.defects.length
+          ? `；问题：${verdict.defects.join('、')}`
+          : '';
+        if (verdict.pass || attempt >= maxAttempts || !verdict.promptPatch) {
+          verifyNote = verdict.pass
+            ? `\n✓ 视觉验证通过（评分 ${verdict.score}，第 ${attempt} 版）`
+            : `\n⚠ 已达重生成上限，采用第 ${attempt} 版（评分 ${verdict.score}${defectLine}）`;
+          break;
+        }
+        verifyNote = `\n🔎 第 ${attempt} 版评分 ${verdict.score}${defectLine}，按反馈修正后重生成…`;
+        setAssistant(`${elapsed()}\n${promptModelLine}${verifyNote.trim()}`, false);
+        attemptPrompt = `${imagePrompt}\n\n【质检修正】${verdict.promptPatch}`;
+        result = await generateImage(
+          { prompt: attemptPrompt, providerId, model, signal: ch.abortController.signal },
+          settings,
+        );
+      }
       const body = imageResultMarkdown(result);
-      setAssistant(`${elapsed()}\n${promptModelLine}${body}`, true);
+      setAssistant(`${elapsed()}\n${promptModelLine}${body}${verifyNote}`, true);
       const capturePendingAssetId = pendingAssetId;
       pendingAssetId = null;
       void captureGeneratedAssets({

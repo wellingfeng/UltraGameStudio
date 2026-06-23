@@ -26,6 +26,7 @@ import {
   Languages,
   ListChecks,
   Loader2,
+  Lock,
   Plus,
   RotateCcw,
   Search,
@@ -33,6 +34,7 @@ import {
   ShieldQuestionMark,
   Square,
   Trash2,
+  Unlock,
   X,
   Zap,
 } from "lucide-react";
@@ -1765,6 +1767,9 @@ export default function AIDock({
   // The organization chart is no longer a top tab beside the stream; it pops up
   // from a `$组织架构` trigger at the input bottom and collapses on outside click.
   const [orgPanelOpen, setOrgPanelOpen] = useState(false);
+  // When locked, the organization popup ignores outside clicks and Escape, so it
+  // only closes via its explicit close button.
+  const [orgPanelLocked, setOrgPanelLocked] = useState(false);
   // New-session layout: in the chat surface, before any message lands, the input
   // box floats in the vertical center. Opening the organization chart promotes
   // it back to the normal bottom composer so the popup never covers the input.
@@ -3885,6 +3890,7 @@ export default function AIDock({
   // trigger button toggles it directly, so ignore clicks that land on it).
   useEffect(() => {
     if (!orgPanelOpen) return;
+    if (orgPanelLocked) return;
     const handlePointerDown = (event: MouseEvent) => {
       const panel = orgPanelRef.current;
       const target = event.target as HTMLElement | null;
@@ -3901,7 +3907,7 @@ export default function AIDock({
       document.removeEventListener("mousedown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [orgPanelOpen]);
+  }, [orgPanelOpen, orgPanelLocked]);
 
   // Keep the inline `$` menu's org definition fresh: reload when the popup
   // panel closes (it may have edited the chart) and on cross-tab storage edits.
@@ -8276,10 +8282,31 @@ export default function AIDock({
             </span>
             <button
               type="button"
+              onClick={() => setOrgPanelLocked((prev) => !prev)}
+              aria-pressed={orgPanelLocked}
+              title={t(
+                locale,
+                orgPanelLocked ? "dock.orgPanelUnlock" : "dock.orgPanelLock",
+              )}
+              aria-label={t(
+                locale,
+                orgPanelLocked ? "dock.orgPanelUnlock" : "dock.orgPanelLock",
+              )}
+              className={cn(
+                "ml-auto flex h-7 w-7 items-center justify-center rounded-md transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent",
+                orgPanelLocked
+                  ? "bg-accent/15 text-accent hover:bg-accent/25"
+                  : "text-fg-dim hover:bg-border-soft/55 hover:text-fg",
+              )}
+            >
+              {orgPanelLocked ? <Lock size={14} /> : <Unlock size={14} />}
+            </button>
+            <button
+              type="button"
               onClick={() => setOrgPanelOpen(false)}
               title={t(locale, "common.close")}
               aria-label={t(locale, "common.close")}
-              className="ml-auto flex h-7 w-7 items-center justify-center rounded-md text-fg-dim transition-colors hover:bg-border-soft/55 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+              className="flex h-7 w-7 items-center justify-center rounded-md text-fg-dim transition-colors hover:bg-border-soft/55 hover:text-fg focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
             >
               <X size={15} />
             </button>

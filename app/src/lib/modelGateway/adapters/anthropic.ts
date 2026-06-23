@@ -10,6 +10,7 @@ export async function completeAnthropic(
     model: request.route.model,
     system: request.system,
     userContent: request.userContent,
+    userImages: request.userImages,
     maxTokens: request.maxTokens,
     signal: request.signal,
     onDelta: request.onDelta,

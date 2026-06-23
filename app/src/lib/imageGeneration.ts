@@ -124,6 +124,16 @@ export interface ImageGenerationSettings {
   providerBaseUrls: Partial<Record<ImageProviderId, string>>;
   providerModels: Partial<Record<ImageProviderId, string>>;
   providerModelLists: Partial<Record<ImageProviderId, string[]>>;
+  /**
+   * Visual-QA closed loop. When enabled, a vision model judges each generated
+   * image against the prompt; if it scores below `verifyThreshold`, the channel
+   * folds the model's defect feedback into the prompt and regenerates, up to
+   * `verifyMaxRetries` extra attempts. Requires a direct (anthropic /
+   * openai-compatible) coding channel; otherwise verification is skipped.
+   */
+  verifyEnabled: boolean;
+  verifyThreshold: number;
+  verifyMaxRetries: number;
 }
 
 export interface ImageGenerationResult {
@@ -726,6 +736,9 @@ export const DEFAULT_IMAGE_GENERATION_SETTINGS: ImageGenerationSettings = {
   providerBaseUrls: {},
   providerModels: {},
   providerModelLists: {},
+  verifyEnabled: false,
+  verifyThreshold: 70,
+  verifyMaxRetries: 1,
 };
 
 function isKnownImageProviderId(
@@ -918,7 +931,25 @@ export function normalizeImageGenerationSettings(
     providerBaseUrls: cleanRecord(source.providerBaseUrls, validKey),
     providerModels: cleanRecord(source.providerModels, validKey),
     providerModelLists: cleanModelListRecord(source.providerModelLists, validKey),
+    verifyEnabled:
+      typeof source.verifyEnabled === 'boolean'
+        ? source.verifyEnabled
+        : DEFAULT_IMAGE_GENERATION_SETTINGS.verifyEnabled,
+    verifyThreshold: clampVerifyThreshold(source.verifyThreshold),
+    verifyMaxRetries: clampVerifyMaxRetries(source.verifyMaxRetries),
   };
+}
+
+function clampVerifyThreshold(value: unknown): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_IMAGE_GENERATION_SETTINGS.verifyThreshold;
+  return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function clampVerifyMaxRetries(value: unknown): number {
+  const n = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(n)) return DEFAULT_IMAGE_GENERATION_SETTINGS.verifyMaxRetries;
+  return Math.max(0, Math.min(3, Math.round(n)));
 }
 
 export function loadImageGenerationSettings(

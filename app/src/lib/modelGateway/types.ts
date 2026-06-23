@@ -98,6 +98,14 @@ export interface GatewayTextRequest {
   route: ResolvedGatewayRoute;
   system: string;
   userContent: string;
+  /**
+   * Optional images attached to the user turn for multimodal (vision) prompts.
+   * Each entry is a `data:` URL or an http(s) URL. Only the direct transports
+   * (`anthropic`, `openai-compatible`) consume these; the CLI transport ignores
+   * them. Used by the asset-verification loop so a vision model can "see" a
+   * freshly generated image/sprite render and judge whether it matches intent.
+   */
+  userImages?: string[];
   maxTokens?: number;
   signal?: AbortSignal;
   runId?: string;
