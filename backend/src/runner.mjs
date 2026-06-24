@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { EventEmitter } from 'node:events';
 import * as git from './git.mjs';
+import { ensureGitReadyForSync } from './environment.mjs';
 import { resolveInvocation } from './models.mjs';
 import {
   addUsage,
@@ -436,34 +437,56 @@ export class JobRunner extends EventEmitter {
       return;
     }
 
-    // 1. Sync code.
+    // 1. Sync code — clone only on first touch.
+    // A project workspace is cloned once; after that every job reuses the
+    // existing checkout instead of re-running the clone/pull on each task.
+    // This drops the "fixed" sync step users saw before every run. To pull
+    // the repo's latest commits, use the project file-tree refresh/sync path
+    // (server.mjs ensureProjectWorkspaceReady with sync=true), not the runner.
+    // Temporary (non-project) jobs get a fresh dir each time, so they still
+    // clone here.
     if (job.repoUrl) {
-      this._setStatus(job, 'cloning');
-      const clone = project
-        ? await git.ensureWorkspace({
-            repoUrl: job.repoUrl,
-            branch: job.branch,
-            dir,
-            token: job._gitToken,
-            onLog: (l) => this._log(job, { phase: 'git', ...l }),
-          })
-        : await git.ensureClone({
-        repoUrl: job.repoUrl,
-        branch: job.branch,
-        dir,
-        token: job._gitToken,
-        onLog: (l) => this._log(job, { phase: 'git', ...l }),
-          });
-      if (this._isCancelled(job)) {
-        this._failCanceled(job);
-        return;
-      }
-      if (!clone.ok) {
-        job.error = `git sync failed: ${clone.stderr}`;
-        this._scrubSecrets(job);
-        this._finalizeLedger(job, 'error');
-        this._setStatus(job, 'error');
-        return;
+      const alreadyCloned = project ? await git.isGitWorkspace(dir) : false;
+      if (!alreadyCloned) {
+        this._setStatus(job, 'cloning');
+        // Gate sync on git availability — the remote host ships nothing
+        // preinstalled, so fail with an actionable message before the clone.
+        try {
+          await ensureGitReadyForSync();
+        } catch (err) {
+          job.error = String(err?.message ?? err);
+          this._log(job, { phase: 'git', stream: 'stderr', text: job.error });
+          this._scrubSecrets(job);
+          this._finalizeLedger(job, 'error');
+          this._setStatus(job, 'error');
+          return;
+        }
+        const clone = project
+          ? await git.ensureWorkspace({
+              repoUrl: job.repoUrl,
+              branch: job.branch,
+              dir,
+              token: job._gitToken,
+              onLog: (l) => this._log(job, { phase: 'git', ...l }),
+            })
+          : await git.ensureClone({
+          repoUrl: job.repoUrl,
+          branch: job.branch,
+          dir,
+          token: job._gitToken,
+          onLog: (l) => this._log(job, { phase: 'git', ...l }),
+            });
+        if (this._isCancelled(job)) {
+          this._failCanceled(job);
+          return;
+        }
+        if (!clone.ok) {
+          job.error = `git sync failed: ${clone.stderr}`;
+          this._scrubSecrets(job);
+          this._finalizeLedger(job, 'error');
+          this._setStatus(job, 'error');
+          return;
+        }
       }
     }
     if (this._isCancelled(job)) {

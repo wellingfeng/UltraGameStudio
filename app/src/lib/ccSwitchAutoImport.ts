@@ -16,6 +16,10 @@ import {
   isTauri,
   type ImportedProvider,
 } from '@/lib/tauri';
+import {
+  flushRemoteProfileWrites,
+  isRemoteProfileActive,
+} from '@/lib/settingsProfile';
 import type { GatewayProvider } from '@/lib/modelGateway/types';
 import { historyStore } from '@/store/history/store';
 import type {
@@ -250,6 +254,27 @@ export async function importCcSwitchProviders(
             .map(importedProviderDraft)[0]
         : undefined,
     );
+
+    // When a remote project profile is active, the writes above are persisted to
+    // the remote account via write-behind. A fire-and-forget failure (server
+    // unreachable, token expired) would otherwise leave the user believing the
+    // copy synced. Await the in-flight remote writes and surface any failure so
+    // the caller reports an honest error instead of a false success.
+    if (isRemoteProfileActive()) {
+      const writes = await flushRemoteProfileWrites();
+      const failed = writes.filter((write) => !write.ok);
+      if (failed.length > 0) {
+        const detail = failed
+          .map((write) => `${write.relPath}: ${write.error ?? 'unknown error'}`)
+          .join('; ');
+        return {
+          status: 'failed',
+          importedCount: imported,
+          skippedCount: skipped,
+          reason: `REMOTE_SYNC_FAILED: ${detail}`,
+        };
+      }
+    }
 
     return {
       status: 'imported',

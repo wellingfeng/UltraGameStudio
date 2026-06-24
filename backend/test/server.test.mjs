@@ -246,3 +246,77 @@ test('saving a project eagerly clones its repo into the workspace', async (t) =>
     delete process.env.UGS_RUNNER_ACCOUNTS;
   }
 });
+
+test('listing project files with sync=1 pulls the latest commits', async (t) => {
+  if (spawnSync('git', ['--version']).status !== 0) {
+    t.skip('git is not available');
+    return;
+  }
+
+  const dataDir = await mkdtemp(join(tmpdir(), 'ugs-runner-sync-data-'));
+  const workDir = await mkdtemp(join(tmpdir(), 'ugs-runner-sync-work-'));
+  const originDir = await mkdtemp(join(tmpdir(), 'ugs-runner-sync-origin-'));
+
+  gitInit(originDir, ['init', '-q', '-b', 'main']);
+  gitInit(originDir, ['config', 'user.email', 'test@example.com']);
+  gitInit(originDir, ['config', 'user.name', 'Test']);
+  await writeFile(join(originDir, 'README.md'), '# sync\n');
+  gitInit(originDir, ['add', '-A']);
+  gitInit(originDir, ['commit', '-q', '-m', 'init']);
+
+  process.env.UGS_RUNNER_TOKEN = 'sync-test-token';
+  process.env.UGS_RUNNER_HOST = '127.0.0.1';
+  process.env.UGS_RUNNER_PORT = '0';
+  process.env.UGS_RUNNER_DATADIR = dataDir;
+  process.env.UGS_RUNNER_WORKDIR = workDir;
+  process.env.UGS_RUNNER_ACCOUNTS = '[]';
+  const mod = await import(`../src/server.mjs?test=${Date.now()}`);
+  await new Promise((resolve) => mod.server.once('listening', resolve));
+  const { port } = mod.server.address();
+  const client = new RunnerClient(`http://127.0.0.1:${port}`, 'sync-test-token');
+
+  try {
+    const project = await client.saveProject({
+      label: 'Sync Pull',
+      repoUrl: originDir,
+      branch: 'main',
+      adapter: 'claude',
+    });
+    // First clone happens eagerly in the background.
+    await mod.settleWorkspacePrepares();
+
+    // A new commit lands upstream AFTER the initial clone.
+    await writeFile(join(originDir, 'LATEST.md'), '# latest\n');
+    gitInit(originDir, ['add', '-A']);
+    gitInit(originDir, ['commit', '-q', '-m', 'add latest']);
+
+    // A plain listing (no sync) keeps the stale first-clone snapshot.
+    const stale = await client.listProjectDirectory(project.id, '');
+    assert.ok(
+      !stale.entries.some((e) => e.name === 'LATEST.md'),
+      'expected the un-synced listing to omit the new upstream file',
+    );
+
+    // sync=1 pulls the new commit, so the file now shows up.
+    const synced = await client.listProjectDirectory(project.id, '', {
+      sync: true,
+    });
+    assert.ok(
+      synced.entries.some((e) => e.name === 'LATEST.md'),
+      'expected sync=1 to pull the latest upstream commit',
+    );
+  } finally {
+    await new Promise((resolve) => mod.server.close(resolve));
+    await mod.store._writeChain;
+    await mod.settleWorkspacePrepares();
+    await rm(dataDir, { recursive: true, force: true });
+    await rm(workDir, { recursive: true, force: true });
+    await rm(originDir, { recursive: true, force: true });
+    delete process.env.UGS_RUNNER_TOKEN;
+    delete process.env.UGS_RUNNER_HOST;
+    delete process.env.UGS_RUNNER_PORT;
+    delete process.env.UGS_RUNNER_DATADIR;
+    delete process.env.UGS_RUNNER_WORKDIR;
+    delete process.env.UGS_RUNNER_ACCOUNTS;
+  }
+});

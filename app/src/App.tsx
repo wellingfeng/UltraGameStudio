@@ -11,6 +11,8 @@ import {
   type LegacyBrandMigrationProgress,
 } from '@/lib/tauri';
 import { useStore } from '@/store/useStore';
+import { setActiveSettingsProfile } from '@/lib/settingsProfile';
+import { profileIdForWorkspacePath } from '@/lib/settingsProfile';
 
 let startupStorageMigrationPromise: Promise<LegacyBrandMigrationProgress> | null = null;
 const startupStorageMigrationSubscribers = new Set<
@@ -42,6 +44,7 @@ function subscribeStartupStorageMigration(
 export default function App() {
   const initHistory = useStore((s) => s.initHistory);
   const startupMigration = useStartupStorageMigration();
+  useActiveChannelProfile();
 
   useEffect(() => {
     if (!startupMigration.done) return;
@@ -82,6 +85,29 @@ export default function App() {
       <StartupStorageMigrationOverlay progress={startupMigration.progress} />
     </div>
   );
+}
+
+/**
+ * Activate the programming-channel settings profile that matches the active
+ * workspace. Remote projects switch the global providers/gateway view to their
+ * own `/user-settings`-backed config (hydrated once, then cached); local
+ * projects use the local profile. This is what makes the bottom channel/model
+ * selector and Settings follow the active remote project.
+ */
+function useActiveChannelProfile(): void {
+  const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
+  const workspaces = useStore((s) => s.workspaces);
+  const composerWorkspace = useStore((s) => s.composer.workspace);
+  const workspacePath = useMemo(() => {
+    const active = workspaces
+      .find((workspace) => workspace.id === activeWorkspaceId)
+      ?.path?.trim();
+    return composerWorkspace.trim() || active || '';
+  }, [activeWorkspaceId, workspaces, composerWorkspace]);
+
+  useEffect(() => {
+    void setActiveSettingsProfile(profileIdForWorkspacePath(workspacePath));
+  }, [workspacePath]);
 }
 
 function useStartupStorageMigration(): {

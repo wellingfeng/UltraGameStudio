@@ -25,6 +25,7 @@ import {
   RefreshCw,
   Rocket,
   Search,
+  Server,
   Settings as SettingsIcon,
   SlidersHorizontal,
   Terminal,
@@ -39,8 +40,13 @@ import { cn } from '@/lib/cn';
 import { basename, pickFolder } from '@/lib/folderPicker';
 import {
   getRemoteWorkspace,
+  getRemoteWorkspaceEnvironment,
+  installRemoteWorkspaceEnvironment,
   isRemoteWorkspacePath,
   remoteWorkspaceIdFromPath,
+  type RemoteEnvironmentInstallResult,
+  type RemoteEnvironmentReport,
+  type RemoteEnvironmentToolId,
   type RemoteWorkspaceConfig,
 } from '@/lib/remoteWorkspace';
 import { uniqueWorkspaceHistory, workspacePathKey } from '@/lib/workspaceHistory';
@@ -167,6 +173,7 @@ const PROJECT_SETTINGS_EN: Record<string, string> = {
   '该 LSP 暂不支持自动安装': 'This LSP does not support auto-install yet',
   '该文件夹已在项目中': 'That folder is already in the project',
   '概览': 'Overview',
+  '远程环境': 'Remote environment',
   '关闭': 'Close',
   '官方': 'Official',
   '获取 Key': 'Get key',
@@ -320,6 +327,7 @@ import {
 } from '@/lib/pluginStoreTranslation';
 type ProjectSettingsTab =
   | 'overview'
+  | 'environment'
   | 'blueprint'
   | 'mcp'
   | 'lsp'
@@ -328,6 +336,7 @@ type ProjectSettingsTab =
 
 const tabs: { id: ProjectSettingsTab; label: string; Icon: LucideIcon }[] = [
   { id: 'overview', label: '概览', Icon: Info },
+  { id: 'environment', label: '远程环境', Icon: Server },
   { id: 'blueprint', label: '蓝图', Icon: FileText },
   { id: 'automation', label: '权限/自动化', Icon: SlidersHorizontal },
 ];
@@ -1672,6 +1681,12 @@ export default function ProjectSettingsModal({
     useState<GenericProjectMcpSetupResult | null>(null);
   const [cocosSetupError, setCocosSetupError] = useState<string | null>(null);
   const [remoteDialogOpen, setRemoteDialogOpen] = useState(false);
+  const [envReport, setEnvReport] = useState<RemoteEnvironmentReport | null>(null);
+  const [envLoading, setEnvLoading] = useState(false);
+  const [envError, setEnvError] = useState<string | null>(null);
+  const [envInstalling, setEnvInstalling] = useState(false);
+  const [envInstallResult, setEnvInstallResult] =
+    useState<RemoteEnvironmentInstallResult | null>(null);
 
   const workspacePath = record?.path || workspace.path || '';
   const isRemoteWorkspace = isRemoteWorkspacePath(workspacePath);
@@ -1711,12 +1726,17 @@ export default function ProjectSettingsModal({
   const visibleTabs = useMemo(
     () =>
       tabs.filter((item) => {
+        if (item.id === 'environment') {
+          // Remote projects need a provisioning surface because the backend host
+          // ships nothing preinstalled; local projects use the host's own tools.
+          return isRemoteWorkspace;
+        }
         if (item.id === 'blueprint') {
           return showGameFeatures && detectedOrConfiguredEngine === 'unreal';
         }
         return true;
       }),
-    [detectedOrConfiguredEngine, showGameFeatures],
+    [detectedOrConfiguredEngine, isRemoteWorkspace, showGameFeatures],
   );
   const rankedLspServers = useMemo(
     () => rankLspServers(languageScan.languages, lspQuery),
@@ -2257,8 +2277,7 @@ export default function ProjectSettingsModal({
   );
 
   const handleRemoteSaved = useCallback(
-    (_remotePath: string, config: RemoteWorkspaceConfig) => {
-      setRemoteDialogOpen(false);
+    (_remotePath: string, config: RemoteWorkspaceConfig) => {      setRemoteDialogOpen(false);
       void historyStore
         .renameWorkspace(workspace.id, config.label)
         .then((nextRecord) => {
@@ -2282,6 +2301,51 @@ export default function ProjectSettingsModal({
     },
     [onWorkspaceUpdated, workspace.id, locale],
   );
+
+  const probeRemoteEnvironment = useCallback(async () => {
+    if (!isRemoteWorkspace || !workspacePath.trim()) return;
+    setEnvLoading(true);
+    setEnvError(null);
+    try {
+      const report = await getRemoteWorkspaceEnvironment(workspacePath);
+      setEnvReport(report);
+    } catch (err) {
+      setEnvError(describeError(err));
+    } finally {
+      setEnvLoading(false);
+    }
+  }, [isRemoteWorkspace, workspacePath]);
+
+  const installRemoteEnvironment = useCallback(
+    async (tools?: RemoteEnvironmentToolId[]) => {
+      if (!isRemoteWorkspace || !workspacePath.trim()) return;
+      setEnvInstalling(true);
+      setEnvError(null);
+      setEnvInstallResult(null);
+      try {
+        const result = await installRemoteWorkspaceEnvironment(
+          workspacePath,
+          tools && tools.length ? { tools } : {},
+        );
+        setEnvInstallResult(result);
+        setEnvReport(result.report);
+      } catch (err) {
+        setEnvError(describeError(err));
+      } finally {
+        setEnvInstalling(false);
+      }
+    },
+    [isRemoteWorkspace, workspacePath],
+  );
+
+  // Auto-probe the remote host the first time the environment tab is opened, so
+  // a fresh cloud project immediately shows what is installed (the host ships
+  // nothing preinstalled, so git may well be missing).
+  useEffect(() => {
+    if (tab !== 'environment' || !isRemoteWorkspace) return;
+    if (envReport || envLoading || envError) return;
+    void probeRemoteEnvironment();
+  }, [tab, isRemoteWorkspace, envReport, envLoading, envError, probeRemoteEnvironment]);
 
   const addCustomServer = useCallback(() => {
     const id = `custom-${Date.now().toString(36)}`;
@@ -3562,6 +3626,197 @@ export default function ProjectSettingsModal({
                 </div>
               </div>
             </div>
+          </section>
+        </div>
+      );
+    }
+
+    if (tab === 'environment') {
+      const tools = envReport?.tools ?? [];
+      const missingInstallable = tools.filter(
+        (item) => !item.installed && item.installable,
+      );
+      const stepById = new Map(
+        (envInstallResult?.steps ?? []).map((step) => [step.id, step]),
+      );
+      const noPackageManager =
+        envReport != null && !envReport.packageManager;
+      return (
+        <div className="grid gap-4">
+          <section className="rounded-md border border-border bg-panel-2 p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 text-sm font-semibold text-fg">
+                  <Server size={16} className="text-accent-2" />
+                  {locale === 'zh-CN' ? '远程环境' : 'Remote environment'}
+                </div>
+                <div className="mt-1 max-w-2xl text-xs leading-relaxed text-fg-faint">
+                  {locale === 'zh-CN'
+                    ? '云端主机默认不预装任何开发环境。项目同步（git clone / pull）依赖 git，通常还需要 Node.js、Python。在这里检测并一键远程安装这些环境——点击在本地，安装在远程执行，且会在项目同步之前完成。缺少 git 时不会触发同步。'
+                    : 'The cloud host ships no developer tooling preinstalled. Project sync (git clone / pull) needs git, and usually Node.js and Python too. Detect and one-click install them here — the click is local, the install runs remotely, and it completes before any project sync. Without git, sync will not run.'}
+                </div>
+              </div>
+              <div className="flex shrink-0 flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={() => void probeRemoteEnvironment()}
+                  disabled={envLoading || envInstalling}
+                  className="inline-flex items-center gap-1.5 rounded-md border border-border bg-bg-alt px-3 py-2 text-xs font-semibold text-fg-dim hover:border-accent hover:text-fg disabled:opacity-50"
+                >
+                  <RefreshCw size={14} className={envLoading ? 'animate-spin' : ''} />
+                  {locale === 'zh-CN' ? '重新检测' : 'Re-check'}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void installRemoteEnvironment()}
+                  disabled={
+                    envInstalling ||
+                    envLoading ||
+                    missingInstallable.length === 0
+                  }
+                  className="inline-flex items-center gap-1.5 rounded-md border border-accent bg-accent/20 px-3 py-2 text-xs font-semibold text-fg hover:bg-accent/30 disabled:opacity-50"
+                >
+                  {envInstalling ? (
+                    <RefreshCw size={14} className="animate-spin" />
+                  ) : (
+                    <Download size={14} />
+                  )}
+                  {envInstalling
+                    ? locale === 'zh-CN'
+                      ? '安装中...'
+                      : 'Installing…'
+                    : locale === 'zh-CN'
+                      ? '一键安装缺失环境'
+                      : 'Install missing'}
+                </button>
+              </div>
+            </div>
+
+            {envReport ? (
+              <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-fg-faint">
+                <span className="rounded border border-border-soft bg-bg-alt px-2 py-0.5">
+                  {locale === 'zh-CN' ? '远程系统' : 'Remote OS'}：{envReport.platform}
+                </span>
+                <span className="rounded border border-border-soft bg-bg-alt px-2 py-0.5">
+                  {locale === 'zh-CN' ? '包管理器' : 'Package manager'}：
+                  {envReport.packageManager ?? (locale === 'zh-CN' ? '未识别' : 'unknown')}
+                </span>
+                <span
+                  className={cn(
+                    'rounded border px-2 py-0.5',
+                    envReport.gitReady
+                      ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                      : 'border-red-500/40 bg-red-500/10 text-red-300',
+                  )}
+                >
+                  {envReport.gitReady
+                    ? locale === 'zh-CN'
+                      ? '可同步（git 就绪）'
+                      : 'Sync ready (git present)'
+                    : locale === 'zh-CN'
+                      ? '无法同步（缺少 git）'
+                      : 'Sync blocked (git missing)'}
+                </span>
+              </div>
+            ) : null}
+
+            {envError ? (
+              <div className="mt-3 flex items-start gap-2 rounded border border-red-500/40 bg-red-500/10 px-3 py-2 text-[11px] text-red-300">
+                <TriangleAlert size={13} className="mt-0.5 shrink-0" />
+                <span className="min-w-0 break-words">{envError}</span>
+              </div>
+            ) : null}
+
+            {noPackageManager ? (
+              <div className="mt-3 rounded border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+                {locale === 'zh-CN'
+                  ? '远程主机上未检测到受支持的包管理器（apt/dnf/yum/apk/pacman/zypper/brew/winget/choco），无法自动安装。请在云端主机手动安装 git、Node.js、Python。'
+                  : 'No supported package manager (apt/dnf/yum/apk/pacman/zypper/brew/winget/choco) was found on the remote host, so auto-install is unavailable. Install git, Node.js and Python manually on the cloud host.'}
+              </div>
+            ) : null}
+
+            {!envReport && envLoading ? (
+              <div className="mt-3 flex items-center gap-2 rounded border border-border-soft bg-bg-alt px-3 py-2 text-[11px] text-fg-dim">
+                <RefreshCw size={12} className="animate-spin text-accent" />
+                {locale === 'zh-CN' ? '正在检测远程环境...' : 'Probing remote environment…'}
+              </div>
+            ) : null}
+
+            <ul className="mt-3 grid gap-2">
+              {tools.map((item) => {
+                const step = stepById.get(item.id);
+                return (
+                  <li
+                    key={item.id}
+                    className="grid gap-1.5 rounded-md border border-border-soft bg-bg-alt px-3 py-2.5"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-sm font-semibold text-fg">{item.label}</span>
+                      <span
+                        className={cn(
+                          'rounded border px-1.5 py-0.5 text-[10px]',
+                          item.installed
+                            ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-300'
+                            : 'border-red-500/40 bg-red-500/10 text-red-300',
+                        )}
+                      >
+                        {item.installed
+                          ? locale === 'zh-CN'
+                            ? '已安装'
+                            : 'Installed'
+                          : locale === 'zh-CN'
+                            ? '未安装'
+                            : 'Missing'}
+                      </span>
+                      {item.installed && item.version ? (
+                        <span className="truncate font-mono text-[10px] text-fg-faint">
+                          {item.version}
+                        </span>
+                      ) : null}
+                      {!item.installed && item.installable ? (
+                        <button
+                          type="button"
+                          onClick={() => void installRemoteEnvironment([item.id])}
+                          disabled={envInstalling || envLoading}
+                          className="ml-auto inline-flex items-center gap-1 rounded border border-accent/60 bg-accent/10 px-2 py-1 text-[11px] font-semibold text-fg hover:bg-accent/20 disabled:opacity-50"
+                        >
+                          <Download size={12} />
+                          {locale === 'zh-CN' ? '安装' : 'Install'}
+                        </button>
+                      ) : null}
+                    </div>
+                    {!item.installed && item.installHint ? (
+                      <code className="truncate font-mono text-[10px] text-fg-faint" title={item.installHint}>
+                        {item.installHint}
+                      </code>
+                    ) : null}
+                    {step ? (
+                      <div
+                        className={cn(
+                          'rounded border px-2 py-1 text-[10px]',
+                          step.ok
+                            ? 'border-emerald-500/30 bg-emerald-500/5 text-emerald-300'
+                            : 'border-red-500/30 bg-red-500/5 text-red-300',
+                        )}
+                      >
+                        {step.ok
+                          ? locale === 'zh-CN'
+                            ? '安装成功'
+                            : 'Install succeeded'
+                          : `${locale === 'zh-CN' ? '安装失败' : 'Install failed'}${
+                              step.error ? `：${step.error}` : ''
+                            }`}
+                      </div>
+                    ) : null}
+                  </li>
+                );
+              })}
+              {envReport && tools.length === 0 ? (
+                <li className="rounded-md border border-dashed border-border-soft bg-bg-alt px-3 py-4 text-center text-xs text-fg-faint">
+                  {locale === 'zh-CN' ? '没有需要检测的环境项。' : 'No environment items to check.'}
+                </li>
+              ) : null}
+            </ul>
           </section>
         </div>
       );

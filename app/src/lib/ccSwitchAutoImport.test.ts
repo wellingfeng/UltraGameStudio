@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   saveGatewayConfig: vi.fn(),
   setActiveProviderId: vi.fn(),
   setActiveGatewaySelection: vi.fn(),
+  isRemoteProfileActive: vi.fn(),
+  flushRemoteProfileWrites: vi.fn(),
 }));
 
 vi.mock('@/lib/apiConfig', () => ({
@@ -27,6 +29,11 @@ vi.mock('@/lib/gatewayConfig', () => ({
   modelClassFromModelId: mocks.modelClassFromModelId,
   saveGatewayConfig: mocks.saveGatewayConfig,
   setActiveGatewaySelection: mocks.setActiveGatewaySelection,
+}));
+
+vi.mock('@/lib/settingsProfile', () => ({
+  isRemoteProfileActive: mocks.isRemoteProfileActive,
+  flushRemoteProfileWrites: mocks.flushRemoteProfileWrites,
 }));
 
 vi.mock('@/lib/tauri', () => ({
@@ -70,11 +77,16 @@ beforeEach(() => {
   mocks.saveGatewayConfig.mockReset();
   mocks.setActiveProviderId.mockReset();
   mocks.setActiveGatewaySelection.mockReset();
+  mocks.isRemoteProfileActive.mockReset();
+  mocks.flushRemoteProfileWrites.mockReset();
 
   vi.spyOn(console, 'info').mockImplementation(() => undefined);
   vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
   mocks.isTauri.mockReturnValue(true);
+  mocks.isRemoteProfileActive.mockReturnValue(false);
+  mocks.flushRemoteProfileWrites.mockResolvedValue([]);
   mocks.getConfig.mockResolvedValue({ schemaVersion: 1 });
   mocks.importCcSwitchClaude.mockResolvedValue({
     providers: [ccSwitchProvider],
@@ -179,6 +191,42 @@ describe('maybeRunCcSwitchAutoImportOnFirstRun', () => {
       providerId: 'p_cc_switch',
       channelId: 'default',
     });
+  });
+
+  it('verifies remote sync when a remote profile is active and fails loudly when it does not land', async () => {
+    mocks.isRemoteProfileActive.mockReturnValue(true);
+    mocks.flushRemoteProfileWrites.mockResolvedValue([
+      { relPath: 'settings/providers.v1.json', ok: false, error: 'unauthorized' },
+    ]);
+
+    const outcome = await importCcSwitchProviders({ promoteActiveAnthropic: true });
+
+    expect(outcome.status).toBe('failed');
+    expect(outcome.reason).toContain('REMOTE_SYNC_FAILED');
+    expect(outcome.reason).toContain('unauthorized');
+    // The local import work still ran; only the remote-sync verification failed.
+    expect(mocks.importProviders).toHaveBeenCalled();
+  });
+
+  it('reports success when a remote profile is active and the remote sync lands', async () => {
+    mocks.isRemoteProfileActive.mockReturnValue(true);
+    mocks.flushRemoteProfileWrites.mockResolvedValue([
+      { relPath: 'settings/providers.v1.json', ok: true },
+    ]);
+
+    const outcome = await importCcSwitchProviders({ promoteActiveAnthropic: true });
+
+    expect(outcome.status).toBe('imported');
+    expect(mocks.flushRemoteProfileWrites).toHaveBeenCalled();
+  });
+
+  it('does not block local-profile imports on remote-sync verification', async () => {
+    mocks.isRemoteProfileActive.mockReturnValue(false);
+
+    const outcome = await importCcSwitchProviders({ promoteActiveAnthropic: true });
+
+    expect(outcome.status).toBe('imported');
+    expect(mocks.flushRemoteProfileWrites).not.toHaveBeenCalled();
   });
 
   it('records cc-switch parsing failures without throwing or importing providers', async () => {

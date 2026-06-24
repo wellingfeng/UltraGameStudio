@@ -40,6 +40,9 @@ import {
 } from '@ugs/protocol';
 import type {
   RemoteAdapter,
+  RemoteEnvironmentInstallInput,
+  RemoteEnvironmentInstallResult,
+  RemoteEnvironmentReport,
   RemoteRunnerFileUpload,
   RemoteRunnerFileUploadInput,
   RemoteRunnerFilePreview,
@@ -52,6 +55,12 @@ import type {
 export type {
   CreateRemoteJobInput,
   RemoteAdapter,
+  RemoteEnvironmentInstallInput,
+  RemoteEnvironmentInstallResult,
+  RemoteEnvironmentInstallStep,
+  RemoteEnvironmentReport,
+  RemoteEnvironmentTool,
+  RemoteEnvironmentToolId,
   RemoteJob,
   RemoteJobArtifacts,
   RemoteJobLogLine,
@@ -413,12 +422,13 @@ function clearRemoteRunnerConnection(): void {
  *
  * 判定为「纯预填产物」需同时满足：
  *   - 工作区 serverUrl 指向内置默认（或本机回环）；
- *   - 该工作区没有自己保存过的 per-workspace Token；
+ *   - 工作区没有项目内容（既无 repoUrl 也无 projectId，即从未绑定真实项目）；
+ *   - 该工作区没有自己保存过的非默认 per-workspace Token；
  *   - 全局连接要么没保存过，要么本身就是默认共享 Token（即用户从未改过）。
  *
  * 满足时删除该工作区配置/密钥/provider，并返回被删的 id 列表，便于上层
- * 同步清理历史工作区索引中对应的 `remote://` 记录。用户真正配置过（改过 Token）
- * 的默认 Runner 项目不会被误删。
+ * 同步清理历史工作区索引中对应的 `remote://` 记录。用户真正配置过的默认
+ * Runner 项目（已绑定仓库/项目 id，或改过 Token）不会被误删。
  *
  * @returns 被删除的工作区 id 列表（用于同步清理历史索引）。
  */
@@ -431,11 +441,20 @@ export function purgeDefaultRemoteWorkspaces(): string[] {
   if (!connectionIsPureDefault) return [];
 
   const removed: string[] = [];
+  let keptRealDefaultProject = false;
   for (const workspace of loadRemoteWorkspaces()) {
     const pointsAtDefault =
       isDefaultRunnerServerUrl(workspace.serverUrl) ||
       isLoopbackServerUrl(workspace.serverUrl);
     if (!pointsAtDefault) continue;
+    // 有项目内容（已绑定仓库或服务端项目 id）的不是纯预填空壳，保留——
+    // 即便它用的是内置默认 Token，也属于用户有意保存的真实云端项目。
+    const hasProjectContent =
+      Boolean(workspace.repoUrl?.trim()) || Boolean(workspace.projectId?.trim());
+    if (hasProjectContent) {
+      keptRealDefaultProject = true;
+      continue;
+    }
     const ownToken = readRemoteSecrets(workspace.id).token.trim();
     if (ownToken && ownToken !== DEFAULT_REMOTE_RUNNER_TOKEN) continue;
     deleteRemoteWorkspace(workspace.id);
@@ -443,7 +462,8 @@ export function purgeDefaultRemoteWorkspaces(): string[] {
   }
 
   // 连同纯默认的全局连接一起清掉，避免下次又被解析/预填。
-  if (storedServerUrl.trim() || storedToken.trim()) {
+  // 但若保留了指向默认服务器的真实项目，则保留全局连接供其继续使用。
+  if (!keptRealDefaultProject && (storedServerUrl.trim() || storedToken.trim())) {
     clearRemoteRunnerConnection();
   }
   return removed;
@@ -706,6 +726,7 @@ export async function ensureRemoteWorkspaceProject(
 export async function listRemoteWorkspaceDirectory(
   rootPath: string,
   relativePath = '',
+  opts: { sync?: boolean } = {},
 ): Promise<WorkspaceDirectoryListing> {
   const workspaceId = remoteWorkspaceIdFromPath(rootPath);
   let config = getRemoteWorkspace(workspaceId);
@@ -717,19 +738,19 @@ export async function listRemoteWorkspaceDirectory(
 
   if (config.projectId) {
     try {
-      listing = await client.listProjectDirectory(config.projectId, relativePath);
+      listing = await client.listProjectDirectory(config.projectId, relativePath, opts);
     } catch (err) {
       if (!isRemoteProjectNotFoundError(err)) throw err;
       config = await ensureRemoteWorkspaceProject(config, client);
       if (!config.projectId) {
         throw new Error('云端项目在后端不存在或已被删除。请在云端项目设置中重新保存。');
       }
-      listing = await client.listProjectDirectory(config.projectId, relativePath);
+      listing = await client.listProjectDirectory(config.projectId, relativePath, opts);
     }
   } else {
     config = await ensureRemoteWorkspaceProject(config, client);
     if (!config.projectId) throw new Error('云端项目未绑定后端 projectId。请在云端项目设置中重新保存。');
-    listing = await client.listProjectDirectory(config.projectId, relativePath);
+    listing = await client.listProjectDirectory(config.projectId, relativePath, opts);
   }
 
   return {
@@ -811,8 +832,54 @@ export async function previewRemoteWorkspaceFile(
   };
 }
 
-function remoteAdapterToProviderKind(adapter: string): ProviderKind {
-  if (adapter === 'codex') return 'codex';
+/**
+ * Resolve a bound RunnerClient + projectId for a remote workspace path. Shared by
+ * the remote-environment helpers below so they can target the server-side project
+ * the same way file listing/preview do (creating/binding the project if needed).
+ */
+async function resolveRemoteProjectClient(
+  rootPath: string,
+): Promise<{ client: RunnerClient; projectId: string }> {
+  const workspaceId = remoteWorkspaceIdFromPath(rootPath);
+  let config = getRemoteWorkspace(workspaceId);
+  if (!config) throw new Error('云端项目不存在。');
+  const connection = resolveRemoteRunnerConnection(config);
+  if (!connection) throw new Error('云端服务未配置。请先配置服务器地址和访问 Token。');
+  const client = new RunnerClient(connection.serverUrl, connection.token);
+  if (!config.projectId) {
+    config = await ensureRemoteWorkspaceProject(config, client);
+  }
+  if (!config.projectId) {
+    throw new Error('云端项目未绑定后端 projectId。请在云端项目设置中重新保存。');
+  }
+  return { client, projectId: config.projectId };
+}
+
+/**
+ * Probe the remote host for the runtime environment a project needs (git, node,
+ * python). Used by the project settings "remote environment" tab to show what is
+ * installed and whether a sync can run.
+ */
+export async function getRemoteWorkspaceEnvironment(
+  rootPath: string,
+): Promise<RemoteEnvironmentReport> {
+  const { client, projectId } = await resolveRemoteProjectClient(rootPath);
+  return client.getProjectEnvironment(projectId);
+}
+
+/**
+ * Trigger a server-side install of the missing required tools. The click happens
+ * locally in project settings; the install runs remotely on the backend host.
+ */
+export async function installRemoteWorkspaceEnvironment(
+  rootPath: string,
+  input: RemoteEnvironmentInstallInput = {},
+): Promise<RemoteEnvironmentInstallResult> {
+  const { client, projectId } = await resolveRemoteProjectClient(rootPath);
+  return client.installProjectEnvironment(projectId, input);
+}
+
+function remoteAdapterToProviderKind(adapter: string): ProviderKind {  if (adapter === 'codex') return 'codex';
   if (adapter === 'gemini') return 'gemini';
   return 'anthropic';
 }

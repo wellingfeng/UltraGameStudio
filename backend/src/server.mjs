@@ -8,6 +8,11 @@ import { makeAuthorizer } from './auth.mjs';
 import { JsonStore } from './store.mjs';
 import { JobRunner } from './runner.mjs';
 import * as git from './git.mjs';
+import {
+  detectEnvironment,
+  ensureGitReadyForSync,
+  installEnvironment,
+} from './environment.mjs';
 import { supportedAdapters } from './models.mjs';
 import { AccountRegistry, loadAccountsFromEnv, normalizeAccount } from './accounts.mjs';
 import { summarizeJobs, summarizeLedger } from './usage.mjs';
@@ -37,6 +42,8 @@ import {
   matchRemoteRunnerJobPath,
   matchRemoteRunnerJobStreamPath,
   matchRemoteRunnerProjectFilesPath,
+  matchRemoteRunnerProjectEnvironmentPath,
+  matchRemoteRunnerProjectEnvironmentInstallPath,
   matchRemoteRunnerProjectPath,
 } from '../../packages/protocol/index.js';
 
@@ -295,18 +302,32 @@ function currentUserSettingsRoot(req) {
   return userSettingsRoot(cfg.workdir, currentUserId(req));
 }
 
-async function ensureProjectWorkspaceReady(project) {
+async function ensureProjectWorkspaceReady(project, opts = {}) {
   const dir = projectWorkspaceDir(project);
   await assertWorkspaceBoundary(cfg.workdir, dir, { create: true });
-  if (!(await git.isGitWorkspace(dir))) {
-    const synced = await git.ensureWorkspace({
-      repoUrl: project.repoUrl,
-      branch: project.branch,
-      dir,
-      token: project.gitToken,
-    });
-    if (!synced.ok) {
-      throw new Error(`git sync failed: ${synced.stderr || synced.stdout || 'unknown error'}`);
+  const alreadyCloned = await git.isGitWorkspace(dir);
+  // Clone on first touch; otherwise only re-sync (reconcile origin + checkout +
+  // ff-only pull) when the caller explicitly asks for it. Without `sync`, an
+  // existing checkout is left untouched — so a plain file-tree open stays cheap
+  // and offline-friendly. The `sync` path is what lets the client's "refresh"
+  // actually pull the repo's latest commits instead of showing the stale
+  // snapshot captured at first clone (the reason remote projects appeared
+  // unable to fetch the latest version).
+  if (!alreadyCloned || opts.sync) {
+    if (project.repoUrl) {
+      // The remote host ships nothing preinstalled. A clone/pull without git on
+      // PATH fails with a confusing low-level error, so gate sync on git first
+      // and point the user at the remote-environment install when it is missing.
+      await ensureGitReadyForSync();
+      const synced = await git.ensureWorkspace({
+        repoUrl: project.repoUrl,
+        branch: project.branch,
+        dir,
+        token: project.gitToken,
+      });
+      if (!synced.ok) {
+        throw new Error(`git sync failed: ${synced.stderr || synced.stdout || 'unknown error'}`);
+      }
     }
   }
   return dir;
@@ -523,7 +544,8 @@ const server = http.createServer(async (req, res) => {
     const project = store.getProject(projectFilesId, currentUserId(req));
     if (!project) return send(res, 404, { ok: false, error: 'not found' });
     try {
-      const dir = await ensureProjectWorkspaceReady(project);
+      const wantSync = url.searchParams.get('sync') === '1';
+      const dir = await ensureProjectWorkspaceReady(project, { sync: wantSync });
       if (url.searchParams.get('preview') === '1') {
         const file = await previewWorkspaceFile({
           dir,
@@ -574,6 +596,38 @@ const server = http.createServer(async (req, res) => {
         ok: false,
         error: String(err?.message ?? err),
       });
+    }
+  }
+
+  // GET /projects/:id/environment — probe the remote host for required runtime
+  // tools (git, node, python). The remote backend has nothing preinstalled, so
+  // the client uses this to decide whether a sync can run.
+  const projectEnvId = matchRemoteRunnerProjectEnvironmentPath(path);
+  if (projectEnvId && req.method === 'GET') {
+    const project = store.getProject(projectEnvId, currentUserId(req));
+    if (!project) return send(res, 404, { ok: false, error: 'not found' });
+    try {
+      const environment = await detectEnvironment();
+      return send(res, 200, { ok: true, environment });
+    } catch (err) {
+      return send(res, 500, { ok: false, error: String(err?.message ?? err) });
+    }
+  }
+
+  // POST /projects/:id/environment/install — install missing required tools on
+  // the remote host. Triggered locally; runs server-side. Runs ahead of (and
+  // independent from) project sync, so a fresh host can be provisioned first.
+  const projectEnvInstallId = matchRemoteRunnerProjectEnvironmentInstallPath(path);
+  if (projectEnvInstallId && req.method === 'POST') {
+    const project = store.getProject(projectEnvInstallId, currentUserId(req));
+    if (!project) return send(res, 404, { ok: false, error: 'not found' });
+    const body = await readJson(req);
+    const tools = Array.isArray(body?.tools) ? body.tools : undefined;
+    try {
+      const install = await installEnvironment({ tools });
+      return send(res, 200, { ok: true, install });
+    } catch (err) {
+      return send(res, 500, { ok: false, error: String(err?.message ?? err) });
     }
   }
 

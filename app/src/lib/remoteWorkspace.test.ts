@@ -200,6 +200,26 @@ describe('purgeDefaultRemoteWorkspaces', () => {
     expect(getRemoteWorkspace(real.id)).not.toBeNull();
   });
 
+  it('keeps a default-server workspace that has real project content', () => {
+    // 用内置默认 Token 保存、但已绑定仓库/项目 id 的真实云端项目：
+    // 不是纯预填空壳，启动期清理必须保留它（否则用默认 Token 存的项目会被误删）。
+    const real = saveRemoteWorkspace(
+      {
+        label: '默认服上的真实项目',
+        serverUrl: DEFAULT_REMOTE_RUNNER_SERVER_URL,
+        projectId: 'proj_real',
+        repoUrl: 'https://github.com/me/real.git',
+        adapter: 'codex',
+      },
+      { token: DEFAULT_REMOTE_RUNNER_TOKEN },
+    );
+
+    const removed = purgeDefaultRemoteWorkspaces();
+
+    expect(removed).toEqual([]);
+    expect(getRemoteWorkspace(real.id)).not.toBeNull();
+  });
+
   it('does not touch workspaces pointing at a custom server', () => {
     const custom = saveRemoteWorkspace({
       label: '自建服务器',

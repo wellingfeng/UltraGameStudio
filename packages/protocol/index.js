@@ -39,6 +39,9 @@ export const REMOTE_RUNNER_API_PATHS = Object.freeze({
   jobStream: (id) => `/jobs/${encodeURIComponent(id)}/stream`,
   project: (id) => `/projects/${encodeURIComponent(id)}`,
   projectFiles: (id) => `/projects/${encodeURIComponent(id)}/files`,
+  projectEnvironment: (id) => `/projects/${encodeURIComponent(id)}/environment`,
+  projectEnvironmentInstall: (id) =>
+    `/projects/${encodeURIComponent(id)}/environment/install`,
   account: (id) => `/accounts/${encodeURIComponent(id)}`,
 });
 
@@ -83,6 +86,46 @@ export function matchRemoteRunnerProjectPath(path) {
 export function matchRemoteRunnerProjectFilesPath(path) {
   return matchRemoteRunnerNestedIdPath(path, REMOTE_RUNNER_API_PATHS.projects, 'files');
 }
+
+export function matchRemoteRunnerProjectEnvironmentPath(path) {
+  return matchRemoteRunnerNestedIdPath(
+    path,
+    REMOTE_RUNNER_API_PATHS.projects,
+    'environment',
+  );
+}
+
+export function matchRemoteRunnerProjectEnvironmentInstallPath(path) {
+  return matchRemoteRunnerNestedIdPath(
+    path,
+    REMOTE_RUNNER_API_PATHS.projects,
+    'environment/install',
+  );
+}
+
+/**
+ * Error mapper for the remote-environment endpoints. An out-of-date cloud
+ * backend predates these routes and answers them with the generic 404 fallback
+ * ("not found"), even though project binding and file listing keep working. A
+ * bare "not found" looks like a broken button, so translate the 404 into an
+ * actionable hint: the backend host must be redeployed with the newer build.
+ */
+function remoteEnvironmentEndpointError(data, status) {
+  if (status === 404) {
+    return '云端后端不支持「远程环境」接口（/environment 返回 404）。该功能需要较新版本的后端，请在云端主机上更新并重启 runner 后再试。';
+  }
+  return data?.error ?? `runner returned ${status}`;
+}
+
+export const REMOTE_ENVIRONMENT_TOOL_IDS = Object.freeze([
+  'git',
+  'git-lfs',
+  'node',
+  'python',
+  'ffmpeg',
+  'curl',
+  'unzip',
+]);
 
 export function matchRemoteRunnerJobPath(path) {
   return matchRemoteRunnerSingleIdPath(path, REMOTE_RUNNER_API_PATHS.jobs);
@@ -355,9 +398,10 @@ export class RunnerClient {
     return data.artifacts;
   }
 
-  async listProjectDirectory(projectId, relativePath = '') {
+  async listProjectDirectory(projectId, relativePath = '', opts = {}) {
     const params = new URLSearchParams();
     if (relativePath) params.set('path', relativePath);
+    if (opts.sync) params.set('sync', '1');
     const suffix = params.toString() ? `?${params}` : '';
     const res = await fetch(
       this.url(`${REMOTE_RUNNER_API_PATHS.projectFiles(projectId)}${suffix}`),
@@ -384,6 +428,34 @@ export class RunnerClient {
       throw new Error(data.error ?? `runner returned ${res.status}`);
     }
     return data.file;
+  }
+
+  async getProjectEnvironment(projectId) {
+    const res = await fetch(
+      this.url(REMOTE_RUNNER_API_PATHS.projectEnvironment(projectId)),
+      { headers: this.headers() },
+    );
+    const data = await res.json();
+    if (!res.ok || !data.ok || !data.environment) {
+      throw new Error(remoteEnvironmentEndpointError(data, res.status));
+    }
+    return data.environment;
+  }
+
+  async installProjectEnvironment(projectId, input = {}) {
+    const res = await fetch(
+      this.url(REMOTE_RUNNER_API_PATHS.projectEnvironmentInstall(projectId)),
+      {
+        method: 'POST',
+        headers: this.headers(true),
+        body: JSON.stringify(input),
+      },
+    );
+    const data = await res.json();
+    if (!res.ok || !data.ok || !data.install) {
+      throw new Error(remoteEnvironmentEndpointError(data, res.status));
+    }
+    return data.install;
   }
 
   async previewProjectFile(projectId, relativePath) {

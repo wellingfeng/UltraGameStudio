@@ -8,10 +8,14 @@ import { Buffer } from 'node:buffer';
  */
 
 /**
- * Default per-call git timeout. A network-stalled `git clone` (e.g. a backend
- * that cannot reach github.com) would otherwise hang forever, leaving the job
- * stuck in `cloning` with no logs and the client waiting indefinitely. Override
- * per-call via `opts.timeoutMs`, or globally via `UGS_RUNNER_GIT_TIMEOUT_MS`.
+ * Default per-call git timeout. This is an *idle* timeout, not a total
+ * wall-clock cap: the timer resets every time the child emits output. A healthy
+ * `git clone` of a large repo keeps printing "Receiving objects: x%" via
+ * `--progress`, so it is never killed just for taking a long time. Only a truly
+ * stalled command (no output at all for this long, e.g. a backend that cannot
+ * reach github.com) gets killed, so the job can fail fast instead of hanging in
+ * `cloning` forever. Override per-call via `opts.timeoutMs`, or globally via
+ * `UGS_RUNNER_GIT_TIMEOUT_MS`.
  */
 const DEFAULT_GIT_TIMEOUT_MS = (() => {
   const raw = Number(process.env.UGS_RUNNER_GIT_TIMEOUT_MS);
@@ -39,8 +43,9 @@ export function run(cmd, args, opts = {}) {
       typeof opts.timeoutMs === 'number' && opts.timeoutMs > 0
         ? opts.timeoutMs
         : DEFAULT_GIT_TIMEOUT_MS;
-    const timer = setTimeout(() => {
-      const note = `\n[git] command timed out after ${timeoutMs}ms; killing process`;
+    let timer;
+    const onTimeout = () => {
+      const note = `\n[git] command stalled (no output for ${timeoutMs}ms); killing process`;
       opts.onLog?.({ stream: 'stderr', text: note });
       try {
         child.kill('SIGKILL');
@@ -48,12 +53,21 @@ export function run(cmd, args, opts = {}) {
         /* already gone */
       }
       finish({ code: -1, stdout, stderr: stderr + note });
-    }, timeoutMs);
+    };
+    // Idle timeout: reset the clock whenever the child makes progress. Only a
+    // command that produces no output at all for `timeoutMs` is considered hung.
+    const armTimer = () => {
+      clearTimeout(timer);
+      timer = setTimeout(onTimeout, timeoutMs);
+    };
+    armTimer();
     child.stdout?.on('data', (d) => {
+      armTimer();
       stdout += d.toString();
       opts.onLog?.({ stream: 'stdout', text: d.toString() });
     });
     child.stderr?.on('data', (d) => {
+      armTimer();
       stderr += d.toString();
       opts.onLog?.({ stream: 'stderr', text: d.toString() });
     });
@@ -137,14 +151,104 @@ export function proxyUrl() {
 }
 
 /**
+ * Built-in GitHub acceleration mirrors for CN-hosted backends. Unlike an HTTP
+ * proxy (which needs a real reachable proxy server you operate), these are
+ * public URL-rewrite accelerators: git connects to the mirror host instead of
+ * github.com via `url.<mirror>.insteadOf=https://github.com/`. They only help
+ * for *public* github.com repos (a private-repo token is scoped to the
+ * github.com origin and will not travel to the mirror host). Mirror uptime in
+ * the wild is volatile, so this is an ordered fallback list, tried only after a
+ * direct connection (and any real proxy) fails. Override the whole list with
+ * `UGS_RUNNER_GIT_MIRROR` (comma-separated prefixes), or disable with
+ * `UGS_RUNNER_GIT_MIRROR=off`.
+ *
+ * Each entry is the replacement prefix for `https://github.com/`, so it must end
+ * with a trailing slash and, when the mirror wraps the full URL, embed the
+ * original `https://github.com/` (e.g. `https://ghfast.top/https://github.com/`).
+ */
+const DEFAULT_GITHUB_MIRRORS = [
+  'https://ghfast.top/https://github.com/',
+  'https://gh-proxy.com/https://github.com/',
+  'https://ghproxy.net/https://github.com/',
+  'https://gh.llkk.cc/https://github.com/',
+  'https://gitclone.com/github.com/',
+];
+
+/**
+ * Whether to try GitHub accelerator mirrors *before* a direct connection for
+ * public github.com repos. CN-hosted backends (e.g. Tencent Cloud) reliably
+ * fail to reach github.com directly — every direct attempt burns its retry
+ * budget on a GnuTLS/HTTP2 error (10s–90s) before the chain ever reaches a
+ * working mirror. Putting mirrors first makes a public-repo sync succeed on the
+ * first endpoint instead of after several doomed direct attempts. This is the
+ * real "proxy on by default for CN" path, since a mirror needs no operator-run
+ * proxy server. Disabled automatically when a token is present (a private-repo
+ * token is scoped to github.com and won't authenticate against a mirror host).
+ * Opt out with `UGS_RUNNER_GIT_PREFER_MIRROR=off`.
+ */
+export function preferMirrorFirst() {
+  const raw = process.env.UGS_RUNNER_GIT_PREFER_MIRROR;
+  if (raw === undefined) return true;
+  return !/^(0|false|off|no|none)$/i.test(raw.trim());
+}
+
+export function mirrorList() {
+  const raw = process.env.UGS_RUNNER_GIT_MIRROR;
+  if (raw === undefined) return [...DEFAULT_GITHUB_MIRRORS];
+  if (/^(off|0|false|no|none)$/i.test(raw.trim())) return [];
+  const custom = raw
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((s) => (s.endsWith('/') ? s : `${s}/`));
+  return custom.length ? custom : [...DEFAULT_GITHUB_MIRRORS];
+}
+
+/** True when a repo URL points at github.com (the only host mirrors rewrite). */
+export function isGithubUrl(repoUrl) {
+  if (typeof repoUrl !== 'string') return false;
+  try {
+    return new URL(normalizeRepoUrl(repoUrl, 'x')).hostname === 'github.com';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * HTTP robustness config applied to every network git op. Tencent Cloud (and
+ * other CN-hosted backends) routinely fail to reach github.com over HTTP/2:
+ * the connection dies mid-transfer with "RPC failed; curl 16 Error in the HTTP2
+ * framing layer" or a GnuTLS "TLS connection was non-properly terminated"
+ * (-110). Pinning HTTP/1.1 sidesteps the brittle HTTP/2 multiplexing, and a
+ * large postBuffer avoids chunked-transfer hiccups on big pushes. Opt out with
+ * `UGS_RUNNER_GIT_HTTP1=0` if a host actually prefers HTTP/2.
+ */
+export function httpRobustnessConfig() {
+  if (/^(0|false|off|no)$/i.test(String(process.env.UGS_RUNNER_GIT_HTTP1 ?? ''))) {
+    return [];
+  }
+  return [
+    ['http.version', 'HTTP/1.1'],
+    ['http.postBuffer', '524288000'],
+  ];
+}
+
+/** Number of extra retries per endpoint for transient network failures. */
+export function gitRetryCount() {
+  const raw = Number(process.env.UGS_RUNNER_GIT_RETRIES);
+  return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 2;
+}
+
+/**
  * Git env config for one HTTPS host. Token never enters command args/remotes.
  * Pass an explicit `proxy` (string) to route this invocation through it; pass
- * `null`/omit for a direct connection. The token auth header is always included
- * (when applicable) regardless of proxy choice.
+ * `null`/omit for a direct connection. Pass a `mirror` prefix to rewrite
+ * github.com to a CN accelerator via git `insteadOf`. The token auth header is
+ * always included (when applicable) regardless of proxy/mirror choice.
  */
-export function authEnvForUrl(repoUrl, token, proxy = null) {
+export function authEnvForUrl(repoUrl, token, proxy = null, mirror = null) {
   const env = { GIT_TERMINAL_PROMPT: '0' };
-  const entries = [];
+  const entries = [...httpRobustnessConfig()];
   if (token) {
     try {
       const u = new URL(normalizeRepoUrl(repoUrl, token));
@@ -165,6 +269,11 @@ export function authEnvForUrl(repoUrl, token, proxy = null) {
     entries.push(['http.proxy', proxy]);
     entries.push(['https.proxy', proxy]);
   }
+  if (mirror) {
+    // Transparently rewrite github.com to the accelerator at connection time,
+    // without touching command args or the stored remote URL.
+    entries.push([`url.${mirror}.insteadOf`, 'https://github.com/']);
+  }
   if (entries.length === 0) return env;
   env.GIT_CONFIG_COUNT = String(entries.length);
   entries.forEach(([key, value], i) => {
@@ -184,40 +293,81 @@ export function authEnvForUrl(repoUrl, token, proxy = null) {
 export function isNetworkFailure(res) {
   if (!res || res.code === 0) return false;
   const text = `${res.stderr ?? ''}\n${res.stdout ?? ''}`;
-  return /Connection timed out|Could ?n[o']?t connect|Failed to connect|Couldn't connect to server|Could not resolve host|unable to access|unexpected disconnect|RPC failed|early EOF|Recv failure|Send failure|timed out after \d+ms|TLS connect|SSL_ERROR|Operation timed out|Connection reset/i.test(
+  return /Connection timed out|Could ?n[o']?t connect|Failed to connect|Couldn't connect to server|Could not resolve host|unable to access|unexpected disconnect|RPC failed|early EOF|Recv failure|Send failure|timed out after \d+ms|stalled \(no output for \d+ms\)|TLS connect|SSL_ERROR|GnuTLS|HTTP2 framing|expected flush after ref listing|Operation timed out|Connection reset/i.test(
     text,
   );
 }
 
 /**
- * Run a network-touching git command with direct-first, proxy-fallback retry.
- * Tries a direct connection, and only if it fails with a network error does it
- * retry through each configured proxy in order. Auth/branch/other errors short
- * -circuit immediately. Returns the last attempt's result plus `attempts`.
+ * Run a network-touching git command with a layered fallback chain plus a few
+ * transient retries per endpoint. Endpoint order depends on the repo:
+ *   - Public github.com repo (no token), mirror-first enabled (the CN default):
+ *       each accelerator mirror -> direct -> each configured HTTP proxy.
+ *   - Otherwise (private repo / token present / non-github host):
+ *       direct -> each configured HTTP proxy -> each github mirror.
+ * Mirrors are skipped for a token'd (private) repo since the token cannot
+ * authenticate against a mirror host. Each endpoint gets up to `gitRetryCount()`
+ * extra attempts on a network error. Auth/branch/other non-network failures
+ * short-circuit immediately. Returns the last attempt's result plus
+ * `proxyUsed`/`mirrorUsed`.
  */
 export async function runGitNet(args, { cwd, repoUrl, token, onLog } = {}) {
-  const attempts = [null, ...proxyList()];
+  const direct = { proxy: null, mirror: null, label: 'direct' };
+  const proxies = proxyList().map((proxy) => ({
+    proxy,
+    mirror: null,
+    label: `proxy ${proxy}`,
+  }));
+  // Mirrors only apply to public github.com repos: a private-repo token is
+  // scoped to the github.com origin and will not travel to the mirror host.
+  const mirrors =
+    isGithubUrl(repoUrl) && !token
+      ? mirrorList().map((mirror) => ({ proxy: null, mirror, label: `mirror ${mirror}` }))
+      : [];
+
+  // CN default: for a public github.com repo, try accelerator mirrors first so a
+  // sync succeeds immediately instead of after several doomed direct attempts.
+  const endpoints =
+    mirrors.length && preferMirrorFirst()
+      ? [...mirrors, direct, ...proxies]
+      : [direct, ...proxies, ...mirrors];
+
+  const maxTries = gitRetryCount() + 1;
   let last = null;
-  for (let i = 0; i < attempts.length; i++) {
-    const proxy = attempts[i];
-    if (proxy) {
+  for (let i = 0; i < endpoints.length; i++) {
+    const { proxy, mirror, label } = endpoints[i];
+    if (i > 0) {
       onLog?.({
         phase: 'git',
         stream: 'stderr',
-        text: redact(`[git] direct connection failed; retrying via proxy ${proxy}`),
+        text: redact(`[git] previous endpoint failed; retrying via ${label}`),
       });
     }
-    const res = await run('git', args, {
-      cwd,
-      env: authEnvForUrl(repoUrl, token, proxy),
-      onLog: (l) => onLog?.({ ...l, text: redact(l.text) }),
-    });
-    last = res;
-    if (res.code === 0) return { ...res, proxyUsed: proxy };
-    // Stop retrying on non-network failures (auth, missing branch, etc.).
-    if (!isNetworkFailure(res)) break;
+    for (let attempt = 1; attempt <= maxTries; attempt++) {
+      const res = await run('git', args, {
+        cwd,
+        env: authEnvForUrl(repoUrl, token, proxy, mirror),
+        onLog: (l) => onLog?.({ ...l, text: redact(l.text) }),
+      });
+      last = res;
+      if (res.code === 0) return { ...res, proxyUsed: proxy, mirrorUsed: mirror };
+      // Non-network failures (auth, missing branch, etc.) never recover by
+      // retrying: bail out of both the attempt loop and the endpoint loop.
+      if (!isNetworkFailure(res)) {
+        return { ...last, proxyUsed: null, mirrorUsed: null };
+      }
+      if (attempt < maxTries) {
+        onLog?.({
+          phase: 'git',
+          stream: 'stderr',
+          text: redact(
+            `[git] transient network error; retry ${attempt}/${maxTries - 1} via ${label}`,
+          ),
+        });
+      }
+    }
   }
-  return { ...last, proxyUsed: null };
+  return { ...last, proxyUsed: null, mirrorUsed: null };
 }
 
 /** Redact any embedded credentials from a string before it leaves the server. */

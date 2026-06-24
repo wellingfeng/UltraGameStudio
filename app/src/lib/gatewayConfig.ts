@@ -20,6 +20,21 @@ import {
   secureStorageAvailable,
   writeSecureRecord,
 } from '@/lib/secureStorage';
+import {
+  isRemoteProfileActive,
+  readRemoteProfileRaw,
+  writeRemoteProfileRaw,
+} from '@/lib/settingsProfile';
+
+/** Remote-profile KV relPath for the gateway config (channels + inline keys). */
+const GATEWAY_PROFILE_RELPATH = 'settings/modelGateway.v1.json';
+const ACTIVE_SELECTION_PROFILE_RELPATH =
+  'settings/activeGatewaySelection.v1.json';
+
+/** remote-runner / freecc providers are not per-project; keep them local. */
+function isLocalOnlyGatewayId(id: string): boolean {
+  return id.startsWith('remote-runner:') || id.startsWith(FREE_CHANNEL_PROVIDER_PREFIX);
+}
 
 export const GATEWAY_CONFIG_STORAGE = 'ugs_model_gateway_v1';
 export const ACTIVE_GATEWAY_SELECTION_STORAGE =
@@ -334,6 +349,68 @@ function stringRecord(value: object): Record<string, string> {
 }
 
 function readStoredGatewayConfig(): GatewayConfig {
+  if (isRemoteProfileActive()) return readRemoteProfileGatewayConfig();
+  return readLocalStoredGatewayConfig();
+}
+
+/**
+ * Remote profile: gateway providers come from the project's `/user-settings`
+ * with API keys inlined (no keychain). remote-runner/freecc execution channels
+ * stay sourced locally so the active project can still run.
+ */
+function readRemoteProfileGatewayConfig(): GatewayConfig {
+  const localKept = readLocalStoredGatewayConfig().providers.filter((provider) =>
+    isLocalOnlyGatewayId(provider.id),
+  );
+  const stored = readRemoteProfileRaw(GATEWAY_PROFILE_RELPATH);
+  let remote: GatewayProvider[] = [];
+  if (stored) {
+    try {
+      const parsed = JSON.parse(stored) as unknown;
+      const raw =
+        typeof parsed === 'object' && parsed !== null
+          ? (parsed as Record<string, unknown>)
+          : {};
+      remote = Array.isArray(raw.providers)
+        ? raw.providers
+            .map(normalizeProviderInlineKeys)
+            .filter((p): p is GatewayProvider => p !== null)
+            .filter((p) => !isLocalOnlyGatewayId(p.id))
+        : [];
+    } catch {
+      remote = [];
+    }
+  }
+  const seen = new Set(remote.map((p) => p.id));
+  return {
+    version: 1,
+    providers: [...remote, ...localKept.filter((p) => !seen.has(p.id))],
+  };
+}
+
+/** Like normalizeProvider but trusts inline channel.apiKey (remote profile). */
+function normalizeProviderInlineKeys(value: unknown): GatewayProvider | null {
+  const base = normalizeProvider(value);
+  if (!base) return null;
+  if (typeof value !== 'object' || value === null) return base;
+  const rawChannels = (value as Record<string, unknown>).channels;
+  if (!Array.isArray(rawChannels)) return base;
+  return {
+    ...base,
+    channels: base.channels.map((channel, i) => {
+      const raw = rawChannels[i];
+      const inlineKey =
+        typeof raw === 'object' && raw !== null
+          ? (raw as Record<string, unknown>).apiKey
+          : undefined;
+      return typeof inlineKey === 'string' && inlineKey
+        ? { ...channel, apiKey: inlineKey }
+        : channel;
+    }),
+  };
+}
+
+function readLocalStoredGatewayConfig(): GatewayConfig {
   const stored = rawGet(GATEWAY_CONFIG_STORAGE);
   if (!stored) return { version: 1, providers: [] };
   try {
@@ -515,6 +592,10 @@ export function loadGatewayConfig(): GatewayConfig {
 }
 
 export function saveGatewayConfig(config: GatewayConfig): void {
+  if (isRemoteProfileActive()) {
+    saveGatewayConfigForRemoteProfile(config);
+    return;
+  }
   if (secureStorageAvailable()) {
     const apiKeys: Record<string, string> = {};
     for (const provider of config.providers) {
@@ -534,6 +615,35 @@ export function saveGatewayConfig(config: GatewayConfig): void {
       providers: config.providers.map(gatewayProviderForStorage),
     }),
   );
+}
+
+/**
+ * Remote profile: persist ordinary gateway providers (API keys inlined) to the
+ * project's `/user-settings`. remote-runner/freecc channels are not per-project,
+ * so they are excluded here and remain in the local store.
+ */
+function saveGatewayConfigForRemoteProfile(config: GatewayConfig): void {
+  const ordinary = config.providers.filter(
+    (provider) => !isLocalOnlyGatewayId(provider.id),
+  );
+  writeRemoteProfileRaw(
+    GATEWAY_PROFILE_RELPATH,
+    JSON.stringify({
+      version: 1,
+      providers: ordinary.map((provider) => ({
+        ...provider,
+        channels: provider.channels.map((channel) => ({
+          ...channel,
+          // Inline the key for cross-device sync (per product choice).
+          apiKey: channel.apiKey ?? undefined,
+          route: { ...channel.route },
+        })),
+      })),
+    }),
+  );
+  if (hasWindow()) {
+    window.dispatchEvent(new Event('ugs:gateway-config-changed'));
+  }
 }
 
 function gatewayProviderForStorage(provider: GatewayProvider): GatewayProvider {
@@ -559,7 +669,9 @@ export function listGatewayProviders(): GatewayProvider[] {
 }
 
 export function getExplicitActiveGatewaySelection(): GatewaySelection | null {
-  const stored = rawGet(ACTIVE_GATEWAY_SELECTION_STORAGE);
+  const stored = isRemoteProfileActive()
+    ? readRemoteProfileRaw(ACTIVE_SELECTION_PROFILE_RELPATH)
+    : rawGet(ACTIVE_GATEWAY_SELECTION_STORAGE);
   if (stored) {
     try {
       const selection = normalizeSelection(JSON.parse(stored));
@@ -568,6 +680,7 @@ export function getExplicitActiveGatewaySelection(): GatewaySelection | null {
       /* fall through to legacy active provider */
     }
   }
+  if (isRemoteProfileActive()) return null;
 
   const activeProviderId = (rawGet(LEGACY_ACTIVE_PROVIDER_STORAGE) ?? '').trim();
   if (!activeProviderId) return null;
@@ -589,6 +702,16 @@ export function getActiveGatewaySelection(): GatewaySelection {
 }
 
 export function setActiveGatewaySelection(selection: GatewaySelection): void {
+  if (isRemoteProfileActive()) {
+    writeRemoteProfileRaw(
+      ACTIVE_SELECTION_PROFILE_RELPATH,
+      JSON.stringify(selection),
+    );
+    if (hasWindow()) {
+      window.dispatchEvent(new Event('ugs:gateway-config-changed'));
+    }
+    return;
+  }
   rawSet(ACTIVE_GATEWAY_SELECTION_STORAGE, JSON.stringify(selection));
 }
 
@@ -600,6 +723,13 @@ export const writeStoredGatewaySelection = setActiveGatewaySelection;
  * Settings active provider and the legacy pointer untouched.
  */
 export function clearActiveGatewaySelection(): void {
+  if (isRemoteProfileActive()) {
+    writeRemoteProfileRaw(ACTIVE_SELECTION_PROFILE_RELPATH, 'null');
+    if (hasWindow()) {
+      window.dispatchEvent(new Event('ugs:gateway-config-changed'));
+    }
+    return;
+  }
   rawRemove(ACTIVE_GATEWAY_SELECTION_STORAGE);
 }
 
@@ -608,7 +738,9 @@ export function clearActiveGatewaySelection(): void {
  * chosen a specific channel rather than inheriting the global default.
  */
 export function hasExplicitGatewayPin(): boolean {
-  const stored = rawGet(ACTIVE_GATEWAY_SELECTION_STORAGE);
+  const stored = isRemoteProfileActive()
+    ? readRemoteProfileRaw(ACTIVE_SELECTION_PROFILE_RELPATH)
+    : rawGet(ACTIVE_GATEWAY_SELECTION_STORAGE);
   if (!stored) return false;
   try {
     return normalizeSelection(JSON.parse(stored)) !== null;

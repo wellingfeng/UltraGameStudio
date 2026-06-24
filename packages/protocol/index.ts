@@ -41,6 +41,10 @@ export const REMOTE_RUNNER_API_PATHS = {
   jobStream: (id: string) => `/jobs/${encodeURIComponent(id)}/stream`,
   project: (id: string) => `/projects/${encodeURIComponent(id)}`,
   projectFiles: (id: string) => `/projects/${encodeURIComponent(id)}/files`,
+  projectEnvironment: (id: string) =>
+    `/projects/${encodeURIComponent(id)}/environment`,
+  projectEnvironmentInstall: (id: string) =>
+    `/projects/${encodeURIComponent(id)}/environment/install`,
   account: (id: string) => `/accounts/${encodeURIComponent(id)}`,
 } as const;
 
@@ -91,6 +95,24 @@ export function matchRemoteRunnerProjectPath(path: string): string | null {
 
 export function matchRemoteRunnerProjectFilesPath(path: string): string | null {
   return matchRemoteRunnerNestedIdPath(path, REMOTE_RUNNER_API_PATHS.projects, 'files');
+}
+
+export function matchRemoteRunnerProjectEnvironmentPath(path: string): string | null {
+  return matchRemoteRunnerNestedIdPath(
+    path,
+    REMOTE_RUNNER_API_PATHS.projects,
+    'environment',
+  );
+}
+
+export function matchRemoteRunnerProjectEnvironmentInstallPath(
+  path: string,
+): string | null {
+  return matchRemoteRunnerNestedIdPath(
+    path,
+    REMOTE_RUNNER_API_PATHS.projects,
+    'environment/install',
+  );
 }
 
 export function matchRemoteRunnerJobPath(path: string): string | null {
@@ -290,8 +312,86 @@ export interface RemoteJobArtifacts {
   result: RemoteJobResult | null;
 }
 
-export interface WorkspaceTreeEntry {
-  name: string;
+/**
+ * Required runtime environment for a remote project. The remote backend has no
+ * software pre-installed, so a clone/sync needs git (and usually node/python)
+ * present first. The client renders these in a "remote environment" tab and can
+ * trigger a server-side install before any git sync runs.
+ */
+export const REMOTE_ENVIRONMENT_TOOL_IDS = [
+  'git',
+  'git-lfs',
+  'node',
+  'python',
+  'ffmpeg',
+  'curl',
+  'unzip',
+] as const;
+
+export type RemoteEnvironmentToolId =
+  (typeof REMOTE_ENVIRONMENT_TOOL_IDS)[number];
+
+/** A single tool's detection result on the remote host. */
+export interface RemoteEnvironmentTool {
+  id: RemoteEnvironmentToolId;
+  /** Display name, e.g. "Git", "Node.js", "Python". */
+  label: string;
+  /** Whether the command is resolvable on the remote host. */
+  installed: boolean;
+  /** Reported version string when installed (raw `--version` first line). */
+  version?: string | null;
+  /** Whether the backend knows how to auto-install this tool on its OS. */
+  installable: boolean;
+  /** The command the backend would run to install (for transparency). */
+  installHint?: string | null;
+}
+
+export interface RemoteEnvironmentReport {
+  /** Detected remote OS platform, e.g. "linux", "darwin", "win32". */
+  platform: string;
+  /** Detected package manager used for auto-install, e.g. "apt", "brew". */
+  packageManager?: string | null;
+  tools: RemoteEnvironmentTool[];
+  /** True when every required tool is installed. */
+  ready: boolean;
+  /** True when git specifically is present (the gate for project sync). */
+  gitReady: boolean;
+  checkedAt: number;
+}
+
+export interface RemoteEnvironmentInstallInput {
+  /** Tool ids to install. Omit/empty to install every missing required tool. */
+  tools?: RemoteEnvironmentToolId[];
+}
+
+export interface RemoteEnvironmentInstallStep {
+  id: RemoteEnvironmentToolId;
+  ok: boolean;
+  /** Combined stdout/stderr tail from the install command (redacted). */
+  log?: string;
+  error?: string | null;
+}
+
+export interface RemoteEnvironmentInstallResult {
+  ok: boolean;
+  platform: string;
+  packageManager?: string | null;
+  steps: RemoteEnvironmentInstallStep[];
+  /** The environment report captured after the install attempt. */
+  report: RemoteEnvironmentReport;
+}
+
+export interface RemoteRunnerEnvironmentResponse {
+  ok: true;
+  environment: RemoteEnvironmentReport;
+}
+
+export interface RemoteRunnerEnvironmentInstallResponse {
+  ok: true;
+  install: RemoteEnvironmentInstallResult;
+}
+
+export interface WorkspaceTreeEntry {  name: string;
   path: string;
   relativePath: string;
   kind: 'directory' | 'file';
@@ -431,6 +531,21 @@ function remoteRunnerResponseError(data: unknown, status: number): string {
     if (typeof error === 'string' && error) return error;
   }
   return `runner returned ${status}`;
+}
+
+/**
+ * Error mapper for the remote-environment endpoints. These routes were added
+ * after the first cloud-runner release, so an out-of-date backend returns the
+ * generic 404 fallback ("not found") for them while the rest of the API (project
+ * binding, file listing) keeps working. A bare "not found" reads like the button
+ * is broken, so translate that case into an actionable hint: the backend host
+ * needs to be redeployed with the newer build that exposes /environment.
+ */
+function remoteEnvironmentEndpointError(data: unknown, status: number): string {
+  if (status === 404) {
+    return '云端后端不支持「远程环境」接口（/environment 返回 404）。该功能需要较新版本的后端，请在云端主机上更新并重启 runner 后再试。';
+  }
+  return remoteRunnerResponseError(data, status);
 }
 
 export class RunnerClient {
@@ -698,9 +813,14 @@ export class RunnerClient {
   async listProjectDirectory(
     projectId: string,
     relativePath = '',
+    opts: { sync?: boolean } = {},
   ): Promise<WorkspaceDirectoryListing> {
     const params = new URLSearchParams();
     if (relativePath) params.set('path', relativePath);
+    // `sync=1` asks the server to git-pull the latest commits before listing,
+    // so a client "refresh" reflects the repo's newest state instead of the
+    // snapshot captured at first clone.
+    if (opts.sync) params.set('sync', '1');
     const suffix = params.toString() ? `?${params}` : '';
     const res = await fetch(
       this.url(`${REMOTE_RUNNER_API_PATHS.projectFiles(projectId)}${suffix}`),
@@ -715,11 +835,57 @@ export class RunnerClient {
     return data.listing;
   }
 
+  /**
+   * Probe the remote host for the runtime environment a project needs (git,
+   * node, python). The remote backend ships no software preinstalled, so this
+   * is how the client knows whether a sync can even run.
+   */
+  async getProjectEnvironment(
+    projectId: string,
+  ): Promise<RemoteEnvironmentReport> {
+    const res = await fetch(
+      this.url(REMOTE_RUNNER_API_PATHS.projectEnvironment(projectId)),
+      { headers: this.headers() },
+    );
+    const data = (await res.json()) as
+      | RemoteRunnerEnvironmentResponse
+      | RemoteRunnerErrorResponse;
+    if (!res.ok || !data.ok || !('environment' in data)) {
+      throw new Error(remoteEnvironmentEndpointError(data, res.status));
+    }
+    return data.environment;
+  }
+
+  /**
+   * Trigger a server-side install of the missing required tools, then return the
+   * post-install environment report. The click happens locally; the install runs
+   * remotely on the backend host.
+   */
+  async installProjectEnvironment(
+    projectId: string,
+    input: RemoteEnvironmentInstallInput = {},
+  ): Promise<RemoteEnvironmentInstallResult> {
+    const res = await fetch(
+      this.url(REMOTE_RUNNER_API_PATHS.projectEnvironmentInstall(projectId)),
+      {
+        method: 'POST',
+        headers: this.headers(true),
+        body: JSON.stringify(input),
+      },
+    );
+    const data = (await res.json()) as
+      | RemoteRunnerEnvironmentInstallResponse
+      | RemoteRunnerErrorResponse;
+    if (!res.ok || !data.ok || !('install' in data)) {
+      throw new Error(remoteEnvironmentEndpointError(data, res.status));
+    }
+    return data.install;
+  }
+
   async uploadProjectFile(
     projectId: string,
     input: RemoteRunnerFileUploadInput,
-  ): Promise<RemoteRunnerFileUpload> {
-    const res = await fetch(
+  ): Promise<RemoteRunnerFileUpload> {    const res = await fetch(
       this.url(REMOTE_RUNNER_API_PATHS.projectFiles(projectId)),
       {
         method: 'POST',

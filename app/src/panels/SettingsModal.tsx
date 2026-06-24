@@ -777,7 +777,11 @@ export default function SettingsModal({ onClose }: { onClose: () => void }) {
                   setPersonalInstructions={setPersonalInstructions}
                 />
               ) : tab === 'models' ? (
-                <ChannelsSettings locale={locale} cliRuntime={cliRuntime} />
+                <ChannelsSettings
+                  key={settingsProfileId ?? 'local'}
+                  locale={locale}
+                  cliRuntime={cliRuntime}
+                />
               ) : tab === 'imageGeneration' ? (
                 <ErrorBoundary label={t(locale, 'settings.tabs.imageGeneration')}>
                   <ImageGenerationSettingsPanel
@@ -2207,6 +2211,17 @@ function ModelsSettings({
       }
       if (result.status === 'failed') {
         const reason = result.reason ?? 'Unknown error';
+        // 远程项目档案下，渠道是写到远程账号的；写入失败时给出可操作的说明，
+        // 而不是让用户误以为"导入成功"。
+        if (reason.startsWith('REMOTE_SYNC_FAILED')) {
+          const detail = reason.slice('REMOTE_SYNC_FAILED:'.length).trim();
+          const hint =
+            locale === 'zh-CN'
+              ? `已读取本地 cc-switch 数据，但同步到远程账号失败，请检查远程连接/登录后重试${detail ? `（${detail}）` : ''}`
+              : `Read local cc-switch data, but syncing to the remote account failed. Check the remote connection/login and retry${detail ? ` (${detail})` : ''}`;
+          setStatus({ tone: 'err', msg: hint });
+          return;
+        }
         setStatus({
           tone: 'err',
           msg: `${t(locale, 'settings.models.importError')}: ${reason}`,

@@ -49,15 +49,18 @@ export default function RemoteWorkspaceDialog({
     () => (existing ? readRemoteSecrets(existing.id) : null),
     [existing],
   );
-  // 不预填内置默认云端 Runner：只回填用户显式保存过的连接。
-  // 否则空白「添加云端项目」会带出官方测试 Runner，误导用户保存出一个
-  // 指向默认服务器的云端工作区（本地项目随后被显示成云端的根因）。
+  // 预填内置默认云端 Runner（官方测试服务器地址 + 共享 Token），
+  // 这样「添加云端项目」打开即带出可用连接，用户无需每次手填 Token，
+  // 保存按钮也不再因连接未就绪而置灰。仍可被用户覆盖。
+  // 注意：空白对话框不会误存出幽灵云端工作区——保存要求 label + repoUrl
+  // 都非空（见 required），而启动期 purgeDefaultRemoteWorkspaces 只清理
+  // 没有 repoUrl/projectId 的纯空壳，不会误删用默认 Token 保存的真实项目。
   const initialConnection = useMemo(
-    () => readRemoteRunnerConnection({ allowDefault: false }),
+    () => readRemoteRunnerConnection({ allowDefault: true }),
     [],
   );
   const initialConnectionSecrets = useMemo(
-    () => readRemoteRunnerConnectionSecrets({ allowDefault: false }),
+    () => readRemoteRunnerConnectionSecrets({ allowDefault: true }),
     [],
   );
 

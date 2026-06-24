@@ -899,7 +899,7 @@ export default function ProjectFileTree() {
       workspaceId: string,
       rootPath: string,
       relativePath: string,
-      options: { force?: boolean } = {},
+      options: { force?: boolean; sync?: boolean } = {},
     ) => {
       const key = directoryKey(relativePath);
       const current = cacheRef.current[workspaceId];
@@ -931,7 +931,9 @@ export default function ProjectFileTree() {
 
       try {
         const listing = isRemoteWorkspacePath(rootPath)
-          ? await listRemoteWorkspaceDirectory(rootPath, key)
+          ? await listRemoteWorkspaceDirectory(rootPath, key, {
+              sync: options.sync,
+            })
           : await listWorkspaceDirectory(rootPath, key);
         setCache((prev) => {
           const previous = prev[workspaceId];
@@ -1303,8 +1305,11 @@ export default function ProjectFileTree() {
       ...prev,
       [activeRootKey]: '',
     }));
+    // For remote projects, an explicit refresh should pull the repo's latest
+    // commits (sync) — not just re-list the stale first-clone snapshot.
     void loadDirectory(activeRootKey, selectedRootPath, '', {
       force: true,
+      sync: isRemoteWorkspacePath(selectedRootPath),
     });
   }, [activeRootKey, selectedRootPath, loadDirectory]);
 

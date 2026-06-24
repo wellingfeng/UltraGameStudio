@@ -10,6 +10,8 @@ import {
   matchRemoteRunnerJobPath,
   matchRemoteRunnerJobStreamPath,
   matchRemoteRunnerProjectFilesPath,
+  matchRemoteRunnerProjectEnvironmentPath,
+  matchRemoteRunnerProjectEnvironmentInstallPath,
   matchRemoteRunnerProjectPath,
   remoteRunnerApiUrl,
 } from '../../packages/protocol/index.js';
@@ -18,6 +20,21 @@ test('protocol route constants and matchers stay symmetric', () => {
   assert.equal(remoteRunnerApiUrl('https://runner.test/', REMOTE_RUNNER_API_PATHS.health), 'https://runner.test/health');
   assert.equal(matchRemoteRunnerProjectPath('/projects/proj%201'), 'proj 1');
   assert.equal(matchRemoteRunnerProjectFilesPath('/projects/proj%201/files'), 'proj 1');
+  assert.equal(
+    matchRemoteRunnerProjectEnvironmentPath('/projects/proj%201/environment'),
+    'proj 1',
+  );
+  assert.equal(
+    matchRemoteRunnerProjectEnvironmentInstallPath(
+      '/projects/proj%201/environment/install',
+    ),
+    'proj 1',
+  );
+  // The plain environment matcher must not also swallow the install sub-path.
+  assert.equal(
+    matchRemoteRunnerProjectEnvironmentPath('/projects/proj%201/environment/install'),
+    null,
+  );
   assert.equal(matchRemoteRunnerJobPath('/jobs/job%201'), 'job 1');
   assert.equal(matchRemoteRunnerJobArtifactsPath('/jobs/job%201/artifacts'), 'job 1');
   assert.equal(matchRemoteRunnerJobCancelPath('/jobs/job%201/cancel'), 'job 1');

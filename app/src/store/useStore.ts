@@ -80,6 +80,7 @@ import { listProviders, setActiveProviderId } from '@/lib/apiConfig';
 import { appendComposerDraftState } from '@/lib/composerEntryPolicy';
 import {
   clearActiveGatewaySelection,
+  getDefaultGatewaySelection,
   getExplicitActiveGatewaySelection,
   setActiveGatewaySelection,
 } from '@/lib/gatewayConfig';
@@ -822,8 +823,34 @@ function remoteWorkspaceGatewaySelection(
   });
 }
 
+/**
+ * 本地工作区不能使用 `remote-runner:` provider（那是某个远程项目专属的执行
+ * 通道）。从远程会话切回本地会话时，全局活动选择 / 旧会话快照里可能还残留着
+ * 远程 provider，导致底部渠道/大模型停在远程的、本地项目跑不了。
+ *
+ * 这里把指向远程 runner 的 selection 替换成一个干净的本地默认（优先沿用当前
+ * 适配器对应的本地 provider，否则退回系统默认）。非远程 selection 原样返回。
+ */
+function sanitizeLocalWorkspaceSelection(
+  selection: GatewaySelection,
+): GatewaySelection {
+  if (!parseRemoteProviderId(selection.providerId)) return selection;
+  const fallback =
+    getExplicitActiveGatewaySelection() ??
+    configuredCliGatewaySelection() ??
+    getDefaultGatewaySelection();
+  // 若全局活动选择本身也指向远程（同一次泄漏的来源），再退一层到 CLI/系统默认。
+  const clean = parseRemoteProviderId(fallback.providerId)
+    ? configuredCliGatewaySelection() ?? getDefaultGatewaySelection()
+    : fallback;
+  return normalizeGatewaySelection(clean);
+}
+
 function withNewSessionGatewayDefaults(workflow: IRGraph): IRGraph {
-  const selection = getExplicitActiveGatewaySelection() ?? configuredCliGatewaySelection();
+  const explicit = getExplicitActiveGatewaySelection();
+  const selection = explicit
+    ? sanitizeLocalWorkspaceSelection(explicit)
+    : configuredCliGatewaySelection();
   return selection ? withSessionGatewayDefaults(workflow, selection) : workflow;
 }
 
@@ -1037,10 +1064,27 @@ export function composerPatchForSession(
     baseSnapshot.composer.workspace || fallbackComposer.workspace,
     baseSnapshot.gatewaySelection,
   );
-  const snapshot = remoteSelection
-    ? { ...baseSnapshot, gatewaySelection: remoteSelection }
+  // 本地工作区：清洗掉残留的远程 runner 选择，避免底部渠道/大模型停在远程的、
+  // 导致本地项目跑不了。同时把全局活动 pin 一并修复，让运行时解析与新建会话
+  // 不再继续泄漏远程 provider。
+  const localSelection = remoteSelection
+    ? null
+    : (() => {
+        const cleaned = sanitizeLocalWorkspaceSelection(
+          baseSnapshot.gatewaySelection,
+        );
+        if (cleaned === baseSnapshot.gatewaySelection) return null;
+        const activePin = getExplicitActiveGatewaySelection();
+        if (activePin && parseRemoteProviderId(activePin.providerId)) {
+          setActiveGatewaySelection(cleaned);
+        }
+        return cleaned;
+      })();
+  const effectiveSelection = remoteSelection ?? localSelection;
+  const snapshot = effectiveSelection
+    ? { ...baseSnapshot, gatewaySelection: effectiveSelection }
     : baseSnapshot;
-  if ((!stored || remoteSelection) && sessionKeyPersistable(sessionKey)) {
+  if ((!stored || effectiveSelection) && sessionKeyPersistable(sessionKey)) {
     composerBySession = { ...composerBySession, [key]: snapshot };
   }
   return {
@@ -6365,16 +6409,35 @@ function aiEditOwnedMessages(ch: AiEditChannel): Message[] {
   return ch.messages.filter((message) => ch.ownedMessageIds?.has(message.id));
 }
 
-function mergeMessagesById(base: Message[], updates: Message[]): Message[] {
+export function mergeMessagesById(base: Message[], updates: Message[]): Message[] {
   if (updates.length === 0) return base;
   const byId = new Map(updates.map((message) => [message.id, message]));
+  // Apply in-place updates first, preserving `base` ordering for messages that
+  // already exist (e.g. live streaming edits to an assistant bubble).
   const merged = base.map((message) => byId.get(message.id) ?? message);
-  const existing = new Set(base.map((message) => message.id));
+  const indexOfId = new Map(merged.map((message, index) => [message.id, index]));
+  // Insert brand-new messages at the position implied by the `updates` order
+  // rather than blindly at the tail. A turn's owned messages are ordered
+  // [userPrompt, assistant…]; the user prompt is already present in `base`, so
+  // its assistant reply must land right after it — even when a later turn's
+  // user message has already been appended to `base` (the "插话" / interjection
+  // case). Tail-appending here is what made an in-flight reply jump below the
+  // next user message, merging the two prompts visually.
+  let anchorIndex = -1;
   for (const message of updates) {
-    if (!existing.has(message.id)) {
-      merged.push(message);
-      existing.add(message.id);
+    const existingIndex = indexOfId.get(message.id);
+    if (existingIndex !== undefined) {
+      anchorIndex = existingIndex;
+      continue;
     }
+    const insertAt = anchorIndex + 1;
+    merged.splice(insertAt, 0, message);
+    // Every entry at/after the insertion shifts right by one.
+    for (const [id, index] of indexOfId) {
+      if (index >= insertAt) indexOfId.set(id, index + 1);
+    }
+    indexOfId.set(message.id, insertAt);
+    anchorIndex = insertAt;
   }
   return merged;
 }

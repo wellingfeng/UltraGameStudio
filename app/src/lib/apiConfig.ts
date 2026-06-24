@@ -36,8 +36,22 @@ import {
   setActiveGatewaySelection,
 } from '@/lib/gatewayConfig';
 import { tauriAvailable } from '@/lib/tauri';
+import {
+  isRemoteProfileActive,
+  readRemoteProfileRaw,
+  writeRemoteProfileRaw,
+} from '@/lib/settingsProfile';
 import type { RuntimeAdapterId } from '@/lib/adapters';
 import type { GatewayProvider, GatewayTransport } from '@/lib/modelGateway/types';
+
+/** remote-runner execution providers are per-project and never profile-scoped. */
+function isRemoteRunnerProviderId(id: string): boolean {
+  return id.startsWith('remote-runner:');
+}
+
+/** Remote-profile KV relPaths for the channel config. */
+const PROVIDERS_PROFILE_RELPATH = 'settings/providers.v1.json';
+const ACTIVE_BY_KIND_PROFILE_RELPATH = 'settings/activeProviderByKind.v1.json';
 
 export type ProviderKind = 'anthropic' | 'codex' | 'gemini';
 export type ProviderTransport = 'direct' | 'cli';
@@ -295,6 +309,29 @@ type ActiveByKind = Partial<Record<ProviderKind, string>>;
  * key. Migration assigns the legacy active id to its provider's own category.
  */
 function loadActiveByKind(): ActiveByKind {
+  if (isRemoteProfileActive()) {
+    const stored = readRemoteProfileRaw(ACTIVE_BY_KIND_PROFILE_RELPATH);
+    if (stored !== null) {
+      try {
+        const parsed = JSON.parse(stored);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          const out: ActiveByKind = {};
+          for (const kind of PROVIDER_KINDS) {
+            const value = (parsed as Record<string, unknown>)[kind];
+            if (typeof value === 'string' && value) out[kind] = value;
+          }
+          return out;
+        }
+      } catch {
+        /* corrupt — fall through to empty */
+      }
+    }
+    return {};
+  }
+  return loadLocalActiveByKind();
+}
+
+function loadLocalActiveByKind(): ActiveByKind {
   const stored = rawGet(ACTIVE_PROVIDER_BY_KIND_STORAGE);
   if (stored !== null) {
     try {
@@ -329,6 +366,13 @@ function loadActiveByKind(): ActiveByKind {
  * the legacy single-id key (the gateway's "inherit global" fallback reads it).
  */
 function saveActiveByKind(map: ActiveByKind): void {
+  if (isRemoteProfileActive()) {
+    writeRemoteProfileRaw(
+      ACTIVE_BY_KIND_PROFILE_RELPATH,
+      JSON.stringify(map),
+    );
+    return;
+  }
   rawSet(ACTIVE_PROVIDER_BY_KIND_STORAGE, JSON.stringify(map));
   const anthropic = (map.anthropic ?? '').trim();
   if (anthropic) {
@@ -360,13 +404,65 @@ function resolveActiveForKind(
   return ofKind[0]?.id ?? '';
 }
 
+function loadProviders(): Provider[] {
+  if (isRemoteProfileActive()) return loadProvidersForRemoteProfile();
+  return loadLocalProviders();
+}
+
+/**
+ * Remote profile: ordinary channels come from the project's `/user-settings`
+ * (API keys inlined in the JSON, per the cross-device-sync product choice),
+ * while `remote-runner:` execution providers stay sourced from the local store
+ * so the active project can still run.
+ */
+function loadProvidersForRemoteProfile(): Provider[] {
+  const localRunners = loadLocalProviders().filter((provider) =>
+    isRemoteRunnerProviderId(provider.id),
+  );
+  const stored = readRemoteProfileRaw(PROVIDERS_PROFILE_RELPATH);
+  let remote: Provider[] = [];
+  if (stored) {
+    try {
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed)) {
+        remote = parsed
+          .map(normalizeRemoteProfileProvider)
+          .filter((p): p is Provider => p !== null)
+          .filter((p) => !isRemoteRunnerProviderId(p.id));
+      }
+    } catch {
+      remote = [];
+    }
+  }
+  const seen = new Set(remote.map((p) => p.id));
+  return [...remote, ...localRunners.filter((p) => !seen.has(p.id))];
+}
+
+/** Remote-profile providers carry their apiKey inline (no keychain). */
+function normalizeRemoteProfileProvider(value: unknown): Provider | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const v = value as Record<string, unknown>;
+  if (typeof v.id !== 'string') return null;
+  const kind = normalizeProviderKind(v.kind ?? v.adapter);
+  return {
+    id: v.id,
+    kind,
+    name: typeof v.name === 'string' ? v.name : 'Claude',
+    apiKey: typeof v.apiKey === 'string' ? v.apiKey : '',
+    baseUrl: typeof v.baseUrl === 'string' ? v.baseUrl : '',
+    transport: normalizeProviderTransport(kind, v.transport),
+    model: typeof v.model === 'string' ? v.model : undefined,
+    models: normalizeProviderModels(v.models),
+  };
+}
+
 /**
  * Read the provider list, running a one-time migration from the legacy
  * single-key storage when the new key is absent. The presence of
  * `PROVIDERS_STORAGE` (even an empty array) is the migration sentinel, so this
  * runs at most once per device.
  */
-function loadProviders(): Provider[] {
+function loadLocalProviders(): Provider[] {
   const stored = rawGet(PROVIDERS_STORAGE);
   if (stored !== null) {
     try {
@@ -384,7 +480,7 @@ function loadProviders(): Provider[] {
               typeof (value as Record<string, unknown>).apiKey === 'string',
           )
         ) {
-          saveProviders(providers);
+          saveLocalProviders(providers);
         }
         return providers;
       }
@@ -409,7 +505,7 @@ function loadProviders(): Provider[] {
     migrated = [p];
     rawSet(ACTIVE_PROVIDER_STORAGE, p.id);
   }
-  saveProviders(migrated);
+  saveLocalProviders(migrated);
   rawRemove(API_KEY_STORAGE);
   return migrated;
 }
@@ -473,6 +569,45 @@ function normalizeProviderTransport(
 }
 
 function saveProviders(list: Provider[]): void {
+  if (isRemoteProfileActive()) {
+    saveProvidersForRemoteProfile(list);
+    return;
+  }
+  saveLocalProviders(list);
+}
+
+/**
+ * Remote profile: persist ordinary channels (keys inlined) to the project's
+ * `/user-settings`, and keep any `remote-runner:` execution providers in the
+ * local store so the active project keeps its run channel.
+ */
+function saveProvidersForRemoteProfile(list: Provider[]): void {
+  const runners = list.filter((provider) => isRemoteRunnerProviderId(provider.id));
+  const ordinary = list.filter((provider) => !isRemoteRunnerProviderId(provider.id));
+  // Mirror remote-runner providers back into the local store unchanged.
+  const localRunnersPrev = loadLocalProviders().filter((provider) =>
+    isRemoteRunnerProviderId(provider.id),
+  );
+  if (
+    runners.length !== localRunnersPrev.length ||
+    runners.some(
+      (provider, i) =>
+        JSON.stringify(provider) !== JSON.stringify(localRunnersPrev[i]),
+    )
+  ) {
+    const localNonRunner = loadLocalProviders().filter(
+      (provider) => !isRemoteRunnerProviderId(provider.id),
+    );
+    saveLocalProviders([...localNonRunner, ...runners]);
+  }
+  writeRemoteProfileRaw(
+    PROVIDERS_PROFILE_RELPATH,
+    JSON.stringify(ordinary),
+  );
+  notifyProviderConfigChanged();
+}
+
+function saveLocalProviders(list: Provider[]): void {
   if (secureStorageAvailable()) {
     const apiKeys: Record<string, string> = {};
     for (const provider of list) {
