@@ -343,6 +343,18 @@ describe('parseGameExpertCommand', () => {
     expect(parseGameExpertCommand('/plan 做个计划', settings)).toBeNull();
     expect(parseGameExpertCommand('普通问题', settings)).toBeNull();
   });
+
+  it('does not treat UE asset paths under /Game as a game-expert command', () => {
+    expect(
+      parseGameExpertCommand(
+        '/Game/Cinematics/LS_CamPullback50m2，这个打开失效了，你修复下',
+        settings,
+      ),
+    ).toBeNull();
+    expect(
+      parseGameExpertCommand('/Game/Maps/Main 打开后黑屏', settings),
+    ).toBeNull();
+  });
 });
 
 describe('pinned expert selection', () => {

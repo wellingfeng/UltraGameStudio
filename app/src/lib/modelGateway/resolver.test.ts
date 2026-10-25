@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import type { IRGraph } from '@/core/ir';
 import { setActiveGatewaySelection } from '@/lib/gatewayConfig';
-import { PROVIDERS_STORAGE } from '@/lib/apiConfig';
+import { PROVIDERS_STORAGE, syncGatewayFromProviders } from '@/lib/apiConfig';
 import {
   FREE_CHANNEL_AUTO_ID,
   FREE_CHANNEL_AUTO_MODEL,
@@ -19,6 +19,11 @@ import {
   workflowGatewaySelection,
 } from './resolver';
 import { resolveDirectGatewayRoute } from './modelGateway';
+
+function setTestStorage(key: string, value: string): void {
+  window.localStorage.setItem(key, value);
+  if (key === PROVIDERS_STORAGE) syncGatewayFromProviders();
+}
 
 function buildWorkflow(nodes: IRGraph['nodes']): IRGraph {
   return {
@@ -167,7 +172,7 @@ describe('model gateway compatibility', () => {
   });
 
   it('routes cc-switch imported Claude-compatible providers through the local CLI', () => {
-    window.localStorage.setItem(
+    setTestStorage(
       PROVIDERS_STORAGE,
       JSON.stringify([
         {
@@ -209,7 +214,7 @@ describe('model gateway compatibility', () => {
   });
 
   it('resolves keyless localhost Anthropic-compatible providers as direct routes', () => {
-    window.localStorage.setItem(
+    setTestStorage(
       PROVIDERS_STORAGE,
       JSON.stringify([
         {
@@ -243,7 +248,7 @@ describe('model gateway compatibility', () => {
   });
 
   it('resolves codex/gemini custom providers as OpenAI-compatible direct routes', () => {
-    window.localStorage.setItem(
+    setTestStorage(
       PROVIDERS_STORAGE,
       JSON.stringify([
         {
@@ -281,7 +286,7 @@ describe('model gateway compatibility', () => {
   });
 
   it('uses the selected Codex session model instead of the provider default', () => {
-    window.localStorage.setItem(
+    setTestStorage(
       PROVIDERS_STORAGE,
       JSON.stringify([
         {
@@ -315,7 +320,7 @@ describe('model gateway compatibility', () => {
   });
 
   it('uses a session model override without rewriting the provider default model', () => {
-    window.localStorage.setItem(
+    setTestStorage(
       PROVIDERS_STORAGE,
       JSON.stringify([
         {
@@ -350,7 +355,7 @@ describe('model gateway compatibility', () => {
   });
 
   it('normalizes known provider bare model ids before exporting CLI env', () => {
-    window.localStorage.setItem(
+    setTestStorage(
       PROVIDERS_STORAGE,
       JSON.stringify([
         {
@@ -538,7 +543,7 @@ describe('model gateway compatibility', () => {
   });
 
   it('uses system CLI defaults without provider env when systemDefault is selected', () => {
-    window.localStorage.setItem(
+    setTestStorage(
       PROVIDERS_STORAGE,
       JSON.stringify([
         {
@@ -647,7 +652,7 @@ describe('model gateway compatibility', () => {
   });
 
   it('prefers cli-backed Claude providers over stale browser-direct defaults', () => {
-    window.localStorage.setItem(
+    setTestStorage(
       PROVIDERS_STORAGE,
       JSON.stringify([
         {
@@ -688,7 +693,7 @@ describe('model gateway compatibility', () => {
   });
 
   it('exports non-claude cc-switch labels as ANTHROPIC_MODEL for claude-code', () => {
-    window.localStorage.setItem(
+    setTestStorage(
       PROVIDERS_STORAGE,
       JSON.stringify([
         {
@@ -718,7 +723,7 @@ describe('model gateway compatibility', () => {
   });
 
   it('passes a genuine claude-* channel model through for claude-code', () => {
-    window.localStorage.setItem(
+    setTestStorage(
       PROVIDERS_STORAGE,
       JSON.stringify([
         {
@@ -748,7 +753,7 @@ describe('model gateway compatibility', () => {
   });
 
   it('maps bare Claude tiers to concrete direct Anthropic model ids when no model is pinned', () => {
-    window.localStorage.setItem(
+    setTestStorage(
       PROVIDERS_STORAGE,
       JSON.stringify([
         {
@@ -804,7 +809,7 @@ describe('model gateway compatibility', () => {
         },
       ],
     };
-    window.localStorage.setItem('ugs_model_gateway_v1', JSON.stringify(config));
+    setTestStorage('ugs_model_gateway_v1', JSON.stringify(config));
 
     const workflow = buildWorkflow([]);
     workflow.meta.gateway = {
@@ -849,7 +854,7 @@ describe('model gateway compatibility', () => {
         },
       ],
     };
-    window.localStorage.setItem('ugs_model_gateway_v1', JSON.stringify(config));
+    setTestStorage('ugs_model_gateway_v1', JSON.stringify(config));
 
     const workflow = buildWorkflow([]);
     workflow.meta.gateway = {
@@ -898,7 +903,7 @@ describe('model gateway compatibility', () => {
         },
       ],
     };
-    window.localStorage.setItem('ugs_model_gateway_v1', JSON.stringify(config));
+    setTestStorage('ugs_model_gateway_v1', JSON.stringify(config));
 
     const workflow = buildWorkflow([]);
     workflow.meta.gateway = {

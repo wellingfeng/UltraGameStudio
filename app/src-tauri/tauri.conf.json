@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "UltraGameStudio",
-  "version": "0.5.19",
+  "version": "0.5.20",
   "identifier": "com.ultragamestudio.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -19,6 +19,7 @@
         "minWidth": 1100,
         "minHeight": 700,
         "resizable": true,
+        "decorations": false,
         "fullscreen": false,
         "center": true,
         "dragDropEnabled": true
@@ -45,6 +46,7 @@
     ],
     "resources": {
       "../cli/dist/ugs.mjs": "cli/ugs.mjs",
+      "../cli/dist/ugs-messaging.mjs": "cli/ugs-messaging.mjs",
       "../cli/ugs-job.mjs": "cli/ugs-job.mjs"
     },
     "android": {

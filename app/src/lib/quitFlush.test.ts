@@ -54,6 +54,7 @@ describe('installQuitFlushHandler', () => {
     resetQuitFlushForTests();
     mocks.isTauri.mockReturnValue(true);
     mocks.listen.mockResolvedValue(() => undefined);
+    mocks.flushSecureStorage.mockResolvedValue(undefined);
   });
 
   it('flushes secrets before allowing tray quit', async () => {
@@ -110,6 +111,39 @@ describe('installQuitFlushHandler', () => {
     await vi.waitFor(() => {
       expect(mocks.invoke).toHaveBeenCalledWith('ugs_quit_flush_done');
     });
+  });
+
+  it('cancels tray quit and reports a failed keychain write', async () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    try {
+      mocks.flushSecureStorage.mockRejectedValueOnce(new Error('credential write failed'));
+      await installQuitFlushHandler();
+      getBeforeQuitListener()?.();
+      await vi.waitFor(() => {
+        expect(mocks.invoke).toHaveBeenCalledWith('ugs_quit_cancel');
+        expect(alert).toHaveBeenCalledWith(expect.stringContaining('已取消退出'));
+      });
+      expect(mocks.invoke).not.toHaveBeenCalledWith('ugs_quit_flush_done');
+    } finally {
+      alert.mockRestore();
+    }
+  });
+
+  it('still alerts when the host cannot acknowledge quit cancellation', async () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    try {
+      mocks.flushSecureStorage.mockRejectedValueOnce(new Error('credential write failed'));
+      mocks.invoke.mockRejectedValueOnce(new Error('host unavailable'));
+      await installQuitFlushHandler();
+      getBeforeQuitListener()?.();
+      await vi.waitFor(() => {
+        expect(alert).toHaveBeenCalledWith(expect.stringContaining('已取消退出'));
+      });
+      expect(mocks.invoke).toHaveBeenCalledWith('ugs_quit_cancel');
+      expect(mocks.invoke).not.toHaveBeenCalledWith('ugs_quit_flush_done');
+    } finally {
+      alert.mockRestore();
+    }
   });
 
   it('does not signal quit completion while a flush is pending', async () => {

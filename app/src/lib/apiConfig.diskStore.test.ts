@@ -105,4 +105,55 @@ describe('apiConfig disk-backed provider store (Tauri)', () => {
     expect(reloaded[0].name).toBe('linxi');
     expect(reloaded[0].apiKey).toBe('sk-secret');
   });
+
+  it('keeps an edited key on restart when an older quit fallback survives in localStorage', async () => {
+    const secure = await import('@/lib/secureStorage');
+    const api = await import('@/lib/apiConfig');
+    const provider = api.addProvider({
+      kind: 'codex', name: 'KuroCodeX', apiKey: 'old-key',
+      baseUrl: 'https://example.test/v1', transport: 'cli',
+    });
+    await secure.flushSecureStorage();
+    await api.flushApiConfigDiskWrites();
+    secure.flushSecretsToLocalStorageFallback();
+
+    // WebView's mirror can stay stale (quota/write failure or another instance's
+    // beforeunload). The durable keychain write nevertheless succeeds.
+    const mirrorWrite = vi.spyOn(Storage.prototype, 'setItem')
+      .mockImplementation(() => { throw new DOMException('Quota exceeded', 'QuotaExceededError'); });
+    try {
+      api.updateProvider(provider.id, { apiKey: 'new-key' });
+      await secure.flushSecureStorage();
+      await api.flushApiConfigDiskWrites();
+      secure.flushSecretsToLocalStorageFallback();
+    } finally {
+      mirrorWrite.mockRestore();
+    }
+    expect(JSON.parse(keychain.get(secure.PROVIDER_API_KEYS_SECRET)!)[provider.id]).toBe('new-key');
+
+    secure.resetSecureStorageForTests();
+    api.resetApiConfigStoreForTests();
+    await secure.initializeSecureStorage();
+    await api.initializeApiConfigStore();
+    expect(api.listProviders().find((p) => p.id === provider.id)?.apiKey).toBe('new-key');
+    expect(secure.readSecureRecord(secure.GATEWAY_CHANNEL_API_KEYS_SECRET)[
+      secure.gatewayChannelSecretKey(provider.id, 'default')
+    ]).toBe('new-key');
+    expect(JSON.parse(window.localStorage.getItem('ugs_providers')!)[0].apiKey).toBeUndefined();
+  });
+
+  it('still migrates a legacy inline key when the keychain has no saved key', async () => {
+    const secure = await import('@/lib/secureStorage');
+    const api = await import('@/lib/apiConfig');
+    window.localStorage.setItem('ugs_providers', JSON.stringify([{
+      id: 'legacy-provider', kind: 'codex', name: 'Legacy',
+      apiKey: 'legacy-key', baseUrl: 'https://example.test/v1', transport: 'cli',
+    }]));
+    secure.resetSecureStorageForTests();
+    api.resetApiConfigStoreForTests();
+    await secure.initializeSecureStorage();
+    await api.initializeApiConfigStore();
+    expect(api.listProviders()[0].apiKey).toBe('legacy-key');
+    expect(secure.readSecureRecord(secure.PROVIDER_API_KEYS_SECRET)['legacy-provider']).toBe('legacy-key');
+  });
 });

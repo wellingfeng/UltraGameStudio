@@ -1,11 +1,14 @@
 import { useEffect, useMemo, useState } from 'react';
 import Sidebar from '@/panels/Sidebar';
-import AIDock from '@/panels/AIDock';
+import { MainSurfaceProvider } from '@/components/MainSurface';
+import WorkspaceMainSurface from '@/components/WorkspaceMainSurface';
 import ProjectFileTree from '@/panels/ProjectFileTree';
 import ScheduledTaskRunner from '@/components/ScheduledTaskRunner';
+import MessagePlatformRunner from '@/components/MessagePlatformRunner';
 import BackgroundJobRunner from '@/components/BackgroundJobRunner';
 import SkillLearningRecovery from '@/components/SkillLearningRecovery';
 import StatusBar from '@/components/StatusBar';
+import { TitleBarLayout } from '@/components/TitleBar';
 import { primeCliRuntime } from '@/lib/cliConfig';
 import { primeCliUpdateStatus } from '@/lib/cliUpdateStatus';
 import {
@@ -46,6 +49,9 @@ function subscribeStartupStorageMigration(
  */
 export default function App() {
   const initHistory = useStore((s) => s.initHistory);
+  const locale = useStore((s) => s.locale);
+  const sessionKey = useStore((s) => `${s.activeWorkspaceId ?? ''}:${s.activeSessionId ?? ''}`);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
   const startupMigration = useStartupStorageMigration();
   useActiveChannelProfile();
 
@@ -72,24 +78,29 @@ export default function App() {
   }, []);
 
   return (
-    <div className="flex h-screen w-screen flex-col overflow-hidden bg-bg text-fg">
-      <ScheduledTaskRunner />
-      <BackgroundJobRunner />
-      <SkillLearningRecovery />
-      <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        <div className="hidden md:block">
-          <Sidebar />
+    <MainSurfaceProvider sessionKey={sessionKey}>
+    <div className="ugs-app-shell flex h-screen w-screen flex-col overflow-hidden bg-bg text-fg">
+      <TitleBarLayout sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen((open) => !open)} locale={locale}>
+        <ScheduledTaskRunner />
+        <MessagePlatformRunner />
+        <BackgroundJobRunner />
+        <SkillLearningRecovery />
+        <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
+          <div id="ugs-left-sidebar" className={sidebarOpen ? 'hidden md:block' : 'hidden'}>
+            <Sidebar />
+          </div>
+          <main className="flex min-h-0 min-w-0 flex-1 flex-col">
+            <WorkspaceMainSurface />
+          </main>
+          <div className="hidden lg:block">
+            <ProjectFileTree />
+          </div>
         </div>
-        <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-          <AIDock layout="chat" />
-        </main>
-        <div className="hidden lg:block">
-          <ProjectFileTree />
-        </div>
-      </div>
-      <StatusBar />
-      <StartupStorageMigrationOverlay progress={startupMigration.progress} />
+        <StatusBar />
+        <StartupStorageMigrationOverlay progress={startupMigration.progress} />
+      </TitleBarLayout>
     </div>
+    </MainSurfaceProvider>
   );
 }
 

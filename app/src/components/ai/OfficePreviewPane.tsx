@@ -4,6 +4,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { previewOfficeDocument, type OfficePreview } from '@/lib/tauri';
 import { useStore } from '@/store/useStore';
 import { t, tArgs } from '@/lib/i18n';
+import { usePreviewTheme } from './lib/previewTheme';
 
 const DOCX_MIME =
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
@@ -11,13 +12,20 @@ const DOCX_MIME =
 /** Rendered inside the sandboxed preview iframe; keeps the extracted OOXML
  *  readable without pulling a stylesheet into the app bundle. */
 const OFFICE_STYLE = [
-  'body{margin:0;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;line-height:1.6;color:#1a1a1a;}',
-  'h2{font-size:15px;font-weight:600;margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid #e2e2e2;}',
+  'html,body{background:var(--bg);color:var(--fg);}',
+  'body{margin:0;padding:16px;box-sizing:border-box;font-family:var(--ugs-font-family);line-height:1.6;overflow-wrap:anywhere;}',
+  'h2{font-size:15px;font-weight:600;margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border-soft);}',
   'p{margin:0 0 8px;white-space:pre-wrap;}',
-  'table{border-collapse:collapse;font-size:12px;}',
-  'td,th{border:1px solid #d8d8d8;padding:4px 8px;vertical-align:top;}',
-  'th.preview-row-number{background:#f4f4f4;color:#8a8a8a;text-align:right;font-weight:400;width:44px;}',
-  '.preview-empty{color:#8a8a8a;font-size:12px;}',
+  'table{border-collapse:collapse;font-size:12px;max-width:100%;}',
+  'td,th{border:1px solid var(--border);padding:4px 8px;vertical-align:top;}',
+  'th{background:var(--panel-2);}',
+  'th.preview-row-number{color:var(--fg-faint);text-align:right;font-weight:400;width:44px;}',
+  '.preview-empty{color:var(--fg-faint);font-size:12px;}',
+  'a{color:var(--accent);}',
+  'blockquote{margin-left:0;padding-left:12px;border-left:3px solid var(--border);}',
+  'img{max-width:100%;height:auto;}',
+  'pre{overflow:auto;padding:12px;background:var(--panel-2);}',
+  'hr{border:0;border-top:1px solid var(--border-soft);}',
 ].join('');
 
 type OfficeState =
@@ -26,8 +34,8 @@ type OfficeState =
   | { status: 'paged'; preview: OfficePreview }
   | { status: 'error'; message: string };
 
-function wrapOfficeHtml(body: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><style>${OFFICE_STYLE}</style></head><body>${body}</body></html>`;
+function wrapOfficeHtml(body: string, theme: string): string {
+  return `<!doctype html><html><head><meta charset="utf-8"><style>${theme}${OFFICE_STYLE}</style></head><body>${body}</body></html>`;
 }
 
 /**
@@ -50,6 +58,7 @@ export default function OfficePreviewPane({
   fileName: string;
 }) {
   const locale = useStore((s) => s.locale);
+  const theme = usePreviewTheme();
   const [state, setState] = useState<OfficeState>({ status: 'loading' });
   const [pageNumber, setPageNumber] = useState(1);
 
@@ -132,12 +141,12 @@ export default function OfficePreviewPane({
 
   if (state.status === 'docx') {
     return (
-      <div className="flex min-h-0 flex-1 flex-col bg-white">
+      <div className="flex min-h-0 flex-1 flex-col bg-bg">
         <iframe
           title={fileName}
           sandbox=""
-          srcDoc={wrapOfficeHtml(state.html)}
-          className="min-h-0 flex-1 border-0 bg-white"
+          srcDoc={wrapOfficeHtml(state.html, theme)}
+          className="min-h-0 flex-1 border-0 bg-bg"
         />
       </div>
     );
@@ -150,7 +159,7 @@ export default function OfficePreviewPane({
     'flex h-6 w-6 items-center justify-center rounded border border-border text-fg-dim transition-colors hover:text-fg disabled:cursor-not-allowed disabled:opacity-40';
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col bg-white">
+    <div className="flex min-h-0 flex-1 flex-col bg-bg">
       <div className="flex shrink-0 items-center justify-center gap-3 border-b border-border-soft bg-panel px-3 py-1.5 text-xs text-fg-dim">
         <button
           type="button"
@@ -185,8 +194,8 @@ export default function OfficePreviewPane({
       <iframe
         title={`${fileName} · ${current?.index ?? 1}`}
         sandbox=""
-        srcDoc={wrapOfficeHtml(current?.html ?? '')}
-        className="min-h-0 flex-1 border-0 bg-white"
+        srcDoc={wrapOfficeHtml(current?.html ?? '', theme)}
+        className="min-h-0 flex-1 border-0 bg-bg"
       />
     </div>
   );

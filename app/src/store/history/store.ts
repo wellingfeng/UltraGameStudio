@@ -1,3 +1,5 @@
+import { isSupportedWorkspacePath } from '@/lib/cloudProjects';
+import { SCHEDULED_TASK_SCOPE, SCHEDULED_TASK_HISTORY_DIR } from '@/lib/scheduledTaskScope';
 import { sessionHasContextCompression } from '@/lib/contextCompression';
 import type { IRGraph } from '@/core/ir';
 import { loadComposer } from '@/lib/composerStorage';
@@ -256,11 +258,17 @@ function workspaceMetaPath(id: string): string {
 }
 
 function sessionIndexPath(workspaceId: string): string {
-  return `workspaces/${workspaceId}/sessions/index.json`;
+  return `${sessionDirectory(workspaceId)}/index.json`;
 }
 
 function sessionPath(workspaceId: string, sessionId: string): string {
-  return `workspaces/${workspaceId}/sessions/${sessionId}.json`;
+  return `${sessionDirectory(workspaceId)}/${sessionId}.json`;
+}
+
+function sessionDirectory(workspaceId: string): string {
+  return workspaceId === SCHEDULED_TASK_SCOPE
+    ? `${SCHEDULED_TASK_HISTORY_DIR}/sessions`
+    : `workspaces/${workspaceId}/sessions`;
 }
 
 function sessionCacheForWorkspace(
@@ -450,6 +458,7 @@ function sessionSummary(record: SessionRecord): SessionSummary {
     ...(record.meta?.unreadCompletion === true ? { unreadCompletion: true } : {}),
     ...(sessionHasContextCompression(record.messages, record.meta) ? { contextCompressed: true } : {}),
     ...(record.meta?.favorite === true ? { favorite: true } : {}),
+    ...(record.meta?.pinned === true ? { pinned: true } : {}),
     ...(record.meta?.scheduledTask
       ? { scheduledTask: record.meta.scheduledTask }
       : {}),
@@ -496,7 +505,7 @@ function sessionFileIdFromName(name: string): string | null {
 }
 
 async function listSessionFileIdsInternal(workspaceId: string): Promise<string[]> {
-  const fileNames = await listDir(`workspaces/${workspaceId}/sessions`);
+  const fileNames = await listDir(sessionDirectory(workspaceId));
   return fileNames
     .map(sessionFileIdFromName)
     .filter((id): id is string => id != null);
@@ -1263,6 +1272,39 @@ async function migrateLocalWorkflowInternal(): Promise<void> {
   });
 }
 
+/** Copy first, then retire the source into history trash. Safe to retry after a failed write. */
+async function migrateScheduledTasksInternal(): Promise<void> {
+  for (const workspace of await listWorkspacesInternal()) {
+    const summaries = await listSessionsInternal(workspace.id);
+    const moved = new Set<string>();
+    for (const summary of summaries) {
+      if (!summary.scheduledTask) continue;
+      const record = await getSessionInternal(workspace.id, summary.id);
+      if (!record?.meta?.scheduledTask) continue;
+      let id = record.id;
+      let existing = await getSessionInternal(SCHEDULED_TASK_SCOPE, id);
+      if (existing && existing.meta?.scheduledTaskSourceWorkspaceId !== workspace.id) {
+        id = `${workspace.id}_${record.id}`;
+        existing = await getSessionInternal(SCHEDULED_TASK_SCOPE, id);
+      }
+      if (!existing) await writeSessionInternal({
+        ...record, id, workspaceId: SCHEDULED_TASK_SCOPE,
+        meta: { ...record.meta, scheduledTaskSourceWorkspaceId: workspace.id, scheduledTaskSourceSessionId: record.id, scheduledTaskExecutionPath: workspace.path },
+      });
+      await removePath(sessionPath(workspace.id, record.id), true);
+      forgetSessionRecord(workspace.id, record.id);
+      moved.add(record.id);
+    }
+    if (moved.size) {
+      const remaining = summaries.filter((summary) => !moved.has(summary.id));
+      await writeSessionIndexInternal(workspace.id, remaining);
+      const current = await getWorkspaceInternal(workspace.id);
+      if (current) await writeWorkspaceInternal({ ...current, sessionCount: remaining.length,
+        lastActiveSessionId: remaining.some((summary) => summary.id === current.lastActiveSessionId) ? current.lastActiveSessionId : remaining[0]?.id });
+    }
+  }
+}
+
 export const historyStore: HistoryStore = {
   async ready() {
     clearSessionRecordCache();
@@ -1285,6 +1327,7 @@ export const historyStore: HistoryStore = {
         ['migrateLocalWorkflow', migrateLocalWorkflowInternal],
         ['rebuildWorkspaceSessionIndexes', rebuildAllWorkspaceSessionIndexesInternal],
         ['reconcileWorkspaceIndex', reconcileWorkspaceIndexInternal],
+        ['migrateScheduledTasks', migrateScheduledTasksInternal],
       ];
       for (const [label, step] of maintenance) {
         try {
@@ -1317,7 +1360,10 @@ export const historyStore: HistoryStore = {
   },
 
   listWorkspaces() {
-    return listWorkspacesInternal();
+    // 仅隐藏已退役云端记录；内部索引仍保留，避免后续写入丢失旧历史。
+    return listWorkspacesInternal().then((workspaces) =>
+      workspaces.filter((workspace) => isSupportedWorkspacePath(workspace.path)),
+    );
   },
 
   getWorkspace(id) {

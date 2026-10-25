@@ -6,6 +6,7 @@ import type { AiEditChannel } from './channelTypes';
 import { startRemoteChatTurn } from './remoteChatTurn';
 import type { StartRemoteChatTurnOptions } from './remoteChatTurn';
 import { DEFAULT_SKILL_LEARNING_CONFIG } from '@/lib/skillLearningConfig';
+import { createSkillCandidateStore } from '@/lib/skillCandidateStore';
 
 // All network, connection and credential values in this file are fixtures.
 // The real chat entry point, RunnerClient and remote skill runtime are exercised.
@@ -110,6 +111,12 @@ function installServer() {
     calls.push({ path, body, headers: new Headers(init?.headers) });
     if (path === '/v1/chat/completions') {
       const messages = body?.messages as Array<{ content: string }>;
+      if (messages[0].content.includes('语义比对器')) {
+        const comparison = JSON.parse(messages[1].content) as { candidates: Array<{ id: string }> };
+        return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({
+          candidateId: comparison.candidates[0].id, similarity: 0.99,
+        }) } }], usage: { prompt_tokens: 5, completion_tokens: 5 } });
+      }
       const review = JSON.parse(messages[1].content) as { reads: Array<{ readReceiptId: string; hash: string }>;
         evidence: Array<{ evidenceId: string }> };
       return Response.json({ choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ version: 1,
@@ -138,6 +145,12 @@ function installServer() {
   });
   vi.stubGlobal('fetch', fetchMock);
   return { calls, config, fetchMock, setJob(value: RemoteJob) { job = value; },
+    async primeRepeatedCandidate() {
+      await createSkillCandidateStore(sourceOrigin).save({ version: 1, lastId: 'fixture-candidate', candidates: [{
+        id: 'fixture-candidate', lesson: applied.lesson, context: 'Earlier verified remote task.',
+        sources: [JSON.stringify(['fixture-prior-session', 'fixture-prior-turn'])], consecutive: 1, submitted: false,
+      }] });
+    },
     setSnapshot(value: RemoteJob) { snapshot = value; }, setContextError() { contextError = true; },
     emit(event: string, value: unknown) {
       if (!stream) throw new Error('Fixture stream not subscribed');
@@ -186,6 +199,7 @@ describe('remote chat skill wiring (fixture HTTP)', () => {
 
   it('automatically reviews the original terminal native snapshot once and uses fresh review receipts', async () => {
     const server = installServer();
+    await server.primeRepeatedCandidate();
     server.setSnapshot({ ...structuredClone(createdJob), status: 'done', result: { exitCode: 0 },
       messages: [{ at: 10, role: 'tool', kind: 'tool', runId: sourceOrigin.runId,
         toolCallId: 'fixture-native-check', toolName: 'command_execution', phase: 'end', provenance: 'native-tool',
@@ -204,12 +218,12 @@ describe('remote chat skill wiring (fixture HTTP)', () => {
       server.emit('result', terminal);
       await vi.waitFor(() => expect(onSkillReviewState).toHaveBeenCalledWith(expect.objectContaining({ status: 'applied' })));
       expect(server.calls.filter((call) => call.path === `/jobs/${sourceOrigin.runId}`)).toHaveLength(1);
-      expect(server.calls.filter((call) => call.path === '/v1/chat/completions')).toHaveLength(1);
+      expect(server.calls.filter((call) => call.path === '/v1/chat/completions')).toHaveLength(2);
       const manage = server.calls.find((call) => call.body?.action === 'manage')!;
       expect(manage.body!.origin).toEqual(sourceOrigin);
       expect(manage.headers.get('x-ugs-skill-control')).toBeNull();
       expect(manage.body!.proposal).toMatchObject({ operations: [{ readReceiptId: 'fixture-review-fresh-receipt' }] });
-      const reviewBody = server.calls.find((call) => call.path === '/v1/chat/completions')!.body!;
+      const reviewBody = server.calls.filter((call) => call.path === '/v1/chat/completions')[0]!.body!;
       const reviewInput = JSON.parse((reviewBody.messages as Array<{ content: string }>)[1].content);
       expect(reviewInput.evidence).toEqual([expect.objectContaining({ provenance: 'native-tool', origin: sourceOrigin,
         evidenceId: JSON.stringify([sourceOrigin.runId, 'fixture-native-check']) })]);
@@ -225,6 +239,7 @@ describe('remote chat skill wiring (fixture HTTP)', () => {
 
   it('uses the server HTTP review selection even when the foreground channel is CLI-only', async () => {
     const server = installServer();
+    await server.primeRepeatedCandidate();
     server.setSnapshot({ ...structuredClone(createdJob), status: 'done', result: { exitCode: 0 },
       messages: [{ at: 30, role: 'tool', kind: 'tool', runId: sourceOrigin.runId,
         toolCallId: 'fixture-config-review-check', toolName: 'command_execution', phase: 'end', provenance: 'native-tool',
@@ -235,10 +250,13 @@ describe('remote chat skill wiring (fixture HTTP)', () => {
       await vi.waitFor(() => expect(server.calls.some((call) => call.path.endsWith('/stream'))).toBe(true));
       server.emit('result', { ...structuredClone(createdJob), status: 'done', result: { exitCode: 0 } });
       await vi.waitFor(() => expect(onSkillReviewState).toHaveBeenCalledWith(expect.objectContaining({ status: 'applied' })));
-      const request = server.calls.find((call) => call.path === '/v1/chat/completions')!.body!;
-      expect(request.model).toBe('fixture-selected-review-model');
-      expect(request.stream).toBe(false);
-      expect(request).not.toHaveProperty('tools');
+      const requests = server.calls.filter((call) => call.path === '/v1/chat/completions').map((call) => call.body!);
+      expect(requests).toHaveLength(2);
+      for (const request of requests) {
+        expect(request.model).toBe('fixture-selected-review-model');
+        expect(request.stream).toBe(false);
+        expect(request).not.toHaveProperty('tools');
+      }
     } finally { ch.abortController.abort(); server.close(); }
   });
 
@@ -322,7 +340,7 @@ describe('remote chat skill wiring (fixture HTTP)', () => {
       await vi.waitFor(() => expect(server.calls.some((call) => call.path.endsWith('/stream'))).toBe(true));
       server.emit('result', { ...structuredClone(createdJob), status: 'done', result: { exitCode: 0 } });
       await vi.waitFor(() => expect(onSkillReviewState).toHaveBeenCalledWith(expect.objectContaining({ status: 'failed',
-        origin: sourceOrigin, mode: 'auto-safe', result: expect.objectContaining({ status: 'failed',
+        origin: sourceOrigin, mode: 'approve-all', result: expect.objectContaining({ status: 'failed',
           origin: sourceOrigin, operationsApplied: 0, error: expect.stringContaining('SKILL_REVIEW_UNAVAILABLE') }) })));
       expect(server.calls.some((call) => call.path === '/v1/chat/completions' || call.body?.action === 'manage')).toBe(false);
       expect(ch.messages.at(-1)?.text).toContain('远程任务完成');

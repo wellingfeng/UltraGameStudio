@@ -8,7 +8,7 @@ const load = (): Promise<typeof import('./remoteSkillLearning') | null> => impor
 const origin: SkillOrigin = { hostId: REMOTE_SKILL_HOST_ID, workspaceId: 'remote-project', sessionId: 'source-session', turnId: 'source-turn', runId: 'preload-run' };
 const entry: SkillEntry = { skillId: 'skill:remote-read', rootId: 'project:remote', name: 'remote-read', description: 'Use when reading a remote project.', scope: 'project', source: 'ugs-managed', relativePath: 'remote-read', revision: 'remote-revision', hash: 'remote-hash', readOnly: false, autoEditable: true, contentLocked: false, pinned: false, state: 'active', files: ['SKILL.md'] };
 const read: SkillReadResult = { entry, relativePath: 'SKILL.md', content: '---\nname: remote-read\ndescription: Use when reading a remote project.\n---\nRead the authoritative remote disk, not a local copy.\n', revision: entry.revision, hash: entry.hash, fullRead: true, readReceiptId: 'remote-receipt', files: entry.files };
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { window.localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 it('preloads fresh remote content with the bound project origin and no owner authority', async () => {
   const remote = await load();
@@ -70,11 +70,8 @@ it('reviews only a freshly fetched terminal native snapshot and forwards no owne
   const modelEvidence = JSON.parse(complete.mock.calls[0][0].userContent).evidence;
   expect(modelEvidence.map((item: { evidenceId: string }) => item.evidenceId)).toEqual([nativeId]);
   const manage = calls.find((call) => call.body?.action === 'manage');
-  expect(manage?.body?.origin).toEqual(runOrigin);
-  expect(manage?.body?.evidence).toEqual(modelEvidence);
-  expect(manage?.headers.get('x-ugs-skill-control')).toBeNull();
-  expect(manage?.headers.get('x-ugs-skill-user-input')).toBeNull();
-  expect(result).toMatchObject(applied);
+  expect(manage).toBeUndefined();
+  expect(result).toMatchObject({ status: 'noop', operationsApplied: 0 });
   expect(onResult).toHaveBeenCalledWith(result);
 });
 
@@ -97,14 +94,13 @@ it('an explicit UI correction can trigger review but a zero-tool job exit cannot
   expect(await remote!.finishRemoteLearning(base)).toBeUndefined();
   expect(complete).not.toHaveBeenCalled();
   const result = await remote!.finishRemoteLearning({ ...base, userCorrections: [{ text: 'Correction: read the disk before changing it.', occurredAt: 20 }] });
-  expect(result?.status).toBe('awaiting_approval');
+  expect(result?.status).toBe('noop');
   expect(complete).toHaveBeenCalledTimes(1);
   const evidence = JSON.parse(complete.mock.calls[0][0].userContent).evidence;
   expect(evidence).toHaveLength(1);
   expect(evidence[0]).toMatchObject({ kind: 'correction', provenance: 'user-input', status: 'success', origin: runOrigin });
   expect(evidence[0]).not.toHaveProperty('exitCode');
-  expect(manages[0].headers.get('x-ugs-skill-user-input')).toBe('correction');
-  expect(manages[0].headers.get('x-ugs-skill-control')).toBeNull();
+  expect(manages).toHaveLength(0);
 });
 
 it('remote foreground owners pause queued learning until the last idempotent release', async () => {
@@ -340,6 +336,7 @@ it('finish rejects a real job snapshot that was relabelled to another captured s
 });
 
 it('a captured remote source survives UI navigation and a late abort cannot hide an applied host commit', async () => {
+  vi.spyOn(await import('@/runtime/skills/preReview'), 'observeSkillCandidate').mockResolvedValue({ eligible: true, consecutive: 2 });
   const remote = await load();
   const savedOrigin = { ...origin, sessionId: 'late-commit-session', runId: 'job-late-commit' };
   const mutableOrigin = { ...savedOrigin };
@@ -383,6 +380,7 @@ it('a throwing or mutating remote result observer cannot rewrite the host outcom
 });
 
 it('remote review refuses a host mutation result whose origin belongs to another source', async () => {
+  vi.spyOn(await import('@/runtime/skills/preReview'), 'observeSkillCandidate').mockResolvedValue({ eligible: true, consecutive: 2 });
   const remote = await load();
   const runOrigin = { ...origin, sessionId: 'mutation-result-source', runId: 'job-mutation-result-source' };
   const onState = vi.fn();

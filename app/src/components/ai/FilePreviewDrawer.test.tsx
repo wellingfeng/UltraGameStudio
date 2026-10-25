@@ -2,7 +2,7 @@ import { act, createElement, useCallback, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import FilePreviewDrawer, { rewriteLocalAssetsInHtml } from './FilePreviewDrawer';
-import { previewLocalFile, workspaceFileDiff } from '@/lib/tauri';
+import { ensureLocalAssetScope, openLocalPath, previewLocalFile, workspaceFileDiff } from '@/lib/tauri';
 import GeneratedArtifactsCard from './GeneratedArtifactsCard';
 import FileChip from './FileChip';
 import SmartLink from './SmartLink';
@@ -11,6 +11,7 @@ import type { FileRef } from './lib/filePath';
 
 vi.mock('@/lib/tauri', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/tauri')>()),
+  ensureLocalAssetScope: vi.fn(),
   openLocalPath: vi.fn(),
   fileExists: vi.fn().mockResolvedValue(true),
   readImageThumbnail: vi.fn().mockRejectedValue(new Error('No thumbnail')),
@@ -36,6 +37,8 @@ describe('FilePreviewDrawer', () => {
     originalCreateObjectUrl = URL.createObjectURL;
     originalRevokeObjectUrl = URL.revokeObjectURL;
     vi.useRealTimers();
+    vi.mocked(ensureLocalAssetScope).mockReset();
+    vi.mocked(ensureLocalAssetScope).mockResolvedValue(undefined);
     vi.mocked(previewLocalFile).mockReset();
     vi.mocked(workspaceFileDiff).mockReset();
     vi.mocked(workspaceFileDiff).mockResolvedValue(null);
@@ -55,6 +58,69 @@ describe('FilePreviewDrawer', () => {
       configurable: true,
       value: originalRevokeObjectUrl,
     });
+  });
+
+  it('resolves Markdown-relative images against the document directory', async () => {
+    const documentPath = 'E:\\docs\\article\\note.md';
+    const imagePath = 'E:\\docs\\article\\images\\figure one.png';
+    vi.mocked(previewLocalFile).mockResolvedValue({
+      path: documentPath,
+      fileName: 'note.md',
+      kind: 'text',
+      mime: 'text/markdown',
+      sizeBytes: 48,
+      truncated: false,
+      text: '![示意图](images/figure%20one.png)',
+      base64: null,
+    });
+
+    await act(async () => {
+      root.render(createElement(FilePreviewDrawer, {
+        refData: { path: documentPath, basename: 'note.md' },
+        onClose: vi.fn(),
+      }));
+    });
+
+    expect(ensureLocalAssetScope).toHaveBeenCalledWith(imagePath);
+    expect(container.querySelector<HTMLImageElement>('.ai-generated-image')?.getAttribute('src'))
+      .toBe(`http://asset.localhost/${encodeURIComponent(imagePath)}`);
+  });
+
+  it('keeps system open and reveal available when an RDC preview fails', async () => {
+    vi.mocked(previewLocalFile).mockRejectedValue(new Error('读取文件信息失败：系统找不到指定的文件。'));
+    vi.mocked(openLocalPath).mockResolvedValue(true);
+    await act(async () => {
+      root.render(createElement(FilePreviewDrawer, {
+        refData: { path: 'Saved/capture.rdc', basename: 'capture.rdc' },
+        cwd: 'E:\\Game', onClose: vi.fn(),
+      }));
+    });
+    expect(container.textContent).toContain('无法预览');
+    const open = container.querySelector<HTMLButtonElement>('[aria-label="用系统默认程序打开"]');
+    const reveal = container.querySelector<HTMLButtonElement>('[aria-label="在文件夹中显示"]');
+    expect(open).not.toBeNull();
+    expect(reveal).not.toBeNull();
+    await act(async () => { open!.click(); reveal!.click(); });
+    expect(openLocalPath).toHaveBeenCalledWith('E:\\Game\\Saved\\capture.rdc');
+    expect(openLocalPath).toHaveBeenCalledWith('E:\\Game\\Saved\\capture.rdc', { reveal: true });
+  });
+
+  it('does not offer local system actions for remote images or disabled external access', async () => {
+    await act(async () => {
+      root.render(createElement(FilePreviewDrawer, {
+        refData: { path: 'https://example.com/image.png', basename: 'image.png', previewKind: 'image' },
+        onClose: vi.fn(),
+      }));
+    });
+    expect(container.querySelector('[aria-label="用系统默认程序打开"]')).toBeNull();
+    vi.mocked(previewLocalFile).mockRejectedValue(new Error('无法读取'));
+    await act(async () => {
+      root.render(createElement(FilePreviewDrawer, {
+        refData: { path: 'capture.rdc', basename: 'capture.rdc' },
+        canOpenExternally: false, onClose: vi.fn(),
+      }));
+    });
+    expect(container.querySelector('[aria-label="用系统默认程序打开"]')).toBeNull();
   });
 
   it('does not mount a full-screen backdrop that blocks the rest of the app', async () => {

@@ -6,6 +6,8 @@ import { DEFAULT_SKILL_LEARNING_CONFIG, saveSkillLearningConfig } from './skillL
 
 afterEach(() => {
   cancelSkillLearning();
+  window.localStorage.clear();
+  vi.restoreAllMocks();
   vi.doUnmock('@/lib/tauri');
   vi.doUnmock('@tauri-apps/api/core');
   Reflect.deleteProperty(globalThis, '__TAURI_INTERNALS__');
@@ -781,6 +783,7 @@ it('settles older cooldown work when the latest source turn is cancelled instead
 });
 
 it('settles a newer turn when an older dispatched commit consumed all shared evidence', async () => {
+  vi.spyOn(await import('@/runtime/skills/preReview'), 'observeSkillCandidate').mockResolvedValue({ eligible: true, consecutive: 2 });
   const owner = { ...origin, sessionId: 'concurrent-commit' };
   let enter!: () => void;
   let release!: () => void;
@@ -827,7 +830,7 @@ it('cancels from the queued observer before any host or model dispatch', async (
   expect(model.complete).not.toHaveBeenCalled();
 });
 
-it('automatically reviews a real user correction after finish and publishes the actual host result', async () => {
+it('holds a single correction and submits only a second highly similar source task', async () => {
   const owner = { ...origin, sessionId: 'automatic-finish' };
   const states: SkillReviewState[] = [];
   const result: SkillMutationResult = { status: 'awaiting_approval', batchId: 'real-batch', origin: owner,
@@ -836,6 +839,8 @@ it('automatically reviews a real user correction after finish and publishes the 
   const host: SkillHostPort = { list: async () => ({ revision: 'empty', entries: [] }), view: vi.fn(), manage };
   const model: SkillReviewModelPort = { capability: 'completion-only', complete: vi.fn(async (request) => {
     const payload = JSON.parse(request.userContent);
+    if (request.system.includes('语义比对器')) return { text: JSON.stringify({ candidateId: payload.candidates[0].id, similarity: 0.98 }),
+      usage: { inputTokens: 10, outputTokens: 10 } };
     return { text: JSON.stringify({ version: 1, kind: 'propose', lesson: result.lesson,
       evidenceIds: [payload.evidence[0].evidenceId], operations: [{ action: 'create', name: 'manifest-first', content: read.content }] }),
       usage: { inputTokens: 51, outputTokens: 21, totalTokens: 72 } };
@@ -844,13 +849,19 @@ it('automatically reviews a real user correction after finish and publishes the 
     selection: { adapter: 'codex', modelClass: 'default' }, config: { ...DEFAULT_SKILL_LEARNING_CONFIG, cooldownMs: 0 },
     host, model, onState: (state) => { states.push(state); } });
   const finished = turn.finish({ finalAnswer: 'I claim I saved a skill.', terminal: 'completed' });
-  await expect(finished).resolves.toMatchObject({ status: 'awaiting_approval', batchId: 'real-batch',
+  await expect(finished).resolves.toMatchObject({ status: 'noop',
     usage: { calls: 1, inputTokens: 51, outputTokens: 21, totalTokens: 72, estimated: false } });
-  expect(manage).toHaveBeenCalledOnce();
+  expect(manage).not.toHaveBeenCalled();
   expect(states[0].resume?.job.evidence[0]).toMatchObject({ provenance: 'user-input', kind: 'correction' });
   expect(states[0].resume?.selection).toEqual({ adapter: 'codex', modelClass: 'default' });
-  expect(states.map((state) => state.status)).toEqual(['queued', 'reading', 'reading', 'proposing', 'applying', 'awaiting_approval']);
+  expect(states.map((state) => state.status)).toEqual(['queued', 'reading', 'reading', 'proposing', 'noop']);
   expect(states.at(-1)?.result?.operationsApplied).toBe(0);
   expect(states.at(-1)?.origin.sessionId).toBe('automatic-finish');
   expect(turn.finish({ finalAnswer: 'duplicate finish', terminal: 'completed' })).toBe(finished);
+  const second = beginSkillLearningTurn({ origin: { ...owner, turnId: 'second-turn', runId: 'second-run' },
+    prompt: '以后选择依赖前必须读取 manifest。', selection: { adapter: 'codex', modelClass: 'default' },
+    config: { ...DEFAULT_SKILL_LEARNING_CONFIG, cooldownMs: 0 }, host, model });
+  await expect(second.finish({ finalAnswer: '已读 manifest', terminal: 'completed' })).resolves.toMatchObject({ status: 'awaiting_approval',
+    batchId: 'real-batch', usage: { calls: 2, inputTokens: 61, outputTokens: 31, totalTokens: 92 } });
+  expect(manage).toHaveBeenCalledOnce();
 });

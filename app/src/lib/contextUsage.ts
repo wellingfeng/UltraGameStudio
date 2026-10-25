@@ -1,6 +1,8 @@
 import { extractToolSentinels } from '@/components/ai/lib/toolEvent';
 import type { RuntimeAdapterId } from '@/lib/adapters';
 import type { Message } from '@/store/types';
+import { estimateTokenCount } from '@/runtime/tokenEstimate';
+export { estimateTokenCount } from '@/runtime/tokenEstimate';
 
 export const SIMPLE_CHAT_CONTEXT_MESSAGE_LIMIT = 20;
 export const SIMPLE_CHAT_CONTEXT_INITIAL_MESSAGE_LIMIT = 5;
@@ -32,13 +34,6 @@ function contextMessageText(message: Message): string {
       ? extractToolSentinels(message.text).text
       : message.text;
   return stripRouteLine(raw);
-}
-
-export function estimateTokenCount(text: string): number {
-  if (!text.trim()) return 0;
-  const cjk = text.match(/[\u3400-\u9fff\uf900-\ufaff\u3040-\u30ff\uac00-\ud7af]/g)?.length ?? 0;
-  const ascii = Math.max(0, text.length - cjk);
-  return Math.ceil(cjk * 1.25 + ascii / 4);
 }
 
 function explicitContextLimitFromModel(model: string): number | null {

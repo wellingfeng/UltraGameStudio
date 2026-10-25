@@ -1723,6 +1723,19 @@ export async function previewLocalFile(
   });
 }
 
+/**
+ * 把本地文件所在目录加入 Tauri asset protocol scope，使 `convertFileSrc`
+ * 生成的 URL 能加载（否则 403）。聊天 / md 预览里内嵌的本地图片显示前先调。
+ * Desktop-only；纯浏览器环境抛 `NO_BACKEND`。
+ */
+export async function ensureLocalAssetScope(path: string): Promise<void> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  await invoke<void>('ensure_local_asset_scope', { path });
+}
+
 /** Paged read of a PPTX/XLSX. Only the leading `maxPages` slides/sheets are
  *  parsed, so preview cost stays flat regardless of document length. */
 export async function previewOfficeDocument(

@@ -12,6 +12,7 @@ import { redactSkillText, SkillEvidenceCollector } from '@/runtime/skills/eviden
 import { createSkillControlHost, createSkillHost } from './skills';
 import { loadSkillLearningConfig, SKILL_LEARNING_CONFIG_CHANGED_EVENT } from './skillLearningConfig';
 import { SkillLearningQueue } from './skillLearningQueue';
+import { createSkillCandidateStore } from './skillCandidateStore';
 
 export interface SkillTurnContext {
   prompt: string;
@@ -232,9 +233,10 @@ function drainReviews(): void {
     try {
       await awaitReadiness(source.ready, signal);
       emit({ status: 'reading', origin: reviewOrigin, detail: '正在连接技能库并读取目录' });
-      reviewHost = source.host ?? createSkillHost({ origin: reviewOrigin, mode: job.config.mode, evidence: job.evidence, signal, ready: source.ready });
+      reviewHost = source.host ?? createSkillHost({ origin: reviewOrigin, mode: job.explicit ? job.config.mode : 'approve-all', evidence: job.evidence, signal, ready: source.ready });
       const model = source.model ?? createSkillReviewModelPort(reviewSelection(source.selection, job.config), reviewOrigin, job.config.reviewTransport);
-      return await runSkillReview({ ...job, origin: reviewOrigin }, { host: reviewHost, model, signal, onState: emit });
+      return await runSkillReview({ ...job, origin: reviewOrigin }, { host: reviewHost, model, signal, onState: emit,
+        candidateStore: createSkillCandidateStore(job.origin) });
     } catch (error) {
       const result = emptyResult(reviewOrigin, signal.aborted ? 'cancelled' : 'failed', '', error);
       emit({ status: result.status, origin: { ...reviewOrigin }, result, error: result.error });

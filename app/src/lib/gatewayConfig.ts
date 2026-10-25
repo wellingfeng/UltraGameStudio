@@ -16,6 +16,7 @@ import {
   GATEWAY_CHANNEL_API_KEYS_SECRET,
   PROVIDER_API_KEYS_SECRET,
   gatewayChannelSecretKey,
+  readSecureRecord,
   readSecureRecordValue,
   secureStorageAvailable,
   writeSecureRecord,
@@ -522,7 +523,12 @@ export function saveGatewayConfig(config: GatewayConfig): void {
     return;
   }
   if (secureStorageAvailable()) {
-    const apiKeys: Record<string, string> = {};
+    // Merge, never replace: this runs on every boot-time sync from the
+    // provider list, where channels whose apiKey failed to hydrate into memory
+    // (transient keychain read failure) carry `undefined`. Replacing the whole
+    // record with that partial view wiped every other channel's token.
+    // Removals are handled explicitly by removeGatewayProvider in apiConfig.
+    const apiKeys = readSecureRecord(GATEWAY_CHANNEL_API_KEYS_SECRET);
     for (const provider of config.providers) {
       for (const channel of provider.channels) {
         const apiKey = channel.apiKey?.trim();

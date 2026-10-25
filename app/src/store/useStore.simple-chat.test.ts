@@ -22,6 +22,7 @@ import {
   saveRemoteWorkspace,
 } from '@/lib/remoteWorkspace';
 import { upsertProviders } from '@/lib/apiConfig';
+import { CLOUD_PROJECTS_ENABLED } from '@/lib/cloudProjects';
 
 const gatewayMocks = vi.hoisted(() => ({
   completeGatewayText: vi.fn(),
@@ -116,6 +117,8 @@ import {
 import type { AiEditChannel } from './useStore';
 import { historyStore } from './history/store';
 import type { Message, Session } from './types';
+import { activeAiEdits } from './channelRegistry';
+import { orderDisplayMessages } from '@/components/ai/lib/orderDisplayMessages';
 
 function cloneGraph(graph: IRGraph): IRGraph {
   return JSON.parse(JSON.stringify(graph)) as IRGraph;
@@ -238,6 +241,37 @@ afterEach(async () => {
 });
 
 describe('simple-workflow chat mode', () => {
+  it('captures native reference evidence on CLI and gateway routes before tool logs are clipped', async () => {
+    for (const route of ['cli', 'gateway'] as const) {
+      __resetSimpleChatRuntimeForTests();
+      resetStore(simpleBlueprint('Reference capture'));
+      tauriMocks.tauriAvailable.mockReturnValue(true);
+      if (route === 'cli') {
+        tauriMocks.isTauri.mockReturnValue(true);
+        gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+        gatewayMocks.resolveCliGatewayRoute.mockResolvedValue({
+          selection: { adapter: 'codex', modelClass: 'default' }, adapter: 'codex', modelClass: 'default',
+          model: 'test-model', mode: 'cli', transport: 'cli', label: 'Test CLI', source: 'global', cliCommand: 'codex',
+        });
+      } else { mockDirectRoute(); }
+      const answer = '结论 [1](https://example.com/docs)。';
+      const emit = (request: { runId: string; onTool?: (event: unknown) => void; onToolEvent?: (event: unknown) => void }) => {
+        const event = { runId: request.runId, toolCallId: 'search', toolName: 'web_search', phase: 'end',
+          provenance: 'native-tool', status: 'success', result: JSON.stringify({ results: [
+            { title: '真实来源', url: 'https://example.com/docs' }, { title: '未引用', url: 'https://example.com/unused' },
+          ] }) };
+        (request.onTool ?? request.onToolEvent)?.(event);
+        return answer;
+      };
+      tauriMocks.aiEditViaCli.mockImplementation(async (_prompt, _adapter, options) => emit(options));
+      gatewayMocks.completeGatewayText.mockImplementation(async (request) => request.runId ? emit(request) : '参考资料');
+      expect(useStore.getState().sendPrompt('查询资料。')).toBe(true);
+      await waitFor(() => useStore.getState().chattingSessions.length === 0 && useStore.getState().messages.some((message) => message.role === 'assistant' && message.text.includes(answer)), `${route} references`);
+      const reply = useStore.getState().messages.find((message) => message.role === 'assistant');
+      expect(reply?.referenceSources, route).toHaveLength(2);
+      expect(reply?.references, route).toEqual([{ url: 'https://example.com/docs', title: '真实来源', toolCallId: 'search', number: 1 }]);
+    }
+  });
   it('persists learning states only to the frozen source session after navigation', async () => {
     resetStore(simpleBlueprint('Learning source'));
     mockDirectRoute();
@@ -1261,7 +1295,7 @@ describe('simple-workflow chat mode', () => {
     expect(systems[0]).not.toContain('/image');
   });
 
-  it('runs simple chat through a selected remote workspace runner', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('runs simple chat through a selected remote workspace runner', async () => {
     window.localStorage.clear();
     await historyStore.ready();
     const remotePath = remoteWorkspacePath('rw_test');
@@ -1419,7 +1453,7 @@ describe('simple-workflow chat mode', () => {
     expect(tauriMocks.aiEditViaCli).not.toHaveBeenCalled();
   });
 
-  it('uses the remote project model when the selected remote account has no model metadata', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('uses the remote project model when the selected remote account has no model metadata', async () => {
     window.localStorage.clear();
     await historyStore.ready();
     const remotePath = remoteWorkspacePath('rw_no_model_metadata');
@@ -1563,7 +1597,7 @@ describe('simple-workflow chat mode', () => {
     );
   });
 
-  it('does not send Claude tier aliases to a non-Claude remote runner account', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('does not send Claude tier aliases to a non-Claude remote runner account', async () => {
     window.localStorage.clear();
     await historyStore.ready();
     const remotePath = remoteWorkspacePath('rw_codex_sonnet_alias');
@@ -1709,7 +1743,7 @@ describe('simple-workflow chat mode', () => {
     );
   });
 
-  it('does not send a claude-family model id to a codex remote runner account', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('does not send a claude-family model id to a codex remote runner account', async () => {
     window.localStorage.clear();
     await historyStore.ready();
     const remotePath = remoteWorkspacePath('rw_codex_claude_full');
@@ -1860,7 +1894,7 @@ describe('simple-workflow chat mode', () => {
     );
   });
 
-  it('keeps the remote runner assistant answer when no patch is produced', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('keeps the remote runner assistant answer when no patch is produced', async () => {
     window.localStorage.clear();
     await historyStore.ready();
     const remotePath = remoteWorkspacePath('rw_answer');
@@ -1974,7 +2008,7 @@ describe('simple-workflow chat mode', () => {
     expect(tauriMocks.aiEditViaCli).not.toHaveBeenCalled();
   });
 
-  it('renders remote runner message events without parsing raw CLI logs', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('renders remote runner message events without parsing raw CLI logs', async () => {
     window.localStorage.clear();
     await historyStore.ready();
     const remotePath = remoteWorkspacePath('rw_message_event');
@@ -2102,7 +2136,7 @@ describe('simple-workflow chat mode', () => {
     expect(tauriMocks.aiEditViaCli).not.toHaveBeenCalled();
   });
 
-  it('hides remote runner protocol logs from the chat stream', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('hides remote runner protocol logs from the chat stream', async () => {
     window.localStorage.clear();
     await historyStore.ready();
     const remotePath = remoteWorkspacePath('rw_protocol');
@@ -2273,7 +2307,7 @@ describe('simple-workflow chat mode', () => {
     expect(finalAssistant?.text).not.toContain('DeprecationWarning');
   });
 
-  it('does not render remote protocol/template noise as a failed answer', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('does not render remote protocol/template noise as a failed answer', async () => {
     window.localStorage.clear();
     await historyStore.ready();
     const remotePath = remoteWorkspacePath('rw_fail_noise');
@@ -3308,6 +3342,43 @@ describe('simple-workflow chat mode', () => {
       workspaceId: waitingSessionKey.workspaceId ?? null,
       sessionId: waitingSessionKey.sessionId ?? null,
     });
+  });
+
+  it('keeps a queued task below interaction continuation until the task starts', async () => {
+    resetStore(simpleBlueprint('Simple chat'));
+    mockDirectRoute();
+    let askQuestion!: (value: string) => void;
+    let finishContinuation!: (value: string) => void;
+    gatewayMocks.completeGatewayText.mockImplementation(async () => {
+      const call = gatewayMocks.completeGatewayText.mock.calls.length;
+      if (call === 1) return await new Promise<string>((resolve) => { askQuestion = resolve; });
+      if (call === 2) return await new Promise<string>((resolve) => { finishContinuation = resolve; });
+      return '排队任务已完成';
+    });
+    useStore.getState().sendPrompt('先执行需要选择的任务');
+    await waitFor(() => gatewayMocks.completeGatewayText.mock.calls.length === 1, 'first task');
+    useStore.getState().sendPrompt('后续排队任务');
+    await waitFor(() => {
+      const state = useStore.getState();
+      return state.queuedChatMessageIds.length === 1 && state.messages.some((m) =>
+        m.id === state.queuedChatMessageIds[0] && m.text === '后续排队任务');
+    }, 'queued task');
+    const queuedId = useStore.getState().queuedChatMessageIds[0];
+    askQuestion('<<UGS_ASK>>\n{"type":"select","prompt":"选择处理方式","options":["继续"],"multi":false}\n<<UGS_ASK_END>>');
+    await waitFor(() => useStore.getState().messages.some((m) => m.interactionStatus === 'pending'), 'interaction');
+    const question = useStore.getState().messages.find((m) => m.interactionStatus === 'pending')!;
+    useStore.getState().answerInteraction(question.id, { kind: 'select', values: ['继续'] });
+    await waitFor(() => gatewayMocks.completeGatewayText.mock.calls.length === 2, 'continuation');
+    const state = useStore.getState();
+    expect(state.queuedChatMessageIds).toEqual([queuedId]);
+    const visible = orderDisplayMessages(state.messages, state.queuedChatMessageIds);
+    expect(visible.at(-1)?.id).toBe(queuedId);
+    expect(visible.at(-2)?.role).toBe('assistant');
+    expect(visible.find((m) => m.id === question.id)?.interactionStatus).toBe('answered');
+    finishContinuation('选择后的续答已完成');
+    await waitFor(() => !useStore.getState().aiStreaming && useStore.getState().messages.some((m) => m.text.includes('排队任务已完成')), 'FIFO completion');
+    expect(useStore.getState().queuedChatMessageIds).toEqual([]);
+    expect(gatewayMocks.completeGatewayText).toHaveBeenCalledTimes(3);
   });
 
   it('does not pause simple chat on an unterminated interaction block', async () => {
@@ -4742,6 +4813,9 @@ describe('simple-workflow chat mode', () => {
 
   it('keeps a Codex follow-up queued until the lightning action steers it into the active turn', async () => {
     resetStore(simpleBlueprint('Simple chat'));
+    useStore.setState({ messages: [{
+      id: 'old-skill-card', role: 'assistant', text: '', createdAt: 1, localOnly: true,
+    }] });
     tauriMocks.isTauri.mockReturnValue(true);
     tauriMocks.tauriAvailable.mockReturnValue(true);
     gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
@@ -4778,6 +4852,14 @@ describe('simple-workflow chat mode', () => {
     );
     const runId = tauriMocks.aiEditViaCli.mock.calls[0]?.[2]?.runId;
 
+    // Reproduce real history: persistence has stamped completedAt while the
+    // native CLI is still running, and an old local card has no completedAt.
+    const channel = [...activeAiEdits.values()].find((ch) => ch.activeAssistantMessageId);
+    expect(channel).toBeDefined();
+    aiEditCommitMessages(channel!, true);
+    const replyId = channel!.activeAssistantMessageId!;
+    expect(useStore.getState().messages.find((m) => m.id === replyId)?.completedAt).toBeDefined();
+
     useStore.getState().sendPrompt('补充：也检查测试');
     await waitFor(
       () => useStore.getState().queuedChatMessageIds.length === 1,
@@ -4808,6 +4890,20 @@ describe('simple-workflow chat mode', () => {
     );
     expect(useStore.getState().queuedChatMessageIds).toEqual([]);
 
+    const assertInterjectionOrder = () => {
+      const messages = useStore.getState().messages;
+      const interjection = messages.find((m) => m.id === queuedId)!;
+      expect(interjection.interjectedReplyId).toBe(replyId);
+      expect(messages.findIndex((m) => m.id === queuedId)).toBe(
+        messages.findIndex((m) => m.id === replyId) - 1,
+      );
+      const visible = orderDisplayMessages(messages);
+      expect(visible.findIndex((m) => m.id === queuedId)).toBe(
+        visible.findIndex((m) => m.id === replyId) - 1,
+      );
+    };
+    assertInterjectionOrder();
+
     resolveTurn('已同时检查项目和测试。');
     await waitFor(
       () => !useStore.getState().aiStreaming,
@@ -4818,6 +4914,7 @@ describe('simple-workflow chat mode', () => {
       '先检查项目',
       '补充：也检查测试',
     ]);
+    assertInterjectionOrder();
   });
 
   it('keeps a Claude follow-up queued until the lightning action steers it into the active turn', async () => {
@@ -5394,6 +5491,7 @@ describe('simple-workflow chat mode', () => {
 
   it('streams CLI progress into the plain chat bubble before the final reply', async () => {
     resetStore(simpleBlueprint('Simple chat'));
+    useStore.getState().setSessionRunSelection({ adapter: 'claude-code', modelClass: 'sonnet', thinkingLevel: 'high' });
     tauriMocks.isTauri.mockReturnValue(true);
     tauriMocks.tauriAvailable.mockReturnValue(true);
     gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
@@ -5431,6 +5529,8 @@ describe('simple-workflow chat mode', () => {
       .getState()
       .messages.find((m) => m.role === 'assistant');
     expect(live?.routeLabel).toBe('Claude Code · sonnet');
+    expect(live?.thinkingLevel).toBe('high');
+    useStore.getState().setSessionRunSelection({ adapter: 'claude-code', modelClass: 'sonnet', thinkingLevel: 'low' });
     expect(live?.text).toContain('⚙ 路由：Claude Code · 模型：sonnet');
     expect(live?.text).toContain('⚙ 会话已启动');
     expect(live?.text).toContain('🔎 正在读取上下文');
@@ -5447,6 +5547,9 @@ describe('simple-workflow chat mode', () => {
           .messages.some((m) => m.role === 'assistant' && m.text.includes('最终回答。')),
       'CLI final reply',
     );
+    const final = useStore.getState().messages.find((m) => m.id === live?.id);
+    expect(final?.thinkingLevel).toBe('high');
+    expect(JSON.parse(JSON.stringify(final)).thinkingLevel).toBe('high');
   });
 
   it('starts the free proxy before resolving a free-channel CLI chat route', async () => {

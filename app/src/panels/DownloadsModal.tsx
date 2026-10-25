@@ -21,24 +21,32 @@ import {
   Trash2,
   Video,
   Wand2,
-  X,
   XCircle,
   FileDown,
   ExternalLink,
+  Star,
+  Info,
+  ArrowLeft,
+  Link2,
+  Search,
   type LucideIcon,
 } from 'lucide-react';
 import { t } from '@/lib/i18n';
 import type { Locale } from '@/lib/i18n';
 import {
-  assetMatchesWorkspace,
+  isOutputAsset,
+  linkConversationUrls,
+  getAssetIndexError,
   clearFinishedAssets,
   getAssets,
   linkKnownAssetsToNearestMessages,
   linkKnownManagedAssetsFromMessageText,
   linkManagedAssetsFromMessageText,
+  linkModifiedAssetsFromMessage,
   mergeCachedAssetsFromDisk,
   removeAsset,
   subscribeAssets,
+  updateAssetDetails,
   type AssetEntry,
   type AssetKind,
 } from '@/lib/downloadRegistry';
@@ -46,15 +54,18 @@ import {
   listCachedAssets,
   openExternal,
   openLocalPath,
-  previewLocalFile,
   tauriAvailable,
 } from '@/lib/tauri';
 import { useStore } from '@/store/useStore';
 import { historyStore } from '@/store/history/store';
 import VideoPlayer from '@/components/ai/VideoPlayer';
+import AssetDetails from '@/components/ai/AssetDetails';
+import { assetThumbnail, probeAssetFile } from '@/lib/assetPreviewCache';
+import { ASSET_CATEGORIES, ASSET_SOURCE_LABELS, assetCategory, assetInScope, filterHubAssets, type AssetCategory, type AssetScope } from '@/lib/assetHubModel';
+import './ArtifactsPanel.css';
 
 /**
- * CONTRACT: the unified Asset Hub modal. Lists every tracked asset (see
+ * CONTRACT: the unified Asset Hub main page. Lists every tracked asset (see
  * lib/downloadRegistry) regardless of source — generated, downloaded, searched
  * or installed. Supports filtering by kind + source, free-text search, inline
  * media previews, per-source row actions (open file / reveal / open source),
@@ -114,6 +125,7 @@ function isManagedLocalAsset(entry: AssetEntry): boolean {
 async function linkKnownManagedAssetsFromHistory(
   workspaceIds: string[],
   isCancelled: () => boolean = () => false,
+  workspacePaths: Record<string, string> = {},
 ): Promise<void> {
   const userFallbacks: Array<{
     text: string;
@@ -157,14 +169,17 @@ async function linkKnownManagedAssetsFromHistory(
           createdAt: message.createdAt,
         });
         if (message.role === 'assistant') {
-          if (message.text.includes('.ultragamestudio')) {
-            linkKnownManagedAssetsFromMessageText({
+            linkConversationUrls({ text: message.text, sessionId: record.id, workspaceId, messageId: message.id, at: message.createdAt, sessionTitle: record.title });
+            linkManagedAssetsFromMessageText({
               text: message.text,
               sessionId: record.id,
               workspaceId,
               messageId: message.id,
+              at: message.createdAt,
+              sessionTitle: record.title,
+              cwd: message.fileChanges?.rootPath ?? workspacePaths[workspaceId],
             });
-          }
+            linkModifiedAssetsFromMessage({ changes: message.fileChanges, sessionId: record.id, workspaceId, messageId: message.id, at: message.createdAt, sessionTitle: record.title });
           continue;
         }
         if (message.role === 'user') {
@@ -201,14 +216,19 @@ function linkManagedAssetsFromActiveMessage(input: {
   sessionId: string;
   workspaceId: string | null;
   messageId: string;
+  cwd?: string;
+  at?: number;
 }): void {
-  if (input.text.includes('.ultragamestudio')) {
+  {
     if (input.role === 'assistant') {
+      linkConversationUrls(input);
       linkManagedAssetsFromMessageText({
         text: input.text,
         sessionId: input.sessionId,
         workspaceId: input.workspaceId,
         messageId: input.messageId,
+        cwd: input.cwd,
+        at: input.at,
       });
     } else if (input.role === 'user') {
       linkKnownManagedAssetsFromMessageText({
@@ -238,6 +258,9 @@ function StatusBadge({
   entry: AssetEntry;
   locale: Locale;
 }) {
+  if (entry.availability === 'missing' && entry.status !== 'pending') {
+    return <span className="inline-flex items-center gap-1 text-[11px] text-status-error"><XCircle size={12} aria-hidden="true" />文件缺失</span>;
+  }
   if (entry.status === 'pending') {
     return (
       <span className="inline-flex items-center gap-1 text-[11px] text-accent">
@@ -292,13 +315,10 @@ function useResolvedPreview(entry: AssetEntry): string | null {
     }
     let cancelled = false;
     setResolved(null);
-    void previewLocalFile(entry.localPath)
+    void assetThumbnail(entry.localPath, entry.finishedAt)
       .then((preview) => {
         if (cancelled) return;
-        if (preview.kind === 'image' && preview.base64) {
-          const mime = preview.mime ?? 'image/png';
-          setResolved(`data:${mime};base64,${preview.base64}`);
-        }
+        setResolved(preview);
       })
       .catch(() => {
         if (!cancelled) setResolved(null);
@@ -306,14 +326,14 @@ function useResolvedPreview(entry: AssetEntry): string | null {
     return () => {
       cancelled = true;
     };
-  }, [entry.previewUrl, entry.localPath, entry.kind]);
+  }, [entry.previewUrl, entry.localPath, entry.kind, entry.finishedAt]);
 
   return resolved;
 }
 
 function AssetPreview({ entry }: { entry: AssetEntry }) {
   const src = useResolvedPreview(entry);
-  if (!src) return null;
+  if (!src) return <div className="artifact-preview-empty"><ImageIcon size={24} strokeWidth={1} /><span>{entry.availability === 'missing' ? '文件缺失' : '暂无缩略图'}</span></div>;
   const isImage = entry.kind === 'image' || entry.kind === 'sprite';
   const isVideo = entry.kind === 'video';
   const isAudio =
@@ -324,7 +344,7 @@ function AssetPreview({ entry }: { entry: AssetEntry }) {
         src={src}
         alt={entry.title}
         loading="lazy"
-        className="mt-2 max-h-44 w-full rounded border border-border-soft bg-black object-contain"
+        className="artifact-preview-image"
       />
     );
   }
@@ -352,17 +372,32 @@ function DownloadRow({
   entry,
   locale,
   onJumpToSession,
+  onDetails,
+  grid = false,
 }: {
   entry: AssetEntry;
   locale: Locale;
   onJumpToSession?: (entry: AssetEntry) => void | Promise<void>;
+  onDetails: (entry: AssetEntry) => void;
+  grid?: boolean;
 }) {
-  const Icon = KIND_ICON[entry.kind] ?? FileDown;
+  const isLink = assetCategory(entry) === 'link';
+  const Icon = isLink ? Link2 : KIND_ICON[entry.kind] ?? FileDown;
   const size = formatBytes(entry.sizeBytes);
   const isTerminal = entry.status !== 'pending';
   const canJumpToSession = Boolean(
-    onJumpToSession && (entry.sessionId || isManagedLocalAsset(entry)),
+    onJumpToSession && entry.sessionId,
   );
+
+  useEffect(() => {
+    if (!entry.localPath || !tauriAvailable()) return;
+    let cancelled = false;
+    void probeAssetFile(entry.localPath).then(exists => {
+      const availability = exists ? 'available' : 'missing';
+      if (!cancelled && entry.availability !== availability) updateAssetDetails(entry.id, { availability });
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [entry.id, entry.localPath, entry.availability]);
 
   const handleOpen = useCallback(
     async (reveal: boolean) => {
@@ -389,71 +424,48 @@ function DownloadRow({
       onKeyDown={
         canJumpToSession
           ? (event) => {
+              if (event.target !== event.currentTarget) return;
               if (event.key !== 'Enter' && event.key !== ' ') return;
               event.preventDefault();
               void onJumpToSession?.(entry);
             }
           : undefined
       }
-      className={`flex items-start gap-3 rounded-md border border-border-soft bg-bg-alt px-3 py-2.5 ${
-        canJumpToSession
-          ? 'cursor-pointer transition-colors hover:border-accent/50 hover:bg-panel-2/75 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent/60'
-          : ''
-      }`}
-      style={{ contentVisibility: 'auto', containIntrinsicSize: '0 220px' }}
+      className={`artifact-entry ${grid ? 'artifact-card' : 'artifact-table-row'} ${canJumpToSession ? 'has-session' : ''}`}
+      style={{ contentVisibility: 'auto', containIntrinsicSize: grid ? '0 260px' : '0 64px' }}
     >
-      <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border-soft bg-panel-2 text-fg-faint">
-        <Icon size={15} aria-hidden="true" />
-      </span>
-      <div className="min-w-0 flex-1">
-        <div className="flex min-w-0 items-center gap-2">
-          <span
-            className="min-w-0 flex-1 truncate text-sm text-fg"
-            title={entry.localPath ?? entry.remoteUrl ?? entry.title}
-          >
-            {entry.title}
-          </span>
-          <StatusBadge entry={entry} locale={locale} />
+      {grid && <button type="button" className="artifact-card-preview" aria-label={`预览产物：${entry.title}`} onClick={event => { event.stopPropagation(); onDetails(entry); }}>
+        {['image', 'sprite', 'video', 'audio', 'music', 'speech'].includes(entry.kind) && entry.status === 'success' ? <AssetPreview entry={entry} /> : <Icon size={32} strokeWidth={1} />}
+      </button>}
+      <div className="artifact-name-cell">
+        <span className="artifact-kind-icon"><Icon size={14} aria-hidden="true" /></span>
+        <div className="artifact-name-content">
+          {grid && <span className="artifact-kind-label">{isLink ? '链接' : ASSET_CATEGORIES.find(item => item.id === assetCategory(entry))?.label ?? '文件'}</span>}
+          <button type="button" className="artifact-title" title={entry.title} aria-label={`查看产物：${entry.title}`} onClick={event => { event.stopPropagation(); onDetails(entry); }}>{entry.title}{isLink && <ExternalLink size={10} />}</button>
+          {entry.status !== 'success' || entry.availability === 'missing' ? <div className="artifact-status"><StatusBadge entry={entry} locale={locale} />{entry.error && <span title={entry.error}>{entry.error}</span>}</div> : null}
+          {!grid && size && <span className="artifact-kind-label">{size}</span>}
         </div>
-        <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-0.5 font-mono text-[10px] text-fg-faint">
-          {entry.provider && <span>{entry.provider}</span>}
-          {entry.model && <span>{entry.model}</span>}
-          {size && <span>{size}</span>}
-          <span>{formatTime(entry.finishedAt ?? entry.startedAt)}</span>
-          {entry.remoteUrl && (
-            <span
-              className="min-w-0 max-w-[14rem] truncate"
-              title={entry.remoteUrl}
-            >
-              {entry.remoteUrl}
-            </span>
-          )}
-        </div>
-        {entry.prompt && (
-          <div
-            className="mt-1 line-clamp-2 text-[11px] leading-snug text-fg-dim"
-            title={entry.prompt}
-          >
-            {entry.prompt}
-          </div>
-        )}
-        {entry.status === 'success' && <AssetPreview entry={entry} />}
-        {entry.status === 'error' && entry.error && (
-          <div className="mt-1 break-words text-[11px] leading-snug text-status-error">
-            {entry.error}
-          </div>
-        )}
+      </div>
+      <div className="artifact-location-cell" title={entry.localPath ?? entry.remoteUrl}>{entry.localPath ?? entry.remoteUrl ?? '暂无路径'}</div>
+      <div className="artifact-session-cell">
+        <span title={entry.sessionTitle ?? entry.sessionId}>{entry.sessionTitle ?? (entry.sessionId ? '来源会话' : '来源未知')}{entry.provenance === 'inferred' ? ' · 推断' : ''}</span>
+        <time>{new Date(entry.finishedAt ?? entry.startedAt).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' })} {formatTime(entry.finishedAt ?? entry.startedAt)}</time>
+        {grid && <span className="artifact-conversation"><FolderOpen size={11} />{canJumpToSession ? '查看对话' : ASSET_SOURCE_LABELS[entry.source]}</span>}
       </div>
       <div
-        className="flex shrink-0 items-center gap-1"
+        className="artifact-row-actions"
         onClick={(event) => event.stopPropagation()}
+        onKeyDown={(event) => event.stopPropagation()}
       >
+        <button type="button" aria-label={entry.favorite ? '取消收藏' : '收藏产物'} title={entry.favorite ? '取消收藏' : '收藏产物'} onClick={() => updateAssetDetails(entry.id, { favorite: !entry.favorite })} className="flex h-7 w-7 items-center justify-center rounded border border-border-soft text-accent"><Star size={13} fill={entry.favorite ? 'currentColor' : 'none'} /></button>
+        <button type="button" aria-label="产物详情" title="产物详情" onClick={() => onDetails(entry)} className="flex h-7 w-7 items-center justify-center rounded border border-border-soft text-fg-dim"><Info size={13} /></button>
         {entry.status === 'success' && entry.localPath && (
           <>
             <button
               type="button"
               title={t(locale, 'downloads.openFile')}
               aria-label={t(locale, 'downloads.openFile')}
+              disabled={entry.availability === 'missing'}
               onClick={() => void handleOpen(false)}
               className="flex h-7 w-7 items-center justify-center rounded border border-border-soft bg-panel-2 text-fg-faint transition-colors hover:border-accent hover:text-fg"
             >
@@ -463,6 +475,7 @@ function DownloadRow({
               type="button"
               title={t(locale, 'downloads.revealFile')}
               aria-label={t(locale, 'downloads.revealFile')}
+              disabled={entry.availability === 'missing'}
               onClick={() => void handleOpen(true)}
               className="flex h-7 w-7 items-center justify-center rounded border border-border-soft bg-panel-2 text-fg-faint transition-colors hover:border-accent hover:text-fg"
             >
@@ -505,6 +518,8 @@ function AssetSection({
   locale,
   scrollRootRef,
   onJumpToSession,
+  onDetails,
+  layout,
 }: {
   title: string;
   count: number;
@@ -513,6 +528,8 @@ function AssetSection({
   locale: Locale;
   scrollRootRef: RefObject<HTMLDivElement>;
   onJumpToSession: (entry: AssetEntry) => void;
+  onDetails: (entry: AssetEntry) => void;
+  layout: 'auto' | 'grid' | 'list';
 }) {
   const sentinelRef = useRef<HTMLDivElement | null>(null);
   const [visibleCount, setVisibleCount] = useState(INITIAL_RENDERED_ASSETS);
@@ -556,18 +573,21 @@ function AssetSection({
   }, [entries.length]);
 
   return (
-    <section>
+    <section className="artifact-section">
       <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-fg-faint">
         {title}
         <span className={`ml-1.5 ${countClassName}`}>{count}</span>
       </h3>
-      <ul className="flex flex-col gap-2">
+      {(layout === 'list' || (layout === 'auto' && !entries.every(entry => ['image', 'sprite'].includes(entry.kind)))) && <div className="artifact-table-head" aria-hidden="true"><span>{entries.every(entry => assetCategory(entry) === 'link') ? '链接标题' : '名称'}</span><span>{entries.every(entry => assetCategory(entry) === 'link') ? 'URL' : '路径'}</span><span>会话</span></div>}
+      <ul className={layout === 'grid' || (layout === 'auto' && entries.every(entry => ['image', 'sprite'].includes(entry.kind))) ? 'artifacts-grid' : 'artifact-table'}>
         {visibleEntries.map((entry) => (
           <DownloadRow
             key={entry.id}
             entry={entry}
             locale={locale}
             onJumpToSession={onJumpToSession}
+            onDetails={onDetails}
+            grid={layout === 'grid' || (layout === 'auto' && entries.every(entry => ['image', 'sprite'].includes(entry.kind)))}
           />
         ))}
       </ul>
@@ -586,7 +606,7 @@ function AssetSection({
   );
 }
 
-export default function DownloadsModal({
+export default function ArtifactsPanel({
   locale,
   onClose,
 }: {
@@ -602,6 +622,14 @@ export default function DownloadsModal({
   const composerWorkspace = useStore((s) => s.composer.workspace);
   const messages = useStore((s) => s.messages);
   const [query, setQuery] = useState('');
+  const [category, setCategory] = useState<AssetCategory>('all');
+  const [source, setSource] = useState('all');
+  const [scope, setScope] = useState<AssetScope>(activeWorkspaceId ? 'workspace' : 'all');
+  const [layout, setLayout] = useState<'auto' | 'grid' | 'list'>('auto');
+  const [favoritesOnly, setFavoritesOnly] = useState(false);
+  const [oldestFirst, setOldestFirst] = useState(false);
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [indexing, setIndexing] = useState(false);
   const scrollRootRef = useRef<HTMLDivElement | null>(null);
 
   const assetCacheCwd = useMemo(() => {
@@ -612,47 +640,37 @@ export default function DownloadsModal({
   }, [activeWorkspaceId, composerWorkspace, workspaces]);
   const historyWorkspaceIds = useMemo(
     () =>
-      activeWorkspaceId
+      scope !== 'all' && activeWorkspaceId
         ? [activeWorkspaceId]
         : workspaces.map((workspace) => workspace.id),
-    [activeWorkspaceId, workspaces],
-  );
-  const unlinkedManagedAssetScanKey = useMemo(
-    () =>
-      assets
-        .filter(
-          (entry) =>
-            (!entry.sessionId || !entry.messageId) &&
-            entry.source !== 'installed' &&
-            (Boolean(entry.localPath?.toLowerCase().includes('.ultragamestudio')) ||
-              entry.source === 'generated' ||
-              entry.source === 'downloaded'),
-        )
-        .map((entry) => entry.id)
-        .join('|'),
-    [assets],
+    [activeWorkspaceId, workspaces, scope],
   );
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
+      if (event.key === 'Escape') { if (detailId) setDetailId(null); else onClose(); }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
+  }, [onClose, detailId]);
 
   useEffect(() => {
     if (!tauriAvailable()) return;
     let cancelled = false;
-    void listCachedAssets(assetCacheCwd)
-      .then((files) => {
-        if (!cancelled) mergeCachedAssetsFromDisk(files);
-      })
-      .catch(() => {});
+    const targets = scope === 'all' ? workspaces.filter(w => w.path).map(w => ({ path: w.path, id: w.id })) : [{ path: assetCacheCwd, id: activeWorkspaceId }];
+    void (async () => {
+      for (const target of targets) {
+        if (cancelled) return;
+        try {
+          const files = await listCachedAssets(target.path);
+          if (!cancelled) mergeCachedAssetsFromDisk(files, target.id);
+        } catch { /* other indexed projects remain browsable */ }
+      }
+    })();
     return () => {
       cancelled = true;
     };
-  }, [assetCacheCwd]);
+  }, [activeWorkspaceId, assetCacheCwd, scope, workspaces]);
 
   useEffect(() => {
     if (!activeSessionId) return;
@@ -663,7 +681,10 @@ export default function DownloadsModal({
         sessionId: activeSessionId,
         workspaceId: activeWorkspaceId,
         messageId: message.id,
+        cwd: assetCacheCwd ?? undefined,
+        at: message.createdAt,
       });
+      if (message.role === 'assistant') linkModifiedAssetsFromMessage({ changes: message.fileChanges, sessionId: activeSessionId, workspaceId: activeWorkspaceId, messageId: message.id, at: message.createdAt });
     }
     linkKnownAssetsToNearestMessages({
       messages: messages.map((message) => ({
@@ -675,22 +696,24 @@ export default function DownloadsModal({
       })),
       maxDistanceMs: ACTIVE_ASSET_MESSAGE_LINK_WINDOW_MS,
     });
-  }, [activeSessionId, activeWorkspaceId, messages]);
+  }, [activeSessionId, activeWorkspaceId, assetCacheCwd, messages]);
 
   useEffect(() => {
-    if (!historyReady || !unlinkedManagedAssetScanKey || historyWorkspaceIds.length === 0) {
+    if (!historyReady || historyWorkspaceIds.length === 0) {
       return;
     }
     let cancelled = false;
+    setIndexing(true);
     void linkKnownManagedAssetsFromHistory(
       historyWorkspaceIds,
       () => cancelled,
-    );
+      Object.fromEntries(workspaces.map(workspace => [workspace.id, workspace.path])),
+    ).finally(() => { if (!cancelled) setIndexing(false); });
 
     return () => {
       cancelled = true;
     };
-  }, [historyReady, historyWorkspaceIds, unlinkedManagedAssetScanKey]);
+  }, [historyReady, historyWorkspaceIds, workspaces]);
 
   const handleJumpToSession = useCallback(
     async (entry: AssetEntry) => {
@@ -714,7 +737,7 @@ export default function DownloadsModal({
           target.source === 'generated' ||
           target.source === 'downloaded')
       ) {
-        await linkKnownManagedAssetsFromHistory(historyWorkspaceIds);
+        await linkKnownManagedAssetsFromHistory(historyWorkspaceIds, () => false, Object.fromEntries(workspaces.map(workspace => [workspace.id, workspace.path])));
         target = refreshAssetEntry(entry);
       }
       if (!target.sessionId) return;
@@ -732,102 +755,77 @@ export default function DownloadsModal({
       );
       onClose();
     },
-    [activeSessionId, activeWorkspaceId, historyWorkspaceIds, messages, onClose, selectSession],
+    [activeSessionId, activeWorkspaceId, historyWorkspaceIds, messages, onClose, selectSession, workspaces],
   );
 
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    return assets.filter((entry) => {
-      if (!assetMatchesWorkspace(entry, activeWorkspaceId)) return false;
-      if (q) {
-        const haystack = [
-          entry.title,
-          entry.prompt,
-          entry.provider,
-          entry.model,
-          entry.remoteUrl,
-        ]
-          .filter(Boolean)
-          .join(' ')
-          .toLowerCase();
-        if (!haystack.includes(q)) return false;
-      }
-      return true;
-    });
-  }, [activeWorkspaceId, assets, query]);
+    return filterHubAssets(assets, { query, category, source, scope, workspaceId: activeWorkspaceId, sessionId: activeSessionId, favoritesOnly, oldestFirst });
+  }, [activeWorkspaceId, activeSessionId, assets, query, category, source, scope, favoritesOnly, oldestFirst]);
+  const scoped = assets.filter(entry => assetInScope(entry, scope, activeWorkspaceId, activeSessionId));
+  const counts = new Map<AssetCategory, number>();
+  for (const entry of scoped) {
+    const kind = assetCategory(entry);
+    counts.set(kind, (counts.get(kind) ?? 0) + 1);
+    if (isOutputAsset(entry)) counts.set('all', (counts.get('all') ?? 0) + 1);
+  }
 
   const active = filtered.filter((entry) => entry.status === 'pending');
   const finished = filtered.filter((entry) => entry.status !== 'pending');
   const finishedAll = filtered.filter((entry) => entry.status !== 'pending');
-  const isEmpty = filtered.length === 0;
+  const isEmpty = scoped.length === 0 && !query && category === 'all' && source === 'all' && !favoritesOnly;
   const noMatch = !isEmpty && filtered.length === 0;
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 sm:p-6"
-      onClick={onClose}
+      data-ugs-artifacts
+      className="artifacts-page"
     >
-      <div
-        role="dialog"
-        aria-modal="true"
+      <div className="artifacts-body">
+      <section
         aria-labelledby="downloads-title"
-        className="flex max-h-[calc(100vh-2.5rem)] w-[calc(100vw-2.5rem)] max-w-[720px] flex-col overflow-hidden rounded-lg border border-border bg-panel shadow-2xl"
-        onClick={(event) => event.stopPropagation()}
+        className="flex h-full min-h-0 min-w-0 w-full flex-col overflow-hidden"
       >
-        <div className="shrink-0 border-b border-border-soft bg-bg-alt px-5 py-4">
-          <div className="flex items-center gap-3">
-            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-accent text-bg">
-              <Boxes size={18} strokeWidth={2.2} />
-            </span>
-            <div className="min-w-0 flex-1">
-              <h2
-                id="downloads-title"
-                className="text-base font-semibold text-fg"
-              >
-                {t(locale, 'downloads.title')}
-              </h2>
-              <p className="mt-1 text-xs leading-relaxed text-fg-faint">
-                {t(locale, 'downloads.subtitle')}
-              </p>
-            </div>
+        <div className="artifacts-header">
+          <div className="flex flex-wrap items-center gap-3">
+            <h2 id="downloads-title" className="artifacts-heading">{t(locale, 'downloads.title')}</h2>
+            <label className="artifacts-search"><Search size={14} aria-hidden="true" /><input type="search" value={query} onChange={event => setQuery(event.target.value)} placeholder="搜索名称、路径或会话" aria-label="搜索产物" /></label>
             {finishedAll.length > 0 && (
               <button
                 type="button"
                 onClick={() =>
-                  clearFinishedAssets((entry) =>
-                    assetMatchesWorkspace(entry, activeWorkspaceId),
-                  )
+                  clearFinishedAssets((entry) => filtered.some(item => item.id === entry.id))
                 }
                 className="shrink-0 rounded-md border border-border bg-panel-2 px-2.5 py-1.5 text-xs text-fg-dim transition-colors hover:border-status-error hover:text-status-error"
               >
-                {t(locale, 'downloads.clearFinished')}
+                清除当前结果
               </button>
             )}
             <button
               type="button"
               onClick={onClose}
-              title={t(locale, 'common.close')}
-              aria-label={t(locale, 'common.close')}
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-faint transition-colors hover:border-accent hover:text-fg"
+              title="返回对话"
+              aria-label="返回对话"
+              className="flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-md px-2 text-xs text-fg-faint transition-colors hover:bg-panel-2 hover:text-fg"
             >
-              <X size={15} strokeWidth={2.2} />
+              <ArrowLeft size={14} />返回对话
             </button>
           </div>
 
-          {!isEmpty && (
-            <div className="mt-3">
-              <input
-                type="text"
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder={t(locale, 'downloads.searchPlaceholder')}
-                className="w-full rounded-md border border-border-soft bg-panel-2 px-3 py-1.5 text-sm text-fg placeholder:text-fg-faint focus:border-accent focus:outline-none"
-              />
-            </div>
-          )}
+          <div className="artifacts-filters">
+            <select aria-label="查看范围" value={scope} onChange={event => setScope(event.target.value as AssetScope)} className="rounded border border-border bg-panel-2 px-2 py-1.5 text-fg">
+              <option value="workspace" disabled={!activeWorkspaceId}>当前项目</option><option value="session" disabled={!activeSessionId || !activeWorkspaceId}>当前会话</option><option value="all">全部已索引项目</option>
+            </select>
+            <select aria-label="产物来源" value={source} onChange={event => setSource(event.target.value)} className="rounded border border-border bg-panel-2 px-2 py-1.5 text-fg"><option value="all">全部来源</option>{Object.entries(ASSET_SOURCE_LABELS).map(([id, label]) => <option key={id} value={id}>{label}</option>)}</select>
+            <select aria-label="显示方式" value={layout} onChange={event => setLayout(event.target.value as typeof layout)} className="rounded border border-border bg-panel-2 px-2 py-1.5 text-fg"><option value="auto">图片网格 / 文件列表</option><option value="grid">网格</option><option value="list">列表</option></select>
+            <select aria-label="时间排序" value={oldestFirst ? 'oldest' : 'newest'} onChange={event => setOldestFirst(event.target.value === 'oldest')} className="rounded border border-border bg-panel-2 px-2 py-1.5 text-fg"><option value="newest">最新优先</option><option value="oldest">最早优先</option></select>
+            <button type="button" aria-pressed={favoritesOnly} onClick={() => setFavoritesOnly(!favoritesOnly)} className={`rounded border px-2 py-1.5 ${favoritesOnly ? 'border-accent text-accent' : 'border-border text-fg-dim'}`}>只看收藏</button>
+            <span className="ml-auto text-fg-faint">{indexing ? '正在回填历史…' : `${filtered.length} 项结果`}</span>
+          </div>
+          <div className="artifacts-categories" aria-label="产物分类">{ASSET_CATEGORIES.map(item => <button key={item.id} type="button" aria-pressed={category === item.id} onClick={() => { setCategory(item.id); setSource('all'); }} className={category === item.id ? 'is-active' : ''}>{item.label}<span>{counts.get(item.id) ?? 0}</span></button>)}</div>
+          {getAssetIndexError() && <p role="alert" className="mt-2 text-xs text-status-error">{getAssetIndexError()}</p>}
         </div>
 
-        <div ref={scrollRootRef} className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+        <div ref={scrollRootRef} className="artifacts-scroll">
           {isEmpty ? (
             <div className="flex flex-col items-center justify-center gap-2 py-12 text-center text-sm text-fg-faint">
               <Boxes
@@ -835,7 +833,7 @@ export default function DownloadsModal({
                 className="text-fg-faint/60"
                 aria-hidden="true"
               />
-              <span>{t(locale, 'downloads.empty')}</span>
+              <span>暂无产物。生成、下载或修改文件后会出现在这里。</span>
             </div>
           ) : noMatch ? (
             <div className="flex flex-col items-center justify-center gap-2 py-12 text-center text-sm text-fg-faint">
@@ -852,10 +850,12 @@ export default function DownloadsModal({
                   locale={locale}
                   scrollRootRef={scrollRootRef}
                   onJumpToSession={handleJumpToSession}
+                  onDetails={entry => setDetailId(entry.id)}
+                  layout="list"
                 />
               )}
 
-              {finished.length > 0 && (
+              {finished.length > 0 && layout !== 'auto' && (
                 <AssetSection
                   title={t(locale, 'downloads.completed')}
                   count={finished.length}
@@ -864,11 +864,19 @@ export default function DownloadsModal({
                   locale={locale}
                   scrollRootRef={scrollRootRef}
                   onJumpToSession={handleJumpToSession}
+                  onDetails={entry => setDetailId(entry.id)}
+                  layout={layout}
                 />
               )}
+              {layout === 'auto' && ['image', 'file', 'link'].map(group => {
+                const items = finished.filter(entry => (['image', 'sprite'].includes(entry.kind) ? 'image' : assetCategory(entry) === 'link' ? 'link' : 'file') === group);
+                return items.length ? <AssetSection key={group} title={group === 'image' ? '图片' : group === 'link' ? '链接' : '文件与媒体'} count={items.length} countClassName="text-fg-dim" entries={items} locale={locale} scrollRootRef={scrollRootRef} onJumpToSession={handleJumpToSession} onDetails={entry => setDetailId(entry.id)} layout={group === 'image' ? 'grid' : 'list'} /> : null;
+              })}
             </div>
           )}
         </div>
+      </section>
+      {detailId && assets.find(entry => entry.id === detailId) && <AssetDetails inline key={detailId} entry={assets.find(entry => entry.id === detailId)!} onClose={() => setDetailId(null)} onJump={handleJumpToSession} onReuse={onClose} />}
       </div>
     </div>
   );

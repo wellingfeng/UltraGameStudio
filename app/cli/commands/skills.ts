@@ -65,7 +65,7 @@ export async function runSkillLearn(action: 'learn' | 'refine', text: string, op
       model: options.reviewModel, baseUrl: options.reviewUrl, mode: 'direct', transport: transport as 'anthropic' | 'openai-compatible', ...(apiKey ? { apiKey } : {}) };
   }
   const workflow = createNodeSkillWorkflow({ origin, cwd, adapter: options.adapter ?? 'claude-code',
-    prompt: `/${action} ${text}`, config: options.skillConfig, route, model: options.model });
+    prompt: `/${action} ${text}`, explicit: true, config: options.skillConfig, route, model: options.model });
   const outcome = await workflow.finish({ finalAnswer: '', terminal: 'completed' });
   process.stdout.write(`${JSON.stringify(outcome, null, options.json ? 2 : undefined)}\n`);
   if (outcome.status === 'unavailable') return 4;

@@ -30,6 +30,7 @@ import { DEFAULT_SKILL_LEARNING_CONFIG } from './skillLearningConfig';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
+  window.localStorage.clear();
   await Promise.all(cleanup.splice(0).map((close) => close()));
   seams.providers = [];
   vi.clearAllMocks();
@@ -83,7 +84,7 @@ it('dispatches the persisted independent HTTP protocol for a CLI source through 
       const owner = req.headers['x-ugs-skill-control'] === 'owner';
       requests.push({ path, body, owner });
       let response: unknown;
-      if (path === `/jobs/${origin.runId}`) response = { ok: true, job: JSON.parse(await readFile(jobPath, 'utf8')) };
+      if (path.startsWith('/jobs/')) response = { ok: true, job: JSON.parse(await readFile(jobPath, 'utf8')) };
       else if (path === `/projects/${origin.workspaceId}/skill-service/config`) response = { ok: true, config: await service.getConfig() };
       else if (path === `/projects/${origin.workspaceId}/skill-service`) {
         const request = body as unknown as SkillServiceRequest;
@@ -98,9 +99,14 @@ it('dispatches the persisted independent HTTP protocol for a CLI source through 
         expect(Object.keys(body!).sort()).toEqual(['max_tokens', 'messages', 'model', 'stream']);
         expect(body).toMatchObject({ model: reviewSelection.model, stream: false });
         const messages = body!.messages as Array<{ content: string }>;
-        const review = JSON.parse(messages[1].content) as { evidence: Array<{ evidenceId: string; origin: SkillOrigin }> };
+        const review = JSON.parse(messages[1].content) as { candidates?: Array<{ id: string }>; evidence: Array<{ evidenceId: string; origin: SkillOrigin }> };
+        if (messages[0].content.includes('语义比对器')) {
+          response = { choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ candidateId: review.candidates![0].id, similarity: 0.98 }) } }],
+            usage: { prompt_tokens: 12, completion_tokens: 18 } };
+          res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(response)); return;
+        }
         expect(review.evidence).toHaveLength(1);
-        expect(review.evidence[0].origin).toEqual(origin);
+        expect(review.evidence[0].origin).toEqual(JSON.parse(await readFile(jobPath, 'utf8')).skillOrigin);
         response = { choices: [{ finish_reason: 'stop', message: { content: JSON.stringify({ version: 1,
           kind: 'propose', lesson: 'Read the complete manifest before choosing project dependencies.',
           evidenceIds: [review.evidence[0].evidenceId], operations: [{ action: 'create', name: 'manifest-first', content }] }) } }],
@@ -128,20 +134,26 @@ it('dispatches the persisted independent HTTP protocol for a CLI source through 
   const sourceSelection = { adapter: 'codex', modelClass: 'foreground-cli-model', systemDefault: true };
   const client = new RunnerClient(baseUrl, '');
   const states: SkillReviewState[] = [];
-  const proposed = await finishRemoteLearning({ client, projectId: origin.workspaceId, origin,
+  const first = await finishRemoteLearning({ client, projectId: origin.workspaceId, origin,
     userText: 'Verify the actual project manifest.', finalAnswer: 'The manifest check completed.', selection: sourceSelection,
+    onState: (state) => { states.push(state); } });
+  expect(first).toMatchObject({ status: 'noop', operationsApplied: 0 });
+  const repeatedOrigin = { ...origin, turnId: 'repeated-turn', runId: 'repeated-host-run' };
+  await writeFile(jobPath, JSON.stringify({ ...job, id: repeatedOrigin.runId, skillOrigin: repeatedOrigin,
+    messages: job.messages!.map((message) => ({ ...message, runId: repeatedOrigin.runId })) }));
+  const proposed = await finishRemoteLearning({ client, projectId: origin.workspaceId, origin: repeatedOrigin,
+    userText: 'Verify the actual project manifest again.', finalAnswer: 'The manifest check completed again.', selection: sourceSelection,
     onState: (state) => { states.push(state); } });
   // This local fixture deliberately does not impersonate the deployed server's
   // native-evidence authentication. Ordinary tool evidence cannot auto-save.
-  expect(proposed, proposed?.error).toMatchObject({ status: 'awaiting_approval', origin, operationsApplied: 0,
-    riskReasons: ['insufficient verified evidence'],
-    usage: { calls: 1, inputTokens: 12, outputTokens: 18, totalTokens: 30, estimated: false } });
+  expect(proposed, proposed?.error).toMatchObject({ status: 'awaiting_approval', origin: repeatedOrigin, operationsApplied: 0,
+    usage: { calls: 2, inputTokens: 24, outputTokens: 36, totalTokens: 60, estimated: false } });
   const path = join(dir, '.ultragamestudio', 'skills', 'manifest-first', 'SKILL.md');
   await expect(readFile(path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   expect(states.at(-1)?.result).toEqual(proposed);
-  const control = createRemoteSkillControlHost({ client, projectId: origin.workspaceId, origin, mode: 'off' });
+  const control = createRemoteSkillControlHost({ client, projectId: origin.workspaceId, origin: repeatedOrigin, mode: 'off' });
   const applied = await control.approve(proposed!.batchId);
-  expect(applied).toMatchObject({ status: 'applied', origin, operationsApplied: 1 });
+  expect(applied).toMatchObject({ status: 'applied', origin: repeatedOrigin, operationsApplied: 1 });
   expect(await readFile(path, 'utf8')).toBe(content);
   const restarted = createWorkspaceSkillService({ dir, hostId: origin.hostId, workspaceId: origin.workspaceId }) as typeof service;
   expect(await restarted.getConfig()).toEqual(config);
@@ -155,11 +167,11 @@ it('dispatches the persisted independent HTTP protocol for a CLI source through 
   expect(JSON.parse(block)[0].content).toBe(content);
   expect(reused.loadedSkills[0]).toMatchObject({ skillId: learned.skillId, revision: learned.revision, hash: learned.hash });
   const undone = await control.rollback(applied!.rollbackId!);
-  expect(undone).toMatchObject({ status: 'applied', origin, operationsApplied: 1 });
+  expect(undone).toMatchObject({ status: 'applied', origin: repeatedOrigin, operationsApplied: 1 });
   await expect(readFile(path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
   const history = await restarted.request({ action: 'history', origin, mode: 'off' }) as { results: SkillMutationResult[] };
   expect(history.results.some((result) => result.batchId === undone.batchId && result.status === 'applied')).toBe(true);
-  expect(requests.filter((request) => request.path === '/v1/chat/completions')).toHaveLength(1);
+  expect(requests.filter((request) => request.path === '/v1/chat/completions')).toHaveLength(3);
   expect(requests.filter((request) => request.body?.action === 'manage').every((request) => !request.owner)).toBe(true);
   expect(seams.providers[0].channels[0].route.transport).toBe('cli');
   expect(sourceSelection).toEqual({ adapter: 'codex', modelClass: 'foreground-cli-model', systemDefault: true });

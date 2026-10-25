@@ -1,7 +1,7 @@
 {
   "name": "ultragamestudio-app",
   "private": true,
-  "version": "0.5.19",
+  "version": "0.5.20",
   "type": "module",
   "license": "MIT",
   "bin": {
@@ -23,6 +23,7 @@
     "package": "npm run cli:build && npm run check:built-in-workflows && node scripts/tauri-build-platform.mjs"
   },
   "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.76.0",
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-dialog": "^2.7.1",
     "@tauri-apps/plugin-fs": "^2.5.1",
@@ -37,6 +38,7 @@
     "mammoth": "1.12.0",
     "mermaid": "^11.15.0",
     "pdfjs-dist": "^6.3.289",
+    "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^9.1.0",
@@ -58,6 +60,7 @@
     "@tauri-apps/cli": "^2.11.2",
     "@types/babel__traverse": "^7.20.6",
     "@types/node": "^20.16.11",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@types/three": "^0.184.1",

@@ -46,18 +46,18 @@ describe('appearanceStorage', () => {
     store.resetGenerationSettingsStoreForTests();
   });
 
-  it('defaults to Cherry dark when no stored appearance exists', async () => {
+  it('defaults to black style when no stored appearance exists', async () => {
     const { loadAppearance } = await import('./appearanceStorage');
     expect(loadAppearance()).toEqual(DEFAULT_APPEARANCE_SETTINGS);
-    expect(loadAppearance().stylePresetId).toBe('cherry-dark');
+    expect(loadAppearance().stylePresetId).toBe('hermes-dark');
   });
 
-  it('persists appearance to the disk-backed global settings file', async () => {
+  it.each(['cherry-dark', 'cherry-light', 'hermes-dark'] as const)('persists %s to the disk-backed global settings file', async (stylePresetId) => {
     const { loadAppearance, saveAppearance, APPEARANCE_STORAGE_KEY } =
       await import('./appearanceStorage');
 
     saveAppearance({
-      stylePresetId: 'cherry-light',
+      stylePresetId,
       streamSchemeId: 'current',
       fontFamilyId: 'cjk',
       fontSizePx: 18,
@@ -65,13 +65,13 @@ describe('appearanceStorage', () => {
     await flushWrites();
 
     expect(JSON.parse(disk.get('settings/appearance.v1.json') ?? '{}')).toEqual({
-      stylePresetId: 'cherry-light',
+      stylePresetId,
       streamSchemeId: 'current',
       fontFamilyId: 'cjk',
       fontSizePx: 18,
     });
     expect(window.localStorage.getItem(APPEARANCE_STORAGE_KEY)).toContain(
-      'cherry-light',
+      stylePresetId,
     );
 
     window.localStorage.clear();
@@ -79,9 +79,9 @@ describe('appearanceStorage', () => {
     store.resetGenerationSettingsStoreForTests();
     await store.initializeGenerationSettingsStore();
 
-    expect(loadAppearance().stylePresetId).toBe('cherry-light');
+    expect(loadAppearance().stylePresetId).toBe(stylePresetId);
     expect(window.localStorage.getItem(APPEARANCE_STORAGE_KEY)).toContain(
-      'cherry-light',
+      stylePresetId,
     );
   });
 
@@ -119,7 +119,7 @@ describe('appearanceStorage', () => {
     window.localStorage.setItem('ultragamestudio.appearance.v1', '{bad json');
 
     expect(loadAppearance()).toEqual({
-      stylePresetId: 'cherry-dark',
+      stylePresetId: 'hermes-dark',
       streamSchemeId: 'current',
       fontFamilyId: DEFAULT_FONT_FAMILY_ID,
       fontSizePx: DEFAULT_FONT_SIZE_PX,

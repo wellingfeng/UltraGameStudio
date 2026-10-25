@@ -1,3 +1,4 @@
+import { isSupportedProviderId } from '@/lib/cloudProjects';
 /**
  * CONTRACT: single source of truth for the locally-stored set of model
  * providers and which one is currently active.
@@ -25,8 +26,11 @@
 
 import {
   PROVIDER_API_KEYS_SECRET,
+  GATEWAY_CHANNEL_API_KEYS_SECRET,
+  readSecureRecord,
   readSecureRecordValue,
   secureStorageAvailable,
+  setSecureRecordValue,
   writeSecureRecord,
 } from '@/lib/secureStorage';
 import {
@@ -638,7 +642,13 @@ function saveProvidersForRemoteProfile(list: Provider[]): void {
 
 function saveLocalProviders(list: Provider[]): void {
   if (secureStorageAvailable()) {
-    const apiKeys: Record<string, string> = {};
+    // Merge, never replace. Rebuilding the keychain record from `list` alone
+    // wiped every key whose provider failed to hydrate an apiKey into memory
+    // (e.g. a transient keychain read failure at boot, or a record that lost
+    // entries to a crashed chunked write): the next save of an untouched
+    // provider would persist the truncated record and the tokens were gone.
+    // Deletions therefore happen ONLY via deleteProvider/updateProvider below.
+    const apiKeys = readSecureRecord(PROVIDER_API_KEYS_SECRET);
     for (const provider of list) {
       const key = provider.apiKey.trim();
       if (key) apiKeys[provider.id] = key;
@@ -713,9 +723,10 @@ function syncGatewayProvidersFromProviders(list: Provider[]): void {
   const legacyIds = new Set(list.map((provider) => provider.id));
   const nextProviders = current.providers.filter(
     (provider) =>
-      !legacyIds.has(provider.id) && !provider.id.startsWith('freecc:'),
+      !legacyIds.has(provider.id) && !provider.id.startsWith('freecc:') &&
+      isSupportedProviderId(provider.id),
   );
-  nextProviders.push(...list.map(providerToGatewayProvider));
+  nextProviders.push(...list.filter((provider) => isSupportedProviderId(provider.id)).map(providerToGatewayProvider));
   saveGatewayConfig({ version: 1, providers: nextProviders });
 }
 
@@ -729,7 +740,7 @@ function syncGatewayProvidersFromProviders(list: Provider[]): void {
  * a freshly-synced name with a stale one, e.g. "ExampleAI" over "ExampleGemini").
  */
 export function syncGatewayFromProviders(): void {
-  syncGatewayProvidersFromProviders(loadProviders());
+  syncGatewayProvidersFromProviders(listProviders());
 }
 
 function upsertGatewayProvider(provider: Provider): void {
@@ -750,6 +761,24 @@ function removeGatewayProvider(providerId: string): void {
       candidate.id !== providerId && !candidate.id.startsWith('freecc:'),
   );
   saveGatewayConfig({ version: 1, providers: nextProviders });
+  // saveGatewayConfig only upserts channel keys; drop every stored channel
+  // secret belonging to the removed provider explicitly.
+  if (secureStorageAvailable()) {
+    const record = readSecureRecord(GATEWAY_CHANNEL_API_KEYS_SECRET);
+    let changed = false;
+    for (const key of Object.keys(record)) {
+      try {
+        const parsed = JSON.parse(key) as unknown;
+        if (Array.isArray(parsed) && parsed[0] === providerId) {
+          delete record[key];
+          changed = true;
+        }
+      } catch {
+        /* not a [providerId, channelId] key — keep */
+      }
+    }
+    if (changed) writeSecureRecord(GATEWAY_CHANNEL_API_KEYS_SECRET, record);
+  }
 }
 
 function selectGatewayProvider(provider: Provider): void {
@@ -958,7 +987,8 @@ export function providerMetadataSignature(
 
 /** List all configured providers (browser-safe; '[]' when none / non-browser). */
 export function listProviders(): Provider[] {
-  return loadProviders();
+  // 仅隐藏云端执行渠道；原始配置仍保留。
+  return loadProviders().filter((provider) => isSupportedProviderId(provider.id));
 }
 
 /**
@@ -967,12 +997,12 @@ export function listProviders(): Provider[] {
  * preserving the legacy single-active contract for direct-API callers.
  */
 export function getActiveProviderId(kind: ProviderKind = 'anthropic'): string {
-  return resolveActiveForKind(loadProviders(), loadActiveByKind(), kind);
+  return resolveActiveForKind(listProviders(), loadActiveByKind(), kind);
 }
 
 /** The active/default provider id for every category. */
 export function getActiveProviderIds(): Record<ProviderKind, string> {
-  const list = loadProviders();
+  const list = listProviders();
   const map = loadActiveByKind();
   return {
     anthropic: resolveActiveForKind(list, map, 'anthropic'),
@@ -989,7 +1019,7 @@ export function exportDefaultChannelsConfig(): DefaultChannelsExport {
   return {
     type: 'ultragamestudio.defaultChannels',
     version: 1,
-    providers: loadProviders(),
+    providers: listProviders(),
     activeProviderIds: getActiveProviderIds(),
   };
 }
@@ -1073,7 +1103,7 @@ export function importDefaultChannelsConfig(
 export function setActiveProviderId(id: string): void {
   const trimmed = id.trim();
   if (!trimmed) return;
-  const provider = loadProviders().find((p) => p.id === trimmed);
+  const provider = listProviders().find((p) => p.id === trimmed);
   if (!provider) return;
   const map = loadActiveByKind();
   map[provider.kind] = trimmed;
@@ -1085,7 +1115,7 @@ export function setActiveProviderId(id: string): void {
 
 /** The active anthropic (Claude Code) provider object, or null when none. */
 export function getActiveProvider(): Provider | null {
-  const list = loadProviders();
+  const list = listProviders();
   const id = resolveActiveForKind(list, loadActiveByKind(), 'anthropic');
   if (!id) return null;
   return list.find((p) => p.id === id) ?? null;
@@ -1122,6 +1152,12 @@ export function updateProvider(
   const list = loadProviders();
   const idx = list.findIndex((p) => p.id === id);
   if (idx === -1) return;
+  // Explicit single-key write when the caller patches the apiKey (an empty
+  // value clears the stored token): saveLocalProviders only upserts non-empty
+  // keys, so a cleared field would otherwise keep the stale token alive.
+  if ('apiKey' in patch && secureStorageAvailable()) {
+    setSecureRecordValue(PROVIDER_API_KEYS_SECRET, id, patch.apiKey ?? '');
+  }
   list[idx] = { ...list[idx], ...patch };
   saveProviders(list);
   upsertGatewayProvider(list[idx]);
@@ -1136,6 +1172,11 @@ export function deleteProvider(id: string): void {
   const target = list.find((p) => p.id === id);
   const next = list.filter((p) => p.id !== id);
   saveProviders(next);
+  // saveProviders only upserts; the removed provider's token must be dropped
+  // explicitly or it leaks in the keychain forever.
+  if (secureStorageAvailable()) {
+    setSecureRecordValue(PROVIDER_API_KEYS_SECRET, id, '');
+  }
   removeGatewayProvider(id);
   if (!target) return;
   const map = loadActiveByKind();
@@ -1300,7 +1341,12 @@ export function upsertProviders(
     : list;
   saveProviders(next);
   syncGatewayProvidersFromProviders(next);
-  for (const id of removeIds) removeGatewayProvider(id);
+  for (const id of removeIds) {
+    if (secureStorageAvailable()) {
+      setSecureRecordValue(PROVIDER_API_KEYS_SECRET, id, '');
+    }
+    removeGatewayProvider(id);
+  }
 
   const map = loadActiveByKind();
   if (opts.makeActiveId) {

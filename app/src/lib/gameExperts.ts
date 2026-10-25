@@ -2008,6 +2008,15 @@ export function parseGameExpertCommand(
   // (whole-team routing). A non-root path only counts if it resolves to a
   // concrete expert/group — otherwise it's some other slash command.
   if (!isRoot && !resolution) return null;
+  // Every segment must be a root alias or a known group/expert. Otherwise text
+  // such as a UE asset path (`/Game/Cinematics/LS_Foo，修复下…`) would be
+  // swallowed as a bare `/game` command with an empty task and silently dropped.
+  const allSegmentsKnown = segments.every(
+    (segment) =>
+      GAME_EXPERT_ROOT_ALIASES.has(normalizeSlug(segment)) ||
+      resolveGameExpertPath(segment, settings) !== null,
+  );
+  if (!allSegmentsKnown) return null;
 
   return { task, expertIds: resolution?.expertIds ?? [] };
 }

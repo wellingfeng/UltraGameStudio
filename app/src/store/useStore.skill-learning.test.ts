@@ -27,6 +27,7 @@ vi.mock('@/lib/modelGateway/modelGateway', async (original) => ({
 import { useStore, __resetSimpleChatRuntimeForTests } from './useStore';
 import { historyStore } from './history/store';
 import { remoteWorkspacePath, RunnerClient, saveRemoteWorkspace } from '@/lib/remoteWorkspace';
+import { CLOUD_PROJECTS_ENABLED } from '@/lib/cloudProjects';
 
 const origin: SkillOrigin = {
   hostId: 'local', workspaceId: '__default__', sessionId: 'skills-source',
@@ -79,7 +80,7 @@ afterEach(() => {
 });
 
 describe('skill learning store actions', () => {
-  it('approves a remote frozen batch in its original local history bucket after navigation', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('approves a remote frozen batch in its original local history bucket after navigation', async () => {
     const workspace = await historyStore.resolveWorkspaceByPath(remoteWorkspacePath('remote-control-fixture'));
     saveRemoteWorkspace({ id: 'remote-control-fixture', label: 'Remote control fixture',
       serverUrl: 'https://remote-fixture.test', projectId: 'server-project', adapter: 'codex' });

@@ -6,6 +6,7 @@ import {
 } from '@/lib/remoteWorkspace';
 import { resetSecureStorageForTests } from '@/lib/secureStorage';
 import { checkRemoteWorkspaceConnection } from '@/lib/remoteWorkspaceStatus';
+import { CLOUD_PROJECTS_ENABLED } from '@/lib/cloudProjects';
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -18,7 +19,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('checkRemoteWorkspaceConnection', () => {
+describe.runIf(CLOUD_PROJECTS_ENABLED)('checkRemoteWorkspaceConnection', () => {
   it('marks a remote project connected after health and project checks pass', async () => {
     saveRemoteRunnerConnection(
       { serverUrl: 'https://runner.test' },

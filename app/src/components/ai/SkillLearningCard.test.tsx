@@ -29,6 +29,35 @@ function result(status: SkillMutationResult['status'] = 'awaiting_approval'): Sk
 }
 
 describe('SkillLearningCard', () => {
+  it('keeps failed and cancelled reviews out of the chat even with retained diagnostics', async () => {
+    const cancelled = { ...result('cancelled'), error: 'Error: SKILL_REVIEW_BUDGET_TOKENS' };
+    for (const status of ['cancelled', 'failed'] as const) {
+      await act(async () => { root.render(<Card state={{ status, origin, result: { ...cancelled, status } }} onRetry={vi.fn()} />); });
+      expect(container.innerHTML).toBe('');
+    }
+  });
+  it('renders nothing for a noop result in either language', async () => {
+    for (const locale of ['zh-CN', 'en-US'] as const) {
+      await act(async () => { root.render(<Card locale={locale} state={{ status: 'noop', origin, result: result('noop') }} />); });
+      expect(container.innerHTML).toBe('');
+    }
+  });
+
+  it('localizes persisted host reasons without rewriting the proposal or diff', async () => {
+    const pending = result();
+    pending.riskReasons = ['description first 57 characters do not declare a clear trigger',
+      'lesson has no trusted verification or explicit user correction', 'unknown-host-reason'];
+    const original = JSON.stringify(pending);
+    await act(async () => { root.render(<Card state={{ status: pending.status, origin, result: pending }} />); });
+    expect(container.textContent).toContain('描述的前 57 个字符未明确说明触发条件');
+    expect(container.textContent).toContain('该经验缺少可信验证或用户明确纠正');
+    expect(container.textContent).toContain('unknown-host-reason');
+    expect(container.textContent).not.toContain(pending.riskReasons[0]);
+    expect(JSON.stringify(pending)).toBe(original);
+    await act(async () => { root.render(<Card locale="en-US" state={{ status: pending.status, origin, result: pending }} />); });
+    expect(container.textContent).toContain(pending.riskReasons[0]);
+  });
+
   it('shows a frozen pending change without claiming saved or learned', async () => {
     const pending = result();
     await act(async () => { root.render(<Card state={{ status: pending.status, origin, result: pending }} />); });
@@ -41,16 +70,11 @@ describe('SkillLearningCard', () => {
   });
 
   it.each([
-    ['queued', '排队等待复盘'], ['reading', '正在读取技能'], ['proposing', '正在提炼经验'], ['applying', '正在应用修改'],
-    ['failed', '学习失败'], ['conflicted', '版本冲突'], ['needs_recovery', '需要恢复'],
-    ['cancelled', '已取消'], ['rejected', '已拒绝'], ['noop', '无新经验'],
-  ] as const)('labels %s truthfully without claiming persistence', async (status, label) => {
+    'queued', 'reading', 'proposing', 'applying', 'failed', 'conflicted', 'needs_recovery', 'cancelled', 'rejected',
+  ] as const)('hides %s when no generated result exists', async (status) => {
     const state: SkillReviewState = { status, origin, error: status === 'needs_recovery' ? '恢复快照仍保留' : undefined };
     await act(async () => { root.render(<Card state={state} />); });
-    expect(container.querySelector('[role="status"]')?.textContent).toContain(label);
-    expect(container.textContent).not.toContain('已学会');
-    expect(container.textContent).not.toContain('已保存');
-    if (state.error) expect(container.querySelector('[role="alert"]')?.textContent).toContain(state.error);
+    expect(container.innerHTML).toBe('');
   });
 
   it('requires an applied host result and positive applied operations before reporting learned', async () => {
@@ -276,21 +300,16 @@ describe('SkillLearningCard', () => {
     expect(container.querySelector('button')).toBeNull();
   });
 
-  it('honors an applying phase while retaining the frozen pending diff', async () => {
+  it('hides an applying phase even when the previous pending diff is retained', async () => {
     const pending = result();
     await act(async () => { root.render(<Card state={{ status: 'applying', origin, result: pending }} onApprove={vi.fn()} />); });
-    expect(container.querySelector('[role="status"]')?.textContent).toContain('正在应用修改');
-    expect(container.textContent).not.toContain('已学会');
-    expect(container.textContent).toContain('旧规则');
-    expect(container.querySelector<HTMLButtonElement>('button[aria-label="批准修改"]')?.disabled).toBe(true);
+    expect(container.innerHTML).toBe('');
   });
 
   it('does not report a hydrated rollback action complete while its host phase is still applying', async () => {
     const applied = { ...result('applied'), operationsApplied: 1, rollbackId: 'rollback-a' };
     await act(async () => { root.render(<Card state={{ status: 'applying', origin, result: applied, action: 'rollback' }} onRollback={vi.fn()} />); });
-    expect(container.querySelector('[role="status"]')?.textContent).toContain('正在应用修改');
-    expect(container.textContent).not.toContain('已撤销');
-    expect(container.textContent).not.toContain('已学会');
+    expect(container.innerHTML).toBe('');
   });
 
   it('honors a terminal host failure even when the frozen diff retains an earlier applied result', async () => {

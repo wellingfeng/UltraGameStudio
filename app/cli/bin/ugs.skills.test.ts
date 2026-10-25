@@ -69,9 +69,17 @@ describe('bundled ugs skills dispatcher', () => {
     const address = server.address(); if (!address || typeof address === 'string') throw new Error('server');
     const { stdout } = await exec(process.execPath, [binary, '--json', 'learn', 'Check actual outcomes.', '--cwd', cwd,
       '--review-url', `http://127.0.0.1:${address.port}`, '--review-model', 'review-only', '--review-transport', 'openai-compatible'], { cwd: dir, env: childEnv });
-    expect(JSON.parse(stdout)).toMatchObject({ status: 'reviewed', result: { status: 'applied', operationsApplied: 1 } });
+    const reviewed = JSON.parse(stdout);
+    expect(reviewed).toMatchObject({ status: 'reviewed', result: { status: 'awaiting_approval', operationsApplied: 0 } });
     expect(payloads).toHaveLength(1); expect(payloads[0]).not.toHaveProperty('tools');
     const file = join(cwd, '.ultragamestudio', 'skills', 'verify-outcomes', 'SKILL.md');
+    await expect(readFile(file, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    // @ts-expect-error Node-only backend module has no declaration file.
+    const { createWorkspaceSkillService } = await import('../../../backend/src/workspace-skill-service.mjs');
+    const origin = reviewed.result.origin;
+    const service = createWorkspaceSkillService({ dir: cwd, hostId: origin.hostId, workspaceId: origin.workspaceId });
+    expect(await service.request({ action: 'approve', origin, batchId: reviewed.result.batchId }))
+      .toMatchObject({ status: 'applied', operationsApplied: 1 });
     expect(await readFile(file, 'utf8')).toBe(content);
     const listed = await exec(process.execPath, [binary, '--json', 'skills', 'list', '--cwd', cwd], { cwd: dir, env: childEnv });
     const catalog = JSON.parse(listed.stdout); expect(catalog.entries).toHaveLength(1);
@@ -108,10 +116,19 @@ describe('bundled ugs skills dispatcher', () => {
     try { execution = await exec(process.execPath, argv, { cwd: dir, env: childEnv }); }
     catch (error) { execution = error as typeof execution; }
     expect(execution.stderr).not.toContain('unknown option');
-    expect(JSON.parse(execution.stdout)).toMatchObject({ status: 'reviewed', result: { status: 'applied', operationsApplied: 1 } });
+    const reviewed = JSON.parse(execution.stdout);
+    expect(reviewed).toMatchObject({ status: 'reviewed', result: { status: 'awaiting_approval', operationsApplied: 0 } });
     expect(paths).toEqual(['/v1/messages']); expect(payloads).toHaveLength(1); expect(payloads[0]).toMatchObject({ model: 'review-exact', stream: false });
     expect(Object.keys(payloads[0]).sort()).toEqual(['max_tokens', 'messages', 'model', 'stream', 'system']);
-    const file = join(cwd, '.ultragamestudio', 'skills', 'independent-review', 'SKILL.md'); expect(await readFile(file, 'utf8')).toBe(content);
+    const file = join(cwd, '.ultragamestudio', 'skills', 'independent-review', 'SKILL.md');
+    await expect(readFile(file, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    // @ts-expect-error Node-only backend module has no declaration file.
+    const { createWorkspaceSkillService } = await import('../../../backend/src/workspace-skill-service.mjs');
+    const origin = reviewed.result.origin;
+    const service = createWorkspaceSkillService({ dir: cwd, hostId: origin.hostId, workspaceId: origin.workspaceId });
+    expect(await service.request({ action: 'approve', origin, batchId: reviewed.result.batchId }))
+      .toMatchObject({ status: 'applied', operationsApplied: 1 });
+    expect(await readFile(file, 'utf8')).toBe(content);
     const listed = JSON.parse((await exec(process.execPath, [binary, '--json', 'skills', 'list', '--cwd', cwd], { cwd: dir, env: childEnv })).stdout);
     const fresh = JSON.parse((await exec(process.execPath, [binary, '--json', 'skills', 'view', listed.entries[0].skillId, '--cwd', cwd], { cwd: dir, env: childEnv })).stdout);
     expect(fresh).toMatchObject({ content, fullRead: true, hash: createHash('sha256').update(await readFile(file)).digest('hex') });
@@ -154,6 +171,12 @@ process.stdout.write(JSON.stringify({type:'result',result})+'\\n');});`);
       let body = ''; req.setEncoding('utf8'); req.on('data', (chunk) => { body += chunk; }); req.on('end', () => {
         paths.push(req.url ?? ''); const payload = JSON.parse(body); payloads.push(payload); const snapshot = JSON.parse(payload.messages[0].content);
         res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
+        if (String(payload.system).includes('语义比对器')) {
+          res.end(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({
+            candidateId: snapshot.candidates[0].id, similarity: 0.99,
+          }) }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 10 } }));
+          return;
+        }
         res.end(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ version: 1, kind: 'propose',
           lesson: 'Keep HTTP review separate from foreground CLI execution.', evidenceIds: snapshot.evidence.map((item: { evidenceId: string }) => item.evidenceId),
           operations: [{ action: 'create', name: 'studio-independent-review', content }] }) }], stop_reason: 'end_turn', usage: { input_tokens: 40, output_tokens: 40 } }));
@@ -167,6 +190,11 @@ process.stdout.write(JSON.stringify({type:'result',result})+'\\n');});`);
       'fixture-review': { transport: 'cli', baseUrl: `http://127.0.0.1:${address.port}/v1`, model: 'foreground/default-model' },
     }, skillLearning: { activityThreshold: 1 } }));
     const before = await readFile(configFile);
+    const { createNodeSkillCandidateStore } = await import('../io/skill-candidate-store');
+    await createNodeSkillCandidateStore(cwd).save({ version: 1, lastId: 'prior-studio-review', candidates: [{
+      id: 'prior-studio-review', lesson: 'Keep HTTP review separate from foreground CLI execution.',
+      context: 'Earlier verified task.', sources: [JSON.stringify(['prior-session', 'prior-turn'])], consecutive: 1, submitted: false,
+    }] });
     const argv = [studioBinary, '--json', 'studio', 'ordinary foreground task', '--quiet', '--cwd', cwd, '--run-id', 'studio-product-review',
       '--from-harness', harness, '--adapter', 'claude-code', '--model', 'sonnet', '--provider', 'foreground-coding', '--max-retries', '0',
       '--concurrency', '1', '--verify-command', 'node check.mjs', '--review-adapter', 'codex', '--review-provider', 'fixture-review',
@@ -175,11 +203,19 @@ process.stdout.write(JSON.stringify({type:'result',result})+'\\n');});`);
     try { execution = await exec(process.execPath, argv, { cwd: dir, env }); } catch (error) { execution = error as typeof execution; }
     expect(execution.stderr).not.toContain('unknown option');
     const result = JSON.parse(execution.stdout);
-    expect(result.skillLearning).toMatchObject({ status: 'reviewed', result: { status: 'applied', operationsApplied: 1 } });
+    expect(result.skillLearning).toMatchObject({ status: 'reviewed', result: { status: 'awaiting_approval', operationsApplied: 0 } });
     expect(result.verification).toMatchObject({ passed: true, exitCode: 0, stdout: expect.stringContaining('STUDIO PRODUCT CHECK PASSED') });
-    expect(paths).toEqual(['/v1/messages']); expect(payloads).toHaveLength(1);
-    expect(payloads[0]).toMatchObject({ model: 'review/studio-exact', stream: false });
-    expect(Object.keys(payloads[0]).sort()).toEqual(['max_tokens', 'messages', 'model', 'stream', 'system']);
+    expect(paths).toEqual(['/v1/messages', '/v1/messages']); expect(payloads).toHaveLength(2);
+    for (const payload of payloads) {
+      expect(payload).toMatchObject({ model: 'review/studio-exact', stream: false });
+      expect(Object.keys(payload).sort()).toEqual(['max_tokens', 'messages', 'model', 'stream', 'system']);
+    }
+    const reviewOrigin = result.skillLearning.result.origin;
+    // @ts-expect-error Node-only backend module has no declaration file.
+    const { createWorkspaceSkillService } = await import('../../../backend/src/workspace-skill-service.mjs');
+    const service = createWorkspaceSkillService({ dir: cwd, hostId: reviewOrigin.hostId, workspaceId: reviewOrigin.workspaceId });
+    expect(await service.request({ action: 'approve', origin: reviewOrigin, batchId: result.skillLearning.result.batchId }))
+      .toMatchObject({ status: 'applied', operationsApplied: 1 });
     const spawns = (await readFile(spawnsFile, 'utf8')).trim().split('\n').map((line) => JSON.parse(line));
     expect(spawns.length).toBeGreaterThan(0);
     expect(spawns.filter((spawn) => spawn.args.includes('--model')).every((spawn) => spawn.args[spawn.args.indexOf('--model') + 1] === 'sonnet')).toBe(true);

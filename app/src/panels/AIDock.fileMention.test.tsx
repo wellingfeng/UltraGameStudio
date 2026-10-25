@@ -13,6 +13,7 @@ import {
   remoteWorkspacePath,
   saveRemoteWorkspace,
 } from '@/lib/remoteWorkspace';
+import { CLOUD_PROJECTS_ENABLED } from '@/lib/cloudProjects';
 
 const tauriMocks = vi.hoisted(() => ({
   listWorkspaceDirectory: vi.fn(),
@@ -457,7 +458,7 @@ describe('AIDock file mentions', () => {
     }
   });
 
-  it('walks remote workspace directories from @ without reading local files', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('walks remote workspace directories from @ without reading local files', async () => {
     const remotePath = remoteWorkspacePath('rw_file_mention');
     saveRemoteWorkspace({
       id: 'rw_file_mention',
@@ -547,7 +548,7 @@ describe('AIDock file mentions', () => {
     }
   });
 
-  it('shows remote project session controls instead of local cache/worktree controls', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('shows remote project session controls instead of local cache/worktree controls', async () => {
     const remotePath = remoteWorkspacePath('rw_toolbar');
     saveRemoteWorkspace({
       id: 'rw_toolbar',
@@ -575,7 +576,7 @@ describe('AIDock file mentions', () => {
     }
   });
 
-  it('opens remote workspace files from the add-file button', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('opens remote workspace files from the add-file button', async () => {
     const remotePath = remoteWorkspacePath('rw_add_file');
     saveRemoteWorkspace({
       id: 'rw_add_file',

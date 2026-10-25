@@ -208,6 +208,79 @@ html.ugs-style-pencil {
   --diff-del-bg: color-mix(in oklab, #f778ba 14%, transparent);
 }
 
+/* Hermes: neutral black surfaces and quiet chrome, with color reserved for
+   status and syntax. Stream tokens also cover the adaptive current scheme. */
+html[data-ugs-style='hermes-dark'],
+html.ugs-style-hermes-dark {
+  color-scheme: dark;
+  --ugs-color-bg: #0f0f0f;
+  --ugs-color-bg-alt: #0a0a0a;
+  --ugs-color-panel: #191919;
+  --ugs-color-panel-2: #222222;
+  --ugs-color-border: #303030;
+  --ugs-color-border-soft: #252525;
+  --ugs-color-text: #e5e5e5;
+  --ugs-color-text-muted: #b7b7b7;
+  --ugs-color-text-faint: #888888;
+  --ugs-color-accent: #d4d4d4;
+  --ugs-accent-contrast: #0a0a0a;
+  --ugs-color-accent-2: #89b8a4;
+  --ugs-color-accent-3: #c6ad7d;
+  --ugs-color-accent-4: #a3b8d0;
+  --ugs-status-ai-edit: #a3b8d0;
+  --ugs-status-ai-edit-contrast: #101820;
+  --ugs-status-running: #c6ad7d;
+  --ugs-status-running-contrast: #211a0e;
+  --ugs-status-success: #89b8a4;
+  --ugs-status-success-contrast: #0d1c16;
+  --ugs-status-error: #d69292;
+  --ugs-status-error-contrast: #241111;
+  --ugs-status-draft: #b4a0cd;
+  --ugs-status-draft-contrast: #1c1527;
+  --ugs-status-interrupted: #999999;
+  --ugs-status-interrupted-contrast: #141414;
+  --node-glass: var(--panel);
+  --node-glass-solid: var(--panel);
+  --node-border: var(--border);
+  --node-highlight: rgba(255, 255, 255, 0.025);
+  --node-tint: rgba(255, 255, 255, 0.01);
+  --node-blur: 0;
+  --node-shadow: none;
+  --node-shadow-hover: none;
+  --header-tail: var(--panel-2);
+  --header-fg: var(--fg);
+  --canvas-dot: var(--border-soft);
+  --canvas-vignette: none;
+  --ugs-composer-chat-border: var(--border);
+  --hl-comment: #888888;
+  --hl-keyword: #b4a0cd;
+  --hl-string: #89b8a4;
+  --hl-number: #a3b8d0;
+  --hl-func: #c6ad7d;
+  --hl-type: #c6ad7d;
+  --hl-attr: #a3b8d0;
+  --hl-deletion: #d69292;
+  --hl-addition: #89b8a4;
+  --code-bg: #101010;
+  --code-header-bg: #151515;
+  --code-border: #303030;
+  --diff-add-bg: color-mix(in oklab, #89b8a4 12%, transparent);
+  --diff-del-bg: color-mix(in oklab, #d69292 12%, transparent);
+  --stream-user-bubble-bg: var(--panel);
+  --stream-user-bubble-border: var(--border);
+  --stream-blockquote-bg: var(--panel);
+  --stream-blockquote-border: var(--border);
+  --stream-tool-card-bg: var(--panel);
+  --stream-tool-card-border: var(--border-soft);
+  --stream-tool-card-hover-bg: var(--panel-2);
+  --stream-tool-card-hover-border: var(--border);
+}
+
+html[data-ugs-style='hermes-dark'] .ugs-sidebar,
+html.ugs-style-hermes-dark .ugs-sidebar {
+  background: var(--bg-alt);
+}
+
 html[data-ugs-style='cherry-dark'],
 html.ugs-style-cherry-dark {
   color-scheme: dark;
@@ -1226,6 +1299,32 @@ pre,
   isolation: isolate;
 }
 
+.ugs-session-title {
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.ugs-session-title-text {
+  display: block;
+  width: max-content;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+@keyframes ugs-title-scroll {
+  0%, 15% { transform: translateX(0); }
+  85%, 100% { transform: translateX(var(--ugs-title-scroll-distance)); }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .ugs-sidebar-session:is(:hover, :focus-visible) .ugs-session-title[data-overflow='true'] .ugs-session-title-text {
+    max-width: none;
+    overflow: visible;
+    animation: ugs-title-scroll var(--ugs-title-scroll-duration) linear infinite;
+  }
+}
+
 .ugs-sidebar-session--live::after {
   content: '';
   position: absolute;
@@ -1251,7 +1350,8 @@ pre,
   background-repeat: no-repeat;
   opacity: 0.85;
   pointer-events: none;
-  animation: ugs-session-light 2.6s ease-in-out infinite;
+  animation: ugs-session-light var(--ugs-session-light-duration, 2.6s) ease-in-out infinite;
+  animation-delay: var(--ugs-session-light-delay, 0s);
 }
 
 .ugs-sidebar-meta[data-session-status='running'] .ugs-sidebar-session-summary,
@@ -1799,6 +1899,39 @@ html.ugs-stream-scheme-solarized-dark {
 .ugs-ai-return-header {
   border-color: var(--stream-surface-border);
   background: var(--stream-surface-header-bg);
+}
+/* Compact, shared controls for the chat header and its title-bar portal. */
+.ugs-ai-return-header .ugs-chat-header-actions {
+  gap: 0;
+}
+.ugs-ai-return-header .ugs-chat-header-actions > button {
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--fg-faint);
+  transition: background 120ms, color 120ms;
+}
+.ugs-ai-return-header .ugs-chat-header-actions > button > svg {
+  width: 14px;
+  height: 14px;
+  pointer-events: none;
+}
+.ugs-ai-return-header .ugs-chat-header-actions > button[aria-expanded='true'] {
+  color: var(--fg-dim);
+}
+.ugs-ai-return-header .ugs-chat-header-actions > button:hover {
+  background: var(--panel-2);
+  color: var(--fg);
+}
+.ugs-ai-return-header .ugs-chat-header-actions > button:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: -3px;
 }
 .ugs-ai-return-search {
   border-color: var(--stream-surface-border);

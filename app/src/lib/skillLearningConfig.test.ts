@@ -12,6 +12,11 @@ afterEach(() => {
 });
 
 describe('skill learning configuration', () => {
+  it('migrates the legacy timeout while preserving custom limits', () => {
+    expect(configModule.normalizeSkillLearningConfig({ timeoutMs: 90000 }).timeoutMs).toBe(600000);
+    expect(configModule.normalizeSkillLearningConfig({ timeoutMs: 120000 }).timeoutMs).toBe(120000);
+  });
+
   it('defaults to enabled auto-safe learning with bounded review and opt-in archiving', () => {
     expect(configModule?.DEFAULT_SKILL_LEARNING_CONFIG).toEqual({
       enabled: true,
@@ -21,7 +26,7 @@ describe('skill learning configuration', () => {
       maxRounds: 6,
       maxInputTokens: 48000,
       maxOutputTokens: 6000,
-      timeoutMs: 90000,
+      timeoutMs: 600000,
       autoArchive: false,
       staleAfterDays: 30,
       archiveAfterDays: 90,

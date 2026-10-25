@@ -1,0 +1,14 @@
+.ai-references { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-soft, #303949); }
+.ai-references__heading { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 12px; font-weight: 600; }
+.ai-references__heading > span { color: var(--fg-dim, #94a3b8); font-size: 11px; font-weight: 400; }
+.ai-references__list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.ai-references__item { display: flex; align-items: flex-start; gap: 9px; padding: 9px 10px; border: 1px solid var(--border-soft, #303949); border-radius: 8px; background: var(--panel-2, #151c28); }
+.ai-references__item:focus { outline: 1px solid var(--accent, #67c8ff); outline-offset: 2px; }
+.ai-references__number { flex: none; min-width: 20px; color: var(--accent, #67c8ff); font-size: 12px; }
+.ai-references__item > a { display: grid; flex: 1; min-width: 0; gap: 3px; text-decoration: none; }
+.ai-references__title { color: var(--fg, #e2e8f0); font-size: 12px; overflow-wrap: anywhere; }
+.ai-references__item > a:hover .ai-references__title { color: var(--accent, #67c8ff); text-decoration: underline; }
+.ai-references__url { color: var(--fg-dim, #94a3b8); font-size: 10px; overflow-wrap: anywhere; }
+.ai-references__item > svg { flex: none; margin-top: 2px; color: var(--fg-dim, #94a3b8); }
+.ai-citation { display: inline; margin: 0 2px; padding: 0 3px; border: 0; border-radius: 3px; color: var(--accent, #67c8ff); background: var(--panel-2, #151c28); font: inherit; font-size: .8em; vertical-align: super; cursor: pointer; }
+.ai-citation:hover, .ai-citation:focus-visible { outline: 1px solid var(--accent, #67c8ff); }

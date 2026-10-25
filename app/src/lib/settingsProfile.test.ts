@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { CLOUD_PROJECTS_ENABLED } from './cloudProjects';
 
 const remoteMocks = vi.hoisted(() => ({
   writeUserSetting: vi.fn(),
@@ -53,7 +54,7 @@ afterEach(() => {
 });
 
 describe('settings profile channel overlay', () => {
-  it('isolates ordinary providers per profile while keeping remote-runner local', () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('isolates ordinary providers per profile while keeping remote-runner local', () => {
     // Local store: one ordinary provider + one remote-runner execution provider.
     seedLocal([
       { id: 'p_local', kind: 'anthropic', name: 'Local Claude', apiKey: 'sk-local', baseUrl: '' },

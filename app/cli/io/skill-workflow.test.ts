@@ -47,6 +47,10 @@ describe('Node shared skill workflow', () => {
         const payload = JSON.parse(body); payloads.push(payload);
         const snapshot = JSON.parse(payload.messages[1].content);
         res.writeHead(200, { 'content-type': 'application/json' });
+        if (payload.messages[0].content.includes('语义比对器')) {
+          res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ candidateId: snapshot.candidates[0].id, similarity: 0.98 }) } }],
+            usage: { prompt_tokens: 20, completion_tokens: 20 } })); return;
+        }
         res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ version: 1, kind: 'propose',
           lesson: 'Verify actual outcomes before reporting success.', evidenceIds: snapshot.evidence.map((e: { evidenceId: string }) => e.evidenceId),
           operations: [{ action: 'create', name: 'verify-work', content }] }) } }],
@@ -65,11 +69,29 @@ describe('Node shared skill workflow', () => {
     const result = await flow.finish({ finalAnswer: 'done', terminal: 'completed' });
     const snapshot = JSON.parse((payloads[0].messages as Array<{ content: string }>)[1].content);
     expect(snapshot.evidence[0]).toMatchObject({ kind: 'verification', provenance: 'native-tool', exitCode: 0 });
-    expect(result).toMatchObject({ status: 'reviewed', result: { status: 'applied', operationsApplied: 1, usage: { calls: 1, estimated: false } } });
-    expect(await readFile(join(dir, '.ultragamestudio', 'skills', 'verify-work', 'SKILL.md'), 'utf8')).toBe(content);
+    expect(result).toMatchObject({ status: 'reviewed', result: { status: 'noop', operationsApplied: 0, usage: { calls: 1, estimated: false } } });
+    await expect(readFile(join(dir, '.ultragamestudio', 'skills', 'verify-work', 'SKILL.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    const candidates = JSON.parse(await readFile(join(dir, '.ultragamestudio', 'skill-learning', 'pre-review.v1.json'), 'utf8'));
+    expect(candidates.candidates[0]).toMatchObject({ consecutive: 1, submitted: false });
     expect(payloads).toHaveLength(1);
     expect(payloads[0]).not.toHaveProperty('tools');
     expect(payloads[0]).not.toHaveProperty('mcp');
+    const repeatedOrigin = { ...origin, turnId: 'second-turn', runId: 'second-run' };
+    const repeated = createNodeSkillWorkflow({ origin: repeatedOrigin, cwd: dir, adapter: 'codex', prompt: 'repeat task', route,
+      config: { activityThreshold: 1 } });
+    repeated.onNativeToolEvent({ runId: repeatedOrigin.runId, toolCallId: 'second-test', toolName: 'Bash', phase: 'end',
+      provenance: 'native-tool', occurredAt: 2, args: { command: 'npm test' }, result: 'PASS', status: 'success', exitCode: 0 });
+    const pending = await repeated.finish({ finalAnswer: 'done again', terminal: 'completed' });
+    expect(pending).toMatchObject({ status: 'reviewed', result: { status: 'awaiting_approval', operationsApplied: 0 } });
+    expect(payloads).toHaveLength(3);
+    await expect(readFile(join(dir, '.ultragamestudio', 'skills', 'verify-work', 'SKILL.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    if (pending.status !== 'reviewed') throw new Error('Expected a reviewed candidate');
+    // @ts-expect-error Existing Node filesystem service has no TypeScript declaration.
+    const { createWorkspaceSkillService } = await import('../../../backend/src/workspace-skill-service.mjs');
+    const service = createWorkspaceSkillService({ dir, hostId: origin.hostId, workspaceId: origin.workspaceId });
+    const applied = await service.request({ action: 'approve', origin: repeatedOrigin, mode: 'approve-all', batchId: pending.result.batchId });
+    expect(applied).toMatchObject({ status: 'applied', operationsApplied: 1 });
+    expect(await readFile(join(dir, '.ultragamestudio', 'skills', 'verify-work', 'SKILL.md'), 'utf8')).toBe(content);
   });
 
   it('discovers the persisted independent HTTP reviewer and writes its proposal using the review model rather than the source CLI model', async () => {
@@ -100,12 +122,12 @@ describe('Node shared skill workflow', () => {
     const cli = vi.spyOn(providers, 'resolveCliRoute').mockImplementation(() => { throw new Error('FORBIDDEN_REVIEW_CLI'); });
     const flow = createNodeSkillWorkflow({ origin, cwd: dir, adapter: 'claude-code', prompt: 'task' });
     flow.onHostVerification({ toolCallId: 'actual-check', command: 'node check.mjs', exitCode: 0, output: 'CHECK PASSED' });
-    expect(await flow.finish({ finalAnswer: 'done', terminal: 'completed' })).toMatchObject({ status: 'reviewed', result: { status: 'applied', operationsApplied: 1 } });
+    expect(await flow.finish({ finalAnswer: 'done', terminal: 'completed' })).toMatchObject({ status: 'reviewed', result: { status: 'noop', operationsApplied: 0 } });
     expect(payloads).toHaveLength(1);
     expect(payloads[0].model).toBe('review/pinned-model');
     expect(Object.keys(payloads[0]).sort()).toEqual(['max_tokens', 'messages', 'model', 'stream']);
     expect(ordinary).not.toHaveBeenCalled(); expect(cli).not.toHaveBeenCalled();
-    expect(await readFile(join(dir, '.ultragamestudio', 'skills', 'review-route-checks', 'SKILL.md'), 'utf8')).toBe(content);
+    await expect(readFile(join(dir, '.ultragamestudio', 'skills', 'review-route-checks', 'SKILL.md'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
     expect(await readFile(path)).toEqual(before);
   });
 

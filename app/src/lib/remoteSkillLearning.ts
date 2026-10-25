@@ -187,7 +187,8 @@ export async function finishRemoteLearning(options: FinishRemoteLearningOptions)
   const reservation = scheduler.take();
   if (!reservation) return undefined;
   if (pendingReviews.get(scopeKey) === queueKey) pendingReviews.delete(scopeKey);
-  const job = reservation.job;
+  const job = { ...reservation.job, config: { ...reservation.job.config,
+    mode: reservation.job.explicit ? reservation.job.config.mode : 'approve-all' as const } };
   let result: SkillMutationResult;
   const controller = new AbortController();
   const abort = () => controller.abort();
@@ -223,7 +224,8 @@ export async function finishRemoteLearning(options: FinishRemoteLearningOptions)
         return result;
       },
     };
-    result = await runSkillReview(job, { host, model, signal: controller.signal,
+    const { createSkillCandidateStore } = await import('./skillCandidateStore');
+    result = await runSkillReview(job, { host, model, signal: controller.signal, candidateStore: createSkillCandidateStore(job.origin),
       onState: (state) => options.onState?.({ ...structuredClone(state), mode: job.config.mode }) });
   } catch (error) {
     result = { status: 'failed', batchId: `review-${job.origin.runId}`, origin: job.origin, lesson: '',

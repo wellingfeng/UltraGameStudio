@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Cloud, Loader2, Plus, Trash2, X } from 'lucide-react';
 import { cn } from '@/lib/cn';
+import { CLOUD_PROJECTS_ENABLED } from '@/lib/cloudProjects';
 import { t, type Locale } from '@/lib/i18n';
 import {
   RunnerClient,
@@ -45,7 +46,14 @@ function normalizedServerUrl(raw: string): string {
   return raw.trim().replace(/\/+$/, '');
 }
 
-export default function RemoteWorkspaceDialog({
+// 云端项目已退役：不挂载旧表单，其 hooks 和自动连接均不再执行。
+export default function RemoteWorkspaceDialog(props: RemoteWorkspaceDialogProps) {
+  if (!CLOUD_PROJECTS_ENABLED) return null;
+  return <RetiredRemoteWorkspaceDialog {...props} />;
+}
+
+// 原云端表单保留，便于查阅历史实现。
+function RetiredRemoteWorkspaceDialog({
   locale,
   existing = null,
   onClose,

@@ -91,8 +91,12 @@ describe('UGS focused workspace composer', () => {
       const trigger = container.querySelector<HTMLButtonElement>('[data-ugs-file-panel-toggle]');
       expect(trigger).not.toBeNull();
       expect(trigger?.getAttribute('aria-expanded')).toBe('false');
+      expect(trigger?.getAttribute('aria-label')).toBe('显示右侧栏');
+      expect(trigger?.textContent).toBe('');
+      expect(trigger?.parentElement?.lastElementChild).toBe(trigger);
       await act(async () => trigger!.click());
       expect(trigger?.getAttribute('aria-expanded')).toBe('true');
+      expect(trigger?.getAttribute('aria-label')).toBe('隐藏右侧栏');
       expect(container.querySelector('#ugs-project-file-panel')).not.toBeNull();
       await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="收起文件面板"]')!.click());
       expect(trigger?.getAttribute('aria-expanded')).toBe('false');

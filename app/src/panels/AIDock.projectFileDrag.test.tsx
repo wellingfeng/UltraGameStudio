@@ -15,6 +15,7 @@ import {
   saveRemoteWorkspace,
 } from '@/lib/remoteWorkspace';
 import { resetSecureStorageForTests } from '@/lib/secureStorage';
+import { CLOUD_PROJECTS_ENABLED } from '@/lib/cloudProjects';
 import { sessionChangesCacheKey } from '@/lib/sessionChanges';
 import type { WorkspaceTreeEntry } from '@/lib/tauri';
 import { defaultComposer, samplePromptGroups } from '@/store/sampleSessions';
@@ -391,7 +392,7 @@ describe('AIDock project file drag', () => {
     }
   });
 
-  it('uploads native OS drops before inserting paths for remote workspaces', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('uploads native OS drops before inserting paths for remote workspaces', async () => {
     resetStore();
     saveRemoteRunnerConnection(
       { serverUrl: 'https://runner.test' },
@@ -485,7 +486,7 @@ describe('AIDock project file drag', () => {
     }
   });
 
-  it('uploads browser file drops from DataTransfer items for remote workspaces', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('uploads browser file drops from DataTransfer items for remote workspaces', async () => {
     resetStore();
     saveRemoteRunnerConnection(
       { serverUrl: 'https://runner.test' },
@@ -703,7 +704,7 @@ describe('AIDock project file drag', () => {
     }
   });
 
-  it('connects remote ProjectFileTree drags to the AI input as relative paths', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('connects remote ProjectFileTree drags to the AI input as relative paths', async () => {
     resetStore();
     saveRemoteRunnerConnection(
       { serverUrl: 'https://runner.test' },

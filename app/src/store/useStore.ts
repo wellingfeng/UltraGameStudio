@@ -1,4 +1,5 @@
 import { sessionHasContextCompression, CONTEXT_COMPRESSION_TOOL } from '@/lib/contextCompression';
+import { mergeReferenceSources, sourcesFromTool, withMessageReferences } from '@/lib/messageReferences';
 import { create } from 'zustand';
 import {
   type GatewaySelection,
@@ -195,6 +196,7 @@ import {
 } from '@/lib/tauri';
 import {
   linkManagedAssetsFromMessageText,
+  linkModifiedAssetsFromMessage,
   registerAsset,
   type AssetKind,
   type AssetOrigin,
@@ -238,6 +240,7 @@ import {
 import {
   initHistory as initHistorySlice,
   setWorkflowFavoriteHistorySession,
+  setHistorySessionPinned,
   setWorkflowScheduledTaskHistorySession,
   ensureSessionStartupWorkspace as ensureSessionStartupWorkspaceSlice,
   setWorkspace as setWorkspaceSlice,
@@ -345,11 +348,15 @@ import {
 } from '@/runtime';
 import {
   DEFAULT_LOCALE,
+  SUPPORTED_LOCALES,
   languageAdaptationPrompt,
   languageDirectiveReminder,
   t,
   type Locale,
 } from '@/lib/i18n';
+import { parseCron, validTimeZone } from '@/lib/scheduledTasks';
+import { scheduleText } from '@/lib/scheduledTaskI18n';
+import { SCHEDULED_TASK_SCOPE } from '@/lib/scheduledTaskScope';
 import {
   CACHE_TTL_MINUTES_OPTIONS,
   DEFAULT_CACHE_TTL_MINUTES,
@@ -2005,18 +2012,21 @@ export function registerPendingGeneratedAsset(input: {
 export function linkMessageManagedAssets(
   message: Message,
   sessionKey: WorkflowSessionKey,
+  cwd?: string,
 ): void {
   // The Asset Hub only tracks what the AI produced/handled (generated,
   // downloaded, modified). Asset paths the user types are not AI-handled
   // assets, so skip non-assistant messages.
-  if (message.role !== 'assistant') return;
-  if (!message.text.includes('.ultragamestudio')) return;
+  if (message.role !== 'assistant' || !sessionKey.sessionId) return;
   linkManagedAssetsFromMessageText({
     text: message.text,
     sessionId: sessionKey.sessionId,
     workspaceId: sessionKey.workspaceId,
     messageId: message.id,
+    at: message.createdAt,
+    cwd: message.fileChanges?.rootPath ?? cwd ?? useStore.getState().workspaces.find(workspace => workspace.id === sessionKey.workspaceId)?.path,
   });
+  linkModifiedAssetsFromMessage({ changes: message.fileChanges, sessionId: sessionKey.sessionId, workspaceId: sessionKey.workspaceId, messageId: message.id, at: message.createdAt });
 }
 
 export function threeDFailureHint(message: string): string {
@@ -2106,7 +2116,21 @@ export function normalizeScheduledTask(
   ) {
     return undefined;
   }
+  if (raw.cronExpression !== undefined) {
+    if (typeof raw.cronExpression !== 'string') return undefined;
+    try { parseCron(raw.cronExpression); } catch { return undefined; }
+  }
+  if (raw.timeZone !== undefined && (typeof raw.timeZone !== 'string' || !validTimeZone(raw.timeZone))) return undefined;
+  if (raw.onceAt !== undefined && (typeof raw.onceAt !== 'number' || !Number.isFinite(raw.onceAt) || raw.cronExpression !== undefined)) return undefined;
+  if (raw.promptLocale !== undefined && !SUPPORTED_LOCALES.includes(raw.promptLocale)) return undefined;
   return {
+    ...(typeof raw.name === 'string' ? { name: raw.name.trim() } : {}),
+    ...(typeof raw.templateId === 'string' ? { templateId: raw.templateId } : {}),
+    ...(raw.cronExpression !== undefined ? { cronExpression: raw.cronExpression.trim() } : {}),
+    ...(raw.timeZone !== undefined ? { timeZone: raw.timeZone } : {}),
+    ...(raw.promptLocale !== undefined ? { promptLocale: raw.promptLocale } : {}),
+    ...(raw.onceAt !== undefined ? { onceAt: raw.onceAt } : {}),
+    ...(typeof raw.lastError === 'string' ? { lastError: raw.lastError } : {}),
     enabled: raw.enabled,
     reminderText: raw.reminderText,
     hour,
@@ -2139,6 +2163,7 @@ export function sessionFromSummary(summary: SessionSummary): Session {
     ...(summary.unreadCompletion === true ? { unreadCompletion: true } : {}),
     ...(summary.contextCompressed === true ? { contextCompressed: true } : {}),
     ...(summary.favorite === true ? { favorite: true } : {}),
+    ...(summary.pinned === true ? { pinned: true } : {}),
     ...(scheduledTask ? { scheduledTask } : {}),
   };
 }
@@ -2190,6 +2215,7 @@ export function summaryFromRecord(record: SessionRecord): SessionSummary {
     ...(record.meta?.unreadCompletion === true ? { unreadCompletion: true } : {}),
     ...(sessionHasContextCompression(record.messages, record.meta) ? { contextCompressed: true } : {}),
     ...(record.meta?.favorite === true ? { favorite: true } : {}),
+    ...(record.meta?.pinned === true ? { pinned: true } : {}),
     ...(scheduledTask ? { scheduledTask } : {}),
   };
 }
@@ -2212,7 +2238,9 @@ export async function loadSessionTree(
       ] as const;
     }),
   );
-  return Object.fromEntries(pairs);
+  return { ...Object.fromEntries(pairs),
+    [SCHEDULED_TASK_SCOPE]: (await historyStore.listSessions(SCHEDULED_TASK_SCOPE)).map(sessionFromSummary),
+  };
 }
 
 function sessionsForWorkspaceState(
@@ -4315,15 +4343,8 @@ function scheduledTaskAlertMessage(
   scheduledTask: ScheduledTaskConfig,
 ): string {
   const text = scheduledTask.reminderText.trim();
-  return text ? `自动化运行提醒\n${title}\n\n${text}` : `自动化运行提醒\n${title}`;
-}
-
-function firstReusableChatInput(messages: Message[], workflow?: IRGraph): string {
-  const firstMessageInput =
-    messages.find((message) => message.role === 'user' && message.text.trim())
-      ?.text.trim() ?? '';
-  if (firstMessageInput) return firstMessageInput;
-  return workflow ? startInputsFromWorkflow(workflow)[0]?.trim() ?? '' : '';
+  const heading = scheduleText(scheduledTask.promptLocale ?? useStore.getState().locale, 'title');
+  return text ? `${heading}\n${title}\n\n${text}` : `${heading}\n${title}`;
 }
 
 async function runScheduledTaskHistorySession(
@@ -4337,7 +4358,7 @@ async function runScheduledTaskHistorySession(
   const state = useStore.getState();
   const targetWorkspaceId = workspaceId ?? state.activeWorkspaceId ?? null;
   const sessionKey = { workspaceId: targetWorkspaceId, sessionId };
-  if (sessionLiveStatus(sessionKey, state)) return;
+  if (sessionLiveStatus(sessionKey, state)) throw new Error(scheduleText(state.locale, 'busy'));
 
   const targetSessions = targetWorkspaceId
     ? sessionsForWorkspaceState(state, targetWorkspaceId)
@@ -4345,10 +4366,38 @@ async function runScheduledTaskHistorySession(
   const target = targetSessions.find((session) =>
     sessionMatchesTarget(session, sessionId, targetWorkspaceId),
   );
-  if (!target) return;
+  if (!target) throw new Error(scheduleText(state.locale, 'failed'));
 
   if (normalizedTask.remindOnRun && typeof window !== 'undefined') {
     window.alert(scheduledTaskAlertMessage(target.title, normalizedTask));
+  }
+
+  if (targetWorkspaceId === SCHEDULED_TASK_SCOPE) {
+    const record = await historyStore.getSession(SCHEDULED_TASK_SCOPE, sessionId);
+    if (!record) throw new Error(scheduleText(state.locale, 'failed'));
+    const key = workflowSessionKeyId(sessionKey);
+    if (!state.composerBySession[key]) {
+      const sourceWorkspaceId = record.meta?.scheduledTaskSourceWorkspaceId;
+      const sourceSessionId = record.meta?.scheduledTaskSourceSessionId;
+      const source = typeof sourceWorkspaceId === 'string' && typeof sourceSessionId === 'string'
+        ? state.composerBySession[workflowSessionKeyId({ workspaceId: sourceWorkspaceId, sessionId: sourceSessionId })]
+        : undefined;
+      useStore.setState((s) => {
+        const composerBySession = { ...s.composerBySession, [key]: source ?? {
+          ...composerSnapshotFromState(s),
+          composer: normalizeComposerSettings({ ...s.composer, workspace: typeof record.meta?.scheduledTaskExecutionPath === 'string' ? record.meta.scheduledTaskExecutionPath : '' }),
+        } };
+        saveComposerSoon({ composer: s.composer, composerBySession, workspaceHistory: s.workspaceHistory });
+        return { composerBySession };
+      });
+    }
+    const messages = getAiEditViewSource(SCHEDULED_TASK_SCOPE, sessionId)?.messages ?? record.messages;
+    if (sessionLiveStatus(sessionKey, useStore.getState())) throw new Error(scheduleText(state.locale, 'busy'));
+    if (!useStore.getState().sendPrompt(normalizedTask.reminderText, {
+      locale: normalizedTask.promptLocale,
+      externalSession: { workspaceId: SCHEDULED_TASK_SCOPE, sessionId, messages },
+    })) throw new Error(scheduleText(state.locale, 'failed'));
+    return;
   }
 
   await activateHistorySession(sessionId, targetWorkspaceId ?? undefined);
@@ -4357,7 +4406,7 @@ async function runScheduledTaskHistorySession(
     current.activeSessionId !== sessionId ||
     (targetWorkspaceId !== null && current.activeWorkspaceId !== targetWorkspaceId)
   ) {
-    return;
+    throw new Error(scheduleText(state.locale, 'failed'));
   }
   if (
     sessionLiveStatus(
@@ -4365,17 +4414,45 @@ async function runScheduledTaskHistorySession(
       current,
     )
   ) {
-    return;
+    throw new Error(scheduleText(state.locale, 'busy'));
   }
 
   if (current.workflow.meta?.simple === true || target.isWorkflow === false) {
-    const reusableInput = target.favorite
-      ? firstReusableChatInput(current.messages, current.workflow)
-      : '';
-    current.sendPrompt(reusableInput || normalizedTask.reminderText);
+    if (!current.sendPrompt(normalizedTask.reminderText, { locale: normalizedTask.promptLocale })) {
+      throw new Error(scheduleText(state.locale, 'failed'));
+    }
     return;
   }
   current.runWorkflow();
+}
+
+/** Create the task conversation without replacing the user's active conversation. */
+export async function createScheduledTaskSession(task: ScheduledTaskConfig): Promise<WorkflowSessionKey> {
+  const normalized = normalizeScheduledTask(task);
+  if (!normalized?.name || !normalized.reminderText.trim()) throw new Error('Invalid scheduled task');
+  const state = useStore.getState();
+  const workspaceId = SCHEDULED_TASK_SCOPE;
+  const id = randomSessionId();
+  const now = Date.now();
+  const session = state.historyReady && workspaceId
+    ? sessionFromRecord(await historyStore.createSession({ workspaceId, id, title: normalized.name, isWorkflow: false, messages: [], meta: { scheduledTask: normalized, scheduledTaskExecutionPath: state.composer.workspace } }))
+    : { id, title: normalized.name, createdAt: now, updatedAt: now, isWorkflow: false, messageCount: 0, scheduledTask: normalized, ...(workspaceId ? { workspaceId } : {}) };
+  useStore.setState((s) => {
+    const composerBySession = {
+      ...s.composerBySession,
+      [workflowSessionKeyId({ workspaceId, sessionId: id })]: {
+        ...composerSnapshotFromState(state),
+        composer: normalizeComposerSettings(state.composer),
+      },
+    };
+    saveComposerSoon({ composer: s.composer, composerBySession, workspaceHistory: s.workspaceHistory });
+    return {
+      composerBySession,
+      sessions: s.activeWorkspaceId === workspaceId ? [session, ...s.sessions] : s.sessions,
+      sessionTree: workspaceId ? { ...s.sessionTree, [workspaceId]: [session, ...(s.sessionTree[workspaceId] ?? [])] } : s.sessionTree,
+    };
+  });
+  return { sessionId: id, workspaceId };
 }
 
 /**
@@ -4851,6 +4928,9 @@ export const useStore = create<StoreState>((set, get) => ({
   renameWorkflowSession: (sessionId, workspaceId, name) =>
     renameWorkflowHistorySession(sessionId, workspaceId, name),
 
+  setSessionPinned: (sessionId, workspaceId, pinned) =>
+    setHistorySessionPinned(sessionId, workspaceId, pinned),
+
   setWorkflowFavoriteSession: (sessionId, workspaceId, favorite) =>
     setWorkflowFavoriteHistorySession(sessionId, workspaceId, favorite),
 
@@ -5181,7 +5261,20 @@ export const useStore = create<StoreState>((set, get) => ({
     const forceGameExperts = options?.forceGameExperts === true;
     const pinnedGameExpertIds = options?.gameExpertIds ?? [];
     const selectedSkillIds = [...new Set(options?.skillIds ?? [])];
-    const state = useStore.getState();
+    // Capture the task language for this turn; never change the global UI locale.
+    let state = options?.locale ? { ...useStore.getState(), locale: options.locale } : useStore.getState();
+    if (options?.externalSession) {
+      const target = options.externalSession;
+      const workspace = state.workspaces.find((w) => w.id === target.workspaceId);
+      if (!workspace && target.workspaceId !== SCHEDULED_TASK_SCOPE) return false;
+      const key = { workspaceId: target.workspaceId, sessionId: target.sessionId };
+      const stored = state.composerBySession[workflowSessionKeyId(key)]?.composer;
+      const composer = normalizeComposerSettings({ ...(stored ?? state.composer), workspace: workspace?.path ?? stored?.workspace ?? '' });
+      state = { ...state, activeWorkspaceId: target.workspaceId, activeSessionId: target.sessionId,
+        composer, workflow: withSessionGatewayDefaults(chatWorkflow(target.workspaceId === SCHEDULED_TASK_SCOPE ? '定时任务' : '消息平台会话', state.locale),
+          state.composerBySession[workflowSessionKeyId(key)]?.gatewaySelection ?? getExplicitActiveGatewaySelection()),
+        messages: target.messages, mode: 'design' };
+    }
     if (isWorkflowReadOnly(state)) return false;
     // Image generation is routed explicitly (the /image-mode-* sticky mode and
     // /image one-shot command in AIDock), never inferred from message text here.
@@ -5229,7 +5322,7 @@ export const useStore = create<StoreState>((set, get) => ({
     const activeSession = sessionForKey(state, aiEditingSession);
     const simpleMode = promptUpdate.workflow.meta?.simple === true;
     const replayFavoriteSimpleChat =
-      simpleMode && activeSession?.favorite === true;
+      simpleMode && activeSession?.favorite === true && aiEditingSession.workspaceId !== SCHEDULED_TASK_SCOPE;
     const baseMessages = replayFavoriteSimpleChat ? [] : state.messages;
     const channelWorkflow = replayFavoriteSimpleChat
       ? setStartUserInputs(promptUpdate.workflow, [])
@@ -5352,6 +5445,7 @@ export const useStore = create<StoreState>((set, get) => ({
         role: 'assistant',
         text: txt,
         ...(routeLabel ? { routeLabel } : {}),
+        thinkingLevel: gatewaySelection.thinkingLevel || 'default',
         createdAt: Date.now(),
       };
       ch.ownedMessageIds?.add(msg.id);
@@ -5547,6 +5641,7 @@ ${previousReply.slice(0, 4000)}
     const newBubble = (initial: string, routeLabel = activeRouteLabel) => {
       const id = shortId('m');
       activeId = id;
+      ch.activeAssistantMessageId = id;
       ch.ownedMessageIds?.add(id);
       ch.messages = [
         ...ch.messages,
@@ -5555,6 +5650,7 @@ ${previousReply.slice(0, 4000)}
           role: 'assistant',
           text: initial,
           ...(routeLabel ? { routeLabel } : {}),
+          thinkingLevel: gatewaySelection.thinkingLevel || 'default',
           createdAt: Date.now(),
         },
       ];
@@ -5573,6 +5669,14 @@ ${previousReply.slice(0, 4000)}
       aiEditCommitMessages(ch, persist);
     };
     const persistAiMessages = () => aiEditCommitMessages(ch, true);
+    const captureReferenceSources = (event: import('@/runtime/skills/types').SkillNativeToolEvent) => {
+      if (event.provenance !== 'native-tool' || !activeId) return;
+      const sources = sourcesFromTool(event);
+      if (!sources.length) return;
+      ch.messages = ch.messages.map((message) => message.id === activeId
+        ? { ...message, referenceSources: mergeReferenceSources(message.referenceSources ?? [], sources) } : message);
+      aiEditCommitMessages(ch, false);
+    };
     // Per-turn token usage: snapshot the session meter before the turn, diff it
     // after the reply lands, and stamp the delta onto the assistant bubble so the
     // chat history keeps each turn's tokens/cache even after reload.
@@ -5715,7 +5819,10 @@ ${previousReply.slice(0, 4000)}
           timeoutSeconds: policy.timeoutSeconds,
           idleTimeoutSeconds: policy.idleTimeoutSeconds,
           runId,
-          onTool: (event) => skillLearningTurn?.onTool(event),
+          onTool: (event) => {
+            skillLearningTurn?.onTool(event);
+            captureReferenceSources(event);
+          },
           skillTools: nativeSkillTools,
           signal: ch.abortController.signal,
           onUsage: (raw) => {
@@ -5802,7 +5909,10 @@ ${previousReply.slice(0, 4000)}
           maxTokens: 8192,
           signal: ch.abortController.signal,
           runId,
-          onToolEvent: (event) => skillLearningTurn?.onTool(event),
+          onToolEvent: (event) => {
+            skillLearningTurn?.onTool(event);
+            captureReferenceSources(event);
+          },
           skillTools: nativeSkillTools,
           usageContext: { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
           permission: state.composer.permission || 'full',
@@ -7192,6 +7302,9 @@ ${previousReply.slice(0, 4000)}
           } catch (error) {
             console.warn('[session-files] 本轮文件汇总读取失败', error);
           }
+          for (const message of ch.messages.filter(message => ch.ownedMessageIds?.has(message.id))) {
+            linkMessageManagedAssets(message, { sessionId: ch.sessionId, workspaceId: ch.workspaceId }, workspaceRootPath || undefined);
+          }
           removeAiEditChannel(ch);
           skillLearningTurn?.finish({
             finalAnswer: skillFinalAnswer,
@@ -7935,8 +8048,13 @@ async function trySteerQueuedCliTurn(entry: ChatTurnQueueEntry): Promise<boolean
     if (userMessage) {
       // 插话显示在「当前正在流式的那条 assistant 气泡」正上方——
       // 用户视觉上看到的是"我打断了这条回复"。
-      // 定位方式：running.channel.messages 里第一条未完成的 assistant。
-      const interjection: Message = { ...userMessage, interjected: true };
+      // completedAt can be stamped by intermediate persistence; it is not a
+      // reliable live-bubble selector. Track the actual current bubble ID.
+      const replyId = running.channel.activeAssistantMessageId;
+      const interjection: Message = {
+        ...userMessage, interjected: true,
+        ...(replyId ? { interjectedReplyId: replyId } : {}),
+      };
       running.channel.ownedMessageIds?.add(interjection.id);
       const nextMessages = running.channel.messages.filter(
         (message) => message.id !== interjection.id,
@@ -7944,7 +8062,7 @@ async function trySteerQueuedCliTurn(entry: ChatTurnQueueEntry): Promise<boolean
       // Index must be found AFTER the filter, otherwise a removal before the
       // target shifts everything by one.
       const streamTargetIdx = nextMessages.findIndex(
-        (message) => message.role === 'assistant' && !message.completedAt,
+        (message) => message.id === replyId,
       );
       if (streamTargetIdx >= 0) {
         nextMessages.splice(streamTargetIdx, 0, interjection);
@@ -7965,8 +8083,7 @@ async function trySteerQueuedCliTurn(entry: ChatTurnQueueEntry): Promise<boolean
             (message) => message.id !== interjection.id,
           );
           const globalStreamTargetIdx = filtered.findIndex(
-            (message) =>
-              message.role === 'assistant' && !message.completedAt,
+            (message) => message.id === replyId,
           );
           if (globalStreamTargetIdx >= 0) {
             filtered.splice(globalStreamTargetIdx, 0, interjection);
@@ -9050,6 +9167,7 @@ export function aiEditCommitMessages(ch: AiEditChannel | null, persist: boolean)
   let messages = ch.chat ? mergeAiEditChatMessages(ch) : ch.messages;
   if (persist) {
     messages = completeLatestAiEditAssistantMessage(ch, messages, Date.now());
+    messages = messages.map((message) => !ch.ownedMessageIds || ch.ownedMessageIds.has(message.id) ? withMessageReferences(message) : message);
     ch.messages = messages;
   }
   rememberAiEditSnapshot(ch);

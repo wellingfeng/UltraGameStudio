@@ -10,12 +10,14 @@ import { loadNodeSkillLearningConfig, resolveNodeSkillReviewRoute, type Resolved
 import { createNodeSkillHostPort, createNodeWorkspaceSkillRequest, type NodeSkillHostOptions } from './skill-host';
 import { createNodeSkillReviewModelPort } from './skill-review-model';
 import { createCliSkillReviewModelPort } from './skill-review-capability';
+import { createNodeSkillCandidateStore } from './skill-candidate-store';
 
 export interface NodeSkillWorkflowOptions {
   origin: SkillOrigin;
   cwd: string;
   adapter: string;
   prompt: string;
+  explicit?: boolean;
   config?: Partial<SkillLearningConfig>;
   /** Caller-resolved HTTP route; no credential discovery and no CLI fallback. */
   route?: ResolvedRoute | null;
@@ -99,13 +101,14 @@ export function createNodeSkillWorkflow(options: NodeSkillWorkflowOptions) {
         try { model = reviewModel(); }
         catch (error) { return { status: 'unavailable', origin, reason: String(error) }; }
         const evidence = snapshotEvidence();
-        const job = { origin: reviewOrigin, userText: options.prompt, finalAnswer: result.finalAnswer, evidence, loadedSkills, config };
+        const job = { origin: reviewOrigin, userText: options.prompt, finalAnswer: result.finalAnswer, evidence, loadedSkills, config, explicit: options.explicit };
         const decision = scheduler.observe(job, result.terminal);
         if (!decision.eligible) return { status: 'skipped', origin, reason: decision.reason };
         const reservation = scheduler.take();
         if (!reservation) return { status: 'skipped', origin, reason: 'scheduler-not-ready' };
-        const host = createNodeSkillHostPort({ origin: reservation.job.origin, request, mode: config.mode, evidence: reservation.job.evidence });
-        const mutation = await runSkillReview(reservation.job, { host, model, signal: options.signal });
+        const host = createNodeSkillHostPort({ origin: reservation.job.origin, request, mode: 'approve-all', evidence: reservation.job.evidence });
+        const mutation = await runSkillReview(reservation.job, { host, model, signal: options.signal,
+          candidateStore: createNodeSkillCandidateStore(options.cwd) });
         scheduler.finish(reservation.id, mutation.status);
         return { status: 'reviewed', origin, result: mutation };
       })();

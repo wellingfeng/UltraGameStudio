@@ -17,6 +17,7 @@ import {
   Image as ImageIcon,
   Loader2,
   Maximize2,
+  AppWindow,
   Minimize2,
   Video,
   X,
@@ -30,20 +31,25 @@ import {
   type WorkspaceChangeLine,
   type WorkspaceChangeLineKind,
 } from '@/lib/tauri';
+import { useStore } from '@/store/useStore';
+import { filePreviewScope, useFilePreviewTabs } from '@/store/filePreviewTabs';
 import { cn } from '@/lib/cn';
 import { createObjectUrlFromBase64, revokeObjectUrl } from '@/lib/objectUrl';
 import { readWorkspaceFileDiffOnDemand } from '@/lib/scanHost';
 import { useResizableWidth } from '@/lib/useResizableWidth';
 import {
   displayFileRefPath,
+  parentDirectoryPath,
   type FileRef,
 } from './lib/filePath';
 import { highlightCode } from './lib/highlight';
 import Markdown from './Markdown';
 import OfficePreviewPane from './OfficePreviewPane';
+import HtmlPreviewPane from './HtmlPreviewPane';
 import PdfPreview from './PdfPreview';
 import CopyButton from './CopyButton';
 import { directImagePreviewSource } from './lib/imagePreview';
+import ImagePreviewPane from './ImagePreviewPane';
 
 type PreviewState =
   | { status: 'idle' }
@@ -73,7 +79,7 @@ const MARKDOWN_PREVIEW_EXT = new Set([
 ]);
 
 type TextPreviewMode = 'code' | 'html' | 'markdown';
-type FilePreviewDrawerVariant = 'overlay' | 'embedded';
+type FilePreviewDrawerVariant = 'overlay' | 'embedded' | 'main';
 
 export interface FilePreviewCustomContent {
   label: string;
@@ -179,86 +185,7 @@ function textPreviewModeFromPath(path: string, mime?: string | null): TextPrevie
   return 'code';
 }
 
-/**
- * Rewrites local file references inside an HTML document so they resolve inside
- * the sandboxed preview iframe. A sandbox iframe is an opaque origin and cannot
- * read the local filesystem, so Windows/UNC absolute paths and `file://` URLs
- * must be converted to the Tauri asset URL (`convertFileSrc`); relative paths
- * are resolved against `baseDir` first. Scheme URLs (http/https/data/blob) and
- * fragments are left untouched. Covers `src`, `srcset` and `href` attributes
- * plus CSS `url(...)`.
- */
-export function rewriteLocalAssetsInHtml(html: string, baseDir: string): string {
-  if (!html) return html;
-
-  const rewriteUrl = (raw: string): string => {
-    const value = raw.trim();
-    if (!value) return raw;
-
-    let path: string;
-    if (/^file:\/\//i.test(value)) {
-      try {
-        const url = new URL(value);
-        let p = decodeURIComponent(url.pathname);
-        if (/^\/[A-Za-z]:\//.test(p)) p = p.slice(1); // /E:/a/b.png -> E:/a/b.png
-        if (url.hostname) p = `//${url.hostname}${p}`; // UNC host
-        path = p;
-      } catch {
-        return raw;
-      }
-    } else if (/^[A-Za-z]:[\\/]/.test(value)) {
-      path = value; // Windows absolute path (drive letter).
-    } else if (/^(?:[a-z][a-z0-9+.-]*:|#|\/\/)/i.test(value)) {
-      return raw; // scheme URL, fragment, or protocol-relative URL.
-    } else {
-      path = value; // relative path, or POSIX absolute starting with '/'.
-    }
-
-    const isAbsolute =
-      /^[A-Za-z]:[\\/]/.test(path) ||
-      /^\\\\/.test(path) ||
-      (/^\//.test(path) && !/^\/\//.test(path));
-    if (!isAbsolute) {
-      if (!baseDir) return raw;
-      const sep = baseDir.includes('\\') ? '\\' : '/';
-      const cleaned = path.replace(/^\.?[\\/]/, '').replace(/[\\/]/g, sep);
-      path = `${baseDir}${sep}${cleaned}`;
-    }
-
-    return convertFileSrc(path);
-  };
-
-  const rewriteAttr = (value: string): string => {
-    if (!/,/.test(value)) return rewriteUrl(value);
-    // srcset: comma-separated "url descriptor" entries.
-    return value
-      .split(',')
-      .map((part) => {
-        const m = /^(\s*\S+)(.*)$/.exec(part);
-        if (!m) return part;
-        return `${rewriteUrl(m[1])}${m[2]}`;
-      })
-      .join(',');
-  };
-
-  const attrRe =
-    /\b(src|srcset|href)\s*=\s*("([^"]*)"|'([^']*)'|([^\s>]+))/gi;
-  const cssUrlRe = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^"')]+))\s*\)/gi;
-
-  const rewritten = html.replace(attrRe, (match, _attr, _quoted, dq, sq, bare) => {
-    const raw = dq ?? sq ?? bare ?? '';
-    if (!raw) return match;
-    const next = rewriteAttr(raw);
-    return next === raw ? match : match.replace(raw, () => next);
-  });
-
-  return rewritten.replace(cssUrlRe, (match, dq, sq, bare) => {
-    const raw = (dq ?? sq ?? bare ?? '').trim();
-    if (!raw) return match;
-    const next = rewriteUrl(raw);
-    return next === raw ? match : `url("${next}")`;
-  });
-}
+export { rewriteLocalAssetsInHtml } from './lib/localHtmlAssets';
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
@@ -523,6 +450,7 @@ export default function FilePreviewDrawer({
   diffEnabled = false,
   canOpenExternally = true,
   variant = 'overlay',
+  active = true,
   onClose,
 }: {
   refData: FileRef | null;
@@ -532,10 +460,14 @@ export default function FilePreviewDrawer({
   diffEnabled?: boolean;
   canOpenExternally?: boolean;
   variant?: FilePreviewDrawerVariant;
+  active?: boolean;
   onClose: () => void;
 }) {
   const drawerId = useId();
-  const embedded = variant === 'embedded';
+  const embedded = variant !== 'overlay';
+  const main = variant === 'main';
+  const workspace = useStore((state) => state.composer.workspace);
+  const openMainPreview = useFilePreviewTabs((state) => state.open);
   const [state, setState] = useState<PreviewState>({ status: 'idle' });
   const [diffState, setDiffState] = useState<DiffState>({ status: 'idle' });
   const [isExpanded, setIsExpanded] = useState(false);
@@ -622,7 +554,7 @@ export default function FilePreviewDrawer({
   }, [customContent, cwd, diffEnabled, directImageSource, refData]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !active) return;
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       if (!embedded && isExpanded) {
@@ -633,10 +565,10 @@ export default function FilePreviewDrawer({
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [embedded, isExpanded, onClose, open]);
+  }, [active, embedded, isExpanded, onClose, open]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || main) return;
     const onPointerDown = (event: PointerEvent) => {
       if (shouldIgnoreOutsidePointer(event.target)) return;
       const target = event.target as Node | null;
@@ -653,7 +585,7 @@ export default function FilePreviewDrawer({
       window.clearTimeout(timer);
       document.removeEventListener('pointerdown', onPointerDown, true);
     };
-  }, [embedded, onClose, open]);
+  }, [embedded, main, onClose, open]);
 
   const file = state.status === 'ready' ? state.file : null;
   const imageUrl = useBase64ObjectUrl(
@@ -666,6 +598,10 @@ export default function FilePreviewDrawer({
     file?.path ??
     directImageSource ??
     (refData ? displayFileRefPath(refData, cwd) : '');
+  // System actions belong to the file reference, not the preview decoder.
+  const externalPath = !customContent && !directImageSource && refData
+    ? file?.path ?? displayFileRefPath(refData, cwd)
+    : null;
   const lineSuffix = refData?.startLine
     ? `:${refData.startLine}${refData.endLine ? `-${refData.endLine}` : ''}`
     : '';
@@ -675,12 +611,6 @@ export default function FilePreviewDrawer({
     if (!file || file.kind !== 'text' || file.text == null) return '';
     if (textPreviewMode === 'markdown') return file.text;
     return '';
-  }, [file, textPreviewMode]);
-  const htmlSrcDoc = useMemo(() => {
-    if (!file || file.kind !== 'text' || file.text == null) return '';
-    if (textPreviewMode !== 'html') return '';
-    const baseDir = file.path.replace(/[\\/][^\\/]*$/, '');
-    return rewriteLocalAssetsInHtml(file.text, baseDir);
   }, [file, textPreviewMode]);
   const vcsDiff = diffState.status === 'ready' ? diffState.diff : null;
 
@@ -713,6 +643,23 @@ export default function FilePreviewDrawer({
               {path || customContent?.meta}
             </div>
           </div>
+          {!main && refData && !customContent && (
+            <button
+              type="button"
+              onClick={() => {
+                openMainPreview({
+                  scope: filePreviewScope(workspace),
+                  ref: refData, cwd, previewFile, diffEnabled, canOpenExternally,
+                });
+                onClose();
+              }}
+              title="在主区域预览"
+              aria-label="在主区域预览"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg"
+            >
+              <AppWindow size={14} />
+            </button>
+          )}
           {!embedded && (
             <button
               type="button"
@@ -724,7 +671,7 @@ export default function FilePreviewDrawer({
               {isExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
             </button>
           )}
-          {file && canOpenExternally && (
+          {externalPath && canOpenExternally && (
             <button
               type="button"
               onClick={() => {
@@ -732,9 +679,9 @@ export default function FilePreviewDrawer({
                 // path is otherwise only copyable text, so a deep asset or a
                 // generated artifact buried under .ultragamestudio/ could not be
                 // located on disk from inside the preview.
-                void openLocalPath(file.path, { reveal: true }).then((opened) => {
+                void openLocalPath(externalPath, { reveal: true }).then((opened) => {
                   if (!opened && typeof window !== 'undefined') {
-                    window.alert(`无法在文件管理器中定位该文件：\n${file.path}`);
+                    window.alert(`无法在文件管理器中定位该文件：\n${externalPath}`);
                   }
                 });
               }}
@@ -745,13 +692,13 @@ export default function FilePreviewDrawer({
               <FolderOpen size={14} />
             </button>
           )}
-          {file && canOpenExternally && (
+          {externalPath && canOpenExternally && (
             <button
               type="button"
               onClick={() => {
-                void openLocalPath(file.path).then((opened) => {
+                void openLocalPath(externalPath).then((opened) => {
                   if (!opened && typeof window !== 'undefined') {
-                    window.alert(`无法用系统默认程序打开该文件：\n${file.path}`);
+                    window.alert(`无法用系统默认程序打开该文件：\n${externalPath}`);
                   }
                 });
               }}
@@ -798,13 +745,7 @@ export default function FilePreviewDrawer({
               <ImageIcon size={12} />
               {directImageSource.startsWith('data:') ? '嵌入图片' : '远程图片'}
             </div>
-            <div className="min-h-0 flex-1 overflow-auto bg-bg p-4">
-              <img
-                src={directImageSource}
-                alt={refData?.basename ?? '图片预览'}
-                className="ai-file-preview-image mx-auto max-h-full max-w-full object-contain"
-              />
-            </div>
+            <ImagePreviewPane src={directImageSource} alt={refData?.basename ?? '图片预览'} />
           </div>
         )}
 
@@ -840,13 +781,10 @@ export default function FilePreviewDrawer({
               <ImageIcon size={12} />
               {file.mime} · {formatBytes(file.sizeBytes)}
             </div>
-            <div className="min-h-0 flex-1 overflow-auto bg-bg p-4">
-              <img
-                src={file.streamPath ? convertFileSrc(file.streamPath) : (imageUrl ?? '')}
-                alt={file.fileName}
-                className="ai-file-preview-image mx-auto max-h-full max-w-full object-contain"
-              />
-            </div>
+            <ImagePreviewPane
+              src={file.streamPath ? convertFileSrc(file.streamPath) : (imageUrl ?? '')}
+              alt={file.fileName}
+            />
           </div>
         )}
 
@@ -868,18 +806,12 @@ export default function FilePreviewDrawer({
         )}
 
         {file?.kind === 'text' && textPreviewMode === 'html' && (
-          <div className="flex min-h-0 flex-1 flex-col bg-white">
+          <div className="flex min-h-0 flex-1 flex-col bg-bg">
             <div className="flex shrink-0 items-center gap-2 border-b border-border-soft bg-panel px-3 py-1.5 font-mono text-[10px] text-fg-faint">
               <Globe2 size={12} />
               {file.mime ?? 'text/html'} · {formatBytes(file.sizeBytes)}
             </div>
-            <iframe
-              title={file.fileName}
-              sandbox=""
-              src={file.streamPath ? convertFileSrc(file.streamPath) : undefined}
-              srcDoc={file.streamPath ? undefined : htmlSrcDoc}
-              className="min-h-0 flex-1 border-0 bg-white"
-            />
+            <HtmlPreviewPane file={file} />
           </div>
         )}
 
@@ -889,7 +821,17 @@ export default function FilePreviewDrawer({
               <FileText size={12} />
               {file.mime ?? 'text/markdown'} · {formatBytes(file.sizeBytes)}
             </div>
-            <Markdown text={markdown} />
+            {/* md 内的图片/文件引用以 md 所在目录为基准解析；点击可在
+                右侧预览里打开（本地图片走 previewLocalFile 的 asset scope）。 */}
+            <Markdown
+              text={markdown}
+              cwd={file.path ? parentDirectoryPath(file.path) : cwd}
+              onOpenFile={(ref) => {
+                void previewFile(ref.path, {
+                  cwd: file.path ? parentDirectoryPath(file.path) : cwd,
+                });
+              }}
+            />
           </div>
         )}
 
@@ -947,7 +889,7 @@ export default function FilePreviewDrawer({
                 <FileWarning size={16} />
                 二进制文件
               </div>
-              暂不在预览器中显示。大小 {formatBytes(file.sizeBytes)}。
+              系统未提供此文件的缩略图。可用右上角按钮打开默认程序。大小 {formatBytes(file.sizeBytes)}。
             </div>
           </div>
         )}
@@ -956,7 +898,7 @@ export default function FilePreviewDrawer({
 
   if (embedded) {
     return (
-      <div ref={embeddedPanelRef} className="flex min-h-0 flex-1 flex-col bg-panel">
+      <div ref={embeddedPanelRef} className="flex min-h-0 min-w-0 flex-1 flex-col bg-panel">
         {panelContent}
       </div>
     );

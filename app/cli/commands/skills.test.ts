@@ -67,8 +67,17 @@ describe('ugs skills', () => {
     let stdout = '';
     vi.spyOn(process.stdout, 'write').mockImplementation(((chunk: unknown) => { stdout += String(chunk); return true; }) as never);
     expect(await runSkillLearn('learn', 'Always read actual test outcomes before reporting success.', { cwd, json: true, route })).toBe(0);
-    expect(JSON.parse(stdout)).toMatchObject({ status: 'reviewed', result: { status: 'applied', operationsApplied: 1 } });
-    expect(await readFile(join(cwd, '.ultragamestudio', 'skills', 'verify-work', 'SKILL.md'), 'utf8')).toBe(content);
+    const reviewed = JSON.parse(stdout);
+    expect(reviewed).toMatchObject({ status: 'reviewed', result: { status: 'awaiting_approval', operationsApplied: 0 } });
+    const file = join(cwd, '.ultragamestudio', 'skills', 'verify-work', 'SKILL.md');
+    await expect(readFile(file, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+    // @ts-expect-error Existing Node filesystem service has no TypeScript declaration.
+    const { createWorkspaceSkillService } = await import('../../../backend/src/workspace-skill-service.mjs');
+    const origin = reviewed.result.origin;
+    const service = createWorkspaceSkillService({ dir: cwd, hostId: origin.hostId, workspaceId: origin.workspaceId });
+    expect(await service.request({ action: 'approve', origin, batchId: reviewed.result.batchId }))
+      .toMatchObject({ status: 'applied', operationsApplied: 1 });
+    expect(await readFile(file, 'utf8')).toBe(content);
   });
 
   it('accepts an explicit HTTP review endpoint without opening credential or agent config files', async () => {

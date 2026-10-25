@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { memo, useMemo } from 'react';
 import { segmentMessage } from './lib/segmenter';
 import Markdown from './Markdown';
 import ExecutionProcess from './ExecutionProcess';
@@ -11,6 +11,9 @@ import { useStore } from '@/store/useStore';
 import { t } from '@/lib/i18n';
 import SkillLearningCard, { type SkillLearningCardProps } from './SkillLearningCard';
 import type { SkillReviewState } from '@/runtime/skills/types';
+import { isSkillReviewVisible } from './lib/skillReviewVisibility';
+import MessageReferences from './MessageReferences';
+import { collectMessageReferences, mergeReferenceSources, sourcesFromMessageTools, type ReferenceSource } from '@/lib/messageReferences';
 
 
 /**
@@ -35,6 +38,8 @@ function MessageContentImpl({
   onSkillApprove,
   onSkillReject,
   onSkillRollback,
+  referenceSources,
+  collectReferences = true,
 }: {
   text: string;
   streaming?: boolean;
@@ -46,11 +51,15 @@ function MessageContentImpl({
   onSkillApprove?: SkillLearningCardProps['onApprove'];
   onSkillReject?: SkillLearningCardProps['onReject'];
   onSkillRollback?: SkillLearningCardProps['onRollback'];
+  referenceSources?: ReferenceSource[];
+  collectReferences?: boolean;
 }) {
   const locale = useStore((s) => s.locale);
   const segments = segmentMessage(text, streaming);
+  const references = useMemo(() => collectReferences ? collectMessageReferences(text,
+    mergeReferenceSources(referenceSources ?? [], sourcesFromMessageTools(text)), streaming) : [], [text, referenceSources, streaming, collectReferences]);
 
-  if (segments.length === 0 && !skillLearning) {
+  if (segments.length === 0 && !isSkillReviewVisible(skillLearning)) {
     return streaming ? <span className="ai-caret" aria-hidden /> : null;
   }
 
@@ -72,6 +81,7 @@ function MessageContentImpl({
   return (
     <FileChipBudgetProvider>
       <div className="ai-message group/msg relative flex flex-col gap-2">
+        <MessageReferences references={references}>
         {showActions && copyText && (
           <div className="absolute -top-1 right-0 z-10 opacity-0 transition-opacity group-hover/msg:opacity-100">
             <CopyButton
@@ -98,6 +108,7 @@ function MessageContentImpl({
           return (
             <div key={`a${i}`} className="ai-answer-sep relative">
               <Markdown
+                citations
                 text={seg.text}
                 streaming={streaming && i === lastAnswerIdx}
                 onOpenFile={onOpenFile}
@@ -110,6 +121,7 @@ function MessageContentImpl({
             </div>
           );
         })}
+        </MessageReferences>
         {skillLearning && <SkillLearningCard state={skillLearning} locale={locale}
           onApprove={onSkillApprove} onReject={onSkillReject} onRollback={onSkillRollback} />}
       </div>

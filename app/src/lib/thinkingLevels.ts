@@ -111,6 +111,12 @@ const LABEL_KEYS: Record<string, TranslationKey> = {
   max: 'dock.thinkingLevel.max',
 };
 
+/** Localized label for a recorded level; custom levels retain their native spelling. */
+export function thinkingLevelLabelKey(id: string): TranslationKey | null {
+  if (id === THINKING_LEVEL_DEFAULT_ID) return 'dock.thinkingDefault';
+  return LABEL_KEYS[id] ?? null;
+}
+
 const HINT_KEYS: Record<string, TranslationKey> = {
   off: 'dock.thinkingHint.off',
   none: 'dock.thinkingHint.none',

@@ -19,6 +19,7 @@ type MockSession = {
   isWorkflow: boolean;
   simple?: boolean;
   favorite?: boolean;
+  pinned?: boolean;
   scheduledTask?: {
     enabled: boolean;
     reminderText: string;
@@ -86,6 +87,7 @@ type MockStoreState = {
     workspaceId: string | null,
     name: string,
   ) => Promise<void>;
+  setSessionPinned: (sessionId: string, workspaceId: string | null, pinned: boolean) => Promise<void>;
   setWorkflowFavoriteSession: (
     sessionId: string,
     workspaceId: string | null,
@@ -241,6 +243,7 @@ function resetSidebarStore(): void {
     deleteSession: vi.fn(),
     deleteWorkspaceHistory: vi.fn(),
     renameWorkflowSession: vi.fn(async () => undefined),
+    setSessionPinned: vi.fn(async () => undefined),
     setWorkflowFavoriteSession: vi.fn(async () => undefined),
     setWorkflowScheduledTaskSession: vi.fn(async () => undefined),
     runScheduledTaskSession: vi.fn(async () => undefined),
@@ -474,14 +477,6 @@ function contextMenuScheduleButton(container: HTMLElement): HTMLButtonElement {
   const button = Array.from(
     container.querySelectorAll('button:not([role="tab"])'),
   ).find((item) => item.textContent?.trim() === '设置定时运行');
-  expect(button).toBeInstanceOf(HTMLButtonElement);
-  return button as HTMLButtonElement;
-}
-
-function tabButton(container: HTMLElement, label: string): HTMLButtonElement {
-  const button = Array.from(
-    container.querySelectorAll('button[role="tab"]'),
-  ).find((item) => item.textContent?.includes(label));
   expect(button).toBeInstanceOf(HTMLButtonElement);
   return button as HTMLButtonElement;
 }
@@ -846,6 +841,62 @@ describe('Sidebar workflow rename', () => {
     }
   });
 
+  it.each([false, true])('toggles pin from the context menu (pinned=%s)', async (pinned) => {
+    resetSidebarStore();
+    const session = { ...SESSION, pinned };
+    mockState.sessions = [session];
+    mockState.sessionTree = { [WORKSPACE.id]: [session] };
+    const view = await renderSidebar();
+    try {
+      await openSessionContextMenu(sessionButton(view.container, SESSION.title));
+      await clickButton(sessionButton(view.container, pinned ? '取消置顶' : '置顶'));
+      expect(mockState.setSessionPinned).toHaveBeenCalledWith(SESSION.id, WORKSPACE.id, !pinned);
+      expect(view.container.querySelector('[aria-label="已置顶"]') !== null).toBe(pinned);
+    } finally { await view.cleanup(); }
+  });
+
+  it.each([true, false])('keeps pinned sessions above live, unread, draft and recent sessions (grouped=%s)', async (grouped) => {
+    resetSidebarStore();
+    const pinned = { ...SESSION, id: 's_pin', title: '旧置顶', pinned: true, updatedAt: 1 };
+    const running = { ...SESSION, id: 's_run', title: '运行会话', updatedAt: 2 };
+    const editing = { ...SESSION, id: 's_edit', title: '编辑会话', updatedAt: 3 };
+    const unread = { ...SESSION, id: 's_unread', title: '未读完成', runStatus: 'success' as const, unreadCompletion: true, updatedAt: 4 };
+    const draft = { ...SESSION, id: 's_draft', title: '草稿会话', updatedAt: 5 };
+    const recent = { ...SESSION, id: 's_recent', title: '最新会话', updatedAt: 6 };
+    mockState.sessions = [recent, draft, unread, editing, running, pinned];
+    mockState.sessionTree = { [WORKSPACE.id]: mockState.sessions };
+    mockState.workspaces = grouped ? [{ ...WORKSPACE, sessionCount: 6 }] : [];
+    mockState.runningSessions = [{ workspaceId: grouped ? WORKSPACE.id : null, sessionId: running.id }];
+    mockState.aiEditingSessions = [{ workspaceId: grouped ? WORKSPACE.id : null, sessionId: editing.id }];
+    mockState.composerDrafts = { [`${grouped ? WORKSPACE.id : '__none__'}::${draft.id}`]: '草稿' };
+    const view = await renderSidebar();
+    try {
+      const titles = mockState.sessions.map((session) => session.title);
+      expect(sessionTitleOrder(view.container, titles)[0]).toBe(pinned.title);
+      mockState.sessions = mockState.sessions.map((session) => ({ ...session, pinned: false }));
+      mockState.sessionTree = { [WORKSPACE.id]: mockState.sessions };
+      await view.rerender();
+      expect(sessionTitleOrder(view.container, titles)[0]).toBe(editing.title);
+    } finally { await view.cleanup(); }
+  });
+
+  it('promotes a workspace with pinned sessions above selected and running workspaces', async () => {
+    resetSidebarStore();
+    const pinned = { ...SESSION, id: 's_pin_other', title: '跨工作区置顶', pinned: true, updatedAt: 1 };
+    const otherWorkspace = { ...WORKSPACE, id: 'w_pinned_other', name: '置顶工作区', path: 'E:/PinTest', updatedAt: 1 };
+    mockState.workspaces = [WORKSPACE, otherWorkspace];
+    mockState.sessionTree = { [WORKSPACE.id]: [SESSION], [otherWorkspace.id]: [pinned] };
+    mockState.selectedWorkspaceId = WORKSPACE.id;
+    mockState.runningSessions = [SESSION_KEY];
+    const view = await renderSidebar();
+    try {
+      expectTextBefore(view.container, pinned.title, SESSION.title);
+      await openSessionContextMenu(sessionButton(view.container, pinned.title));
+      await clickButton(sessionButton(view.container, '取消置顶'));
+      expect(mockState.setSessionPinned).toHaveBeenCalledWith(pinned.id, otherWorkspace.id, false);
+    } finally { await view.cleanup(); }
+  });
+
   it('favorites workflow sessions from the context menu', async () => {
     resetSidebarStore();
     const view = await renderSidebar();
@@ -980,7 +1031,7 @@ describe('Sidebar workflow rename', () => {
     }
   });
 
-  it('shows all favorited sessions in the favorites tab', async () => {
+  it('shows all history sessions directly without history or automation tabs', async () => {
     resetSidebarStore();
     const favoriteSession = {
       ...SESSION,
@@ -1008,10 +1059,11 @@ describe('Sidebar workflow rename', () => {
     const view = await renderSidebar();
 
     try {
-      await clickButton(tabButton(view.container, '自动化'));
+      expect(view.container.querySelector('[role="tablist"]')).toBeNull();
+      expect(view.container.querySelector('[role="tab"]')).toBeNull();
 
       expect(view.container.textContent).toContain('Favorite Workflow');
-      expect(view.container.textContent).not.toContain('Plain Workflow');
+      expect(view.container.textContent).toContain('Plain Workflow');
       expect(view.container.textContent).toContain('Favorite Chat');
     } finally {
       await view.cleanup();
@@ -2030,7 +2082,7 @@ describe('Sidebar session search', () => {
     }
   });
 
-  it('shows an empty favorites state when there are no sessions', async () => {
+  it('shows the history empty state without tabs when there are no sessions', async () => {
     resetSidebarStore();
     mockState.sessions = [];
     mockState.workspaces = [];
@@ -2041,10 +2093,11 @@ describe('Sidebar session search', () => {
     const view = await renderSidebar();
 
     try {
-      await clickButton(tabButton(view.container, '自动化'));
+      expect(view.container.querySelector('[role="tablist"]')).toBeNull();
+      expect(view.container.querySelector('[role="tab"]')).toBeNull();
 
       expect(queryHistorySearchInput(view.container)).toBeNull();
-      expect(view.container.textContent).toContain('暂无自动化会话');
+      expect(view.container.textContent).toContain('暂无会话');
     } finally {
       await view.cleanup();
     }

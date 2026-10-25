@@ -48,6 +48,8 @@ function LazyMessageContentImpl({
   eager = false,
   scrollRootRef,
   searchState = null,
+  referenceSources,
+  collectReferences = true,
 }: {
   text: string;
   /** Plain-text stand-in shown until the rich renderer is mounted. */
@@ -59,6 +61,8 @@ function LazyMessageContentImpl({
   eager?: boolean;
   scrollRootRef?: RefObject<HTMLElement | null>;
   searchState?: SearchHighlightState | null;
+  referenceSources?: import('@/lib/messageReferences').ReferenceSource[];
+  collectReferences?: boolean;
 }) {
   // Reset the per-message hit counter before each render so the fallback and
   // the rich renderer (which may render at different times due to lazy
@@ -104,6 +108,8 @@ function LazyMessageContentImpl({
         onOpenFile={onOpenFile}
         cwd={cwd}
         searchState={searchState}
+        referenceSources={referenceSources}
+        collectReferences={collectReferences}
       />
     );
   }

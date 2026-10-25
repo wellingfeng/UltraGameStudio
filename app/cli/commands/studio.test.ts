@@ -56,6 +56,12 @@ describe('ugs studio', () => {
         paths.push(req.url ?? ''); const payload = JSON.parse(body); payloads.push(payload);
         const snapshot = JSON.parse(payload.messages[0].content);
         res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
+        if (String(payload.system).includes('语义比对器')) {
+          res.end(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({
+            candidateId: snapshot.candidates[0].id, similarity: 0.99,
+          }) }], stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 10 } }));
+          return;
+        }
         res.end(JSON.stringify({ content: [{ type: 'text', text: JSON.stringify({ version: 1, kind: 'propose',
           lesson: 'Keep completion-only review independent of coding execution.',
           evidenceIds: snapshot.evidence.map((item: { evidenceId: string }) => item.evidenceId),
@@ -70,6 +76,11 @@ describe('ugs studio', () => {
       transport: 'cli', baseUrl: `http://127.0.0.1:${address.port}/v1`, model: 'foreground/default-model',
     } }, skillLearning: { activityThreshold: 1 } }));
     const configBefore = readFileSync(configFile);
+    const { createNodeSkillCandidateStore } = await import('../io/skill-candidate-store');
+    await createNodeSkillCandidateStore(dir).save({ version: 1, lastId: 'prior-independent-review', candidates: [{
+      id: 'prior-independent-review', lesson: 'Keep completion-only review independent of coding execution.',
+      context: 'Earlier verified task.', sources: [JSON.stringify(['prior-session', 'prior-turn'])], consecutive: 1, submitted: false,
+    }] });
     const providers = await import('../config/providers');
     const ordinary = vi.spyOn(providers, 'resolveDirectRoute').mockImplementation(() => { throw new Error('FORBIDDEN_REVIEW_GENERAL_GATEWAY'); });
     const cli = vi.spyOn(providers, 'resolveCliRoute').mockImplementation(() => { throw new Error('FORBIDDEN_REVIEW_CLI_ROUTE'); });
@@ -83,11 +94,19 @@ describe('ugs studio', () => {
       reviewAdapter: 'codex', reviewProvider: 'fixture-review', reviewModel: 'review/exact-model', reviewTransport: 'anthropic' };
     expect(await runStudio('审查博客里的技术论断', options)).toBe(0);
     const result = JSON.parse(outBuf);
-    expect(result.skillLearning).toMatchObject({ status: 'reviewed', result: { status: 'applied', operationsApplied: 1 } });
+    expect(result.skillLearning).toMatchObject({ status: 'reviewed', result: { status: 'awaiting_approval', operationsApplied: 0 } });
+    // @ts-expect-error Existing Node filesystem service has no TypeScript declaration.
+    const { createWorkspaceSkillService } = await import('../../../backend/src/workspace-skill-service.mjs');
+    const reviewOrigin = result.skillLearning.result.origin;
+    const service = createWorkspaceSkillService({ dir, hostId: reviewOrigin.hostId, workspaceId: reviewOrigin.workspaceId });
+    expect(await service.request({ action: 'approve', origin: reviewOrigin, batchId: result.skillLearning.result.batchId }))
+      .toMatchObject({ status: 'applied', operationsApplied: 1 });
     expect(result.verification).toMatchObject({ exitCode: 0, passed: true, stdout: expect.stringContaining('INDEPENDENT REVIEW CHECK PASSED') });
-    expect(paths).toEqual(['/v1/messages']); expect(payloads).toHaveLength(1);
-    expect(payloads[0]).toMatchObject({ model: 'review/exact-model', stream: false });
-    expect(Object.keys(payloads[0]).sort()).toEqual(['max_tokens', 'messages', 'model', 'stream', 'system']);
+    expect(paths).toEqual(['/v1/messages', '/v1/messages']); expect(payloads).toHaveLength(2);
+    for (const payload of payloads) {
+      expect(payload).toMatchObject({ model: 'review/exact-model', stream: false });
+      expect(Object.keys(payload).sort()).toEqual(['max_tokens', 'messages', 'model', 'stream', 'system']);
+    }
     expect(foregroundSelections.length).toBeGreaterThan(0);
     expect(foregroundSelections.every((selection) => selection.adapter === 'claude-code' && selection.modelClass === 'sonnet' && selection.providerId === 'foreground-coding')).toBe(true);
     expect(ordinary).not.toHaveBeenCalled(); expect(cli).not.toHaveBeenCalled();
@@ -115,8 +134,15 @@ describe('ugs studio', () => {
     const server = createServer((req, res) => {
       let body = ''; req.setEncoding('utf8'); req.on('data', (chunk) => { body += chunk; });
       req.on('end', () => {
-        const payload = JSON.parse(body); const snapshot = JSON.parse(payload.messages[1].content); snapshots.push(snapshot);
+        const payload = JSON.parse(body); const snapshot = JSON.parse(payload.messages[1].content);
         res.writeHead(200, { 'content-type': 'application/json', connection: 'close' });
+        if (payload.messages[0].content.includes('语义比对器')) {
+          res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({
+            candidateId: snapshot.candidates[0].id, similarity: 0.99,
+          }) } }], usage: { prompt_tokens: 10, completion_tokens: 10 } }));
+          return;
+        }
+        snapshots.push(snapshot);
         res.end(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ version: 1, kind: 'propose',
           lesson: 'Read an actual successful host check before reporting success.',
           evidenceIds: snapshot.evidence.map((item: { evidenceId: string }) => item.evidenceId),
@@ -128,16 +154,29 @@ describe('ugs studio', () => {
     const address = server.address(); if (!address || typeof address === 'string') throw new Error('server');
     const route: ResolvedRoute = { selection: { adapter: 'custom', modelClass: 'review' }, adapter: 'custom', modelClass: 'review',
       mode: 'direct', transport: 'openai-compatible', model: 'review-only', baseUrl: `http://127.0.0.1:${address.port}` };
+    const { createNodeSkillCandidateStore } = await import('../io/skill-candidate-store');
+    await createNodeSkillCandidateStore(dir).save({ version: 1, lastId: 'prior-verified-outcomes', candidates: [{
+      id: 'prior-verified-outcomes', lesson: 'Read an actual successful host check before reporting success.',
+      context: 'Earlier verified task.', sources: [JSON.stringify(['prior-session', 'prior-turn'])], consecutive: 1, submitted: false,
+    }] });
     expect(await runStudio('审查博客里的技术论断', { cwd: dir, runId: 'uc-auto-skill-http', json: true, quiet: true,
       gateway: fakeStudioGateway([]), maxRetries: '0', verifyCommand: 'node check.mjs',
       skillWorkflow: { route, config: { activityThreshold: 1 } } })).toBe(0);
     const first = JSON.parse(outBuf);
     expect(first.verification).toMatchObject({ exitCode: 0, passed: true, stdout: expect.stringContaining('CHECK PASSED') });
-    expect(first.skillLearning).toMatchObject({ status: 'reviewed', result: { status: 'applied', operationsApplied: 1 } });
+    expect(first.skillLearning).toMatchObject({ status: 'reviewed', result: { status: 'awaiting_approval', operationsApplied: 0 } });
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0].evidence).toMatchObject([{ provenance: 'host-check', kind: 'verification', exitCode: 0, status: 'success' }]);
     expect(snapshots[0].evidence).toHaveLength(1);
-    expect(readFileSync(join(dir, '.ultragamestudio', 'skills', 'verify-outcomes', 'SKILL.md'), 'utf8')).toBe(content);
+    const file = join(dir, '.ultragamestudio', 'skills', 'verify-outcomes', 'SKILL.md');
+    expect(existsSync(file)).toBe(false);
+    // @ts-expect-error Existing Node filesystem service has no TypeScript declaration.
+    const { createWorkspaceSkillService } = await import('../../../backend/src/workspace-skill-service.mjs');
+    const reviewOrigin = first.skillLearning.result.origin;
+    const service = createWorkspaceSkillService({ dir, hostId: reviewOrigin.hostId, workspaceId: reviewOrigin.workspaceId });
+    expect(await service.request({ action: 'approve', origin: reviewOrigin, batchId: first.skillLearning.result.batchId }))
+      .toMatchObject({ status: 'applied', operationsApplied: 1 });
+    expect(readFileSync(file, 'utf8')).toBe(content);
     outBuf = ''; const calls: string[] = [];
     expect(await runStudio('/verify-outcomes 审查博客里的技术论断', { cwd: dir, runId: 'uc-reuse-learned-skill', json: true, quiet: true,
       gateway: fakeStudioGateway(calls), maxRetries: '0', verifyCommand: 'node check.mjs' })).toBe(0);

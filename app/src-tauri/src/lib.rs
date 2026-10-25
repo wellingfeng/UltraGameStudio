@@ -20,10 +20,12 @@ mod dsh_log;
 mod free_proxy;
 mod history;
 mod kimi_log;
+mod message_platforms;
 mod proxy_http;
 mod secure_store;
 mod skills;
 mod storage_paths;
+mod system_file_preview;
 
 /// Windows CreateProcess flag: don't allocate a console window for the child.
 /// Without this, spawning the `claude` console binary pops up a black terminal
@@ -36,11 +38,9 @@ const TRAY_MENU_SHOW_ID: &str = "tray-show-main";
 const TRAY_MENU_GITHUB_ID: &str = "tray-open-github";
 const TRAY_MENU_QUIT_ID: &str = "tray-quit";
 /// 退出前冲刷事件：宿主（托盘右键菜单「退出」）先通知前端把内存中的密钥
-/// 兜底落盘，等前端确认（ugs_quit_flush_done）或超时后再真正退出，避免
+/// 兜底落盘，等前端确认（ugs_quit_flush_done）后再真正退出，避免
 /// 就地编辑的 API Key 因 keychain 异步写未完成而丢失。
 const BEFORE_QUIT_EVENT: &str = "ugs:before-quit";
-/// 前端是否已确认完成退出前冲刷（见 `ugs_quit_flush_done`）。
-static QUIT_FLUSH_DONE: AtomicBool = AtomicBool::new(false);
 const GITHUB_REPOSITORY_URL: &str = "https://github.com/wellingfeng/UltraGameStudio";
 const SINGLE_INSTANCE_WARNING_EVENT: &str = "single-instance-warning";
 const SINGLE_INSTANCE_WARNING_MESSAGE: &str = "只能同时运行一个进程";
@@ -115,15 +115,13 @@ fn focus_main_window(app: AppHandle) {
 /// 前端完成退出前冲刷（密钥兜底落盘 + keychain flush）后调用，放行退出。
 #[tauri::command]
 fn ugs_quit_flush_done(app: AppHandle) {
-    QUIT_FLUSH_DONE.store(true, Ordering::SeqCst);
     app.exit(0);
 }
 
 /// 前端决定本次不退出（例如仍有会话在运行，用户点了「取消」）。
-/// 标记 QUIT_FLUSH_DONE=true 让 1.5s 超时线程放弃 exit，并把主窗拉回前台。
+/// 把主窗拉回前台，等待用户处理未保存的数据。
 #[tauri::command]
 fn ugs_quit_cancel(app: AppHandle) {
-    QUIT_FLUSH_DONE.store(true, Ordering::SeqCst);
     show_main_window(&app);
 }
 
@@ -12337,6 +12335,20 @@ fn preview_office_document_blocking(
     }
 }
 
+fn binary_file_preview(resolved: &Path, path: String, file_name: String, size_bytes: u64) -> LocalFilePreview {
+    use base64::Engine;
+    let thumbnail = system_file_preview::thumbnail(resolved);
+    let has_thumbnail = thumbnail.is_some();
+    LocalFilePreview {
+        path, file_name, size_bytes,
+        kind: if has_thumbnail { "image" } else { "binary" }.to_string(),
+        mime: has_thumbnail.then(|| "image/png".to_string()),
+        truncated: false, text: None,
+        base64: thumbnail.map(|png| base64::engine::general_purpose::STANDARD.encode(png)),
+        stream_path: None, page_count: None,
+    }
+}
+
 fn preview_local_file_blocking(
     path: String,
     cwd: Option<String>,
@@ -12435,7 +12447,7 @@ fn preview_local_file_blocking(
             truncated: false,
             text: None,
             base64: None,
-            stream_path: None,
+            stream_path: Some(preview_stream_path(&resolved)),
             page_count: None,
         });
     }
@@ -12452,33 +12464,11 @@ fn preview_local_file_blocking(
     }
 
     if !has_utf16_bom(&bytes) && probably_binary(&bytes) {
-        return Ok(LocalFilePreview {
-            path,
-            file_name,
-            kind: "binary".to_string(),
-            mime: None,
-            size_bytes,
-            truncated: false,
-            text: None,
-            base64: None,
-            stream_path: Some(preview_stream_path(&resolved)),
-            page_count: None,
-        });
+        return Ok(binary_file_preview(&resolved, path, file_name, size_bytes));
     }
 
     let Some(text) = decode_preview_text(bytes) else {
-        return Ok(LocalFilePreview {
-            path,
-            file_name,
-            kind: "binary".to_string(),
-            mime: None,
-            size_bytes,
-            truncated: false,
-            text: None,
-            base64: None,
-            stream_path: None,
-            page_count: None,
-        });
+        return Ok(binary_file_preview(&resolved, path, file_name, size_bytes));
     };
 
     Ok(LocalFilePreview {
@@ -12508,7 +12498,11 @@ fn allow_preview_stream(app: &AppHandle, preview: &LocalFilePreview) {
     let stream = std::path::Path::new(stream);
     let absolute = std::fs::canonicalize(stream).unwrap_or_else(|_| stream.to_path_buf());
     if let Some(parent) = absolute.parent() {
-        let _ = app.asset_protocol_scope().allow_directory(parent, false);
+        // HTML commonly keeps styles, scripts and images in child directories.
+        // Scope those resources to this document's directory; other previews
+        // still authorize only their immediate directory.
+        let recursive = preview.mime.as_deref() == Some("text/html");
+        let _ = app.asset_protocol_scope().allow_directory(parent, recursive);
     }
 }
 
@@ -12525,6 +12519,19 @@ async fn preview_local_file(
 
     allow_preview_stream(&app, &preview);
     Ok(preview)
+}
+
+/// 把本地文件所在目录加入 asset protocol scope，使 `convertFileSrc(path)`
+/// 生成的 URL 能加载。聊天 / md 预览里内嵌的本地图片先调它，否则 403。
+#[tauri::command]
+fn ensure_local_asset_scope(app: AppHandle, path: String) -> Result<(), String> {
+    let target = std::path::Path::new(&path);
+    let absolute = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    let Some(parent) = absolute.parent() else {
+        return Err("路径没有父目录".to_string());
+    };
+    let _ = app.asset_protocol_scope().allow_directory(parent, false);
+    Ok(())
 }
 
 /// Paged read of a PPTX/XLSX: only the leading slides/sheets are parsed, so a
@@ -21283,6 +21290,26 @@ mod tests {
         assert!(stream.ends_with("shot.png"), "实际: {stream}");
     }
 
+    #[test]
+    fn video_preview_exposes_stream_for_asset_scope() {
+        let dir = preview_fixture_dir("video-stream");
+        for ext in ["mp4", "webm", "mov", "avi", "mkv"] {
+            let file = dir.join(format!("视频 预览.{ext}"));
+            let fixture = std::fs::File::create(&file).unwrap();
+            fixture.set_len(617_659_737).unwrap();
+            drop(fixture);
+            let preview = preview_local_file_blocking(file.to_string_lossy().to_string(), None).unwrap();
+            assert_eq!(preview.kind, "video");
+            assert_eq!(preview.size_bytes, 617_659_737);
+            assert!(preview.base64.is_none());
+            assert!(!preview.truncated);
+            let stream = preview.stream_path.expect("视频必须提供流式路径，否则会跳过 asset scope 授权");
+            assert_eq!(stream, preview.path);
+            assert!(!stream.starts_with(r"\\?\"));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// SVG 是标记文本、体积可控，保留内联路径即可，不必多开一次 asset 请求。
     #[test]
     fn svg_preview_stays_inline() {
@@ -24703,19 +24730,15 @@ pub fn run() {
                     }
                     TRAY_MENU_QUIT_ID => {
                         // 先给前端一次同步落盘兜底的机会（见 BEFORE_QUIT_EVENT），
-                        // 等前端 invoke `ugs_quit_flush_done` 或 1.5s 超时后再退出，
-                        // 防止就地编辑的 API Key 因 keychain 异步写未完成而丢失。
-                        QUIT_FLUSH_DONE.store(false, Ordering::SeqCst);
+                        // 只在前端确认落盘后退出；固定超时会截断 keychain 写入。
                         if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
-                            let _ = window.emit(BEFORE_QUIT_EVENT, ());
-                        }
-                        let handle = (*app).clone();
-                        std::thread::spawn(move || {
-                            std::thread::sleep(std::time::Duration::from_millis(1500));
-                            if !QUIT_FLUSH_DONE.load(Ordering::SeqCst) {
-                                let _ = handle.exit(0);
+                            if let Err(error) = window.emit(BEFORE_QUIT_EVENT, ()) {
+                                eprintln!("[quitFlush] 退出前保存事件发送失败: {error}");
+                                show_main_window(app);
                             }
-                        });
+                        } else {
+                            app.exit(0);
+                        }
                     }
                     _ => {}
                 })
@@ -24733,6 +24756,10 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            message_platforms::message_platform_load,
+            message_platforms::message_platform_save,
+            message_platforms::message_platform_request,
+            message_platforms::message_platform_status,
             focus_main_window,
             ugs_quit_flush_done,
             ugs_quit_cancel,
@@ -24801,6 +24828,7 @@ pub fn run() {
             workspace_changes_cached,
             prepare_isolated_workspace,
             preview_local_file,
+            ensure_local_asset_scope,
             preview_office_document,
             read_image_thumbnail,
             file_exists,
@@ -24834,6 +24862,9 @@ pub fn run() {
             autosave::autosave_config,
             autosave::autosave_list_snapshots
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_, event| {
+            if matches!(event, tauri::RunEvent::Exit) { message_platforms::shutdown(); }
+        });
 }

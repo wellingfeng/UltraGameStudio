@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { BUILTIN_STYLE_PRESETS } from '../lib/appearance';
 
 const css = readFileSync('src/styles/global.css', 'utf8').replace(/\r\n/g, '\n');
 
@@ -26,7 +27,7 @@ describe('quiet professional workspace visual contracts', () => {
 
   it('provides a readable primary-button foreground in every theme', () => {
     const blocks = [...css.matchAll(/html\.ugs-style-([\w-]+)\s*\{([^}]+)\}/g)];
-    expect(blocks).toHaveLength(12);
+    expect(blocks).toHaveLength(BUILTIN_STYLE_PRESETS.length);
     const luminance = (hex: string) => {
       const channels = hex.slice(1).match(/../g)!.map((value) => parseInt(value, 16) / 255);
       const linear = channels.map((value) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4);

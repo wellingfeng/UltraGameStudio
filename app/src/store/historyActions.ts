@@ -1,3 +1,5 @@
+import { CLOUD_PROJECTS_ENABLED, isSupportedWorkspacePath } from '@/lib/cloudProjects';
+import { SCHEDULED_TASK_SCOPE } from '@/lib/scheduledTaskScope';
 // ARCHITECTURAL CONSTRAINT — do not break the import cycle.
 // This module is NOT a Zustand slice (no createXxxSlice(set, get) factory). It is
 // a call-time *actions* module: it imports `useStore` from './useStore' while
@@ -27,6 +29,7 @@ import {
   sessionFromSummary,
   summaryFromRecord,
   normalizeScheduledTask,
+  sessionLiveStatus,
   visibleChatSessionSummaries,
   loadSessionTree,
   beginHistoryNavigation,
@@ -69,6 +72,7 @@ import {
   withoutWorkflowGatewayDefaults,
 } from '@/lib/modelGateway/resolver';
 import { simpleBlueprint } from '@/core/defaultBlueprint';
+import { scheduleText } from '@/lib/scheduledTaskI18n';
 import { loadComposer } from '@/lib/composerStorage';
 import { maybeRunCcSwitchAutoImportOnFirstRun } from '@/lib/ccSwitchAutoImport';
 import { isTauri, prepareIsolatedWorkspace } from '@/lib/tauri';
@@ -86,6 +90,8 @@ import {
  * 对应的 `remote://` 记录，避免本地项目继续被显示成云端。
  */
 async function purgeGhostRemoteWorkspaces(): Promise<void> {
+  // 功能退役后不再清理或改写用户已有云端数据。
+  if (!CLOUD_PROJECTS_ENABLED) return;
   let removedIds: string[] = [];
   try {
     removedIds = purgeDefaultRemoteWorkspaces();
@@ -171,6 +177,70 @@ export async function setWorkflowFavoriteHistorySession(
   });
 }
 
+export async function setHistorySessionPinned(
+  sessionId: string,
+  workspaceId: string | null,
+  pinned: boolean,
+): Promise<void> {
+  const state = useStore.getState();
+  if (!workspaceId || !state.historyReady) {
+    const localSessions = workspaceId
+      ? state.sessionTree[workspaceId] ?? state.sessions
+      : state.sessions;
+    const target = localSessions.find((session) =>
+      sessionMatchesTarget(session, sessionId, workspaceId),
+    );
+    if (!target) {
+      throw new Error(`Session not found: ${sessionId}`);
+    }
+
+    useStore.setState((s) => {
+      const update = (session: Session): Session =>
+        sessionMatchesTarget(session, sessionId, workspaceId)
+          ? { ...session, pinned }
+          : session;
+      return {
+        sessions: s.sessions.map(update),
+        sessionTree: workspaceId
+          ? {
+              ...s.sessionTree,
+              [workspaceId]: (s.sessionTree[workspaceId] ?? s.sessions).map(
+                update,
+              ),
+            }
+          : s.sessionTree,
+      };
+    });
+    return;
+  }
+
+  const record = await historyStore.getSession(workspaceId, sessionId);
+  if (!record) {
+    throw new Error(`Session not found: ${workspaceId}/${sessionId}`);
+  }
+
+  await historyStore.updateSession(workspaceId, sessionId, {
+    meta: { pinned },
+    preserveUpdatedAt: true,
+  });
+
+  useStore.setState((s) => {
+    const update = (session: Session): Session =>
+      sessionMatchesTarget(session, sessionId, workspaceId)
+        ? { ...session, pinned }
+        : session;
+    return {
+      sessions: s.sessions.map(update),
+      sessionTree: s.sessionTree[workspaceId]
+        ? {
+            ...s.sessionTree,
+            [workspaceId]: s.sessionTree[workspaceId].map(update),
+          }
+        : s.sessionTree,
+    };
+  });
+}
+
 export async function setWorkflowScheduledTaskHistorySession(
   sessionId: string,
   workspaceId: string | null,
@@ -184,6 +254,15 @@ export async function setWorkflowScheduledTaskHistorySession(
   }
 
   const state = useStore.getState();
+  if (workspaceId === SCHEDULED_TASK_SCOPE && scheduledTask === null) {
+    if (sessionLiveStatus({ workspaceId, sessionId }, state)) throw new Error(scheduleText(state.locale, 'busy'));
+    if (state.historyReady) await historyStore.deleteSession(workspaceId, sessionId, true);
+    useStore.setState((s) => ({
+      sessions: s.sessions.filter((session) => !sessionMatchesTarget(session, sessionId, workspaceId)),
+      sessionTree: { ...s.sessionTree, [workspaceId]: (s.sessionTree[workspaceId] ?? []).filter((session) => session.id !== sessionId) },
+    }));
+    return;
+  }
   if (!workspaceId || !state.historyReady) {
     const localSessions = workspaceId
       ? state.sessionTree[workspaceId] ?? state.sessions
@@ -249,7 +328,7 @@ export async function setWorkflowScheduledTaskHistorySession(
 
 async function activateWorkspacePath(path: string): Promise<void> {
   const trimmed = normalizeWorkspacePath(path);
-  if (!trimmed) return;
+  if (!trimmed || !isSupportedWorkspacePath(trimmed)) return;
   const navigationVersion = beginHistoryNavigation();
   const state = useStore.getState();
   if (!state.historyReady) return;
@@ -383,12 +462,16 @@ async function initHistoryFromDisk(): Promise<void> {
     // persisted path when its config still exists.
     const persistedPath =
       rawPersistedPath &&
-      isRemoteWorkspacePath(rawPersistedPath) &&
-      !getRemoteWorkspace(remoteWorkspaceIdFromPath(rawPersistedPath))
+      (!isSupportedWorkspacePath(rawPersistedPath) ||
+        (isRemoteWorkspacePath(rawPersistedPath) &&
+          !getRemoteWorkspace(remoteWorkspaceIdFromPath(rawPersistedPath))))
         ? undefined
         : rawPersistedPath;
-    const configuredWorkspace = config.lastActiveWorkspaceId
+    const configuredCandidate = config.lastActiveWorkspaceId
       ? await historyStore.getWorkspace(config.lastActiveWorkspaceId)
+      : null;
+    const configuredWorkspace = configuredCandidate && isSupportedWorkspacePath(configuredCandidate.path)
+      ? configuredCandidate
       : null;
     // Prefer `config.lastActiveWorkspaceId` — it is the authoritative record of
     // the last workspace the user navigated to (written to disk atomically by
@@ -487,7 +570,7 @@ async function initHistoryFromDisk(): Promise<void> {
         workflow,
         {
           ...s.composer,
-          workspace: workspace.path || s.composer.workspace,
+          workspace: workspace.path || (isSupportedWorkspacePath(s.composer.workspace) ? s.composer.workspace : ''),
           workspaceFolders: workspaceFoldersFromMetadata(workspace.metadata),
         },
         historicalGatewaySelection,
@@ -590,7 +673,7 @@ export async function ensureSessionStartupWorkspace(): Promise<void> {
 // (deduped, capped). Empty paths are ignored.
 export function setWorkspace(path: string): void {
   const trimmed = normalizeWorkspacePath(path);
-  if (!trimmed) return;
+  if (!trimmed || !isSupportedWorkspacePath(trimmed)) return;
   if (isActiveAiEditingSession(useStore.getState())) return;
   useStore.setState((state) => {
     const composer = normalizeComposerSettings({
@@ -624,7 +707,7 @@ export function setWorkspace(path: string): void {
 // cwd; later folders are passed to CLI adapters as extra allowed directories.
 export function addWorkspaceFolder(path: string): void {
   const trimmed = normalizeWorkspacePath(path);
-  if (!trimmed) return;
+  if (!trimmed || !isSupportedWorkspacePath(trimmed)) return;
   const current = useStore.getState();
   if (isActiveAiEditingSession(current)) return;
   const shouldActivate = !normalizeWorkspacePath(current.composer.workspace);

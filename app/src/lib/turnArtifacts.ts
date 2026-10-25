@@ -11,7 +11,7 @@ export interface TurnArtifact {
 }
 
 const parser = unified().use(remarkParse);
-const DELIVERABLE = /\.(?:docx?|pdf|rtf|odt|xlsx?|pptx?|html?|md|markdown|txt|csv|png|jpe?g|webp|gif|svg|mp4|webm|mov|mp3|wav|zip|glb|gltf)$/i;
+const DELIVERABLE = /\.(?:docx?|pdf|rtf|odt|xlsx?|pptx?|html?|md|markdown|txt|csv|tsv|json|png|jpe?g|webp|gif|svg|apng|jfif|avif|bmp|ico|mp4|webm|mov|m4v|mp3|wav|ogg|flac|aac|m4a|zip|glb|gltf|obj|stl|fbx|bvh|asf|amc|ply|usdz|blend)$/i;
 interface MarkdownNode {
   type: string;
   value?: string;
@@ -37,7 +37,7 @@ export function collectTurnArtifacts(text: string, cwd?: string): TurnArtifact[]
   const add = (raw: string, label: string, explicit: boolean) => {
     const ref = parseFileRef(raw, { allowSpaces: true });
     if (!ref || ref.startLine || ref.endLine || ref.col) return;
-    const outputPath = /(?:^|[\\/])(?:\.ultragamestudio[\\/](?:docs|temp|assets|model-assets)|reports|outputs|artifacts)[\\/]/i.test(ref.path);
+    const outputPath = /(?:^|[\\/])(?:\.ultragamestudio[\\/](?:docs|temp|assets|model-assets|sprites?|clipboard-images|session-captures)|reports|outputs|artifacts)[\\/]/i.test(ref.path);
     if (!DELIVERABLE.test(ref.path) && !(explicit && /(?:下载|生成|脚本|download|generated|script)/i.test(label))) return;
     if (!explicit && !outputPath) return;
     const resolved = displayFileRefPath(ref, cwd).replace(/\\/g, '/');

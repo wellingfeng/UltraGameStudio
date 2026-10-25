@@ -78,3 +78,15 @@ await build({
 });
 
 console.log(`Built cli/dist/ugs.mjs (build time ${__UGS_BUILD_TIME__})`);
+
+await build({
+  entryPoints: [join(here, 'messaging', 'main.ts')],
+  outfile: join(distDir, 'ugs-messaging.mjs'),
+  bundle: true,
+  platform: 'node',
+  format: 'esm',
+  target: 'node20',
+  packages: 'bundle',
+  banner: { js: "import { createRequire as __ugsCreateRequire } from 'node:module'; import { fileURLToPath as __ugsFileURLToPath } from 'node:url'; import { dirname as __ugsDirname } from 'node:path'; const require = __ugsCreateRequire(import.meta.url); const __filename = __ugsFileURLToPath(import.meta.url); const __dirname = __ugsDirname(__filename);" },
+  logLevel: 'info',
+});

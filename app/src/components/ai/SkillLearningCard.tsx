@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Locale } from '@/lib/i18n';
 import type { SkillMutationResult, SkillOrigin, SkillReviewState } from '@/runtime/skills/types';
+import { localizeSkillReviewText } from './lib/skillReviewText';
+import { isSkillReviewVisible } from './lib/skillReviewVisibility';
 
 export interface SkillLearningCardProps {
   state: SkillReviewState;
@@ -34,6 +36,7 @@ function sameOrigin(left: SkillOrigin, right: SkillOrigin): boolean {
 }
 
 export default function SkillLearningCard(props: SkillLearningCardProps) {
+  if (!isSkillReviewVisible(props.state)) return null;
   const origin = props.state.origin;
   const identity = JSON.stringify([origin.hostId, origin.workspaceId, origin.sessionId, origin.turnId, origin.runId, origin.cwd, props.state.result?.batchId]);
   return <SkillLearningCardContent key={identity} {...props} />;
@@ -80,6 +83,7 @@ function SkillLearningCardContent({ state, locale = 'zh-CN', onApprove, onReject
     : status === 'applied' && !provedApplied ? (zh ? '未确认应用' : 'Application unconfirmed') : labels[status][zh ? 0 : 1];
   const error = originMismatch ? (zh ? '结果来源不匹配，未更新此卡片' : 'Result origin mismatch; this card was not updated')
     : actionError || result?.error || state.error;
+  const budgetFailure = (status === 'cancelled' || status === 'failed') && /SKILL_REVIEW_BUDGET_(?:TOKENS|TIME|ROUNDS)/.test(error ?? '');
   const runAction = async (action: 'approve' | 'reject' | 'rollback' | 'retry') => {
     const handler = action === 'approve' ? onApprove : action === 'reject' ? onReject : action === 'retry' ? onRetry : onRollback;
     if (!handler || !result || inFlight.current) return;
@@ -109,14 +113,15 @@ function SkillLearningCardContent({ state, locale = 'zh-CN', onApprove, onReject
       if (mounted.current) setBusy(null);
     }
   };
+  if (status === 'noop') return null;
   return (
     <article className="min-w-0 space-y-2 rounded-lg border border-border bg-panel p-3 text-xs text-fg">
-      <p role="status" className="font-semibold">{label}</p>
+      <p role="status" className="font-semibold">{budgetFailure ? (zh ? '复盘失败' : 'Review failed') : label}</p>
       {phase && state.detail && <p className="text-fg-dim">{state.detail}</p>}
       {phase && state.queuedAt !== undefined && <p className="text-fg-faint tabular-nums">
         {zh ? '已等待' : 'Elapsed'} {Math.max(0, Math.floor((now - state.queuedAt) / 1000))} {zh ? '秒' : 's'}
       </p>}
-      {result && <p className="whitespace-pre-wrap break-words leading-relaxed">{result.lesson}</p>}
+      {result && <p className="whitespace-pre-wrap break-words leading-relaxed">{localizeSkillReviewText(result.lesson, zh)}</p>}
       <p className="break-words text-[11px] text-fg-faint">{state.origin.workspaceId}</p>
       {result?.revision && <p className="break-all font-mono text-[11px] text-fg-faint">{result.revision}</p>}
       {result?.usage && (
@@ -127,10 +132,10 @@ function SkillLearningCardContent({ state, locale = 'zh-CN', onApprove, onReject
           {' · '}{result.usage.calls} {zh ? '次模型调用' : 'model calls'}
         </p>
       )}
-      {error && <p role="alert" className="whitespace-pre-wrap break-words text-status-error">{error}</p>}
+      {error && <p role="alert" className="whitespace-pre-wrap break-words text-status-error">{localizeSkillReviewText(error, zh)}</p>}
       {result && result.riskReasons.length > 0 && (
         <ul className="space-y-1 text-fg-dim">
-          {result.riskReasons.map((reason, index) => <li key={index} className="break-words">{reason}</li>)}
+          {result.riskReasons.map((reason, index) => <li key={index} className="break-words">{localizeSkillReviewText(reason, zh)}</li>)}
         </ul>
       )}
       {result && result.changes.length > 0 && (

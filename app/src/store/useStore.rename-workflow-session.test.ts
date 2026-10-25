@@ -257,3 +257,32 @@ describe('renameWorkflowSession', () => {
     ).toBe(true);
   });
 });
+
+describe('setSessionPinned', () => {
+  it.each([false, true])('persists pin without changing activity time or live summaries (workflow=%s)', async (isWorkflow) => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({
+      workspaceId: workspace.id, isWorkflow, title: '置顶持久化',
+      ...(isWorkflow ? { workflow: defaultBlueprint('置顶持久化') } : {}),
+    });
+    const session: Session = {
+      id: record.id, workspaceId: workspace.id, title: record.title,
+      createdAt: record.createdAt, updatedAt: record.updatedAt,
+      isWorkflow, messageCount: 7, preview: '正在生成的新内容',
+    };
+    useStore.setState({ historyReady: true, sessions: [session], sessionTree: { [workspace.id]: [session] } });
+    await useStore.getState().setSessionPinned(record.id, workspace.id, true);
+    expect((await historyStore.getSession(workspace.id, record.id))?.meta?.pinned).toBe(true);
+    expect((await historyStore.listSessions(workspace.id))[0]?.pinned).toBe(true);
+    expect(useStore.getState().sessions[0]).toEqual({ ...session, pinned: true });
+    expect(useStore.getState().sessionTree[workspace.id][0].pinned).toBe(true);
+    await useStore.getState().setSessionPinned(record.id, workspace.id, false);
+    const restored = await historyStore.getSession(workspace.id, record.id);
+    expect(restored?.meta?.pinned).toBe(false);
+    expect(restored?.updatedAt).toBe(record.updatedAt);
+    expect((await historyStore.listSessions(workspace.id))[0]?.pinned).toBeUndefined();
+    expect(useStore.getState().sessions[0].pinned).toBe(false);
+  });
+});

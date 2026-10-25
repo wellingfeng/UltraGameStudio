@@ -28,6 +28,7 @@ import {
   saveRemoteWorkspace,
 } from "@/lib/remoteWorkspace";
 import { upsertProviders } from "@/lib/apiConfig";
+import { CLOUD_PROJECTS_ENABLED } from "@/lib/cloudProjects";
 
 const slashCatalogMock = vi.hoisted(() => ({
   entries: [
@@ -1926,7 +1927,7 @@ describe("AIDock slash suggestions", () => {
     }
   });
 
-  it("scopes CLI slash commands to the remote project adapter", async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)("scopes CLI slash commands to the remote project adapter", async () => {
     resetStore("claude-code");
     const remotePath = remoteWorkspacePath("rw_slash_codex");
     saveRemoteWorkspace({

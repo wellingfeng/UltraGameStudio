@@ -1,8 +1,9 @@
 import type { TranslationKey } from '@/lib/i18n';
 
-export const DEFAULT_STYLE_PRESET_ID = 'cherry-dark' as const;
+export const DEFAULT_STYLE_PRESET_ID = 'hermes-dark' as const;
 export const BUILTIN_STYLE_PRESETS = [
   DEFAULT_STYLE_PRESET_ID,
+  'cherry-dark',
   'pencil',
   'cherry-light',
   'midnight',
@@ -89,6 +90,13 @@ export interface FontFamilyDefinition {
 
 export const STYLE_PRESETS: Record<BuiltinStylePresetId, StylePresetDefinition> =
   {
+    'hermes-dark': {
+      id: 'hermes-dark',
+      labelKey: 'settings.appearancePresetHermesDark',
+      descriptionKey: 'settings.appearancePresetHermesDarkDescription',
+      colorScheme: 'dark',
+      swatches: ['#0f0f0f', '#0a0a0a', '#191919', '#d4d4d4', '#89b8a4'],
+    },
     pencil: {
       id: 'pencil',
       labelKey: 'settings.appearancePresetPencil',

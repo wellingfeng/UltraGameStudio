@@ -122,10 +122,11 @@ describe('Sidebar quiet workspace', () => {
     const source = readFileSync('src/panels/Sidebar.tsx', 'utf8');
     expect(/text-\[(?:9|10)px\]/.test(source)).toBe(false);
     await renderSidebar();
-    expect(container.querySelector('[role="tab"]')?.className).toContain('text-[13px]');
+    expect(container.querySelector('[role="tab"]')).toBeNull();
     expect(container.querySelector('input[type="search"]')?.className).toContain('text-[13px]');
-    expect(button(session.title).textContent).toContain(session.preview);
-    const metadata = Array.from(container.querySelectorAll('span')).find((item) => item.textContent === session.preview)?.parentElement;
+    expect(button(session.title).textContent).not.toContain(session.preview);
+    const metadata = button(session.title).querySelector<HTMLElement>('.ugs-sidebar-meta');
+    expect(metadata?.title).toContain(session.preview);
     expect(metadata?.className).toContain('text-[11px]');
     expect(metadata?.className).not.toContain('font-mono');
   });
@@ -209,7 +210,7 @@ describe('Sidebar live session treatment', () => {
   });
 
   it.each([
-    ['running', '运行中'],
+    ['running', '正在运行，进度未知'],
     ['thinking', 'AI 思考中'],
     ['waiting', '等待输入'],
     ['failed', '已失败'],
@@ -226,7 +227,8 @@ describe('Sidebar live session treatment', () => {
     }
     await renderSidebar();
     const metadata = button(session.title).querySelector<HTMLElement>('.ugs-sidebar-meta')!;
-    expect(metadata.textContent).toContain(label);
+    expect(metadata.getAttribute('title')).toContain(label);
+    expect(button(session.title).querySelector('[data-status]')?.getAttribute('aria-label')).toBe(label);
     expect(metadata.textContent).not.toContain(session.preview);
     expect(metadata.getAttribute('title')).toContain(session.preview);
     expect(button(session.title).classList.contains('ugs-sidebar-session--live')).toBe(tone === 'running' || tone === 'thinking');
@@ -237,15 +239,15 @@ describe('Sidebar live session treatment', () => {
     state.runningSessionProgress = { [`${workspace.id}::${session.id}`]: { percent: 42 } };
     await renderSidebar();
     const metadata = button(session.title).querySelector<HTMLElement>('.ugs-sidebar-meta')!;
-    expect(metadata.textContent).toContain('运行中 · 42%');
+    expect(metadata.textContent).toContain('42%');
     expect(metadata.getAttribute('title')).toContain('正在运行，进度 42%');
     state.runningSessionProgress = {};
     await renderSidebar();
-    expect(metadata.textContent).toContain('运行中');
+    expect(metadata.getAttribute('title')).toContain('正在运行');
     expect(metadata.textContent).not.toContain('%');
   });
 
-  it.each(['grouped', 'flat'] as const)('compacts legacy timing in the %s list without discarding its source', async (layout) => {
+  it.each(['grouped', 'flat'] as const)('keeps legacy timing in the %s tooltip without a second line', async (layout) => {
     const preview = '⏱ 13:49:59 → 13:52:19 · 耗时 2m 20s\n完成阴影根因分析';
     const completed = { ...session, preview, runStatus: 'success' } as Session;
     state.sessions = [completed];
@@ -259,7 +261,7 @@ describe('Sidebar live session treatment', () => {
       await act(async () => root!.render(<Sidebar />));
     } else await renderSidebar();
     const metadata = button(session.title).querySelector<HTMLElement>('.ugs-sidebar-meta')!;
-    expect(metadata.textContent).toContain('耗时 2m 20s');
+    expect(metadata.textContent).not.toContain('耗时');
     expect(metadata.textContent).not.toContain('13:49:59 → 13:52:19');
     expect(metadata.getAttribute('title')).toContain(preview);
     expect(button(session.title).querySelector('[title="检查工作区"]')).not.toBeNull();
@@ -273,7 +275,7 @@ describe('Sidebar live session treatment', () => {
     const row = button(session.title);
     expect(row.classList.contains('ugs-sidebar-session--live')).toBe(false);
     expect(row.querySelector('[data-status="waiting"]')).not.toBeNull();
-    expect(row.querySelector('.ugs-sidebar-meta')?.textContent).toContain('等待输入');
+    expect(row.querySelector('.ugs-sidebar-meta')?.getAttribute('title')).toContain('等待输入');
     state.waitingInputSessions = [];
     await renderSidebar();
     expect(row.classList.contains('ugs-sidebar-session--live')).toBe(true);

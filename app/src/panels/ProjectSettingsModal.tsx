@@ -1,3 +1,4 @@
+import { isSupportedWorkspacePath } from '@/lib/cloudProjects';
 import {
   useCallback,
   useEffect,
@@ -1563,7 +1564,7 @@ function UnityMcpQuickSetup({
   );
 }
 
-export default function ProjectSettingsModal({
+function ProjectSettingsModalContent({
   workspace,
   onClose,
   onWorkspaceUpdated,
@@ -5520,4 +5521,10 @@ export default function ProjectSettingsModal({
       {translateDialogNode}
     </div>
   );
+}
+
+// 云端项目已退役：旧记录不能打开设置或触发环境探测。
+export default function ProjectSettingsModal(props: ProjectSettingsModalProps) {
+  if (!isSupportedWorkspacePath(props.workspace.path)) return null;
+  return <ProjectSettingsModalContent {...props} />;
 }

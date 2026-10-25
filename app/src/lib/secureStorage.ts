@@ -317,7 +317,9 @@ function stripProviderSecrets(providerKeys: Record<string, string>): {
       const id = typeof record.id === "string" ? record.id : "";
       const apiKey =
         typeof record.apiKey === "string" ? record.apiKey.trim() : "";
-      if (id && apiKey) providerKeys[id] = apiKey;
+      // The keychain is durable; a leftover quit mirror may be older than a
+      // successfully saved edit. Migrate missing keys only, never roll it back.
+      if (id && apiKey && !providerKeys[id]) providerKeys[id] = apiKey;
       if ("apiKey" in record) {
         changed = true;
         const rest = { ...record };
@@ -370,7 +372,8 @@ function stripGatewaySecrets(gatewayKeys: Record<string, string>): {
           ? channelRecord.apiKey.trim()
           : "";
       if (providerId && apiKey) {
-        gatewayKeys[gatewayChannelSecretKey(providerId, channelId)] = apiKey;
+        const key = gatewayChannelSecretKey(providerId, channelId);
+        if (!gatewayKeys[key]) gatewayKeys[key] = apiKey;
       }
       if ("apiKey" in channelRecord) {
         changed = true;
@@ -416,18 +419,24 @@ async function migrateLocalStorageSecrets(): Promise<void> {
   }
   const proxyToken = (rawGet(FREE_PROXY_TOKEN_STORAGE) ?? "").trim();
 
-  await persistSecretNow(
-    PROVIDER_API_KEYS_SECRET,
-    serializeRecord(providerKeys),
-  );
-  await persistSecretNow(
-    GATEWAY_CHANNEL_API_KEYS_SECRET,
-    serializeRecord(gatewayKeys),
-  );
-  await persistSecretNow(
-    FREE_CHANNEL_API_KEYS_SECRET,
-    serializeRecord(freeChannelKeys),
-  );
+  // Persist back ONLY when the migration actually merged/stripped something.
+  // The previous version rewrote all three records on every boot; for chunked
+  // (oversized) records each rewrite re-shards and then deletes the old
+  // shards, so every boot opened a fresh crash window in which the manifest
+  // could end up pointing at deleted shards — after which the next save of an
+  // unrelated provider could truncate the whole record.
+  const providerSerialized = serializeRecord(providerKeys);
+  if (providerSerialized !== serializeRecord(readSecureRecord(PROVIDER_API_KEYS_SECRET))) {
+    await persistSecretNow(PROVIDER_API_KEYS_SECRET, providerSerialized);
+  }
+  const gatewaySerialized = serializeRecord(gatewayKeys);
+  if (gatewaySerialized !== serializeRecord(readSecureRecord(GATEWAY_CHANNEL_API_KEYS_SECRET))) {
+    await persistSecretNow(GATEWAY_CHANNEL_API_KEYS_SECRET, gatewaySerialized);
+  }
+  const freeChannelSerialized = serializeRecord(freeChannelKeys);
+  if (freeChannelSerialized !== serializeRecord(readSecureRecord(FREE_CHANNEL_API_KEYS_SECRET))) {
+    await persistSecretNow(FREE_CHANNEL_API_KEYS_SECRET, freeChannelSerialized);
+  }
   if (proxyToken) await persistSecretNow(FREE_PROXY_TOKEN_SECRET, proxyToken);
 
   if (providerStorage.value !== null)

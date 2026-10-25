@@ -49,7 +49,7 @@ export function resetQuitFlushForTests(): void {
  * - Tauri 宿主：监听托盘右键菜单「退出」发出的 `ugs:before-quit` 事件，先同步
  *   落盘 localStorage 兜底，再尽力冲刷 OS keychain、生图/音频/视频等生成类
  *   设置磁盘写入，以及远程 project profile 写入，完成后通知宿主（invoke
- *   `ugs_quit_flush_done`）放行退出；宿主侧另有 1.5s 超时兜底，不会卡死退出。
+ *   `ugs_quit_flush_done`）放行退出；密钥写入失败时取消退出并提示重试。
  * 浏览器 / dev 构建下自动跳过 Tauri 部分，beforeunload 兜底始终生效。
  */
 export async function installQuitFlushHandler(): Promise<void> {
@@ -94,10 +94,12 @@ export async function installQuitFlushHandler(): Promise<void> {
 
         runQuitFlushTasks();
         flushSecretsToLocalStorageFallback();
-        void Promise.all([
-          flushSecureStorage().catch(() => {
-            /* keychain write failed — localStorage fallback above still applies */
+        try {
+          await Promise.all([
+          import('@/lib/downloadRegistry').then(({ flushAssetIndex }) => flushAssetIndex()).catch(error => {
+            console.error('[asset-index] 退出前资产索引写入失败', error);
           }),
+          flushSecureStorage(),
           flushGenerationSettings().catch(() => {
             /* disk write failed — localStorage mirror above still applies */
           }),
@@ -124,13 +126,21 @@ export async function installQuitFlushHandler(): Promise<void> {
             .catch(() => {
               /* draft flush failed — best-effort only */
             }),
-        ]).finally(() => {
-          void import("@tauri-apps/api/core")
-            .then(({ invoke }) => invoke("ugs_quit_flush_done"))
-            .catch(() => {
-              /* host already gone */
-            });
-        });
+          ]);
+          const { invoke } = await import("@tauri-apps/api/core");
+          await invoke("ugs_quit_flush_done");
+        } catch (error) {
+          console.error("[quitFlush] secret persistence failed; quit cancelled", error);
+          try {
+            const { invoke } = await import("@tauri-apps/api/core");
+            await invoke("ugs_quit_cancel");
+          } catch (cancelError) {
+            console.warn("[quitFlush] failed to notify host about quit cancellation", cancelError);
+          }
+          if (hasWindow()) {
+            window.alert("渠道密钥尚未保存成功，已取消退出。请重新保存密钥后再退出。");
+          }
+        }
       })();
     };
     await listen("ugs:before-quit", beforeQuitListener);

@@ -123,6 +123,37 @@ describe('DownloadsModal conversation jumps', () => {
     __resetAssetsForTest();
   });
 
+  it('renders artifacts as a main page without a modal backdrop', async () => {
+    const view = await renderModal();
+    try {
+      expect(view.container.querySelector('[data-ugs-artifacts]')).not.toBeNull();
+      expect(view.container.querySelector('[role="dialog"]')).toBeNull();
+      expect(view.container.querySelector('[aria-modal]')).toBeNull();
+      expect(view.container.querySelector('[aria-label="返回对话"]')).not.toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  });
+
+  it('renders answer links as a three-column list and opens details inside the main surface', async () => {
+    mockState.messages = [{ id: 'm_link', role: 'assistant', text: '[官方参考](https://example.com/api)', createdAt: 100 }];
+    const view = await renderModal();
+    try {
+      const category = Array.from(view.container.querySelectorAll('button')).find(button => button.textContent?.startsWith('链接'));
+      await act(async () => { category?.click(); });
+      expect(view.container.querySelector('.artifact-table-head')?.textContent).toBe('链接标题URL会话');
+      expect(view.container.querySelector('.artifact-location-cell')?.textContent).toBe('https://example.com/api');
+      const title = view.container.querySelector<HTMLButtonElement>('[aria-label="查看产物：官方参考"]');
+      await act(async () => { title?.click(); });
+      expect(view.container.querySelector('[role="region"][aria-label="产物详情"]')).not.toBeNull();
+      expect(view.container.querySelector('[role="dialog"]')).toBeNull();
+      expect(storeMocks.selectSession).not.toHaveBeenCalled();
+      await act(async () => { view.container.querySelector<HTMLButtonElement>('[aria-label="关闭详情"]')?.click(); });
+      expect(view.container.querySelector('[aria-label="产物详情"][role="region"]')).toBeNull();
+      expect(view.container.querySelector('.artifact-table')).not.toBeNull();
+    } finally { await view.cleanup(); }
+  });
+
   it('links an existing clipboard image from a user message before jumping', async () => {
     const path =
       'E:\\UltraGameStudio\\.ultragamestudio\\clipboard-images\\pasted-1.png';
@@ -171,6 +202,8 @@ describe('DownloadsModal conversation jumps', () => {
     const view = await renderModal();
 
     try {
+      expect(view.container.querySelector('[role="button"]')).toBeNull();
+      await act(async () => { Array.from(view.container.querySelectorAll('button')).find(button => button.textContent?.startsWith('输入素材'))?.click(); });
       const row = view.container.querySelector('[role="button"]');
       expect(row?.textContent).toContain('pasted-1.png');
 
@@ -228,6 +261,8 @@ describe('DownloadsModal conversation jumps', () => {
     const view = await renderModal();
 
     try {
+      expect(view.container.querySelector('[role="button"]')).toBeNull();
+      await act(async () => { Array.from(view.container.querySelectorAll('button')).find(button => button.textContent?.startsWith('输入素材'))?.click(); });
       const row = view.container.querySelector('[role="button"]');
       expect(row?.textContent).toContain('pasted-current.png');
 
@@ -281,6 +316,7 @@ describe('DownloadsModal conversation jumps', () => {
         sizeBytes: 2,
         createdAtMs: 1_010,
         modifiedAtMs: 1_030,
+        workspaceId: 'w_1',
       },
     ]);
 

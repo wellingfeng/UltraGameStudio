@@ -17,6 +17,8 @@
  * "workspace" as a string path while still distinguishing remote ones.
  */
 
+import { CLOUD_PROJECTS_ENABLED, assertCloudProjectsEnabled } from '@/lib/cloudProjects';
+
 import {
   listProviders,
   upsertProviders,
@@ -359,6 +361,8 @@ function readStoredRunnerServerUrl(): string {
 
 /** Read all configured remote workspaces (non-secret data only). */
 export function loadRemoteWorkspaces(): RemoteWorkspaceConfig[] {
+  // 云端项目已退役：不再读取旧配置，磁盘/localStorage 数据保留。
+  if (!CLOUD_PROJECTS_ENABLED) return [];
   if (!hasStorage()) return [];
   try {
     const raw = window.localStorage.getItem(REMOTE_WORKSPACE_STORAGE_KEY);
@@ -409,6 +413,7 @@ export function saveRemoteWorkspace(
   },
   secrets?: Partial<RemoteWorkspaceSecrets>,
 ): RemoteWorkspaceConfig {
+  assertCloudProjectsEnabled();
   const list = loadRemoteWorkspaces();
   const now = Date.now();
   const existing = input.id ? list.find((w) => w.id === input.id) : undefined;
@@ -734,6 +739,11 @@ function clearRemoteSecrets(id: string): void {
 // ---------- Runner client SDK ----------
 
 export class RunnerClient extends ProtocolRunnerClient {
+  // 云端项目已退役：阻断所有旧调用路径，禁止向 Runner 发起请求。
+  constructor(serverUrl: string, token: string) {
+    assertCloudProjectsEnabled();
+    super(serverUrl, token);
+  }
   /** Build a client straight from a saved workspace id. */
   static fromWorkspace(id: string): RunnerClient | null {
     const config = getRemoteWorkspace(id);

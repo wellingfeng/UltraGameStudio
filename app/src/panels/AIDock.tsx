@@ -10,6 +10,10 @@ import {
   type DragEvent as ReactDragEvent,
   type ReactNode,
 } from "react";
+import { FilePreviewTabs, MainFilePreview } from "@/components/ai/FilePreviewTabs";
+import { filePreviewScope, useFilePreviewTabs } from "@/store/filePreviewTabs";
+import { TitleBarContent } from "@/components/TitleBar";
+import SidebarToggleButton from "@/components/SidebarToggleButton";
 import {
   ArrowDownToLine,
   ArrowUp,
@@ -152,6 +156,7 @@ import {
   parseThinkingLevelOverrides,
   thinkingDefault,
   thinkingLevelOptions,
+  thinkingLevelLabelKey,
 } from "@/lib/thinkingLevels";
 import {
   LANGUAGE_SELECT_OPTIONS,
@@ -162,6 +167,7 @@ import {
 import type { Message } from "@/store/types";
 import type { SkillReviewState } from "@/runtime/skills/types";
 import SkillLearningCard from "@/components/ai/SkillLearningCard";
+import { isSkillReviewVisible } from "@/components/ai/lib/skillReviewVisibility";
 import {
   buildSlashSuggestions,
   buildGameSkillSuggestions,
@@ -627,8 +633,13 @@ function permissionRank(id: string): number {
   return 2; // 完全访问 — 最高，置于最右
 }
 
-function assistantHeaderLabel(message: Message): string {
-  return message.routeLabel?.trim() || routeLabelFromText(message.text);
+function assistantHeaderLabel(message: Message, locale: Locale): string {
+  const route = message.routeLabel?.trim() || routeLabelFromText(message.text);
+  const level = message.thinkingLevel?.trim();
+  if (!level) return route;
+  const key = thinkingLevelLabelKey(level);
+  const label = key ? t(locale, key) : level;
+  return [route, `${t(locale, "dock.thinkingTitle")}：${label}`].filter(Boolean).join(" · ");
 }
 
 function translatedAnswerTitle(target: Locale, locale: Locale): string {
@@ -2182,6 +2193,12 @@ export default function AIDock({
     [locale, shortcutSettings],
   );
   const [dropActive, setDropActive] = useState(false);
+  const previewScope = filePreviewScope(composer.workspace);
+  const activePreviewId = useFilePreviewTabs((state) => state.activeByScope[previewScope]);
+  const showMainPreview = isChat && Boolean(activePreviewId);
+  useEffect(() => {
+    useFilePreviewTabs.getState().select(previewScope, null);
+  }, [activeSessionId, previewScope]);
   const [filePreviewRef, setFilePreviewRef] = useState<FileRef | null>(null);
   const [filePreviewDrawerWidth, setFilePreviewDrawerWidth] = useState(0);
   const [chatVisibleRightInset, setChatVisibleRightInset] = useState(0);
@@ -4508,15 +4525,18 @@ export default function AIDock({
   }, [messages]);
   const renderFullMessageList =
     forceEagerCapture || normalizedSearch.length > 0;
-  // Display-only chronological ordering. The store keeps messages merged by
-  // turn (an in-flight reply lands right after its own prompt, even if a later
-  // user message was appended first), so the raw array can be out of
-  // `createdAt` order. Sort a copy here; the store array and the LLM-facing
-  // history are untouched. Sort is skipped when the array is already monotonic
-  // so steady-state rendering stays O(n). Interjected ("插话") messages are the
-  // one exception: they keep their store position (just above the reply they
-  // interrupted) instead of being re-sorted by their send-time createdAt.
-  const displayMessages = useMemo(() => orderDisplayMessages(messages), [messages]);
+  // Display-only ordering: chronological replies, interjections above their
+  // target reply, and pending prompts at the tail in FIFO order. Queue changes
+  // must rerender even when messages are unchanged. Store/history stay intact.
+  const displayMessages = useMemo(() => {
+    const visible = messages.filter((message) =>
+      !message.skillLearning || isSkillReviewVisible(message.skillLearning) || message.text.trim().length > 0,
+    );
+    return orderDisplayMessages(
+      visible.length === messages.length ? messages : visible,
+      queuedChatMessageIds,
+    );
+  }, [messages, queuedChatMessageIds]);
   const taskProgress = useMemo(() => collectChatTaskProgress(messages.filter(
     (message) => !queuedChatMessageIds.includes(message.id),
   )), [messages, queuedChatMessageIds]);
@@ -7908,41 +7928,32 @@ export default function AIDock({
   }, []);
   const conversationActions = isChat && (
     <>
-      <button type="button" data-ugs-file-panel-toggle
-        onClick={requestProjectRightPanelToggle}
-        title={locale === "zh-CN" ? "文件面板" : "File panel"}
-        aria-label={locale === "zh-CN" ? "文件面板" : "File panel"}
-        aria-expanded={projectFilePanelOpen} aria-controls="ugs-project-file-panel"
-        className={headerActionButtonClass + " hidden lg:flex"}>
-        <Folder size={14} />
-        <span>{locale === "zh-CN" ? "文件" : "Files"}</span>
-      </button>
       <button
         type="button"
         onClick={() => void handleCopyConversation()}
         title={t(locale, "dock.copyConversation")}
+        aria-label={t(locale, "dock.copyConversation")}
         className={headerActionButtonClass}
       >
-        <Copy size={13} />
-        <span>{t(locale, "dock.copyConversation")}</span>
+        <Copy size={14} strokeWidth={1.5} />
       </button>
       <button
         type="button"
         onClick={() => void handleExportConversation()}
         title={t(locale, "dock.exportConversation")}
+        aria-label={t(locale, "dock.exportConversation")}
         className={headerActionButtonClass}
       >
-        <ArrowDownToLine size={13} />
-        <span>{t(locale, "dock.exportConversation")}</span>
+        <ArrowDownToLine size={14} strokeWidth={1.5} />
       </button>
       <button
         type="button"
         onClick={() => newSession()}
         title={t(locale, "dock.newSession")}
+        aria-label={t(locale, "dock.newSession")}
         className={headerActionButtonClass}
       >
-        <Plus size={13} />
-        <span>{t(locale, "dock.newSession")}</span>
+        <Plus size={14} strokeWidth={1.5} />
       </button>
     </>
   );
@@ -7964,7 +7975,7 @@ export default function AIDock({
           : "border-border bg-panel-2 text-fg-dim hover:border-accent hover:text-fg")
       }
     >
-      <Search size={14} />
+      <Search size={14} strokeWidth={1.5} />
     </button>
   );
   const composerToolButtonClass =
@@ -8220,7 +8231,7 @@ export default function AIDock({
     <div
       ref={dockRef}
       className={
-        "relative " +
+        "relative " + (showMainPreview ? "ugs-main-preview-active " : "") +
         (isChat
           ? "flex h-full min-h-0 flex-col bg-bg" +
             (centerInput ? " justify-center" : "")
@@ -8252,161 +8263,169 @@ export default function AIDock({
           (centerInput ? "shrink-0" : "flex-1")
         }
       >
-        <header
-          className={
-            "ugs-ai-return-header flex flex-wrap items-center gap-2 border-b border-border-soft px-3 py-2 " +
-            (centerInput ? "absolute left-0 top-0 z-20 bg-bg/95" : "relative")
-          }
-          style={
-            centerInput
-              ? {
-                  right: "var(--ugs-chat-visible-right-inset)",
-                }
-              : undefined
-          }
-        >
-          {isChat ? (
-            chatTitleEditing ? (
-              <input
-                ref={chatTitleInputRef}
-                type="text"
-                aria-label={t(locale, "sidebar.renameSession")}
-                data-testid="chat-title-input"
-                value={chatTitleDraft}
-                maxLength={MAX_CHAT_TITLE_LENGTH}
-                disabled={chatTitleSaving}
-                onChange={(e) => setChatTitleDraft(e.target.value)}
-                onFocus={(e) => e.currentTarget.select()}
-                onBlur={() => {
-                  if (skipNextTitleBlurCommitRef.current) {
-                    skipNextTitleBlurCommitRef.current = false;
-                    return;
+        <TitleBarContent enabled={isChat}>
+          <header
+            data-tauri-drag-region={isChat || undefined}
+            className={
+              "ugs-ai-return-header flex flex-wrap items-center gap-2 border-b border-border-soft px-3 py-2 " +
+              (centerInput ? "absolute left-0 top-0 z-20 bg-bg/95" : "relative")
+            }
+            style={
+              centerInput
+                ? {
+                    right: "var(--ugs-chat-visible-right-inset)",
                   }
-                  void commitChatTitleEdit();
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    void commitChatTitleEdit();
-                  } else if (e.key === "Escape") {
-                    e.preventDefault();
-                    cancelChatTitleEdit();
-                  }
-                }}
-                className="min-w-0 flex-1 rounded-md border border-accent bg-bg px-2 py-1 text-sm font-medium text-fg outline-none transition-colors disabled:opacity-70"
-              />
-            ) : activeSessionId ? (
-              <button
-                type="button"
-                onClick={beginChatTitleEdit}
-                className="min-w-0 flex-1 truncate rounded-sm text-left text-sm font-medium text-fg transition-colors hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
-                title={chatTitle}
-                data-testid="chat-title-display"
-              >
-                {chatTitle || t(locale, "dock.aiReturn")}
-              </button>
-            ) : (
-              <span
-                className="min-w-0 flex-1 truncate text-sm font-medium text-fg"
-                title={chatTitle}
-              >
-                {chatTitle || t(locale, "dock.aiReturn")}
-              </span>
-            )
-          ) : (
-            <span className="font-mono text-[10px] uppercase tracking-wider text-accent">
-              {t(locale, "dock.aiReturn")}
-            </span>
-          )}
-          {activeAiEditing && (
-            <span className="flex items-center gap-1 font-mono text-[10px] text-accent-2">
-              <span className="omc-pulse-dot" />
-              {t(locale, "dock.generating")}
-            </span>
-          )}
-          <div className="ml-auto flex shrink-0 items-center gap-1">
-            {conversationActions}
-            {searchToggleButton}
-          </div>
-          {returnSearchOpen && (
-            <div
-              className={
-                "ugs-ai-return-search absolute left-3 right-3 top-full z-30 mt-2 flex items-center gap-1 rounded-lg border border-border bg-panel/95 p-1.5 shadow-2xl backdrop-blur sm:w-96 " +
-                (isChat ? "sm:right-auto" : "sm:left-auto")
-              }
-            >
-              <div className="ugs-ai-return-search-input flex min-w-0 flex-1 items-center gap-1 rounded-md border border-border bg-bg px-2 py-1 transition-colors focus-within:border-accent">
-                <Search size={13} className="shrink-0 text-fg-faint" />
+                : undefined
+            }
+          >
+            {isChat ? (
+              <FilePreviewTabs scope={previewScope}>{chatTitleEditing ? (
                 <input
-                  id="ai-return-search"
-                  type="search"
-                  ref={searchInputRef}
-                  value={returnSearch}
-                  onChange={(e) => setReturnSearch(e.target.value)}
+                  ref={chatTitleInputRef}
+                  type="text"
+                  aria-label={t(locale, "sidebar.renameSession")}
+                  data-testid="chat-title-input"
+                  value={chatTitleDraft}
+                  maxLength={MAX_CHAT_TITLE_LENGTH}
+                  disabled={chatTitleSaving}
+                  onChange={(e) => setChatTitleDraft(e.target.value)}
+                  onFocus={(e) => e.currentTarget.select()}
+                  onBlur={() => {
+                    if (skipNextTitleBlurCommitRef.current) {
+                      skipNextTitleBlurCommitRef.current = false;
+                      return;
+                    }
+                    void commitChatTitleEdit();
+                  }}
                   onKeyDown={(e) => {
                     if (e.key === "Enter") {
                       e.preventDefault();
-                      moveSearchMatch(e.shiftKey ? -1 : 1);
+                      void commitChatTitleEdit();
                     } else if (e.key === "Escape") {
                       e.preventDefault();
-                      e.stopPropagation();
-                      closeReturnSearch();
+                      cancelChatTitleEdit();
                     }
                   }}
-                  placeholder={t(locale, "dock.searchPlaceholder")}
-                  aria-label={t(locale, "dock.searchAria")}
-                  spellCheck={false}
-                  className="min-w-0 flex-1 bg-transparent text-xs text-fg outline-none placeholder:text-fg-faint"
+                  className="min-w-0 flex-1 rounded-md border border-accent bg-bg px-2 py-1 text-sm font-medium text-fg outline-none transition-colors disabled:opacity-70"
                 />
-                {returnSearch ? (
-                  <button
-                    type="button"
-                    onMouseDown={(e) => e.preventDefault()}
-                    onClick={clearReturnSearch}
-                    title={t(locale, "dock.searchClear")}
-                    aria-label={t(locale, "dock.searchClear")}
-                    className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-fg-faint transition-colors hover:text-fg"
-                  >
-                    <X size={12} />
-                  </button>
-                ) : null}
-              </div>
-              <button
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => moveSearchMatch(-1)}
-                disabled={searchMatches.length === 0}
-                title={t(locale, "dock.searchPrevious")}
-                aria-label={t(locale, "dock.searchPrevious")}
-                className="ugs-ai-return-search-button flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <ChevronUp size={14} />
-              </button>
-              <button
-                type="button"
-                onMouseDown={(e) => e.preventDefault()}
-                onClick={() => moveSearchMatch(1)}
-                disabled={searchMatches.length === 0}
-                title={t(locale, "dock.searchNext")}
-                aria-label={t(locale, "dock.searchNext")}
-                className="ugs-ai-return-search-button flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
-              >
-                <ChevronDown size={14} />
-              </button>
-              <span
-                aria-live="polite"
+              ) : activeSessionId ? (
+                <button
+                  type="button"
+                  onClick={beginChatTitleEdit}
+                  className="min-w-0 flex-1 truncate rounded-sm text-left text-sm font-medium text-fg transition-colors hover:text-accent focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent"
+                  title={chatTitle}
+                  data-testid="chat-title-display"
+                >
+                  {chatTitle || t(locale, "dock.aiReturn")}
+                </button>
+              ) : (
+                <span
+                  className="min-w-0 flex-1 truncate text-sm font-medium text-fg"
+                  title={chatTitle}
+                >
+                  {chatTitle || t(locale, "dock.aiReturn")}
+                </span>
+              )}</FilePreviewTabs>
+            ) : (
+              <span className="font-mono text-[10px] uppercase tracking-wider text-accent">
+                {t(locale, "dock.aiReturn")}
+              </span>
+            )}
+            {activeAiEditing && (
+              <span className="flex items-center gap-1 font-mono text-[10px] text-accent-2">
+                <span className="omc-pulse-dot" />
+                {t(locale, "dock.generating")}
+              </span>
+            )}
+            <div className={"ml-auto flex shrink-0 items-center gap-1" + (isChat ? " ugs-chat-header-actions" : "")}>
+              {conversationActions}
+              {searchToggleButton}
+              {isChat && (
+                <SidebarToggleButton side="right" open={projectFilePanelOpen}
+                  onClick={requestProjectRightPanelToggle}
+                  controls="ugs-project-file-panel" locale={locale} />
+              )}
+            </div>
+            {returnSearchOpen && (
+              <div
                 className={
-                  "min-w-[3.75rem] whitespace-nowrap text-right font-mono text-[10px] " +
-                  (normalizedSearch && searchMatches.length === 0
-                    ? "text-accent-3"
-                    : "text-fg-faint")
+                  "ugs-ai-return-search absolute left-3 right-3 top-full z-30 mt-2 flex items-center gap-1 rounded-lg border border-border bg-panel/95 p-1.5 shadow-2xl backdrop-blur sm:w-96 " +
+                  (isChat ? "sm:right-auto" : "sm:left-auto")
                 }
               >
-                {searchStatus}
-              </span>
-            </div>
-          )}
-        </header>
+                <div className="ugs-ai-return-search-input flex min-w-0 flex-1 items-center gap-1 rounded-md border border-border bg-bg px-2 py-1 transition-colors focus-within:border-accent">
+                  <Search size={13} className="shrink-0 text-fg-faint" />
+                  <input
+                    id="ai-return-search"
+                    type="search"
+                    ref={searchInputRef}
+                    value={returnSearch}
+                    onChange={(e) => setReturnSearch(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        moveSearchMatch(e.shiftKey ? -1 : 1);
+                      } else if (e.key === "Escape") {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        closeReturnSearch();
+                      }
+                    }}
+                    placeholder={t(locale, "dock.searchPlaceholder")}
+                    aria-label={t(locale, "dock.searchAria")}
+                    spellCheck={false}
+                    className="min-w-0 flex-1 bg-transparent text-xs text-fg outline-none placeholder:text-fg-faint"
+                  />
+                  {returnSearch ? (
+                    <button
+                      type="button"
+                      onMouseDown={(e) => e.preventDefault()}
+                      onClick={clearReturnSearch}
+                      title={t(locale, "dock.searchClear")}
+                      aria-label={t(locale, "dock.searchClear")}
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-fg-faint transition-colors hover:text-fg"
+                    >
+                      <X size={12} />
+                    </button>
+                  ) : null}
+                </div>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => moveSearchMatch(-1)}
+                  disabled={searchMatches.length === 0}
+                  title={t(locale, "dock.searchPrevious")}
+                  aria-label={t(locale, "dock.searchPrevious")}
+                  className="ugs-ai-return-search-button flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <ChevronUp size={14} />
+                </button>
+                <button
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => moveSearchMatch(1)}
+                  disabled={searchMatches.length === 0}
+                  title={t(locale, "dock.searchNext")}
+                  aria-label={t(locale, "dock.searchNext")}
+                  className="ugs-ai-return-search-button flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <ChevronDown size={14} />
+                </button>
+                <span
+                  aria-live="polite"
+                  className={
+                    "min-w-[3.75rem] whitespace-nowrap text-right font-mono text-[10px] " +
+                    (normalizedSearch && searchMatches.length === 0
+                      ? "text-accent-3"
+                      : "text-fg-faint")
+                  }
+                >
+                  {searchStatus}
+                </span>
+              </div>
+            )}
+          </header>
+        </TitleBarContent>
         <div
           id="ugs-stream-surface"
           className={"relative min-h-0 " + (centerInput ? "" : "flex-1")}
@@ -8487,7 +8506,7 @@ export default function AIDock({
                     activeSearchMatchMessageId === m.id;
                   const isAssetJumpHit = assetJumpHighlightId === m.id;
                   const assistantLabel =
-                    !isUser && !isSystem ? assistantHeaderLabel(m) : "";
+                    !isUser && !isSystem ? assistantHeaderLabel(m, locale) : "";
                   const roleLabel = isUser
                     ? "› you"
                     : isSystem
@@ -8742,6 +8761,8 @@ export default function AIDock({
                         // searchState without losing the rich rendering.
                         <div className="min-w-0 w-full">
                           <LazyMessageContent
+                            referenceSources={m.referenceSources ?? m.references}
+                            collectReferences={m.role === 'assistant' && !m.localOnly}
                             text={renderMessageText(m.text)}
                             fallback={cleanMessageText(m.text)}
                             streaming={aiBusy && m.id === lastAssistantId}
@@ -10007,6 +10028,7 @@ export default function AIDock({
           </div>
         </div>
       )}
+      {isChat && <MainFilePreview scope={previewScope} />}
       <FilePreviewDrawer
         refData={filePreviewRef}
         cwd={workspaceCwd || undefined}

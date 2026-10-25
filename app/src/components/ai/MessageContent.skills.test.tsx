@@ -23,6 +23,14 @@ afterEach(async () => {
 });
 
 describe('MessageContent learning surface', () => {
+  it.each(['queued', 'reading', 'proposing', 'applying', 'noop', 'failed', 'cancelled'] as const)(
+    'renders no empty message wrapper for %s', async (status) => {
+      await act(async () => { root.render(<MessageContent text="" skillLearning={{ ...state, status }} />); });
+      expect(container.innerHTML).toBe('');
+      await act(async () => { root.render(<MessageContent text="正常回答保留" skillLearning={{ ...state, status }} />); });
+      expect(container.textContent).toContain('正常回答保留');
+      expect(container.querySelector('article')).toBeNull();
+    });
   it('renders a structured learning card even for a textless history message and forwards its exact action', async () => {
     const onSkillApprove = vi.fn(async () => ({ ...result, status: 'applied' as const, operationsApplied: 1 }));
     await act(async () => {

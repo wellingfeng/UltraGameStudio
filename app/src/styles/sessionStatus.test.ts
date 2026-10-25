@@ -25,7 +25,7 @@ describe('session selection and activity', () => {
     expect(light).toContain('background-position: 0% 0, 0% 100%, 0 0, 0 100%');
     expect(light).toContain('background-repeat: no-repeat');
     expect(light).toContain('pointer-events: none');
-    expect(light).toContain('2.6s ease-in-out infinite');
+    expect(light).toContain('var(--ugs-session-light-duration, 2.6s) ease-in-out infinite');
     expect(light).not.toContain('conic-gradient(');
     expect(light).not.toContain('blur(');
 

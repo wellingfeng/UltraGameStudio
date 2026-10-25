@@ -12,6 +12,7 @@ import { defaultComposer } from '@/store/sampleSessions';
 import { useStore } from '@/store/useStore';
 import ProjectFileTree from './ProjectFileTree';
 import { requestProjectRightPanelToggle } from './projectRightPanelEvents';
+import { CLOUD_PROJECTS_ENABLED } from '@/lib/cloudProjects';
 
 const tauriMocks = vi.hoisted(() => ({
   listWorkspaceDirectory: vi.fn(async (rootPath: string, relativePath: string) => ({
@@ -97,7 +98,7 @@ async function waitForExpect(assertion: () => void): Promise<void> {
   throw lastError;
 }
 
-describe('ProjectFileTree remote workspaces', () => {
+describe.runIf(CLOUD_PROJECTS_ENABLED)('ProjectFileTree remote workspaces', () => {
   it('lists remote project files through the Runner API, not local Tauri', async () => {
     const connection = saveRemoteRunnerConnection(
       { serverUrl: 'https://runner.test' },

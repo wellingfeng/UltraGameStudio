@@ -347,6 +347,11 @@ export interface StoreState {
     workspaceId: string | null,
     name: string,
   ) => Promise<void>;
+  setSessionPinned: (
+    sessionId: string,
+    workspaceId: string | null,
+    pinned: boolean,
+  ) => Promise<void>;
   setWorkflowFavoriteSession: (
     sessionId: string,
     workspaceId: string | null,
@@ -374,7 +379,7 @@ export interface StoreState {
   ) => Promise<void>;
   sendPrompt: (
     text: string,
-    options?: { forceGameExperts?: boolean; gameExpertIds?: string[]; skillIds?: string[] },
+    options?: { forceGameExperts?: boolean; gameExpertIds?: string[]; skillIds?: string[]; locale?: Locale; externalSession?: { workspaceId: string; sessionId: string; messages: Message[] } },
   ) => boolean;
   /** Explicit skill review never falls through to the normal chat gateway. */
   learnSkills: (kind: 'learn' | 'refine', text: string) => boolean;
@@ -387,6 +392,7 @@ export interface StoreState {
     options?: {
       providerId?: ImageProviderId;
       model?: string;
+      strictProvider?: boolean;
       onSettled?: OnGenerationSettled;
       background?: boolean;
       sessionKey?: WorkflowSessionKey;
@@ -398,6 +404,7 @@ export interface StoreState {
     options?: {
       providerId?: MusicProviderId;
       model?: string;
+      strictProvider?: boolean;
       onSettled?: OnGenerationSettled;
       background?: boolean;
       sessionKey?: WorkflowSessionKey;
@@ -409,6 +416,7 @@ export interface StoreState {
     options?: {
       providerId?: ThreeDProviderId;
       model?: string;
+      strictProvider?: boolean;
       onSettled?: OnGenerationSettled;
       background?: boolean;
       sessionKey?: WorkflowSessionKey;
@@ -420,6 +428,7 @@ export interface StoreState {
     options?: {
       providerId?: VideoProviderId;
       model?: string;
+      strictProvider?: boolean;
       onSettled?: OnGenerationSettled;
       background?: boolean;
       sessionKey?: WorkflowSessionKey;
@@ -431,6 +440,7 @@ export interface StoreState {
     options?: {
       providerId?: AnimationProviderId;
       model?: string;
+      strictProvider?: boolean;
       onSettled?: OnGenerationSettled;
       background?: boolean;
       sessionKey?: WorkflowSessionKey;
@@ -442,6 +452,7 @@ export interface StoreState {
     options?: {
       providerId?: SpeechProviderId;
       model?: string;
+      strictProvider?: boolean;
       voice?: string;
       onSettled?: OnGenerationSettled;
       background?: boolean;
@@ -454,6 +465,7 @@ export interface StoreState {
     options?: {
       providerId?: ImageProviderId;
       model?: string;
+      strictProvider?: boolean;
       onSettled?: OnGenerationSettled;
       background?: boolean;
       sessionKey?: WorkflowSessionKey;

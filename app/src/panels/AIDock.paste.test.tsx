@@ -11,6 +11,7 @@ import {
   saveRemoteWorkspace,
 } from '@/lib/remoteWorkspace';
 import { resetSecureStorageForTests } from '@/lib/secureStorage';
+import { CLOUD_PROJECTS_ENABLED } from '@/lib/cloudProjects';
 import { defaultComposer, samplePromptGroups } from '@/store/sampleSessions';
 import { useStore } from '@/store/useStore';
 
@@ -252,7 +253,7 @@ describe('AIDock pasted clipboard images', () => {
     }
   });
 
-  it('uploads pasted images to the remote project instead of inserting local paths', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('uploads pasted images to the remote project instead of inserting local paths', async () => {
     resetStore();
     saveRemoteRunnerConnection(
       { serverUrl: 'https://runner.test' },
@@ -323,7 +324,7 @@ describe('AIDock pasted clipboard images', () => {
     }
   });
 
-  it('surfaces remote pasted image upload failures', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('surfaces remote pasted image upload failures', async () => {
     resetStore();
     saveRemoteRunnerConnection(
       { serverUrl: 'https://runner.test' },

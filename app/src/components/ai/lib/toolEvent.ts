@@ -36,6 +36,8 @@ export interface ToolEvent {
   /** Compact native file changes, captured before large arguments are clipped. */
   fileChanges?: import('@/lib/turnFileChanges').TurnFileChange[];
   status: ToolStatus;
+  /** Native success verdict is distinct from UI lifecycle completion. */
+  evidenceStatus?: 'success' | 'error' | 'unknown';
   /** Result/output body once the call finishes. */
   result?: string;
   /** Wall-clock duration in milliseconds. */

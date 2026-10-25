@@ -14,6 +14,7 @@ import {
 } from '@/lib/remoteWorkspace';
 import { defaultComposer } from './sampleSessions';
 import { workflowDefaultGatewaySelection } from '@/lib/modelGateway/resolver';
+import { CLOUD_PROJECTS_ENABLED } from '@/lib/cloudProjects';
 
 async function waitFor(
   condition: () => boolean | Promise<boolean>,
@@ -228,7 +229,7 @@ describe('top workspace switcher selection (selectedWorkspaceId)', () => {
     expect(state.selectedWorkspaceId).toBe(wsA.id);
   });
 
-  it('uses the remote project provider and model when a remote session is selected', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('uses the remote project provider and model when a remote session is selected', async () => {
     await historyStore.ready();
     const remotePath = remoteWorkspacePath('rw_switch');
     const providerId = remoteProviderId('rw_switch', 'codex-main');
@@ -299,7 +300,7 @@ describe('top workspace switcher selection (selectedWorkspaceId)', () => {
     expect(selection.modelOverride).toBe('gpt-remote');
   });
 
-  it('overrides a stale model on an already remote session selection', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('overrides a stale model on an already remote session selection', async () => {
     await historyStore.ready();
     const remotePath = remoteWorkspacePath('rw_stale_model');
     const providerId = remoteProviderId('rw_stale_model', 'codex-main');
@@ -373,7 +374,7 @@ describe('top workspace switcher selection (selectedWorkspaceId)', () => {
     expect(selection.modelOverride).toBe('gpt-remote');
   });
 
-  it('ignores Claude tier aliases for non-Claude remote project models', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('ignores Claude tier aliases for non-Claude remote project models', async () => {
     await historyStore.ready();
     const remotePath = remoteWorkspacePath('rw_codex_sonnet_alias');
     const providerId = remoteProviderId('rw_codex_sonnet_alias', 'codex-main');
@@ -447,7 +448,7 @@ describe('top workspace switcher selection (selectedWorkspaceId)', () => {
     expect(selection.modelOverride).toBeUndefined();
   });
 
-  it('does not bind to a mismatched account when the project agent has none', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('does not bind to a mismatched account when the project agent has none', async () => {
     await historyStore.ready();
     const remotePath = remoteWorkspacePath('rw_claude_no_account');
     // Runner only exposes a Codex account, but the project is configured for

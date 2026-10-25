@@ -298,6 +298,21 @@ describe('MessageContent integration', () => {
     expect(html).toMatch(/data:image\/png;base64,iVBORw0KGgo=/);
   });
 
+  it('keeps pasted clipboard image paths as img src (urlTransform must not clear drive-letter src)', () => {
+    const html = renderToStaticMarkup(
+      createElement(MessageContent, {
+        text:
+          '![粘贴截图](E:\\UltraGameStudio\\.ultragamestudio\\clipboard-images\\pasted-1792774607400-5eceb5f08a25f101-0.jpg)',
+        streaming: false,
+      }),
+    );
+    expect(html).toMatch(/<img/);
+    expect(html).toMatch(/class="ai-generated-image"/);
+    // 修复前 defaultUrlTransform 把 `E:` 当非法协议清成空串，src 为空。
+    expect(html).toMatch(/pasted-1792774607400-5eceb5f08a25f101-0\.jpg/);
+    expect(html).not.toMatch(/src=""/);
+  });
+
   it('routes HTTP markdown images to the in-app file preview', async () => {
     const calls: Array<{ path: string; basename: string }> = [];
     const container = document.createElement('div');

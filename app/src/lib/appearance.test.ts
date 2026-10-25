@@ -27,6 +27,7 @@ import {
 import { SUPPORTED_LOCALES, t } from './i18n';
 
 const NEW_PRESETS = [
+  'hermes-dark',
   'cherry-dark',
   'cherry-light',
   'midnight',
@@ -112,8 +113,9 @@ afterEach(() => {
 });
 
 describe('appearance presets', () => {
-  it('registers Cherry dark default plus the built-in unified style presets', () => {
+  it('registers black style default plus the built-in unified style presets', () => {
     expect(BUILTIN_STYLE_PRESETS).toEqual([
+      'hermes-dark',
       'cherry-dark',
       'pencil',
       'cherry-light',
@@ -127,13 +129,13 @@ describe('appearance presets', () => {
       'solarized-dark',
       'terminal',
     ]);
-    expect(STYLE_PRESET_LIST).toHaveLength(12);
+    expect(STYLE_PRESET_LIST).toHaveLength(13);
   });
 
-  it('uses Cherry dark as the default startup style', () => {
-    expect(DEFAULT_STYLE_PRESET_ID).toBe('cherry-dark');
-    expect(DEFAULT_APPEARANCE_SETTINGS.stylePresetId).toBe('cherry-dark');
-    expect(indexHtml).toContain("const fallback = 'cherry-dark'");
+  it('uses black style as the default startup style', () => {
+    expect(DEFAULT_STYLE_PRESET_ID).toBe('hermes-dark');
+    expect(DEFAULT_APPEARANCE_SETTINGS.stylePresetId).toBe('hermes-dark');
+    expect(indexHtml).toContain("const fallback = 'hermes-dark'");
     for (const id of BUILTIN_STYLE_PRESETS) {
       expect(indexHtml).toContain(`'${id}'`);
     }

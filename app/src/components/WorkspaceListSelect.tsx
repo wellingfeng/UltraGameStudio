@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Check, ChevronDown, Cloud, FolderPlus, Layers } from 'lucide-react';
 import RemoteWorkspaceStatusBadge from '@/components/RemoteWorkspaceStatusBadge';
 import { cn } from '@/lib/cn';
+import { isSupportedWorkspacePath } from '@/lib/cloudProjects';
 import { t } from '@/lib/i18n';
 import type { Locale } from '@/lib/i18n';
 import { isRemoteWorkspacePath } from '@/lib/remoteWorkspace';
@@ -15,8 +16,7 @@ import type { WorkspaceSummary } from '@/store/history/types';
  * Lists every known workspace and lets the user jump to one (which activates
  * that workspace's first session). A "浏览本地…" action opens the native folder
  * picker to add a new workspace; selecting an already-known folder just
- * switches to it via {@link onBrowseLocal}. "添加云端项目…" opens the remote
- * Runner project dialog via {@link onAddRemote}.
+ * switches to it via {@link onBrowseLocal}. Cloud projects are retired.
  */
 export interface WorkspaceListSelectProps {
   workspaces: WorkspaceSummary[];
@@ -38,7 +38,7 @@ export default function WorkspaceListSelect({
   locale,
   onSelect,
   onBrowseLocal,
-  onAddRemote,
+  // onAddRemote, // 云端项目已退役。
   remoteConnectionStates = {},
   disabled = false,
 }: WorkspaceListSelectProps) {
@@ -60,7 +60,8 @@ export default function WorkspaceListSelect({
     return () => document.removeEventListener('mousedown', onDown);
   }, [disabled, open]);
 
-  const active = workspaces.find((w) => w.id === activeWorkspaceId) ?? null;
+  const supportedWorkspaces = workspaces.filter((w) => isSupportedWorkspacePath(w.path));
+  const active = supportedWorkspaces.find((w) => w.id === activeWorkspaceId) ?? null;
   const label = active?.name ?? t(locale, 'workspaceList.title');
   const activeKey = active?.path ? workspacePathKey(active.path) : '';
   const activeIsRemote = isRemoteWorkspacePath(active?.path ?? '');
@@ -107,6 +108,7 @@ export default function WorkspaceListSelect({
             <FolderPlus size={13} className="shrink-0 text-accent" />
             <span>{t(locale, 'workspaceList.browseLocal')}</span>
           </button>
+          {/* 云端项目已退役：保留原入口代码，不再挂载。
           {onAddRemote && (
             <button
               type="button"
@@ -120,19 +122,20 @@ export default function WorkspaceListSelect({
               <span>{t(locale, 'workspaceList.addRemote')}</span>
             </button>
           )}
+          */}
 
           <div className="my-1 border-t border-border-soft" />
           <div className="px-3 pb-0.5 text-[10px] uppercase tracking-wider text-fg-faint">
             {t(locale, 'workspaceList.title')}
           </div>
 
-          {workspaces.length === 0 ? (
+          {supportedWorkspaces.length === 0 ? (
             <div className="px-3 py-1.5 text-xs text-fg-faint">
               {t(locale, 'workspaceList.empty')}
             </div>
           ) : (
             <ul role="listbox" className="max-h-[18rem] overflow-y-auto">
-              {workspaces.map((workspace) => {
+              {supportedWorkspaces.map((workspace) => {
                 const isActive =
                   workspace.id === activeWorkspaceId ||
                   (activeKey !== '' &&
@@ -195,6 +198,7 @@ export default function WorkspaceListSelect({
                           {t(locale, 'workspaceList.current')}
                         </span>
                       )}
+                      {/* 云端项目已退役：保留原入口代码，不再挂载。
                       {isRemote && onAddRemote && (
                         <span
                           role="button"
@@ -210,6 +214,7 @@ export default function WorkspaceListSelect({
                           ⚙
                         </span>
                       )}
+                      */}
                     </button>
                   </li>
                 );

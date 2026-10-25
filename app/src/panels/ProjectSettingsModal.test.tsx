@@ -5,7 +5,6 @@ import ProjectSettingsModal from './ProjectSettingsModal';
 import { DEFAULT_GAME_EXPERT_SETTINGS } from '@/lib/gameExperts';
 import {
   remoteWorkspacePath,
-  saveRemoteWorkspace,
 } from '@/lib/remoteWorkspace';
 import {
   blueprintModeInstall,
@@ -397,42 +396,15 @@ describe('ProjectSettingsModal game project tabs', () => {
     }
   });
 
-  it('treats remote workspaces as remote runner projects instead of local paths', async () => {
-    const remoteConfig = saveRemoteWorkspace(
-      {
-        id: 'rw_project',
-        label: '远程服务器测试',
-        serverUrl: 'https://runner.test:8787',
-        projectId: 'proj_game',
-        repoUrl: 'https://github.com/me/game.git',
-        branch: 'main',
-        adapter: 'codex',
-        model: 'gpt-5-codex',
-      },
-      { token: 'runner-token' },
-    );
+  it('does not open retired cloud settings or probe their environment', async () => {
     const previousScanCalls = vi.mocked(scanProjectEnvironment).mock.calls.length;
     const view = await renderProjectSettingsModal(unknownScan(), {
-      id: 'w_remote',
-      path: remoteWorkspacePath(remoteConfig.id),
-      name: remoteConfig.label,
-      updatedAt: 1,
-      sessionCount: 0,
+      id: 'w_remote', path: remoteWorkspacePath('rw_project'),
+      name: '旧云端项目', updatedAt: 1, sessionCount: 0,
     });
-
     try {
-      expect(vi.mocked(scanProjectEnvironment).mock.calls).toHaveLength(
-        previousScanCalls,
-      );
-      expect(view.container.textContent).toContain('云端项目');
-      expect(view.container.textContent).toContain('proj_game');
-      expect(view.container.textContent).toContain('云端服务');
-      expect(view.container.textContent).toContain('已连接');
-      expect(view.container.textContent).not.toContain('https://runner.test:8787');
-      expect(view.container.textContent).toContain('https://github.com/me/game.git');
-      expect(view.container.textContent).toContain('云端项目设置');
-      expect(view.container.textContent).not.toContain('添加文件夹');
-      expect(view.container.textContent).not.toContain('打开位置');
+      expect(vi.mocked(scanProjectEnvironment).mock.calls).toHaveLength(previousScanCalls);
+      expect(view.container.innerHTML).toBe('');
     } finally {
       await view.cleanup();
     }

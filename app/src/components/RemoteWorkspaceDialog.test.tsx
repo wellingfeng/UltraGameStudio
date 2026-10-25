@@ -7,6 +7,7 @@ import {
   saveRemoteWorkspace,
 } from '@/lib/remoteWorkspace';
 import { resetSecureStorageForTests } from '@/lib/secureStorage';
+import { CLOUD_PROJECTS_ENABLED } from '@/lib/cloudProjects';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
@@ -30,7 +31,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe('RemoteWorkspaceDialog', () => {
+describe.runIf(CLOUD_PROJECTS_ENABLED)('RemoteWorkspaceDialog', () => {
   it('keeps server URL and access token out of the project form by default', () => {
     saveRemoteRunnerConnection(
       { serverUrl: 'https://runner.test:8787' },

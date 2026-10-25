@@ -40,6 +40,14 @@ export interface CanvasViewport {
 export type ScheduledTaskWeekday = 0 | 1 | 2 | 3 | 4 | 5 | 6;
 
 export interface ScheduledTaskConfig {
+  name?: string;
+  templateId?: string;
+  cronExpression?: string;
+  timeZone?: string;
+  promptLocale?: Locale;
+  /** Absolute timestamp for a one-time task. */
+  onceAt?: number;
+  lastError?: string;
   enabled: boolean;
   reminderText: string;
   hour: number;
@@ -71,6 +79,8 @@ export interface Message {
   text: string;
   /** Assistant route shown in the message header, e.g. "OpenRouter · glm-4.6". */
   routeLabel?: string;
+  /** Thinking level selected when this turn started; default means no override. */
+  thinkingLevel?: string;
   /** Epoch milliseconds. */
   createdAt: number;
   /** Epoch milliseconds when an assistant turn finished. Used for history order. */
@@ -79,6 +89,10 @@ export interface Message {
   contextCompressed?: boolean;
   /** File summary captured at turn completion; survives history reloads. */
   fileChanges?: import('@/lib/turnFileChanges').TurnFileChanges;
+  /** Successful web-tool evidence, including results not used by the answer. */
+  referenceSources?: import('@/lib/messageReferences').ReferenceSource[];
+  /** Cited sources in first-use order; survives tool-log clipping. */
+  references?: import('@/lib/messageReferences').MessageReference[];
   /** Full-read metadata for the source turn; never replayed as assistant prose. */
   skillContext?: {
     origin: import('@/runtime/skills/types').SkillOrigin;
@@ -137,6 +151,8 @@ export interface Message {
    * the conversation, where it reads as "not sent yet".
    */
   interjected?: boolean;
+  /** Reply bubble targeted by native steering; stable across history reloads. */
+  interjectedReplyId?: string;
 }
 
 /**
@@ -189,6 +205,8 @@ export interface Session {
   contextCompressed?: boolean;
   /** True when a workflow session is pinned into the Sidebar favorites tab. */
   favorite?: boolean;
+  /** Highest-priority ordering in the Sidebar history list. */
+  pinned?: boolean;
   /** Optional alarm-style schedule for favorite sessions. */
   scheduledTask?: ScheduledTaskConfig;
 }

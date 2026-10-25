@@ -10,7 +10,7 @@ export const DEFAULT_SKILL_LEARNING_CONFIG: SkillLearningConfig = {
   maxRounds: 6,
   maxInputTokens: 48000,
   maxOutputTokens: 6000,
-  timeoutMs: 90000,
+  timeoutMs: 600000,
   autoArchive: false,
   staleAfterDays: 30,
   archiveAfterDays: 90,
@@ -63,7 +63,7 @@ export function normalizeSkillLearningConfig(
     maxRounds: boundedInteger(raw.maxRounds, base.maxRounds, 1, 16),
     maxInputTokens: boundedInteger(raw.maxInputTokens, base.maxInputTokens, 1000, 1000000),
     maxOutputTokens: boundedInteger(raw.maxOutputTokens, base.maxOutputTokens, 100, 100000),
-    timeoutMs: boundedInteger(raw.timeoutMs, base.timeoutMs, 1000, 600000),
+    timeoutMs: boundedInteger(raw.timeoutMs === 90000 ? 600000 : raw.timeoutMs, base.timeoutMs, 1000, 600000),
     autoArchive: typeof raw.autoArchive === 'boolean' ? raw.autoArchive : base.autoArchive,
     staleAfterDays,
     archiveAfterDays: Math.max(

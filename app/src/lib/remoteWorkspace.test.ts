@@ -32,6 +32,7 @@ import {
 import { listProviders } from './apiConfig';
 import { providerModelCacheKey, getCachedModels } from './modelLists';
 import { resetSecureStorageForTests } from './secureStorage';
+import { CLOUD_PROJECTS_ENABLED } from './cloudProjects';
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -97,7 +98,7 @@ describe('Claude-family model guard', () => {
   });
 });
 
-describe('remote workspace persistence', () => {
+describe.runIf(CLOUD_PROJECTS_ENABLED)('remote workspace persistence', () => {
   it('creates, reads, updates and deletes a workspace', () => {
     const created = saveRemoteWorkspace({
       label: '我的云服务器',
@@ -231,7 +232,7 @@ describe('remote workspace persistence', () => {
   });
 });
 
-describe('purgeDefaultRemoteWorkspaces', () => {
+describe.runIf(CLOUD_PROJECTS_ENABLED)('purgeDefaultRemoteWorkspaces', () => {
   it('removes ghost workspaces left by the built-in default prefill', () => {
     const ghost = saveRemoteWorkspace({
       label: '默认云端',
@@ -332,7 +333,7 @@ describe('purgeDefaultRemoteWorkspaces', () => {
   });
 });
 
-describe('RunnerClient', () => {
+describe.runIf(CLOUD_PROJECTS_ENABLED)('RunnerClient', () => {
   it('normalizes the server url and sends the bearer token', async () => {
     const fetchMock = vi.fn(async () =>
       new Response(JSON.stringify({ ok: true, authRequired: true }), {
@@ -745,7 +746,7 @@ describe('RunnerClient', () => {
   });
 });
 
-describe('remote workspace account sync', () => {
+describe.runIf(CLOUD_PROJECTS_ENABLED)('remote workspace account sync', () => {
   it('syncs enabled runner accounts into default channel providers', () => {
     const ws = saveRemoteWorkspace({
       label: '远程测试',
@@ -855,7 +856,7 @@ describe('remote workspace account sync', () => {
   });
 });
 
-describe('remote workspace skill catalog cache', () => {
+describe.runIf(CLOUD_PROJECTS_ENABLED)('remote workspace skill catalog cache', () => {
   it('fetches the remote project skill catalog and caches it per workspace', async () => {
     const ws = saveRemoteWorkspace(
       {

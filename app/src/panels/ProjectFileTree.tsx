@@ -25,6 +25,8 @@ import {
   LayoutGrid,
   List,
   Loader2,
+  Lock,
+  LockOpen,
   RefreshCw,
   X,
 } from 'lucide-react';
@@ -800,7 +802,23 @@ export default function ProjectFileTree() {
   const [cache, setCache] = useState<WorkspaceTreeCache>({});
   const cacheRef = useRef(cache);
   const [previewRef, setPreviewRef] = useState<FileRef | null>(null);
-  const [panelOpen, setPanelOpen] = useState(false);
+  const [panelLocked, setPanelLocked] = useState(() => {
+    try {
+      return window.localStorage.getItem('ultragamestudio.projectRightPanelLocked.v1') === 'true';
+    } catch {
+      return false;
+    }
+  });
+  const panelLockedRef = useRef(panelLocked);
+  const [panelOpen, setPanelOpen] = useState(panelLocked);
+  useEffect(() => {
+    panelLockedRef.current = panelLocked;
+    try {
+      window.localStorage.setItem('ultragamestudio.projectRightPanelLocked.v1', String(panelLocked));
+    } catch {
+      // Keep locking available when browser storage is unavailable.
+    }
+  }, [panelLocked]);
   const panelRef = useRef<HTMLElement | null>(null);
   const [teamDetailsPreview, setTeamDetailsPreview] = useState<{
     nodeId?: string;
@@ -825,7 +843,7 @@ export default function ProjectFileTree() {
     window.dispatchEvent(new CustomEvent(PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, { detail: { open: panelOpen } }));
   }, [panelOpen]);
   useEffect(() => {
-    setPanelOpen(false);
+    setPanelOpen(panelLockedRef.current);
     setPreviewRef(null);
     setTeamDetailsPreview(null);
     setPreviewDiffEnabled(false);
@@ -855,7 +873,7 @@ export default function ProjectFileTree() {
 
   useEffect(() => {
     // Embedded previews already own their outside-pointer handling.
-    if (!panelOpen || previewRef || teamDetailsPreview) return;
+    if (!panelOpen || panelLocked || previewRef || teamDetailsPreview) return;
     const onPointerDown = (event: PointerEvent) => {
       const target = event.target;
       if (!(target instanceof Node) || panelRef.current?.contains(target)) return;
@@ -873,7 +891,7 @@ export default function ProjectFileTree() {
     };
     document.addEventListener('pointerdown', onPointerDown, true);
     return () => document.removeEventListener('pointerdown', onPointerDown, true);
-  }, [panelOpen, previewRef, teamDetailsPreview]);
+  }, [panelOpen, panelLocked, previewRef, teamDetailsPreview]);
 
   useEffect(() => {
     cacheRef.current = cache;
@@ -2163,7 +2181,7 @@ export default function ProjectFileTree() {
             canOpenExternally={!previewCwd || !isRemoteWorkspacePath(previewCwd)}
             variant="embedded"
             onClose={() => {
-              setPanelOpen(false);
+              setPanelOpen(panelLocked);
               setPreviewRef(null);
               setTeamDetailsPreview(null);
               setPreviewDiffEnabled(false);
@@ -2178,6 +2196,21 @@ export default function ProjectFileTree() {
               title={locale === 'zh-CN' ? '收起文件面板' : 'Close file panel'}
               className="ugs-control flex h-7 w-7 shrink-0 items-center justify-center rounded text-fg-faint hover:bg-border-soft hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent">
               <X size={14} />
+            </button>
+            <button
+              type="button"
+              onClick={() => setPanelLocked((locked) => !locked)}
+              aria-pressed={panelLocked}
+              aria-label={locale === 'zh-CN'
+                ? (panelLocked ? '解锁文件面板' : '锁定文件面板')
+                : (panelLocked ? 'Unlock file panel' : 'Lock file panel')}
+              title={locale === 'zh-CN'
+                ? (panelLocked ? '已锁定，点击恢复自动隐藏' : '锁定后保持显示，不再自动隐藏')
+                : (panelLocked ? 'Locked. Click to restore auto-hide' : 'Lock to keep the file panel visible')}
+              className={'ugs-control flex h-7 w-7 shrink-0 items-center justify-center rounded hover:bg-border-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent ' +
+                (panelLocked ? 'bg-accent/10 text-accent' : 'text-fg-faint hover:text-fg')}
+            >
+              {panelLocked ? <Lock size={14} /> : <LockOpen size={14} />}
             </button>
             <div
               role="tablist"

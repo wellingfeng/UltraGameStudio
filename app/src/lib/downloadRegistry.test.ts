@@ -472,7 +472,7 @@ describe('asset registry', () => {
       },
     ]);
 
-    linkManagedAssetsFromMessageText({
+    linkKnownManagedAssetsFromMessageText({
       text: `${path}，这是 AI/MCP 生成的图`,
       sessionId: 's_2',
       workspaceId: 'w_2',
@@ -486,7 +486,7 @@ describe('asset registry', () => {
     expect(list[0].messageId).toBe('m_2');
   });
 
-  it('registers managed asset paths from a message when disk scan has not run', () => {
+  it('does not treat an unrecorded clipboard reference as generated output', () => {
     linkManagedAssetsFromMessageText({
       text: 'E:\\UltraGameStudio\\.ultragamestudio\\clipboard-images\\shot.png',
       sessionId: 's_2',
@@ -494,11 +494,7 @@ describe('asset registry', () => {
       messageId: 'm_2',
     });
 
-    const entry = getAssets()[0];
-    expect(entry.kind).toBe('image');
-    expect(entry.status).toBe('success');
-    expect(entry.sessionId).toBe('s_2');
-    expect(entry.messageId).toBe('m_2');
+    expect(getAssets()).toEqual([]);
   });
 
   it('links only known managed assets from history messages', () => {
@@ -541,6 +537,7 @@ describe('asset registry', () => {
         sizeBytes: 2,
         createdAtMs: 1_000,
         modifiedAtMs: 1_020,
+        workspaceId: 'w_1',
       },
     ]);
 

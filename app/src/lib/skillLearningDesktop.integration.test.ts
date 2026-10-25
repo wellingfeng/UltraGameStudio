@@ -42,6 +42,7 @@ import { createSkillControlHost } from './skills';
 
 const cleanup: Array<() => Promise<void>> = [];
 afterEach(async () => {
+  window.localStorage.clear();
   cancelSkillLearning();
   await Promise.all(cleanup.splice(0).map((close) => close()));
   seams.providers = [];
@@ -50,7 +51,7 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-it.each(['configured-http', 'explicit-http-for-cli'] as const)('automatically saves, fresh-loads and undoes the real batch through an independent %s review', async (reviewRoute) => {
+it.each(['configured-http', 'explicit-http-for-cli'] as const)('holds the first candidate, approves the repeated batch, fresh-loads and undoes it through %s', async (reviewRoute) => {
 
   const scratch = process.env.TMPDIR ?? tmpdir();
   await mkdir(scratch, { recursive: true });
@@ -105,8 +106,9 @@ it.each(['configured-http', 'explicit-http-for-cli'] as const)('automatically sa
       const body = JSON.parse(text);
       const selection = String(body.messages[0].content).startsWith('Select only');
       const review = selection ? undefined : JSON.parse(body.messages[1].content);
+      const similarity = String(body.messages[0].content).includes('语义比对器');
       httpCalls.push({ path: req.url ?? '', body, review });
-      const response = selection ? { skillIds: [] } : { version: 1, kind: 'propose',
+      const response = selection ? { skillIds: [] } : similarity ? { candidateId: review.candidates[0].id, similarity: 0.98 } : { version: 1, kind: 'propose',
         lesson: 'Read the complete manifest before selecting project dependencies.', evidenceIds: [review.evidence[0].evidenceId],
         operations: [{ action: 'create', name: 'manifest-first', content }] };
       res.writeHead(200, { 'content-type': 'application/json' });
@@ -156,15 +158,27 @@ it.each(['configured-http', 'explicit-http-for-cli'] as const)('automatically sa
     provenance: 'host-check', status: 'success', exitCode: 0, summary: `node --test --test-reporter=tap ${checkPath}`, result: check.stdout }]);
   const finalAnswer = 'The real dependency check completed.';
 
-  const applied = await turn.finish({ finalAnswer, terminal: 'completed' });
-
-  expect(applied, JSON.stringify({ status: applied.status, error: applied.error, riskReasons: applied.riskReasons })).toMatchObject({ status: 'applied', operationsApplied: 1,
+  const first = await turn.finish({ finalAnswer, terminal: 'completed' });
+  expect(first).toMatchObject({ status: 'noop', operationsApplied: 0,
     usage: { calls: 1, inputTokens: 41, outputTokens: 29, totalTokens: 70, estimated: false } });
+  const repeatedOrigin = { ...origin, turnId: 'repeated-turn', runId: 'repeated-run' };
+  const repeated = beginSkillLearningTurn({ origin: repeatedOrigin, prompt: 'Verify the project dependency check again.', selection, config, ready,
+    onState: (state) => { states.push(state); } });
+  const rechecked = await promisify(execFile)(process.execPath, ['--test', '--test-reporter=tap', checkPath]);
+  repeated.onHostEvidence([{ evidenceId: 'repeated-dependency-check', origin: repeatedOrigin, occurredAt: Date.now(),
+    toolCallId: 'repeated-check', toolName: 'test', kind: 'verification', provenance: 'host-check', status: 'success', exitCode: 0,
+    summary: `node --test --test-reporter=tap ${checkPath}`, result: rechecked.stdout }]);
+  const pending = await repeated.finish({ finalAnswer, terminal: 'completed' });
+  expect(pending, pending.error).toMatchObject({ status: 'awaiting_approval', operationsApplied: 0,
+    usage: { calls: 2, inputTokens: 82, outputTokens: 58, totalTokens: 140, estimated: false } });
+  const path = join(dir, '.ultragamestudio', 'skills', 'manifest-first', 'SKILL.md');
+  await expect(readFile(path, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  expect(states.at(-1)?.result).toEqual(pending);
+  const applied = await performSkillReviewAction({ status: pending.status, origin: pending.origin, result: pending, mode: 'approve-all' }, 'approve');
+  expect(applied).toMatchObject({ status: 'applied', operationsApplied: 1 });
   expect(applied.origin.runId).not.toBe(origin.runId);
   expect(turn.getSnapshot().finalAnswer).toBe(finalAnswer);
-  const path = join(dir, '.ultragamestudio', 'skills', 'manifest-first', 'SKILL.md');
   expect(await readFile(path, 'utf8')).toBe(content);
-  expect(states.at(-1)?.result).toEqual(applied);
   expect(httpCalls[0]).toMatchObject({ path: '/v1/chat/completions', body: { model: 'review-model' }, review: { task: { userText: 'Verify the project dependency check.' },
     evidence: [expect.objectContaining({ origin: { ...origin, runId: 'real-host-check' } })] } });
   expect(Object.keys(httpCalls[0].body).sort()).toEqual(['max_tokens', 'messages', 'model', 'stream']);

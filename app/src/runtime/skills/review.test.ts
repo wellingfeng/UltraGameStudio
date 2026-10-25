@@ -12,7 +12,7 @@ const config = {
   autoArchive: false, staleAfterDays: 30, archiveAfterDays: 90,
 };
 const job = (overrides: Partial<SkillLearningJob> = {}): SkillLearningJob => ({
-  origin, userText: '纠正：先运行测试再修改', finalAnswer: 'done', loadedSkills: [], config,
+  origin, userText: '纠正：先运行测试再修改', finalAnswer: 'done', loadedSkills: [], config, explicit: true,
   evidence: [{ evidenceId: 'e', origin, occurredAt: 1, kind: 'correction', provenance: 'user-input', status: 'success', summary: '先运行测试再修改' }],
   ...overrides,
 });
@@ -46,6 +46,159 @@ const patchProposal: SkillProposal = { ...proposal, operations: [{ action: 'patc
 
 afterEach(() => vi.useRealTimers());
 describe('bounded independent skill review', () => {
+  it('keeps Chinese output instructions through reads and protocol correction', async () => {
+    const requests: string[] = [];
+    const replies = ['invalid JSON', JSON.stringify({ version: 1, kind: 'read', requests: [{ skillId: entry.skillId }] }),
+      JSON.stringify({ version: 1, kind: 'noop', reason: '现有规则已覆盖，无需新增。' })];
+    const review = await runSkillReview(job(), { host: host({ list: async () => ({ revision: 'r', entries: [entry] }), view: async () => readResult() }),
+      model: { capability: 'completion-only', complete: async ({ system }) => {
+        requests.push(system);
+        return { text: replies.shift()! };
+      } } });
+    expect(review.status).toBe('noop');
+    expect(requests).toHaveLength(3);
+    for (const system of requests) {
+      expect(system).toContain('简体中文');
+      expect(system).toContain('oldString');
+      expect(system).toContain('lesson');
+      expect(system).toContain('reason');
+    }
+  });
+
+  it('uses Chinese for a host-generated no-evidence result', async () => {
+    const review = await runSkillReview(job({ evidence: [] }), { host: host(), model: model([]) });
+    expect(review.lesson).toBe('没有可信的可复用证据，或技能学习已关闭。');
+  });
+
+  it('reviews a long tool session within the token budget across fresh-read rounds', async () => {
+    const evidence = Array.from({ length: 28 }, (_, i) => ({
+      ...job().evidence[0], evidenceId: `tool-${i}`, kind: 'tool' as const,
+      provenance: 'native-tool' as const, toolCallId: `call-${i}`, toolName: 'exec_command',
+      status: i === 0 ? 'error' as const : 'success' as const, exitCode: i === 0 ? 1 : 0,
+      summary: '读取源码，执行验证。'.repeat(40), result: 'source line and diagnostic output\n'.repeat(120),
+    }));
+    const complete = vi.fn<SkillReviewModelPort['complete']>(async (request) => {
+      const payload = JSON.parse(request.userContent);
+      expect(payload.evidence.map((e: { evidenceId: string }) => e.evidenceId)).toContain('tool-0');
+      expect(payload.evidence.map((e: { evidenceId: string }) => e.evidenceId)).toContain('tool-27');
+      if (complete.mock.calls.length === 1) return {
+        text: JSON.stringify({ version: 1, kind: 'read', requests: [{ skillId: entry.skillId }] }),
+        usage: { inputTokens: 12000, outputTokens: 100 },
+      };
+      expect(payload.reads[0].content).toBe(readResult().content);
+      expect(payload.reads[0].readReceiptId).toBe(readResult().readReceiptId);
+      return { text: JSON.stringify({ ...patchProposal, evidenceIds: ['tool-0', 'tool-27'] }),
+        usage: { inputTokens: 12000, outputTokens: 300 } };
+    });
+    const reviewed = await runSkillReview(job({ evidence }), {
+      host: host({ list: async () => ({ revision: 'c', entries: [entry] }), view: async () => readResult() }),
+      model: { capability: 'completion-only', complete },
+    });
+    expect(reviewed.status, reviewed.error).toBe('applied');
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect(reviewed.usage).toMatchObject({ inputTokens: 24000, outputTokens: 400, estimated: false });
+  });
+
+  it('does not mistake a Chinese response byte length for output tokens without reported usage', async () => {
+    const reason = '暂无新的可复用规则。'.repeat(220);
+    const reviewed = await runSkillReview(job(), { host: host(),
+      model: model([JSON.stringify({ version: 1, kind: 'noop', reason })]) });
+    expect(reviewed.status, reviewed.error).toBe('noop');
+    expect(reviewed.usage?.estimated).toBe(true);
+    expect(reviewed.usage?.outputTokens).toBeLessThan(6000);
+  });
+
+  it('fits a final proposal after two measured read calls consumed 39992 input tokens', async () => {
+    const evidence = Array.from({ length: 127 }, (_, i) => ({ ...job().evidence[0],
+      evidenceId: `tool-${i}`, kind: 'tool' as const, provenance: 'native-tool' as const,
+      toolCallId: `call-${i}`, toolName: 'exec_command',
+      status: i < 16 ? 'error' as const : 'success' as const, exitCode: i < 16 ? 1 : 0,
+      summary: '诊断信息。'.repeat(170), result: '诊断源码和实际验证输出。'.repeat(300),
+    }));
+    const complete = vi.fn<SkillReviewModelPort['complete']>(async (request) => {
+      const payload = JSON.parse(request.userContent);
+      if (complete.mock.calls.length <= 2) return {
+        text: JSON.stringify({ version: 1, kind: 'read', requests: [{ skillId: entry.skillId }] }),
+        usage: { inputTokens: 19996, outputTokens: 95 },
+      };
+      expect(payload.reads[0].content).toBe('old rule;'.repeat(550));
+      expect(payload.evidence.some((e: { status: string }) => e.status === 'error')).toBe(true);
+      expect(payload.evidence.at(-1).evidenceId).toBe('tool-126');
+      return { text: JSON.stringify({ version: 1, kind: 'noop', reason: '已有规则覆盖。' }),
+        usage: { inputTokens: 7000, outputTokens: 100 } };
+    });
+    const reviewed = await runSkillReview(job({ evidence, finalAnswer: '执行结果。'.repeat(400) }), {
+      host: host({ list: async () => ({ revision: 'c', entries: [entry] }),
+        view: async () => ({ ...readResult(), content: 'old rule;'.repeat(550) }) }),
+      model: { capability: 'completion-only', complete },
+    });
+    expect(reviewed.status, reviewed.error).toBe('noop');
+    expect(complete).toHaveBeenCalledTimes(3);
+    expect(reviewed.usage).toMatchObject({ inputTokens: 46992, outputTokens: 290, calls: 3, estimated: false });
+  });
+
+  it('honors configured input/output budgets above the defaults', async () => {
+    const reviewed = await runSkillReview(job({ config: { ...config, maxInputTokens: 96000, maxOutputTokens: 12000 } }), {
+      host: host(), model: { capability: 'completion-only', complete: async (request) => {
+        expect(request.maxOutputTokens).toBe(12000);
+        return { text: JSON.stringify(proposal), usage: { inputTokens: 50000, outputTokens: 7000 } };
+      } },
+    });
+    expect(reviewed.status, reviewed.error).toBe('applied');
+    expect(reviewed.usage).toMatchObject({ inputTokens: 50000, outputTokens: 7000, estimated: false });
+  });
+
+  it('never truncates fresh skill contents to force an oversized read under budget', async () => {
+    const complete = vi.fn<SkillReviewModelPort['complete']>();
+    const reviewed = await runSkillReview(job({ loadedSkills: [{ skillId: entry.skillId, revision: 'r', hash: 'h', files: [] }] }), {
+      host: host({ list: async () => ({ revision: 'c', entries: [entry] }),
+        view: async () => ({ ...readResult(), content: '中'.repeat(50000) }) }),
+      model: { capability: 'completion-only', complete },
+    });
+    expect(reviewed.error).toContain('BUDGET_TOKENS');
+    expect(complete).not.toHaveBeenCalled();
+  });
+
+  it('redirects protected skill mutations to a writable companion before host dispatch', async () => {
+    for (const protection of [{ scope: 'external' as const }, { readOnly: true }, { contentLocked: true }]) {
+      const protectedEntry = { ...entry, ...protection };
+      const companion = { ...proposal, operations: [{ action: 'create', name: 'local-testing-workflows', content: 'local reusable rules' }] };
+      const manage = vi.fn(async () => result('applied'));
+      const requests: string[] = [];
+      const reviewer = model([JSON.stringify(patchProposal), JSON.stringify(companion)]);
+      const complete = reviewer.complete;
+      reviewer.complete = async (request) => { requests.push(request.userContent); return complete(request); };
+      const reviewed = await runSkillReview(job({ loadedSkills: [{ skillId: entry.skillId, revision: 'r', hash: 'h', files: [] }] }), {
+        host: host({ list: async () => ({ revision: 'c', entries: [protectedEntry] }),
+          view: async () => ({ ...readResult(), entry: protectedEntry }), manage }), model: reviewer,
+      });
+      expect(reviewed.status).toBe('applied');
+      expect(manage).toHaveBeenCalledExactlyOnceWith(companion);
+      expect(requests[1]).toContain('Target is read-only or contentLocked');
+      expect(JSON.parse(requests[0]).index[0]).toMatchObject({
+        readOnly: protectedEntry.readOnly || protectedEntry.scope === 'external', contentLocked: protectedEntry.contentLocked,
+      });
+    }
+  });
+
+  it('allows slow completions past the legacy deadline, including historical retries', async () => {
+    vi.useFakeTimers();
+    for (const timeoutMs of [90000, 300000, 600000]) {
+      const manage = vi.fn(async () => result('applied'));
+      const pending = runSkillReview(job({ config: { ...config, timeoutMs } }), {
+        host: host({ manage }), model: { capability: 'completion-only', complete: async (request) => {
+          expect(request.timeoutMs).toBeGreaterThan(90000);
+          await new Promise((resolve) => setTimeout(resolve, 120000));
+          expect(request.signal.aborted).toBe(false);
+          return { text: JSON.stringify(proposal) };
+        } },
+      });
+      await vi.advanceTimersByTimeAsync(120000);
+      expect((await pending).status).toBe('applied');
+      expect(manage).toHaveBeenCalledTimes(1);
+    }
+  });
+
   it('fresh-reads loaded skills and requested references before accepting a patch', async () => {
     const seen: Array<{ system: string; userContent: string }> = [];
     const m = model([JSON.stringify({ version: 1, kind: 'read', requests: [{ skillId: entry.skillId, filePath: 'references/tests.md' }] }), JSON.stringify(patchProposal)]);
@@ -127,13 +280,13 @@ describe('bounded independent skill review', () => {
     expect(invalid.complete).toHaveBeenCalledTimes(2);
   });
 
-  it('cancels on aggregate token exhaustion and reports real per-call usage', async () => {
+  it('reports aggregate token exhaustion as failure and reports real per-call usage', async () => {
     const manage = vi.fn(async () => result('applied'));
     const tooMuch: SkillReviewModelPort = { capability: 'completion-only', complete: async () => ({
       text: JSON.stringify(proposal), usage: { inputTokens: 48001, outputTokens: 100 },
     }) };
     const exhausted = await runSkillReview(job(), { host: host({ manage }), model: tooMuch });
-    expect(exhausted.status).toBe('cancelled');
+    expect(exhausted.status).toBe('failed');
     expect(exhausted.error).toContain('BUDGET');
     expect(manage).not.toHaveBeenCalled();
     const measured: SkillReviewModelPort = { capability: 'completion-only', complete: async () => ({
@@ -158,13 +311,13 @@ describe('bounded independent skill review', () => {
     await called;
     await vi.advanceTimersByTimeAsync(100);
     expect(modelSignal.aborted).toBe(true);
-    expect((await pending).status).toBe('cancelled');
+    expect((await pending).status).toBe('failed');
     deliver({ text: JSON.stringify(proposal) });
     await Promise.resolve();
     expect(manage).not.toHaveBeenCalled();
   });
 
-  it('cancels at the hard six-round aggregate limit rather than reporting noop', async () => {
+  it('fails at the hard six-round aggregate limit rather than reporting noop', async () => {
     const complete = vi.fn<SkillReviewModelPort['complete']>(async () => ({ text: JSON.stringify({ version: 1, kind: 'read', requests: [{ skillId: entry.skillId }] }), usage: { inputTokens: 1, outputTokens: 1 } }));
     const manage = vi.fn(async () => result('applied'));
     const reviewed = await runSkillReview(job({ config: { ...config, maxRounds: 99 } }), {
@@ -172,7 +325,7 @@ describe('bounded independent skill review', () => {
       model: { capability: 'completion-only', complete },
     });
     expect(complete).toHaveBeenCalledTimes(6);
-    expect(reviewed.status).toBe('cancelled');
+    expect(reviewed.status).toBe('failed');
     expect(reviewed.error).toContain('BUDGET_ROUNDS');
     expect(manage).not.toHaveBeenCalled();
   });
@@ -211,7 +364,7 @@ describe('bounded independent skill review', () => {
         usage: { inputTokens: 100, outputTokens: 3100 } };
     } };
     const reviewed = await runSkillReview(job(), { host: host({ list: async () => ({ revision: 'c', entries: [entry] }), view: async () => readResult(), manage }), model: m });
-    expect(reviewed).toMatchObject({ status: 'cancelled', usage: { inputTokens: 200, outputTokens: 6200, calls: 2, estimated: false } });
+    expect(reviewed).toMatchObject({ status: 'failed', usage: { inputTokens: 200, outputTokens: 6200, calls: 2, estimated: false } });
     expect(manage).not.toHaveBeenCalled();
   });
 

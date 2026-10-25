@@ -22,8 +22,10 @@ const PPTX_MIME =
 describe('OfficePreviewPane', () => {
   let container: HTMLDivElement;
   let root: Root;
+  let rootStyle: string | null;
 
   beforeEach(() => {
+    rootStyle = document.documentElement.getAttribute('style');
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -35,6 +37,8 @@ describe('OfficePreviewPane', () => {
       root.unmount();
     });
     container.remove();
+    if (rootStyle === null) document.documentElement.removeAttribute('style');
+    else document.documentElement.setAttribute('style', rootStyle);
   });
 
   it('shows one slide at a time and admits what was not read', async () => {
@@ -110,5 +114,42 @@ describe('OfficePreviewPane', () => {
     );
     // 翻页只是切换已解析的内容，不该再打一次后端。
     expect(previewOfficeDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it('updates an open preview from the app palette without re-reading or changing pages', async () => {
+    const appRoot = document.documentElement;
+    appRoot.style.setProperty('--bg', '#191919');
+    appRoot.style.setProperty('--fg', '#d4d4d4');
+    appRoot.style.colorScheme = 'dark';
+    vi.mocked(previewOfficeDocument).mockResolvedValue({
+      kind: 'xlsx', pageCount: 2, truncated: false,
+      pages: [{ index: 1, html: '<p>第一页</p>' }, { index: 2, html: '<p>第二页</p>' }],
+    });
+    await act(async () => {
+      root.render(createElement(OfficePreviewPane, {
+        path: 'E:\\book.xlsx', streamPath: 'E:\\book.xlsx',
+        mime: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        fileName: 'book.xlsx',
+      }));
+    });
+    const iframe = container.querySelector('iframe')!;
+    expect(iframe.getAttribute('sandbox')).toBe('');
+    expect(iframe.srcdoc).toContain('--bg:#191919;');
+    expect(iframe.srcdoc).toContain('--fg:#d4d4d4;');
+    expect(iframe.srcdoc).toContain('color-scheme:dark;');
+    await act(async () => {
+      Array.from(container.querySelectorAll('button')).at(-1)?.click();
+    });
+    await act(async () => {
+      appRoot.style.setProperty('--bg', '#f6f7f9');
+      appRoot.style.setProperty('--fg', '#202124');
+      appRoot.style.colorScheme = 'light';
+    });
+    expect(iframe.srcdoc).toContain('--bg:#f6f7f9;');
+    expect(iframe.srcdoc).toContain('--fg:#202124;');
+    expect(iframe.srcdoc).toContain('color-scheme:light;');
+    expect(iframe.srcdoc).toContain('第二页');
+    expect(previewOfficeDocument).toHaveBeenCalledTimes(1);
+    expect(container.querySelector('.bg-white')).toBeNull();
   });
 });

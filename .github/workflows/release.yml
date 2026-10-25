@@ -157,11 +157,41 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: npx tauri build --target ${{ matrix.platform.tauri_target }} --bundles ${{ matrix.platform.bundles }}
 
+      - name: Generate SHA-256 checksums
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        env:
+          ASSET_GLOBS: ${{ matrix.platform.asset_glob }}
+          CHECKSUM_FILE: release-assets/${{ matrix.platform.artifact_name }}-SHA256SUMS.txt
+        run: |
+          mkdir -p release-assets
+          : > "$CHECKSUM_FILE"
+          while IFS= read -r pattern; do
+            [ -n "$pattern" ] || continue
+            found=false
+            for asset in $pattern; do
+              [ -f "$asset" ] || continue
+              found=true
+              (
+                cd "$(dirname "$asset")"
+                sha256sum "$(basename "$asset")"
+              ) >> "$CHECKSUM_FILE"
+            done
+            if [ "$found" != true ]; then
+              echo "No release assets matched: $pattern" >&2
+              exit 1
+            fi
+          done <<< "$ASSET_GLOBS"
+          test -s "$CHECKSUM_FILE"
+          cat "$CHECKSUM_FILE"
+
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.platform.artifact_name }}
-          path: ${{ matrix.platform.asset_glob }}
+          path: |
+            ${{ matrix.platform.asset_glob }}
+            release-assets/${{ matrix.platform.artifact_name }}-SHA256SUMS.txt
           if-no-files-found: error
 
   publish:

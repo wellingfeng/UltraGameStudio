@@ -64,6 +64,34 @@ async function submit(text: string) {
 }
 
 describe('AIDock explicit skill learning', () => {
+  it('hides completed noop rows after live updates and history reload without removing stored records', async () => {
+    const origin = { hostId: 'local', workspaceId: 'ws-noop', sessionId: 'session-noop', turnId: 'turn-noop', runId: 'run-noop' };
+    const message = { id: 'learning-noop', role: 'assistant' as const, text: '', localOnly: true, createdAt: 1,
+      skillLearning: { status: 'proposing' as const, origin } };
+    useStore.setState({ messages: [message] });
+    await renderDock();
+    expect(container.textContent).not.toContain('正在提炼经验');
+    expect(container.querySelector('[data-ugs-message-row]')).toBeNull();
+    const completed = { ...message, skillLearning: { status: 'noop' as const, origin,
+      result: { status: 'noop' as const, batchId: 'batch-noop', origin, lesson: '已有规则覆盖本次操作。', operationsApplied: 0, changes: [], riskReasons: [],
+        usage: { inputTokens: 13103, outputTokens: 198, calls: 1, estimated: false } } } };
+    const assertHidden = () => {
+      expect(container.textContent).not.toContain('无新经验');
+      expect(container.textContent).not.toContain('已有规则覆盖');
+      expect(container.textContent).not.toContain('复盘用量');
+      expect(container.querySelector('[data-ugs-message-row]')).toBeNull();
+    };
+    await act(async () => { useStore.setState({ messages: [completed] }); });
+    assertHidden();
+    expect(useStore.getState().messages[0]).toBe(completed);
+    await act(async () => { useStore.setState({ messages: [] }); });
+    await act(async () => { useStore.setState({ messages: JSON.parse(JSON.stringify([completed])) }); });
+    assertHidden();
+    await act(async () => { useStore.setState({ messages: [{ ...completed, text: '正常回答仍然保留。' }] }); });
+    expect(container.textContent).toContain('正常回答仍然保留。');
+    expect(container.textContent).not.toContain('无新经验');
+  });
+
   it('renders a textless source-frozen history card and persists its action result to that message after navigation', async () => {
     const origin = { hostId: 'local', workspaceId: 'ws-source', sessionId: 'session-source', turnId: 'turn-source', runId: 'run-source', cwd: 'E:/Source' };
     const pending: SkillMutationResult = { status: 'awaiting_approval', batchId: 'batch-source', origin, lesson: 'Source-bound review.', operationsApplied: 0, changes: [], riskReasons: [] };

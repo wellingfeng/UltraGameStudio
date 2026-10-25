@@ -9,17 +9,61 @@ import type { Message } from '@/store/types';
  * `createdAt` so the stream reads top-down in real send time, leaving the
  * store array and the LLM-facing history untouched.
  *
- * The one exception is an interjected ("插话") message: its `createdAt` is its
- * *send* time, which is later than the reply it was steered into. A plain
- * `createdAt` sort would drop it below that reply — back to the tail, where it
- * reads as "not sent yet". Each interjection is instead anchored to the message
- * right after it in the store (the reply it precedes), so it stays just above
- * that reply while everything else keeps its chronological position.
+ * Interjections use their persisted reply ID. Legacy records infer the latest
+ * real reply started in their turn; local-only cards are never reply targets.
+ * Insert before the reply after chronological sorting, without changing store
+ * order or timestamps. This also repairs legacy trailing interjections.
  *
+ * Pending prompts stay at the tail in queue FIFO order until execution starts.
+ * They are not turn boundaries for legacy interjection inference.
  * Sort is skipped when the array is already monotonic, so steady-state
  * rendering stays O(n).
  */
-export function orderDisplayMessages(messages: Message[]): Message[] {
+export function orderDisplayMessages(
+  messages: Message[],
+  queuedMessageIds: readonly string[] = [],
+): Message[] {
+  if (queuedMessageIds.length > 0) {
+    const byId = new Map(messages.map((message) => [message.id, message]));
+    const queued = queuedMessageIds.flatMap((id) => {
+      const message = byId.get(id);
+      return message?.role === 'user' ? [message] : [];
+    });
+    if (queued.length > 0) {
+      const queuedIds = new Set(queued.map((message) => message.id));
+      const ordered = [
+        ...orderDisplayMessages(messages.filter((message) => !queuedIds.has(message.id))),
+        ...queued,
+      ];
+      return ordered.every((message, index) => message === messages[index]) ? messages : ordered;
+    }
+  }
+  const isReply = (message: Message) =>
+    message.role === 'assistant' && !message.localOnly && !message.skillLearning;
+  const byId = new Map(messages.map((message) => [message.id, message]));
+  const anchors = new Map<string, Message[]>();
+  const anchoredIds = new Set<string>();
+  for (const message of messages) {
+    if (!message.interjected) continue;
+    let reply = message.interjectedReplyId ? byId.get(message.interjectedReplyId) : undefined;
+    if (reply && !isReply(reply)) reply = undefined;
+    if (!reply) {
+      const turnStart = messages.reduce((latest, candidate) =>
+        candidate.role === 'user' && !candidate.interjected &&
+        candidate.createdAt <= message.createdAt
+          ? Math.max(latest, candidate.createdAt) : latest, -Infinity);
+      for (const candidate of messages) {
+        if (isReply(candidate) && candidate.createdAt >= turnStart &&
+          candidate.createdAt <= message.createdAt &&
+          (!reply || candidate.createdAt > reply.createdAt)) reply = candidate;
+      }
+    }
+    if (!reply) continue;
+    const group = anchors.get(reply.id) ?? [];
+    group.push(message);
+    anchors.set(reply.id, group);
+    anchoredIds.add(message.id);
+  }
   let sorted = true;
   for (let i = 1; i < messages.length; i += 1) {
     if (messages[i].createdAt < messages[i - 1].createdAt) {
@@ -27,27 +71,9 @@ export function orderDisplayMessages(messages: Message[]): Message[] {
       break;
     }
   }
-  if (sorted) return messages;
-
-  const interjectionAnchor = new Map<string, number>();
-  for (let i = 0; i < messages.length; i += 1) {
-    if (!messages[i].interjected) continue;
-    let nextIdx = -1;
-    for (let j = i + 1; j < messages.length; j += 1) {
-      if (!messages[j].interjected) {
-        nextIdx = j;
-        break;
-      }
-    }
-    interjectionAnchor.set(
-      messages[i].id,
-      nextIdx >= 0 ? messages[nextIdx].createdAt - 1 : messages[i].createdAt,
-    );
-  }
-
-  return [...messages].sort((a, b) => {
-    const ta = interjectionAnchor.get(a.id) ?? a.createdAt;
-    const tb = interjectionAnchor.get(b.id) ?? b.createdAt;
-    return ta - tb;
-  });
+  if (sorted && anchors.size === 0) return messages;
+  const chronological = messages.filter((message) => !anchoredIds.has(message.id));
+  chronological.sort((a, b) => a.createdAt - b.createdAt);
+  const ordered = chronological.flatMap((message) => [...(anchors.get(message.id) ?? []), message]);
+  return ordered.every((message, index) => message === messages[index]) ? messages : ordered;
 }

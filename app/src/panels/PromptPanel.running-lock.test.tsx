@@ -17,6 +17,7 @@ import { remoteProviderId, remoteWorkspacePath } from '@/lib/remoteWorkspace';
 import { defaultComposer, samplePromptGroups } from '@/store/sampleSessions';
 import type { Message } from '@/store/types';
 import { useStore } from '@/store/useStore';
+import { CLOUD_PROJECTS_ENABLED } from '@/lib/cloudProjects';
 
 vi.mock('@/lib/publicTranslation', () => ({
   translatePublicText: vi.fn(),
@@ -474,7 +475,7 @@ describe('PromptPanel running lock', () => {
     }
   });
 
-  it('shows only matching remote runner channels for a cloud workspace', async () => {
+  it.runIf(CLOUD_PROJECTS_ENABLED)('shows only matching remote runner channels for a cloud workspace', async () => {
     const matchingRemoteProvider: Provider = {
       id: remoteProviderId('rw_remote', 'sss'),
       kind: 'anthropic',
@@ -583,9 +584,9 @@ describe('PromptPanel running lock', () => {
       expect(view.container.textContent).not.toContain(
         '在右侧描述你的意图，AI 将据此操作画布并在此回显。',
       );
-      expect(buttonByText(view.container, '复制').disabled).toBe(false);
-      expect(buttonByText(view.container, '导出').disabled).toBe(false);
-      expect(buttonByText(view.container, '新会话').disabled).toBe(false);
+      expect(buttonByAriaLabel(view.container, '复制').disabled).toBe(false);
+      expect(buttonByAriaLabel(view.container, '导出').disabled).toBe(false);
+      expect(buttonByAriaLabel(view.container, '新会话').disabled).toBe(false);
     } finally {
       await view.cleanup();
     }

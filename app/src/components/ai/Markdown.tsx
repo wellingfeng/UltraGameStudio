@@ -1,7 +1,9 @@
 import {
   memo,
+  useEffect,
   useMemo,
   useRef,
+  useState,
   isValidElement,
   cloneElement,
   type MouseEvent as ReactMouseEvent,
@@ -29,12 +31,14 @@ import {
   detectDetailsTitle,
 } from './lib/htmlDetails';
 import { scanFileRefs } from './lib/fileScan';
-import { parseFileRef } from './lib/filePath';
+import { displayFileRefPath, parseFileRef } from './lib/filePath';
 import { parseToolLine } from './lib/toolLine';
 import CodeBlock from './CodeBlock';
 import DetailsBlock from './DetailsBlock';
 import InlineCode from './InlineCode';
 import SmartLink from './SmartLink';
+import { useMessageReferences } from './MessageReferences';
+import { isReferenceCitationLink } from '@/lib/messageReferences';
 import ToolLine from './ToolLine';
 import Callout from './Callout';
 import { detectCallout, stripCalloutMarker } from './lib/callout';
@@ -56,6 +60,8 @@ import {
 import { Eye, FolderOpen, FolderTree } from 'lucide-react';
 import { useStore } from '@/store/useStore';
 import { t } from '@/lib/i18n';
+import { convertFileSrc } from '@tauri-apps/api/core';
+import { ensureLocalAssetScope } from '@/lib/tauri';
 
 const imageMenuIconClass = 'shrink-0 text-fg-faint';
 
@@ -71,17 +77,44 @@ function MarkdownImage({
   source,
   alt,
   onOpenFile,
+  cwd,
 }: {
   source: string;
   alt: string;
   onOpenFile?: OpenFileFn;
+  cwd?: string;
 }) {
   const locale = useStore((s) => s.locale);
   const { open, element } = useFileActionsMenu();
+  const [displaySrc, setDisplaySrc] = useState(source);
+  const directSource = /^(?:https?|data|blob|asset|tauri):/i.test(source);
+  const fileRef = directSource ? null : parseFileRef(source, { allowSpaces: true });
+  const resolvedSource = fileRef ? displayFileRefPath(fileRef, cwd) : source;
+
+  // 本地图片先按文档目录解析成绝对路径，再开 asset scope 并转换 URL；
+  // 否则相对路径会错误地按应用进程目录加载。无 Tauri IPC 时保留原 src。
+  useEffect(() => {
+    if (!source || directSource) {
+      setDisplaySrc(source);
+      return;
+    }
+    let disposed = false;
+    void (async () => {
+      try {
+        await ensureLocalAssetScope(resolvedSource);
+        if (!disposed) setDisplaySrc(convertFileSrc(resolvedSource));
+      } catch {
+        // jsdom/无 Tauri 环境：keep the raw source.
+      }
+    })();
+    return () => {
+      disposed = true;
+    };
+  }, [directSource, resolvedSource, source]);
 
   const image = (
     <img
-      src={source}
+      src={displaySrc}
       alt={alt}
       loading="lazy"
       className="ai-generated-image"
@@ -89,8 +122,8 @@ function MarkdownImage({
   );
   if (!source || !onOpenFile) return image;
 
-  const previewRef = createImagePreviewRef(source, alt || undefined);
-  const localFile = !/^(?:https?:\/\/|data:)/i.test(source);
+  const previewRef = createImagePreviewRef(resolvedSource, alt || undefined);
+  const localFile = !directSource;
 
   const openContextMenu = (event: ReactMouseEvent<HTMLButtonElement>) => {
     const items: FileActionItem[] = [
@@ -159,6 +192,10 @@ function markdownUrlTransform(url: string, key: string): string | null | undefin
   }
   if (key === 'href' && isModelUrl(url)) return url;
   if (key === 'href' && /^data:text\/plain;base64,/i.test(url)) return url;
+  // 本地图片路径（盘符 / UNC / file://）不能掉进 defaultUrlTransform：
+  // 它把 `E:` 当非法协议清成空串，`<img src="">` 直接裂图。放行后
+  // MarkdownImage 会开 asset scope 并转成 asset URL 显示。
+  if (key === 'src' && parseFileRef(url, { allowSpaces: true })) return url;
   // Preserve recognised local destinations (drive paths, /E:/..., file URLs,
   // UNC, percent-encoded paths). SmartLink handles them through the file
   // preview bridge instead of asking the webview to navigate to a file URL.
@@ -226,12 +263,14 @@ function rehypeGroupSections() {
  */
 function MarkdownImpl({
   text,
+  citations = false,
   streaming = false,
   onOpenFile,
   cwd,
   searchState = null,
 }: {
   text: string;
+  citations?: boolean;
   streaming?: boolean;
   onOpenFile?: OpenFileFn;
   cwd?: string;
@@ -267,6 +306,8 @@ function MarkdownImpl({
     [],
   );
   const fileChipBudget = useFileChipBudget();
+  const referenceContext = useMessageReferences();
+  const references = citations ? referenceContext : null;
 
   // Keep the mutable per-render inputs in a ref so the `components` object below
   // can be built once (stable identity) yet always read the latest values.
@@ -275,6 +316,7 @@ function MarkdownImpl({
   // whole subtree each token — which visibly flickers code blocks, image chips,
   // and paragraphs during streaming. Freezing the component map fixes that.
   const ctxRef = useRef({
+    references,
     onOpenFile,
     cwd,
     searchState,
@@ -282,6 +324,7 @@ function MarkdownImpl({
     defaultModelAnimations,
   });
   ctxRef.current = {
+    references,
     onOpenFile,
     cwd,
     searchState,
@@ -456,7 +499,12 @@ function MarkdownImpl({
     children: ReactNode,
   ): { title: string; body: ReactNode } | null => {
     const arr = Array.isArray(children) ? children : [children];
-    const intro = plainText(arr[0]);
+    // react-markdown v9 把换行文本节点平铺在元素之间（children 形如
+    // ["\n", <p>, "\n", <ul>, "\n"]），arr[0] 常常只是 "\n"。跳过前导空白，
+    // 取第一个有内容的节点判定 `[!details]` marker，否则检测永远落空。
+    const first = arr.find((c) => plainText(c).trim() !== '');
+    if (first === undefined) return null;
+    const intro = plainText(first);
     if (!detectDetails(intro)) return null;
     return {
       title: detectDetailsTitle(intro),
@@ -493,7 +541,15 @@ function MarkdownImpl({
         </InlineCode>
       );
     },
-    a: ({ href, children }) => (
+    a: ({ href, children }) => {
+      const reference = href && isReferenceCitationLink(href, plainText(children)) ? ctxRef.current.references?.find(href) : undefined;
+      if (reference) {
+        const numeric = /^\[?\d+\]?$/.test(plainText(children).trim());
+        return <>{!numeric && children}<button type="button" className="ai-citation"
+          title={reference.title} aria-label={`查看参考资料 ${reference.number}：${reference.title}`}
+          onClick={() => ctxRef.current.references?.locate(reference.number)}>[{reference.number}]</button></>;
+      }
+      return (
       <SmartLink
         href={href}
         onOpenFile={ctxRef.current.onOpenFile}
@@ -502,7 +558,8 @@ function MarkdownImpl({
       >
         {children as ReactNode}
       </SmartLink>
-    ),
+      );
+    },
     p: ({ children }) => {
       const tool = parseToolLine(plainText(children));
       if (tool) {
@@ -545,6 +602,7 @@ function MarkdownImpl({
           source={source}
           alt={alt ?? ''}
           onOpenFile={ctxRef.current.onOpenFile}
+          cwd={ctxRef.current.cwd}
         />
       );
     },

@@ -1,0 +1,56 @@
+import { SUPPORTED_LOCALES, type Locale } from './i18n';
+
+// Column order matches SUPPORTED_LOCALES. New scheduling UI has native labels in all 11 languages.
+const words = {
+  returnToChat: ['返回对话', 'Return to chat', 'Retour à la conversation', 'Вернуться к чату', 'Volver al chat', 'चैट पर लौटें', 'العودة إلى المحادثة', 'Voltar à conversa', '会話に戻る', 'Zurück zum Chat', '대화로 돌아가기'],
+  enabled: ['按计划运行', 'Run on schedule', 'Exécution planifiée', 'Запуск по расписанию', 'Ejecutar según horario', 'समय पर चलाएँ', 'تشغيل وفق الجدول', 'Executar na agenda', 'スケジュール実行', 'Nach Zeitplan ausführen', '예약 실행'],
+  time: ['运行时间', 'Run time', 'Heure', 'Время', 'Hora', 'समय', 'وقت التشغيل', 'Hora', '実行時刻', 'Uhrzeit', '실행 시간'],
+  weekdays: ['运行日期', 'Run days', 'Jours', 'Дни запуска', 'Días', 'कार्य दिन', 'أيام التشغيل', 'Dias', '実行曜日', 'Ausführungstage', '실행 요일'],
+  hour: ['时', 'Hour', 'Heure', 'Час', 'Hora', 'घंटा', 'ساعة', 'Hora', '時', 'Stunde', '시'],
+  minute: ['分', 'Min', 'Minute', 'Минута', 'Minuto', 'मिनट', 'دقيقة', 'Minuto', '分', 'Minute', '분'],
+  second: ['秒', 'Sec', 'Seconde', 'Секунда', 'Segundo', 'सेकंड', 'ثانية', 'Segundo', '秒', 'Sekunde', '초'],
+  repeat: ['重复运行', 'Repeat', 'Répéter', 'Повторять', 'Repetir', 'दोहराएँ', 'تكرار', 'Repetir', '繰り返す', 'Wiederholen', '반복'],
+  reminder: ['运行前弹出提醒', 'Show reminder before running', 'Afficher un rappel avant exécution', 'Напомнить перед запуском', 'Recordar antes de ejecutar', 'चलाने से पहले याद दिलाएँ', 'تذكير قبل التشغيل', 'Lembrar antes de executar', '実行前に通知', 'Vor Ausführung erinnern', '실행 전 알림'],
+  requiredPrompt: ['请输入任务提示词', 'Enter the task prompt', 'Saisissez la consigne', 'Введите запрос', 'Introduce la instrucción', 'कार्य निर्देश दें', 'أدخل تعليمات المهمة', 'Informe as instruções', 'タスクの指示を入力', 'Aufgabenprompt eingeben', '작업 지시를 입력하세요'],
+  requiredWeekday: ['至少选择一天', 'Select at least one day', 'Choisissez au moins un jour', 'Выберите хотя бы один день', 'Selecciona al menos un día', 'कम से कम एक दिन चुनें', 'اختر يومًا واحدًا على الأقل', 'Selecione ao menos um dia', '曜日を一つ以上選択', 'Mindestens einen Tag wählen', '하루 이상 선택하세요'],
+  saveError: ['定时任务保存失败，请重试', 'Failed to save task. Please retry', 'Échec de l’enregistrement. Réessayez', 'Не удалось сохранить задание', 'No se pudo guardar. Reintenta', 'कार्य सहेजा नहीं गया। फिर प्रयास करें', 'فشل حفظ المهمة. حاول مجددًا', 'Falha ao salvar. Tente novamente', '保存失敗。再試行してください', 'Speichern fehlgeschlagen. Erneut versuchen', '저장 실패. 다시 시도하세요'],
+  title: ['定时任务', 'Scheduled tasks', 'Tâches planifiées', 'Задания по расписанию', 'Tareas programadas', 'निर्धारित कार्य', 'المهام المجدولة', 'Tarefas agendadas', '定期タスク', 'Geplante Aufgaben', '예약 작업'],
+  create: ['新建定时任务', 'New scheduled task', 'Nouvelle tâche', 'Новое задание', 'Nueva tarea', 'नया कार्य', 'مهمة جديدة', 'Nova tarefa', 'タスクを作成', 'Neue Aufgabe', '새 작업'],
+  search: ['搜索任务或模板…', 'Search tasks or templates…', 'Rechercher une tâche…', 'Поиск заданий…', 'Buscar tareas…', 'कार्य खोजें…', 'البحث عن المهام…', 'Buscar tarefas…', 'タスクを検索…', 'Aufgaben suchen…', '작업 검색…'],
+  templates: ['常用任务', 'Common tasks', 'Tâches courantes', 'Частые задания', 'Tareas comunes', 'सामान्य कार्य', 'المهام الشائعة', 'Tarefas comuns', 'よく使うタスク', 'Häufige Aufgaben', '자주 쓰는 작업'],
+  empty: ['暂无排程任务', 'No scheduled tasks', 'Aucune tâche planifiée', 'Нет заданий', 'No hay tareas', 'कोई कार्य नहीं', 'لا توجد مهام', 'Nenhuma tarefa', 'タスクはありません', 'Keine geplanten Aufgaben', '예약 작업 없음'],
+  hint: ['设置提示词与运行时间，到时自动执行，结果保存在任务会话中。', 'Set a prompt and schedule. Results are saved in the task conversation.', 'Définissez une consigne et un horaire. Les résultats sont enregistrés dans la conversation.', 'Задайте запрос и расписание. Результаты сохраняются в беседе.', 'Define una instrucción y un horario. Los resultados se guardan en la conversación.', 'निर्देश और समय तय करें। परिणाम बातचीत में सहेजे जाते हैं।', 'حدد التعليمات والجدول. تُحفظ النتائج في المحادثة.', 'Defina instruções e horários. Os resultados ficam na conversa.', '指示と実行時刻を設定。結果は会話に保存されます。', 'Prompt und Zeitplan festlegen. Ergebnisse werden im Gespräch gespeichert.', '지시와 시간을 설정하세요. 결과는 대화에 저장됩니다.'],
+  availability: ['应用需保持运行；休眠恢复后补跑最近一次。数据访问沿用当前模型与工具权限。', 'Keep the app running. The latest missed run resumes after sleep. Data access uses your model and tools.', 'Gardez l’application ouverte. La dernière exécution manquée reprend après la veille. Accès via vos outils.', 'Приложение должно работать. После сна выполняется последнее пропущенное задание. Доступ через ваши инструменты.', 'Mantén la aplicación abierta. Tras la suspensión se ejecuta la última tarea pendiente. Acceso mediante tus herramientas.', 'ऐप चालू रखें। नींद के बाद अंतिम छूटा कार्य चलता है। डेटा आपके उपकरणों से मिलता है।', 'أبقِ التطبيق قيد التشغيل. تُنفذ آخر مهمة فائتة بعد السكون. الوصول عبر أدواتك.', 'Mantenha o app aberto. Após a suspensão, executa a última tarefa perdida. Acesso via suas ferramentas.', 'アプリの起動が必要です。スリープ復帰後に直近の未実行分を実行。データは現在のツールで取得。', 'App geöffnet lassen. Nach dem Ruhezustand wird der letzte verpasste Lauf nachgeholt. Zugriff über Ihre Tools.', '앱을 실행해 두세요. 절전 후 최근 누락 작업을 실행합니다. 데이터는 현재 도구로 접근합니다.'],
+  name: ['任务名称', 'Task name', 'Nom', 'Название', 'Nombre', 'कार्य का नाम', 'اسم المهمة', 'Nome', 'タスク名', 'Aufgabenname', '작업 이름'],
+  prompt: ['任务提示词', 'Task prompt', 'Consigne', 'Запрос', 'Instrucción', 'कार्य निर्देश', 'تعليمات المهمة', 'Instruções', 'タスクの指示', 'Aufgabenprompt', '작업 지시'],
+  kind: ['执行方式', 'Schedule type', 'Type de planification', 'Тип расписания', 'Tipo de horario', 'समय प्रकार', 'نوع الجدول', 'Tipo de agenda', '実行スケジュール', 'Zeitplantyp', '예약 방식'],
+  weekly: ['时间与星期', 'Time and weekdays', 'Heure et jours', 'Время и дни', 'Hora y días', 'समय और दिन', 'الوقت والأيام', 'Hora e dias', '時刻と曜日', 'Uhrzeit und Wochentage', '시간과 요일'],
+  once: ['指定日期，仅一次', 'Once on a date', 'Une seule fois', 'Один раз', 'Una vez', 'एक बार', 'مرة واحدة', 'Uma vez', '日時指定・一回', 'Einmalig', '날짜 지정, 한 번'],
+  cron: ['Cron 表达式', 'Cron expression', 'Expression cron', 'Выражение cron', 'Expresión cron', 'Cron व्यंजक', 'تعبير Cron', 'Expressão cron', 'Cron 式', 'Cron-Ausdruck', 'Cron 표현식'],
+  cronHint: ['五段：分 时 日 月 星期。例如 */30 * * * *（每30分钟）', 'Five fields: minute hour day month weekday. Example: */30 * * * *', 'Cinq champs : minute heure jour mois semaine. Exemple : */30 * * * *', 'Пять полей: минута час день месяц день недели. Пример: */30 * * * *', 'Cinco campos: minuto hora día mes semana. Ejemplo: */30 * * * *', 'पाँच भाग: मिनट घंटा दिन महीना सप्ताह-दिन। उदाहरण: */30 * * * *', 'خمسة حقول: دقيقة ساعة يوم شهر يوم الأسبوع. مثال: */30 * * * *', 'Cinco campos: minuto hora dia mês semana. Exemplo: */30 * * * *', '5項目：分 時 日 月 曜日。例：*/30 * * * *', 'Fünf Felder: Minute Stunde Tag Monat Wochentag. Beispiel: */30 * * * *', '5개 필드: 분 시 일 월 요일. 예: */30 * * * *'],
+  timeZone: ['时区', 'Time zone', 'Fuseau horaire', 'Часовой пояс', 'Zona horaria', 'समय क्षेत्र', 'المنطقة الزمنية', 'Fuso horário', 'タイムゾーン', 'Zeitzone', '시간대'],
+  outputLanguage: ['结果语言', 'Output language', 'Langue des résultats', 'Язык результата', 'Idioma del resultado', 'परिणाम की भाषा', 'لغة النتائج', 'Idioma do resultado', '結果の言語', 'Ausgabesprache', '결과 언어'],
+  next: ['下次执行', 'Next run', 'Prochaine exécution', 'Следующий запуск', 'Próxima ejecución', 'अगला कार्य', 'التشغيل التالي', 'Próxima execução', '次回実行', 'Nächster Lauf', '다음 실행'],
+  last: ['上次触发', 'Last triggered', 'Dernier déclenchement', 'Последний запуск', 'Última activación', 'अंतिम बार चला', 'آخر تشغيل', 'Última ativação', '前回実行', 'Zuletzt ausgelöst', '마지막 실행'],
+  paused: ['已暂停', 'Paused', 'En pause', 'Приостановлено', 'En pausa', 'रुका हुआ', 'متوقف', 'Pausada', '一時停止中', 'Pausiert', '일시 중지'],
+  pause: ['暂停', 'Pause', 'Suspendre', 'Пауза', 'Pausar', 'रोकें', 'إيقاف', 'Pausar', '一時停止', 'Pausieren', '일시 중지'],
+  resume: ['启用', 'Enable', 'Activer', 'Включить', 'Activar', 'सक्रिय करें', 'تفعيل', 'Ativar', '有効にする', 'Aktivieren', '활성화'],
+  run: ['立即运行', 'Run now', 'Exécuter', 'Запустить', 'Ejecutar ahora', 'अभी चलाएँ', 'تشغيل الآن', 'Executar agora', '今すぐ実行', 'Jetzt ausführen', '지금 실행'],
+  history: ['查看结果', 'View results', 'Voir les résultats', 'Результаты', 'Ver resultados', 'परिणाम देखें', 'عرض النتائج', 'Ver resultados', '結果を見る', 'Ergebnisse anzeigen', '결과 보기'],
+  noRuns: ['尚无运行记录', 'No runs yet', 'Aucune exécution', 'Запусков пока нет', 'Sin ejecuciones', 'अभी तक कोई रन नहीं', 'لا توجد عمليات تشغيل بعد', 'Nenhuma execução ainda', '実行履歴はありません', 'Noch keine Ausführungen', '실행 기록 없음'],
+  edit: ['编辑任务', 'Edit task', 'Modifier', 'Изменить', 'Editar', 'संपादित करें', 'تعديل', 'Editar', '編集', 'Bearbeiten', '편집'],
+  invalidCron: ['Cron 无效，请检查五段字段、范围和步长', 'Invalid cron: check five fields, ranges and steps', 'Cron invalide : vérifiez les champs', 'Некорректное cron-выражение', 'Cron inválido: revisa los campos', 'Cron अमान्य है', 'تعبير Cron غير صالح', 'Cron inválido: confira os campos', 'Cron の項目・範囲・間隔を確認', 'Ungültiger Cron-Ausdruck', 'Cron 필드, 범위, 간격을 확인하세요'],
+  invalidZone: ['请输入有效的 IANA 时区，如 Asia/Shanghai', 'Enter a valid IANA time zone, e.g. Asia/Shanghai', 'Saisissez un fuseau IANA valide', 'Введите часовой пояс IANA', 'Introduce una zona IANA válida', 'मान्य IANA समय क्षेत्र दें', 'أدخل منطقة زمنية IANA صالحة', 'Informe um fuso IANA válido', '有効な IANA タイムゾーンを入力', 'Gültige IANA-Zeitzone eingeben', '유효한 IANA 시간대를 입력하세요'],
+  invalidDate: ['请选择未来的执行日期与时间', 'Choose a future date and time', 'Choisissez une date future', 'Выберите будущую дату', 'Elige una fecha futura', 'भविष्य की तारीख चुनें', 'اختر تاريخًا ووقتًا مستقبليًا', 'Escolha uma data futura', '未来の日時を選択', 'Zukünftigen Zeitpunkt wählen', '미래 날짜와 시간을 선택하세요'],
+  requiredName: ['请输入任务名称', 'Enter a task name', 'Saisissez un nom', 'Введите название', 'Introduce un nombre', 'कार्य का नाम दें', 'أدخل اسم المهمة', 'Informe um nome', 'タスク名を入力', 'Aufgabenname eingeben', '작업 이름을 입력하세요'],
+  noNext: ['此排程没有可用的下次执行时间', 'No upcoming occurrence for this schedule', 'Aucune prochaine exécution', 'Нет будущих запусков', 'No hay próxima ejecución', 'अगला समय नहीं है', 'لا يوجد موعد قادم', 'Sem próxima execução', '次回実行日時がありません', 'Kein nächster Ausführungstermin', '다음 실행 시간이 없습니다'],
+  noResults: ['未找到匹配任务', 'No matching tasks', 'Aucun résultat', 'Ничего не найдено', 'Sin resultados', 'कोई परिणाम नहीं', 'لا توجد نتائج', 'Sem resultados', '該当なし', 'Keine Treffer', '검색 결과 없음'],
+  delete: ['删除任务', 'Delete task', 'Supprimer', 'Удалить', 'Eliminar', 'मिटाएँ', 'حذف المهمة', 'Excluir', '削除', 'Löschen', '삭제'],
+  busy: ['任务正在运行或等待输入', 'Task is running or waiting for input', 'La tâche est en cours ou attend une saisie', 'Задание выполняется или ждёт ввода', 'La tarea está en curso o espera entrada', 'कार्य चल रहा है या इनपुट की प्रतीक्षा है', 'المهمة قيد التشغيل أو تنتظر الإدخال', 'A tarefa está em execução ou aguarda entrada', 'タスク実行中または入力待ち', 'Aufgabe läuft oder wartet auf Eingabe', '작업 실행 중 또는 입력 대기 중'],
+  failed: ['任务启动失败', 'Failed to start task', 'Échec du lancement', 'Ошибка запуска', 'Error al iniciar', 'कार्य शुरू नहीं हुआ', 'فشل بدء المهمة', 'Falha ao iniciar', 'タスク開始失敗', 'Start fehlgeschlagen', '작업 시작 실패'],
+} as const;
+
+export type ScheduledTaskTextKey = keyof typeof words;
+export function scheduleText(locale: Locale, key: ScheduledTaskTextKey): string {
+  return words[key][SUPPORTED_LOCALES.indexOf(locale)] ?? words[key][0];
+}

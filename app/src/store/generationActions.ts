@@ -1288,6 +1288,7 @@ export function startImageGenerationTurn(
   options: {
     providerId?: ImageProviderId;
     model?: string;
+    strictProvider?: boolean;
     onSettled?: OnGenerationSettled;
     background?: boolean;
     sessionKey?: WorkflowSessionKey;
@@ -1315,6 +1316,11 @@ export function startImageGenerationTurn(
       !imageProviderById(requestedProviderId, settings).local)
       ? requestedProviderId
       : preferredReadyImageProviderIdForProfile(settings, settingsProfile);
+  if (options.strictProvider && providerId !== requestedProviderId) {
+    options.onSettled?.({ ok: false, error: '原渠道不适用于当前项目，未切换渠道。' });
+    return;
+  }
+
   if (!providerId) {
     options.onSettled?.({
       ok: false,
@@ -1599,6 +1605,7 @@ export function startMusicGenerationTurn(
   options: {
     providerId?: MusicProviderId;
     model?: string;
+    strictProvider?: boolean;
     onSettled?: OnGenerationSettled;
     background?: boolean;
     sessionKey?: WorkflowSessionKey;
@@ -1626,6 +1633,11 @@ export function startMusicGenerationTurn(
       !musicProviderById(requestedProviderId, settings).local)
       ? requestedProviderId
       : preferredReadyMusicProviderIdForProfile(settings, settingsProfile);
+  if (options.strictProvider && providerId !== requestedProviderId) {
+    options.onSettled?.({ ok: false, error: '原渠道不适用于当前项目，未切换渠道。' });
+    return;
+  }
+
   if (!providerId) {
     options.onSettled?.({
       ok: false,
@@ -1829,6 +1841,7 @@ export function startThreeDGenerationTurn(
   options: {
     providerId?: ThreeDProviderId;
     model?: string;
+    strictProvider?: boolean;
     onSettled?: OnGenerationSettled;
     background?: boolean;
     sessionKey?: WorkflowSessionKey;
@@ -1856,6 +1869,11 @@ export function startThreeDGenerationTurn(
       !threeDProviderById(requestedProviderId, settings).local)
       ? requestedProviderId
       : preferredReadyThreeDProviderIdForProfile(settings, settingsProfile);
+  if (options.strictProvider && providerId !== requestedProviderId) {
+    options.onSettled?.({ ok: false, error: '原渠道不适用于当前项目，未切换渠道。' });
+    return;
+  }
+
   if (!providerId) {
     options.onSettled?.({
       ok: false,
@@ -2286,6 +2304,7 @@ export function startVideoGenerationTurn(
   options: {
     providerId?: VideoProviderId;
     model?: string;
+    strictProvider?: boolean;
     onSettled?: OnGenerationSettled;
     background?: boolean;
     sessionKey?: WorkflowSessionKey;
@@ -2313,6 +2332,11 @@ export function startVideoGenerationTurn(
       !videoProviderById(requestedProviderId, settings).local)
       ? requestedProviderId
       : preferredReadyVideoProviderIdForProfile(settings, settingsProfile);
+  if (options.strictProvider && providerId !== requestedProviderId) {
+    options.onSettled?.({ ok: false, error: '原渠道不适用于当前项目，未切换渠道。' });
+    return;
+  }
+
   if (!providerId) {
     options.onSettled?.({
       ok: false,
@@ -2777,6 +2801,7 @@ export function startSpeechGenerationTurn(
   options: {
     providerId?: SpeechProviderId;
     model?: string;
+    strictProvider?: boolean;
     voice?: string;
     onSettled?: OnGenerationSettled;
     background?: boolean;
@@ -2805,6 +2830,11 @@ export function startSpeechGenerationTurn(
       !speechProviderById(requestedProviderId, settings).local)
       ? requestedProviderId
       : preferredReadySpeechProviderIdForProfile(settings, settingsProfile);
+  if (options.strictProvider && providerId !== requestedProviderId) {
+    options.onSettled?.({ ok: false, error: '原渠道不适用于当前项目，未切换渠道。' });
+    return;
+  }
+
   if (!providerId) {
     options.onSettled?.({
       ok: false,
@@ -3024,6 +3054,7 @@ export function startSpriteGenerationTurn(
   options: {
     providerId?: ImageProviderId;
     model?: string;
+    strictProvider?: boolean;
     onSettled?: OnGenerationSettled;
     background?: boolean;
     sessionKey?: WorkflowSessionKey;
@@ -3052,6 +3083,11 @@ export function startSpriteGenerationTurn(
       !imageProviderById(requestedProviderId, imageSettings).local)
       ? requestedProviderId
       : preferredReadyImageProviderIdForProfile(imageSettings, settingsProfile);
+  if (options.strictProvider && providerId !== requestedProviderId) {
+    options.onSettled?.({ ok: false, error: '原渠道不适用于当前项目，未切换渠道。' });
+    return;
+  }
+
   if (!providerId) {
     options.onSettled?.({
       ok: false,

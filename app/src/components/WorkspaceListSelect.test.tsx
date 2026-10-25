@@ -25,6 +25,7 @@ async function renderList(props: {
   activeWorkspaceId: string | null;
   onSelect?: (path: string) => void;
   onBrowseLocal?: () => void;
+  onAddRemote?: () => void;
   remoteConnectionStates?: Record<string, RemoteWorkspaceConnectionState>;
 }): Promise<{ container: HTMLDivElement; cleanup: () => Promise<void> }> {
   const container = document.createElement('div');
@@ -39,6 +40,7 @@ async function renderList(props: {
         locale="zh-CN"
         onSelect={props.onSelect ?? vi.fn()}
         onBrowseLocal={props.onBrowseLocal ?? vi.fn()}
+        onAddRemote={props.onAddRemote}
         remoteConnectionStates={props.remoteConnectionStates}
       />,
     );
@@ -157,7 +159,8 @@ describe('WorkspaceListSelect', () => {
     }
   });
 
-  it('shows remote connection status on the active project and list row', async () => {
+  it('hides retired cloud projects and their add action even with a legacy callback', async () => {
+    const onAddRemote = vi.fn();
     const view = await renderList({
       workspaces: [
         makeWorkspace({
@@ -167,6 +170,7 @@ describe('WorkspaceListSelect', () => {
         }),
       ],
       activeWorkspaceId: 'rw_workspace',
+      onAddRemote,
       remoteConnectionStates: {
         rw_workspace: {
           status: 'failed',
@@ -177,12 +181,17 @@ describe('WorkspaceListSelect', () => {
     });
 
     try {
-      expect(view.container.textContent).toContain('连接失败');
+      expect(view.container.textContent).not.toContain('云端项目');
+      expect(view.container.textContent).not.toContain('连接失败');
       await openMenu(view.container);
       const options = Array.from(
         view.container.querySelectorAll('[role="option"]'),
       );
-      expect(options[0]?.textContent).toContain('连接失败');
+      expect(options).toHaveLength(0);
+      expect(view.container.textContent).not.toContain('添加云端项目');
+      expect(view.container.textContent).toContain('浏览本地');
+      expect(view.container.textContent).toContain('暂无工作区');
+      expect(onAddRemote).not.toHaveBeenCalled();
     } finally {
       await view.cleanup();
     }

@@ -26,6 +26,11 @@
  */
 
 /** Lifecycle status. `pending` replaces the old `downloading`. */
+import { collectTurnArtifacts } from './turnArtifacts';
+import { displayFileRefPath } from '@/components/ai/lib/filePath';
+import { desktopAssetIndexIO, readAssetIndex, writeAssetIndex, type AssetIndexIO, type AssetIndexSnapshot } from './assetIndex';
+import type { TurnFileChanges } from './turnFileChanges';
+
 export type AssetStatus = 'pending' | 'success' | 'error';
 
 /**
@@ -48,7 +53,17 @@ export type AssetKind =
   | 'file';
 
 /** How the asset arrived. Drives the "source" filter and the row actions. */
-export type AssetSource = 'generated' | 'downloaded' | 'searched' | 'installed';
+export type AssetSource = 'generated' | 'downloaded' | 'searched' | 'installed' | 'modified' | 'input';
+
+export interface AssetEvent {
+  id: string;
+  operation: AssetSource | 'referenced';
+  at: number;
+  sessionId?: string;
+  workspaceId?: string | null;
+  messageId?: string;
+  provenance: 'recorded' | 'answer' | 'inferred';
+}
 
 /** Where the asset was produced/fetched from. Lets the UI filter local vs cloud. */
 export type AssetOrigin = 'local' | 'remote';
@@ -96,14 +111,24 @@ export interface AssetEntry {
   finishedAt?: number;
   /** Type-specific extension fields (mesh format, skill targetId, …). */
   meta?: Record<string, unknown>;
+  sessionTitle?: string;
+  provenance?: AssetEvent['provenance'];
+  availability?: 'available' | 'missing' | 'unknown';
+  favorite?: boolean;
+  tags?: string[];
+  events?: AssetEvent[];
 }
 
 export function assetMatchesWorkspace(
-  entry: Pick<AssetEntry, 'workspaceId'>,
+  entry: Pick<AssetEntry, 'workspaceId' | 'events'>,
   workspaceId: string | null | undefined,
 ): boolean {
   if (!workspaceId) return true;
-  return entry.workspaceId == null || entry.workspaceId === workspaceId;
+  return entry.workspaceId === workspaceId || Boolean(entry.events?.some(event => event.workspaceId === workspaceId));
+}
+
+export function isOutputAsset(entry: AssetEntry): boolean {
+  return entry.source !== 'input' && entry.source !== 'installed';
 }
 
 /* ----------------------------- legacy aliases ----------------------------- */
@@ -135,7 +160,7 @@ const LEGACY_STORAGE_KEY = 'ultragamestudio.downloads.v1';
  * new generation at the same path lifts the dismissal so the asset reappears.
  */
 const DISMISSED_STORAGE_KEY = 'ultragamestudio.assets.dismissed.v1';
-const MAX_PERSISTED = 1000;
+const MAX_PERSISTED = Number.POSITIVE_INFINITY;
 const MAX_DISMISSED = 5000;
 /**
  * Largest inline `data:` preview we are willing to write to localStorage.
@@ -155,6 +180,123 @@ let hydrated = false;
  */
 let dismissedPaths = new Set<string>();
 const listeners = new Set<() => void>();
+let indexIO: AssetIndexIO | null = null;
+let indexReady: Promise<void> | null = null;
+let indexQueue: Promise<void> = Promise.resolve();
+let indexError: string | null = null;
+let indexLoaded = false;
+let indexRevision = 0;
+let pendingIndex: AssetIndexSnapshot | null = null;
+let indexWriting = false;
+const revivedDuringLoad = new Set<string>();
+const removedDuringLoad = new Set<string>();
+const assetAliases = new Map<string, string>();
+function canonicalAssetId(id: string): string {
+  const seen = new Set<string>();
+  while (assetAliases.has(id) && !seen.has(id)) { seen.add(id); id = assetAliases.get(id)!; }
+  return id;
+}
+
+export function getAssetIndexError(): string | null { return indexError; }
+
+/** Awaitable for shutdown/verification; normal writes are serialized. */
+export async function flushAssetIndex(): Promise<void> {
+  await indexReady;
+  for (;;) {
+    const queue = indexQueue;
+    await queue;
+    if (queue === indexQueue) break;
+  }
+  if (indexError) throw new Error(indexError);
+}
+
+function persistIndex(): void {
+  if (!indexIO || !indexLoaded) return;
+  const io = indexIO;
+  pendingIndex = { version: 2 as const, entries: entries.filter(e => e.status !== 'pending').map(trimForPersist), dismissedPaths: [...dismissedPaths] };
+  if (indexWriting) return;
+  indexWriting = true;
+  indexQueue = indexQueue.then(async () => {
+    while (pendingIndex) {
+      const snapshot = pendingIndex;
+      pendingIndex = null;
+      await writeAssetIndex(io, snapshot);
+      indexError = null;
+    }
+  }).catch(error => {
+    indexError = `资产索引写入失败：${String(error)}`;
+    emit();
+  }).finally(() => { indexWriting = false; if (pendingIndex) persistIndex(); });
+}
+
+export function initializeAssetIndex(io: AssetIndexIO | null = desktopAssetIndexIO()): Promise<void> {
+  if (indexReady) return indexReady;
+  if (!io) return Promise.resolve();
+  indexIO = io;
+  hydrate();
+  const revision = indexRevision;
+  indexReady = (async () => {
+    try {
+      const saved = await readAssetIndex(io);
+      if (saved) {
+        const currentById = new Map(entries.map(e => [e.id, e]));
+        // Keep registrations/removals made while disk reads were in flight.
+        for (const key of saved.dismissedPaths) if (!revivedDuringLoad.has(key)) dismissedPaths.add(key);
+        for (const [id, entry] of currentById) {
+          if (entry.localPath && dismissedPaths.has(pathKey(entry.localPath))) currentById.delete(id);
+        }
+        const restored = saved.entries.filter(isAssetEntry).filter(e => !removedDuringLoad.has(e.id) && (!e.localPath || !dismissedPaths.has(pathKey(e.localPath))));
+        for (const entry of restored) {
+          if (!currentById.has(entry.id)) currentById.set(entry.id, entry);
+          else if (revision === indexRevision) currentById.set(entry.id, entry);
+        }
+        entries = deduplicateAssets(sortAssets([...currentById.values()]));
+      } else {
+        // Retain the complete legacy payload before the first migration.
+        if (!await io.read('assets/migration-v1.json')) {
+          await io.write('assets/migration-v1.json', JSON.stringify({ entries: entries.map(trimForPersist), dismissedPaths: [...dismissedPaths] }));
+        }
+      }
+      indexLoaded = true;
+      persist();
+      emit();
+    } catch (error) {
+      indexError = `资产索引读取失败：${String(error)}`;
+      emit();
+    }
+  })();
+  return indexReady;
+}
+
+function normalizeAssetRole(entry: AssetEntry): AssetEntry {
+  if (entry.source === 'generated' && !entry.events?.some(event => event.provenance === 'recorded') &&
+    /[\\/](?:clipboard-images|session-captures)[\\/]/i.test(entry.localPath ?? '')) {
+    return { ...entry, source: 'input' };
+  }
+  return entry;
+}
+
+function deduplicateAssets(list: AssetEntry[]): AssetEntry[] {
+  const byKey = new Map<string, AssetEntry>();
+  for (const raw of list) {
+    const entry = normalizeAssetRole(raw);
+    const key = entry.localPath ? `path:${pathKey(entry.localPath)}` : entry.remoteUrl ? `url:${entry.remoteUrl}` : `id:${entry.id}`;
+    const old = byKey.get(key);
+    if (!old) { assetAliases.delete(entry.id); byKey.set(key, entry); continue; }
+    if (entry.id !== old.id) assetAliases.set(entry.id, old.id);
+    const events = new Map([...(old.events ?? []), ...(entry.events ?? [])].map(event => [event.id, event]));
+    byKey.set(key, {
+      ...entry, ...old,
+      sessionId: old.sessionId ?? entry.sessionId,
+      messageId: old.messageId ?? entry.messageId,
+      workspaceId: old.workspaceId ?? entry.workspaceId,
+      favorite: old.favorite || entry.favorite,
+      tags: [...new Set([...(old.tags ?? []), ...(entry.tags ?? [])])],
+      events: [...events.values()].sort((a, b) => b.at - a.at),
+    });
+  }
+  return [...byKey.values()];
+}
 
 function entrySortTime(entry: Pick<AssetEntry, 'finishedAt' | 'startedAt'>): number {
   return entry.finishedAt ?? entry.startedAt ?? 0;
@@ -182,7 +324,7 @@ function hydrate(): void {
     if (raw) {
       const parsed = JSON.parse(raw) as unknown;
       if (Array.isArray(parsed)) {
-        entries = sortAssets(parsed.filter(isAssetEntry));
+        entries = deduplicateAssets(sortAssets(parsed.filter(isAssetEntry)));
         return;
       }
     }
@@ -224,6 +366,7 @@ function persistDismissed(): void {
  */
 function undismissPath(localPath: string | undefined): void {
   if (!localPath) return;
+  if (!indexLoaded) revivedDuringLoad.add(pathKey(localPath));
   if (dismissedPaths.delete(pathKey(localPath))) persistDismissed();
 }
 
@@ -301,6 +444,7 @@ function trimForPersist(entry: AssetEntry): AssetEntry {
 }
 
 function persist(): void {
+  persistIndex();
   if (!hasStorage()) return;
   try {
     // Only terminal entries are meaningful across reloads; an in-flight
@@ -320,7 +464,8 @@ function emit(): void {
 }
 
 function commit(next: AssetEntry[]): void {
-  entries = sortAssets(next);
+  indexRevision += 1;
+  entries = deduplicateAssets(sortAssets(next));
   persist();
   emit();
 }
@@ -368,6 +513,7 @@ function nextId(): string {
 /** Subscribe to registry changes. Returns an unsubscribe function. */
 export function subscribeAssets(listener: () => void): () => void {
   listeners.add(listener);
+  void initializeAssetIndex();
   return () => {
     listeners.delete(listener);
   };
@@ -379,17 +525,75 @@ export function getAssets(): AssetEntry[] {
   return entries;
 }
 
+/** Index answer links with their exact source message; never fetch the URL. */
+export function linkConversationUrls(input: {
+  text: string; sessionId: string; workspaceId?: string | null;
+  messageId: string; at?: number; sessionTitle?: string;
+}): void {
+  hydrate();
+  const text = input.text.replace(/```[\s\S]*?```|~~~[\s\S]*?~~~|`[^`\n]*`/g, '');
+  const urls = new Map<string, string>();
+  const add = (raw: string, title?: string) => {
+    try {
+      const url = new URL(raw);
+      if (!['http:', 'https:'].includes(url.protocol)) return;
+      if (!urls.has(url.href) || title) urls.set(url.href, title?.trim() || url.hostname);
+    } catch { /* Ignore incomplete URLs during streaming. */ }
+  };
+  const withoutMarkdown = text.replace(/(!?)\[([^\]\n]+)\]\(<?(https?:\/\/[^\s>]+?)>?(?:\s+"[^"]*")?\)/g, (_match, image, title, url) => {
+    if (!image) add(url, title);
+    return '';
+  });
+  for (const match of withoutMarkdown.matchAll(/https?:\/\/[^\s<>[\]"'`]+/g)) add(match[0].replace(/[.,;!?)，。；！）]+$/, ''));
+  const next = [...entries];
+  let changed = false;
+  for (const [remoteUrl, title] of urls) {
+    if (dismissedPaths.has(`link-url:${remoteUrl}`)) continue;
+    const id = `link:${input.workspaceId ?? ''}:${input.sessionId}:${remoteUrl}`;
+    const eventId = `${id}:${input.messageId}`;
+    const index = next.findIndex(entry => !entry.localPath && entry.remoteUrl === remoteUrl);
+    if (index >= 0 && next[index].meta?.artifactType !== 'link') continue;
+    const at = input.at ?? Date.now();
+    if (index >= 0 && next[index].events?.some(event => event.id === eventId)) {
+      const previous = next[index];
+      const latestTitle = at >= previous.startedAt ? title : previous.title;
+      const sessionTitle = input.sessionTitle ?? previous.sessionTitle;
+      if (previous.title !== latestTitle || previous.sessionTitle !== sessionTitle) {
+        next[index] = { ...previous, title: latestTitle, sessionTitle };
+        changed = true;
+      }
+      continue;
+    }
+    const event: AssetEvent = { id: eventId, operation: 'referenced', at, sessionId: input.sessionId, workspaceId: input.workspaceId, messageId: input.messageId, provenance: 'answer' };
+    const previous = next[index];
+    const entry: AssetEntry = {
+      ...previous, id: previous?.id ?? id, kind: 'file', source: 'generated', origin: 'remote', status: 'success', remoteUrl,
+      title: previous && previous.startedAt > at ? previous.title : title,
+      startedAt: Math.max(previous?.startedAt ?? 0, at), finishedAt: Math.max(previous?.finishedAt ?? 0, at),
+      sessionId: previous && previous.startedAt > at ? previous.sessionId : input.sessionId,
+      workspaceId: previous && previous.startedAt > at ? previous.workspaceId : input.workspaceId,
+      messageId: previous && previous.startedAt > at ? previous.messageId : input.messageId,
+      sessionTitle: input.sessionTitle ?? previous?.sessionTitle, provenance: 'answer',
+      meta: { ...previous?.meta, artifactType: 'link' }, events: [...(previous?.events ?? []), event],
+    };
+    if (index >= 0) next[index] = entry; else next.push(entry);
+    changed = true;
+  }
+  if (changed) commit(next);
+}
+
 /**
  * Fold disk-backed cached files into the registry. This is the durable fallback
  * for assets whose localStorage row was lost while the file still exists under
  * the workspace `.ultragamestudio` cache.
  */
-export function mergeCachedAssetsFromDisk(files: CachedAssetFileInput[]): void {
+export function mergeCachedAssetsFromDisk(files: CachedAssetFileInput[], workspaceId?: string | null): void {
   hydrate();
   if (!files.length) return;
 
   const byPath = new Map<string, AssetEntry>();
   const withoutPath: AssetEntry[] = [];
+  let changed = false;
 
   for (const entry of entries) {
     if (!entry.localPath) {
@@ -407,22 +611,29 @@ export function mergeCachedAssetsFromDisk(files: CachedAssetFileInput[]): void {
     // The user cleared this asset; don't resurrect it from disk unless it is
     // still a live row (e.g. re-registered by a fresh generation).
     if (!existing && dismissedPaths.has(key)) continue;
-    const diskEntry = diskAssetToEntry({ ...file, localPath });
+    const diskEntry = diskAssetToEntry({ ...file, localPath, workspaceId: workspaceId ?? file.workspaceId });
     if (!existing) {
+      changed = true;
       byPath.set(key, diskEntry);
       continue;
     }
-    byPath.set(key, {
+    const merged: AssetEntry = {
       ...existing,
-      status: existing.status === 'pending' ? existing.status : 'success',
+      workspaceId: existing.workspaceId ?? workspaceId ?? file.workspaceId,
+      availability: 'available',
       localPath,
       sizeBytes: existing.sizeBytes ?? diskEntry.sizeBytes,
       startedAt: Math.min(existing.startedAt, diskEntry.startedAt),
       finishedAt: Math.max(entrySortTime(existing), entrySortTime(diskEntry)),
-    });
+    };
+    if (merged.workspaceId !== existing.workspaceId || merged.availability !== existing.availability ||
+      merged.sizeBytes !== existing.sizeBytes || merged.startedAt !== existing.startedAt || merged.finishedAt !== existing.finishedAt || merged.localPath !== existing.localPath) {
+      changed = true;
+      byPath.set(key, merged);
+    }
   }
 
-  commit([...withoutPath, ...byPath.values()]);
+  if (changed) commit([...withoutPath, ...byPath.values()]);
 }
 
 /** @deprecated Use {@link subscribeAssets}. */
@@ -462,6 +673,7 @@ export interface CachedAssetFileInput {
   sizeBytes?: number;
   createdAtMs?: number | null;
   modifiedAtMs?: number | null;
+  workspaceId?: string | null;
 }
 
 function pathKey(path: string): string {
@@ -490,6 +702,8 @@ function diskAssetToEntry(input: CachedAssetFileInput): AssetEntry {
     sizeBytes: input.sizeBytes,
     startedAt: input.createdAtMs ?? modifiedAt,
     finishedAt: modifiedAt,
+    workspaceId: input.workspaceId,
+    availability: 'available',
   };
 }
 
@@ -509,6 +723,7 @@ const MANAGED_ASSET_EXT = new Set([
   'md',
   'txt',
   'pdf',
+  'doc', 'docx', 'rtf', 'odt', 'xls', 'xlsx', 'ppt', 'pptx', 'csv', 'tsv', 'markdown',
 ]);
 const MANAGED_ASSET_EXT_BY_LENGTH = [...MANAGED_ASSET_EXT].sort(
   (a, b) => b.length - a.length,
@@ -538,7 +753,7 @@ const MANAGED_ASSET_TERMINATORS = new Set([
   '？',
 ]);
 const MANAGED_ASSET_PATH_RE =
-  /(?:file:\/\/\/)?(?:[A-Za-z]:[/\\]|[/\\]{1,2}|~[/\\]|\$\w+[/\\]|\.[/\\])?[^\s"'`<>()[\]{}]*?\.ultragamestudio[/\\][^\s"'`<>()[\]{}]*?\.(?:jpeg|pjpeg|apng|jfif|webp|avif|gltf|blend|html|jpg|jpe|pjp|gif|bmp|dib|ico|cur|svg|png|mp4|webm|mov|m4v|mp3|wav|ogg|flac|aac|m4a|glb|obj|stl|fbx|bvh|asf|amc|ply|usdz|zip|json|htm|md|txt|pdf)(?=$|[\s"'`<>()[\]{}.,;:!?，。；、！？])/gi;
+  /(?:file:\/\/\/)?(?:[A-Za-z]:[/\\]|[/\\]{1,2}|~[/\\]|\$\w+[/\\]|\.[/\\])?[^\s"'`<>()[\]{}]*?\.ultragamestudio[/\\][^\s"'`<>()[\]{}]*?\.(?:jpeg|pjpeg|apng|jfif|webp|avif|gltf|blend|html|jpg|jpe|pjp|gif|bmp|dib|ico|cur|svg|png|mp4|webm|mov|m4v|mp3|wav|ogg|flac|aac|m4a|glb|obj|stl|fbx|bvh|asf|amc|ply|usdz|zip|json|htm|md|txt|pdf|docx?|rtf|odt|xlsx?|pptx?|csv|tsv|markdown)(?=$|[\s"'`<>()[\]{}.,;:!?，。；、！？])/gi;
 const ASSET_MESSAGE_LINK_MAX_DISTANCE_MS = 2 * 60 * 60 * 1000;
 
 function extensionFromPath(path: string): string {
@@ -615,6 +830,10 @@ export interface LinkLocalAssetToMessageInput {
   messageId?: string | null;
   title?: string;
   kind?: AssetKind;
+  source?: AssetSource;
+  provenance?: AssetEvent['provenance'];
+  at?: number;
+  sessionTitle?: string;
 }
 
 export function linkLocalAssetToMessage(input: LinkLocalAssetToMessageInput): void {
@@ -632,8 +851,16 @@ export function linkLocalAssetToMessage(input: LinkLocalAssetToMessageInput): vo
   const existingIndex = entries.findIndex(
     (entry) => entry.localPath && pathKey(entry.localPath) === key,
   );
+  const operation = input.source ?? (existingIndex >= 0 ? 'referenced' : 'generated');
+  const event: AssetEvent = { id: `${sessionId}:${messageId}:${operation}`, operation, at: input.at ?? now, sessionId, messageId, workspaceId: input.workspaceId, provenance: input.provenance ?? 'answer' };
 
   if (existingIndex >= 0) {
+    const existing = entries[existingIndex];
+    if (!input.source && existing.events?.some(e => e.sessionId === sessionId && e.messageId === messageId)) {
+      if (input.sessionTitle && existing.sessionId === sessionId && existing.sessionTitle !== input.sessionTitle) updateAssetDetails(existing.id, { sessionTitle: input.sessionTitle });
+      return;
+    }
+    if (existing.events?.some(e => e.id === event.id) && (!input.sessionTitle || existing.sessionTitle === input.sessionTitle)) return;
     commit(
       entries.map((entry, index) =>
         index === existingIndex
@@ -642,9 +869,8 @@ export function linkLocalAssetToMessage(input: LinkLocalAssetToMessageInput): vo
               kind: entry.kind ?? kind,
               title: entry.title || title,
               localPath,
-              sessionId,
-              workspaceId: input.workspaceId ?? null,
-              messageId,
+              ...(!entry.events?.length || event.at >= entry.events[0].at ? { sessionId, workspaceId: input.workspaceId ?? null, messageId, source: input.source ?? entry.source, provenance: event.provenance, sessionTitle: input.sessionTitle ?? entry.sessionTitle } : {}),
+              events: [event, ...(entry.events ?? []).filter(e => e.id !== event.id)].sort((a, b) => b.at - a.at),
               status: entry.status === 'pending' ? entry.status : 'success',
               finishedAt: entry.finishedAt ?? now,
             }
@@ -662,7 +888,7 @@ export function linkLocalAssetToMessage(input: LinkLocalAssetToMessageInput): vo
     {
       id: diskAssetId(localPath),
       kind,
-      source: 'generated',
+      source: input.source ?? 'generated',
       origin: 'local',
       title,
       status: 'success',
@@ -670,8 +896,12 @@ export function linkLocalAssetToMessage(input: LinkLocalAssetToMessageInput): vo
       sessionId,
       workspaceId: input.workspaceId ?? null,
       messageId,
-      startedAt: now,
-      finishedAt: now,
+      startedAt: input.at ?? now,
+      finishedAt: input.at ?? now,
+      provenance: event.provenance,
+      sessionTitle: input.sessionTitle,
+      events: [event],
+      availability: 'unknown',
     },
     ...entries,
   ]);
@@ -682,15 +912,53 @@ export function linkManagedAssetsFromMessageText(input: {
   sessionId?: string | null;
   workspaceId?: string | null;
   messageId?: string | null;
+  cwd?: string;
+  at?: number;
+  sessionTitle?: string;
 }): void {
-  for (const localPath of managedAssetPathsFromText(input.text)) {
+  const paths = new Map<string, { path: string; title?: string }>();
+  for (const artifact of collectTurnArtifacts(input.text, input.cwd)) {
+    const path = displayFileRefPath(artifact.ref, input.cwd);
+    paths.set(pathKey(path), { path, title: artifact.label });
+  }
+  for (const { path: localPath, title } of paths.values()) {
+    // A clipboard input mentioned by an answer remains an input.
+    if (/[\\/](?:clipboard-images|session-captures)[\\/]/i.test(localPath)) continue;
     linkLocalAssetToMessage({
       localPath,
       sessionId: input.sessionId,
       workspaceId: input.workspaceId,
       messageId: input.messageId,
+      title,
+      at: input.at,
+      sessionTitle: input.sessionTitle,
     });
   }
+}
+
+/** Confirmed successful file changes, including project files outside caches. */
+export function linkModifiedAssetsFromMessage(input: {
+  changes?: TurnFileChanges;
+  sessionId: string;
+  workspaceId?: string | null;
+  messageId: string;
+  at?: number;
+  sessionTitle?: string;
+}): void {
+  for (const file of input.changes?.files ?? []) {
+    if (file.status === 'deleted') continue;
+    const root = input.changes?.rootPath;
+    const path = root && !/^(?:[A-Za-z]:[\\/]|\/|\\\\)/.test(file.path)
+      ? `${root.replace(/[\\/]+$/, '')}/${file.path.replace(/^\.\//, '')}` : file.path;
+    linkLocalAssetToMessage({ ...input, localPath: path, source: file.status === 'added' ? 'generated' : 'modified', provenance: 'recorded' });
+  }
+}
+
+export function updateAssetDetails(id: string, patch: Pick<AssetEntry, 'favorite' | 'tags' | 'availability' | 'sessionTitle'>): void {
+  hydrate();
+  id = canonicalAssetId(id);
+  commit(entries.map(entry => entry.id === id ? { ...entry, ...patch,
+    ...(patch.tags ? { tags: [...new Set(patch.tags.map(tag => tag.trim()).filter(Boolean))] } : {}) } : entry));
 }
 
 export function linkKnownManagedAssetsFromMessageText(input: {
@@ -747,7 +1015,7 @@ function assetLinkTimes(entry: AssetEntry): number[] {
 }
 
 function assetCanBelongToSession(entry: AssetEntry): boolean {
-  return entry.source !== 'installed';
+  return entry.source !== 'installed' && entry.source !== 'input';
 }
 
 function messageRolePenalty(role: AssetMessageLinkCandidate['role']): number {
@@ -814,6 +1082,7 @@ export function linkKnownAssetsToNearestMessages(input: {
 
   const next = entries.map((entry) => {
     if (!assetCanBelongToSession(entry)) return entry;
+    if (entry.workspaceId == null && !entry.sessionId) return entry;
     if (entry.sessionId && entry.messageId) return entry;
     const times = assetLinkTimes(entry);
     if (times.length === 0) return entry;
@@ -847,6 +1116,7 @@ export function linkKnownAssetsToNearestMessages(input: {
       sessionId: entry.sessionId ?? best.candidate.sessionId,
       workspaceId: entry.workspaceId ?? best.candidate.workspaceId ?? null,
       messageId: entry.messageId ?? best.candidate.messageId,
+      provenance: 'inferred' as const,
     };
   });
 
@@ -895,9 +1165,12 @@ export function registerAsset(input: RegisterAssetInput): string {
     startedAt: Date.now(),
     finishedAt: status === 'pending' ? undefined : Date.now(),
     meta: input.meta,
+    provenance: 'recorded',
+    availability: localPath ? 'unknown' : undefined,
+    events: [{ id: `${id}:produced`, operation: input.source, at: Date.now(), sessionId: input.sessionId, workspaceId: input.workspaceId, messageId: input.messageId, provenance: 'recorded' }],
   };
   commit([entry, ...entries]);
-  return id;
+  return entries.find(e => localPath ? e.localPath && pathKey(e.localPath) === pathKey(localPath) : e.id === id)?.id ?? id;
 }
 
 export interface MarkAssetDoneInput {
@@ -912,6 +1185,7 @@ export interface MarkAssetDoneInput {
 /** Mark a pending asset as completed. */
 export function markAssetDone(id: string, result?: MarkAssetDoneInput): void {
   hydrate();
+  id = canonicalAssetId(id);
   const localPath = result?.localPath ? normalizeLocalPath(result.localPath) : undefined;
   if (localPath) undismissPath(localPath);
   commit(
@@ -937,6 +1211,7 @@ export function markAssetDone(id: string, result?: MarkAssetDoneInput): void {
 /** Mark a pending asset as failed. */
 export function markAssetFailed(id: string, error: string): void {
   hydrate();
+  id = canonicalAssetId(id);
   commit(
     entries.map((entry) =>
       entry.id === id
@@ -949,9 +1224,15 @@ export function markAssetFailed(id: string, error: string): void {
 /** Remove a single entry. Its disk path is dismissed so the poll won't re-add it. */
 export function removeAsset(id: string): void {
   hydrate();
+  id = canonicalAssetId(id);
   const target = entries.find((entry) => entry.id === id);
+  if (!indexLoaded) removedDuringLoad.add(id);
   if (target?.localPath) {
     dismissedPaths.add(pathKey(target.localPath));
+    persistDismissed();
+  }
+  if (target?.meta?.artifactType === 'link' && target.remoteUrl) {
+    dismissedPaths.add(`link-url:${target.remoteUrl}`);
     persistDismissed();
   }
   commit(entries.filter((entry) => entry.id !== id));
@@ -964,6 +1245,11 @@ export function clearFinishedAssets(
   hydrate();
   let changed = false;
   for (const entry of entries) {
+    if (!indexLoaded && entry.status !== 'pending' && predicate(entry)) removedDuringLoad.add(entry.id);
+    if (entry.status !== 'pending' && predicate(entry) && entry.meta?.artifactType === 'link' && entry.remoteUrl) {
+      dismissedPaths.add(`link-url:${entry.remoteUrl}`);
+      changed = true;
+    }
     if (entry.status !== 'pending' && predicate(entry) && entry.localPath) {
       dismissedPaths.add(pathKey(entry.localPath));
       changed = true;
@@ -1066,6 +1352,17 @@ export async function trackAsset<T>(
 
 /** Test-only: reset all state. */
 export function __resetDownloadsForTest(): void {
+  indexIO = null;
+  indexReady = null;
+  indexQueue = Promise.resolve();
+  indexError = null;
+  indexLoaded = false;
+  indexRevision = 0;
+  pendingIndex = null;
+  indexWriting = false;
+  revivedDuringLoad.clear();
+  removedDuringLoad.clear();
+  assetAliases.clear();
   entries = [];
   dismissedPaths = new Set();
   hydrated = false;

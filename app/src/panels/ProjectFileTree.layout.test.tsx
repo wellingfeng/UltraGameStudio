@@ -79,6 +79,43 @@ function panel(): HTMLElement {
 }
 
 describe('ProjectFileTree on-demand layout', () => {
+  it.each(['files', 'session'])('locks the %s tab across outside clicks, session changes and remounts', async (tab) => {
+    await renderPanel();
+    await act(async () => {
+      if (tab === 'session') requestProjectRightPanelSessionFiles();
+      else requestProjectRightPanelToggle();
+    });
+    const lock = panel().querySelector<HTMLButtonElement>('[aria-label="锁定文件面板"]')!;
+    expect(lock.previousElementSibling?.getAttribute('aria-label')).toBe('收起文件面板');
+    await act(async () => lock.click());
+    expect(lock.getAttribute('aria-pressed')).toBe('true');
+    expect(window.localStorage.getItem('ultragamestudio.projectRightPanelLocked.v1')).toBe('true');
+    await act(async () => document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })));
+    expect(panel()).not.toBeNull();
+    await act(async () => useStore.setState({ activeSessionId: 'another-session', activeWorkspaceId: 'another-workspace' }));
+    expect(panel()).not.toBeNull();
+    await act(async () => root!.unmount());
+    await renderPanel();
+    expect(panel().querySelector('[aria-pressed="true"][aria-label="解锁文件面板"]')).not.toBeNull();
+    await act(async () => panel().querySelector<HTMLButtonElement>('[aria-label="解锁文件面板"]')!.click());
+    expect(panel()).not.toBeNull();
+    await act(async () => document.body.dispatchEvent(new MouseEvent('pointerdown', { bubbles: true })));
+    expect(container.querySelector('aside')).toBeNull();
+    expect(window.localStorage.getItem('ultragamestudio.projectRightPanelLocked.v1')).toBe('false');
+  });
+
+  it('allows manual close while locked and returns to locked tabs when a preview closes', async () => {
+    window.localStorage.setItem('ultragamestudio.projectRightPanelLocked.v1', 'true');
+    await renderPanel();
+    await act(async () => panel().querySelector<HTMLButtonElement>('[aria-label="收起文件面板"]')!.click());
+    expect(container.querySelector('aside')).toBeNull();
+    await act(async () => requestProjectRightPanelFilePreview({ ref: { path: 'app.ts', basename: 'app.ts' }, cwd: 'E:/Game' }));
+    expect(panel().querySelector('[role="tablist"]')).toBeNull();
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })));
+    expect(panel().querySelector('[role="tablist"]')).not.toBeNull();
+    expect(panel().querySelector('[aria-label="解锁文件面板"]')).not.toBeNull();
+  });
+
   it.each(['files', 'session'])('closes the %s tab on an outside blank-area pointer press', async (tab) => {
     await renderPanel();
     await act(async () => {

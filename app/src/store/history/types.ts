@@ -270,6 +270,7 @@ export interface SessionMeta extends HistoryMetadata {
   permission?: string;
   model?: string;
   favorite?: boolean;
+  pinned?: boolean;
   scheduledTask?: ScheduledTaskConfig | null;
   canvasViewport?: CanvasViewport | null;
   runStatus?: 'idle' | 'running' | 'success' | 'error' | 'interrupted';
@@ -356,6 +357,7 @@ export type SessionSummary = Pick<
   contextCompressed?: boolean;
   /** Derived from meta.favorite for lightweight favorite-tab rendering. */
   favorite?: boolean;
+  pinned?: boolean;
   /** Derived from meta.scheduledTask for lightweight schedule rendering. */
   scheduledTask?: ScheduledTaskConfig;
   /** Internal migration marker for completion-time based ordering. */

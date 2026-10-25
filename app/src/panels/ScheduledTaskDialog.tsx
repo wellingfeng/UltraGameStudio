@@ -4,7 +4,10 @@ import type {
   ScheduledTaskConfig,
   ScheduledTaskWeekday,
 } from '@/store/types';
-import { t, type Locale } from '@/lib/i18n';
+import { DEFAULT_LOCALE, LANGUAGE_SELECT_OPTIONS, localizeSelectOption, t, type Locale } from '@/lib/i18n';
+import { nextScheduledTaskRun, parseCron, systemTimeZone, validTimeZone } from '@/lib/scheduledTasks';
+import { scheduleText } from '@/lib/scheduledTaskI18n';
+import './ScheduledTasksPanel.css';
 
 interface ScheduledTaskDialogProps {
   locale: Locale;
@@ -13,6 +16,7 @@ interface ScheduledTaskDialogProps {
   onSave: (task: ScheduledTaskConfig) => Promise<void> | void;
   onDelete: () => Promise<void> | void;
   onClose: () => void;
+  canDelete?: boolean;
 }
 
 const WEEKDAY_ORDER: ScheduledTaskWeekday[] = [1, 2, 3, 4, 5, 6, 0];
@@ -38,6 +42,7 @@ function defaultTask(title: string): ScheduledTaskConfig {
 }
 
 function weekdayLabel(locale: Locale, weekday: ScheduledTaskWeekday): string {
+  if (locale !== 'zh-CN' && locale !== 'en-US') return new Intl.DateTimeFormat(locale, { weekday: 'narrow' }).format(new Date(2023, 0, 1 + weekday));
   if (weekday === 1) return t(locale, 'schedule.weekdayMon');
   if (weekday === 2) return t(locale, 'schedule.weekdayTue');
   if (weekday === 3) return t(locale, 'schedule.weekdayWed');
@@ -54,12 +59,22 @@ export default function ScheduledTaskDialog({
   onSave,
   onDelete,
   onClose,
+  canDelete = Boolean(initialTask),
 }: ScheduledTaskDialogProps) {
   const seed = useMemo(
     () => initialTask ?? defaultTask(title),
     [initialTask, title],
   );
   const [enabled, setEnabled] = useState(seed.enabled);
+  const [name, setName] = useState(seed.name ?? title);
+  const [kind, setKind] = useState<'weekly' | 'cron' | 'once'>(seed.onceAt !== undefined ? 'once' : seed.cronExpression ? 'cron' : 'weekly');
+  const [cronExpression, setCronExpression] = useState(seed.cronExpression ?? '0 9 * * *');
+  const [timeZone, setTimeZone] = useState(seed.timeZone ?? systemTimeZone());
+  const [promptLocale, setPromptLocale] = useState(seed.promptLocale ?? DEFAULT_LOCALE);
+  const [onceDate, setOnceDate] = useState(() => {
+    const date = new Date(seed.onceAt ?? Date.now() + 3600000);
+    return new Date(date.getTime() - date.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  });
   const [reminderText, setReminderText] = useState(seed.reminderText);
   const [hour, setHour] = useState(seed.hour);
   const [minute, setMinute] = useState(seed.minute);
@@ -71,6 +86,12 @@ export default function ScheduledTaskDialog({
   const [remindOnRun, setRemindOnRun] = useState(seed.remindOnRun);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const preview = useMemo(() => {
+    try {
+      if (!validTimeZone(timeZone)) return null;
+      return nextScheduledTaskRun({ ...seed, enabled: true, hour, minute, second, weekdays, cronExpression: kind === 'cron' ? cronExpression : undefined, onceAt: kind === 'once' ? new Date(onceDate).getTime() : undefined, timeZone });
+    } catch { return null; }
+  }, [seed, hour, minute, second, weekdays, cronExpression, onceDate, timeZone, kind]);
 
   const toggleWeekday = (weekday: ScheduledTaskWeekday) => {
     setWeekdays((current) =>
@@ -83,33 +104,47 @@ export default function ScheduledTaskDialog({
 
   const save = async () => {
     const text = reminderText.trim();
+    if (!name.trim()) { setError(scheduleText(locale, 'requiredName')); return; }
     if (!text) {
-      setError(t(locale, 'schedule.errorTextRequired'));
+      setError(scheduleText(locale, 'requiredPrompt'));
       return;
     }
-    if (weekdays.length === 0) {
-      setError(t(locale, 'schedule.errorWeekdayRequired'));
+    if (kind === 'weekly' && weekdays.length === 0) {
+      setError(scheduleText(locale, 'requiredWeekday'));
       return;
     }
+    if (!validTimeZone(timeZone)) { setError(scheduleText(locale, 'invalidZone')); return; }
+    if (kind === 'cron') {
+      try { parseCron(cronExpression); }
+      catch { setError(scheduleText(locale, 'invalidCron')); return; }
+    }
+    if (kind === 'once' && (!Number.isFinite(new Date(onceDate).getTime()) || new Date(onceDate).getTime() <= Date.now())) { setError(scheduleText(locale, 'invalidDate')); return; }
+    if (enabled && !preview) { setError(scheduleText(locale, 'noNext')); return; }
 
     setSaving(true);
     setError(null);
     try {
       await onSave({
+        name: name.trim(),
+        templateId: seed.templateId,
+        cronExpression: kind === 'cron' ? cronExpression.trim() : undefined,
+        onceAt: kind === 'once' ? new Date(onceDate).getTime() : undefined,
+        timeZone: kind === 'once' ? systemTimeZone() : timeZone.trim(),
+        promptLocale,
         enabled,
         reminderText: text,
         hour: clampInt(hour, 0, 23),
         minute: clampInt(minute, 0, 59),
         second: clampInt(second, 0, 59),
-        weekdays,
-        repeat,
+        weekdays: weekdays.length ? weekdays : WEEKDAY_ORDER,
+        repeat: kind === 'once' ? false : repeat,
         remindOnRun,
         updatedAt: Date.now(),
         ...(seed.lastRunAt ? { lastRunAt: seed.lastRunAt } : {}),
       });
       onClose();
     } catch {
-      setError(t(locale, 'schedule.errorSave'));
+      setError(scheduleText(locale, 'saveError'));
     } finally {
       setSaving(false);
     }
@@ -122,7 +157,7 @@ export default function ScheduledTaskDialog({
       await onDelete();
       onClose();
     } catch {
-      setError(t(locale, 'schedule.errorSave'));
+      setError(scheduleText(locale, 'saveError'));
     } finally {
       setSaving(false);
     }
@@ -136,11 +171,11 @@ export default function ScheduledTaskDialog({
         className="absolute inset-0 cursor-default"
         onClick={onClose}
       />
-      <section className="relative flex max-h-[90vh] w-full max-w-md flex-col overflow-hidden rounded-lg border border-border bg-panel shadow-2xl">
+      <section role="dialog" aria-modal="true" aria-label={scheduleText(locale, 'edit')} className="scheduled-task-editor relative flex max-h-[90vh] w-full max-w-xl flex-col overflow-hidden rounded-lg border border-border bg-panel shadow-2xl">
         <header className="flex items-center gap-3 border-b border-border-soft px-4 py-3">
           <div className="min-w-0 flex-1">
             <h2 className="truncate text-base font-semibold text-fg">
-              {t(locale, 'schedule.title')}
+              {locale === 'zh-CN' || locale === 'en-US' ? t(locale, 'schedule.title') : scheduleText(locale, 'title')}
             </h2>
             <p className="truncate text-xs text-fg-faint">{title}</p>
           </div>
@@ -155,8 +190,12 @@ export default function ScheduledTaskDialog({
         </header>
 
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 py-4">
+          <label className="flex flex-col gap-1.5 text-sm text-fg-dim">
+            {scheduleText(locale, 'name')}
+            <input value={name} maxLength={120} onChange={(e) => setName(e.target.value)} className="rounded-md border border-border bg-bg px-3 py-2 text-fg outline-none focus:border-accent" />
+          </label>
           <label className="flex items-center justify-between gap-3 rounded-md border border-border-soft px-3 py-2">
-            <span className="text-sm text-fg">{t(locale, 'schedule.enabledLabel')}</span>
+            <span className="text-sm text-fg">{scheduleText(locale, 'enabled')}</span>
             <input
               type="checkbox"
               checked={enabled}
@@ -167,7 +206,7 @@ export default function ScheduledTaskDialog({
 
           <label className="flex flex-col gap-1.5">
             <span className="text-sm text-fg-dim">
-              {t(locale, 'schedule.reminderTextLabel')}
+              {scheduleText(locale, 'prompt')}
             </span>
             <textarea
               value={reminderText}
@@ -175,32 +214,48 @@ export default function ScheduledTaskDialog({
                 setReminderText(e.target.value);
                 setError(null);
               }}
-              rows={3}
-              maxLength={500}
-              placeholder={t(locale, 'schedule.reminderTextPlaceholder')}
+              rows={4}
+              maxLength={12000}
+              placeholder={scheduleText(locale, 'prompt')}
               className="resize-none rounded-md border border-border bg-bg px-3 py-2 text-sm text-fg outline-none transition-colors placeholder:text-fg-faint focus:border-accent"
             />
           </label>
 
+          <label className="flex flex-col gap-1.5 text-sm text-fg-dim">
+            {scheduleText(locale, 'kind')}
+            <select aria-label={scheduleText(locale, 'kind')} value={kind} onChange={(e) => { setKind(e.target.value as typeof kind); setError(null); }} className="rounded-md border border-border bg-bg px-3 py-2 text-fg">
+              {(['weekly', 'once', 'cron'] as const).map((value) => <option key={value} value={value}>{scheduleText(locale, value)}</option>)}
+            </select>
+          </label>
+          {kind === 'cron' && <label className="flex flex-col gap-1.5 text-sm text-fg-dim">
+            {scheduleText(locale, 'cron')}
+            <input aria-label={scheduleText(locale, 'cron')} value={cronExpression} onChange={(e) => { setCronExpression(e.target.value); setError(null); }} dir="ltr" className="rounded-md border border-border bg-bg px-3 py-2 font-mono text-fg outline-none focus:border-accent" />
+            <span className="text-xs text-fg-faint">{scheduleText(locale, 'cronHint')}</span>
+          </label>}
+          {kind === 'once' && <label className="flex flex-col gap-1.5 text-sm text-fg-dim">
+            {scheduleText(locale, 'once')} · {systemTimeZone()}
+            <input type="datetime-local" value={onceDate} onChange={(e) => { setOnceDate(e.target.value); setError(null); }} className="rounded-md border border-border bg-bg px-3 py-2 text-fg" />
+          </label>}
+          {kind === 'weekly' && <>
           <fieldset className="flex flex-col gap-2">
             <legend className="text-sm text-fg-dim">
-              {t(locale, 'schedule.timeLabel')}
+              {scheduleText(locale, 'time')}
             </legend>
             <div className="grid grid-cols-3 gap-2">
               <NumberField
-                label={t(locale, 'schedule.hour')}
+                label={scheduleText(locale, 'hour')}
                 max={23}
                 value={hour}
                 onChange={setHour}
               />
               <NumberField
-                label={t(locale, 'schedule.minute')}
+                label={scheduleText(locale, 'minute')}
                 max={59}
                 value={minute}
                 onChange={setMinute}
               />
               <NumberField
-                label={t(locale, 'schedule.second')}
+                label={scheduleText(locale, 'second')}
                 max={59}
                 value={second}
                 onChange={setSecond}
@@ -210,7 +265,7 @@ export default function ScheduledTaskDialog({
 
           <fieldset className="flex flex-col gap-2">
             <legend className="text-sm text-fg-dim">
-              {t(locale, 'schedule.weekdaysLabel')}
+              {scheduleText(locale, 'weekdays')}
             </legend>
             <div className="grid grid-cols-7 gap-1.5">
               {WEEKDAY_ORDER.map((weekday) => {
@@ -234,20 +289,38 @@ export default function ScheduledTaskDialog({
               })}
             </div>
           </fieldset>
+          </>}
 
-          <label className="flex items-center justify-between gap-3 rounded-md border border-border-soft px-3 py-2">
-            <span className="text-sm text-fg">{t(locale, 'schedule.repeatLabel')}</span>
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex flex-col gap-1.5 text-sm text-fg-dim">
+              {scheduleText(locale, 'timeZone')}
+              <input value={timeZone} disabled={kind === 'once'} list="scheduled-task-zones" onChange={(e) => { setTimeZone(e.target.value); setError(null); }} className="min-w-0 rounded-md border border-border bg-bg px-2 py-2 text-xs text-fg" />
+              <datalist id="scheduled-task-zones">{[systemTimeZone(), 'Asia/Shanghai', 'UTC', 'Asia/Tokyo', 'America/New_York', 'Europe/London'].filter((zone, index, list) => list.indexOf(zone) === index).map((zone) => <option key={zone} value={zone} />)}</datalist>
+            </label>
+            <label className="flex flex-col gap-1.5 text-sm text-fg-dim">
+              {scheduleText(locale, 'outputLanguage')}
+              <select value={promptLocale} onChange={(e) => setPromptLocale(e.target.value as Locale)} className="min-w-0 rounded-md border border-border bg-bg px-2 py-2 text-xs text-fg">
+                {LANGUAGE_SELECT_OPTIONS.map((option) => <option key={option.id} value={option.id}>{localizeSelectOption(option, locale).label}</option>)}
+              </select>
+            </label>
+          </div>
+          <p className="rounded-md border border-accent/30 bg-accent/10 px-3 py-2 text-xs text-fg-dim">
+            {scheduleText(locale, 'next')}：{preview ? preview.toLocaleString(locale, { timeZone: kind === 'once' ? systemTimeZone() : timeZone }) : '—'}
+          </p>
+
+          {kind !== 'once' && <label className="flex items-center justify-between gap-3 rounded-md border border-border-soft px-3 py-2">
+            <span className="text-sm text-fg">{scheduleText(locale, 'repeat')}</span>
             <input
               type="checkbox"
               checked={repeat}
               onChange={(e) => setRepeat(e.target.checked)}
               className="h-4 w-4 accent-accent"
             />
-          </label>
+          </label>}
 
           <label className="flex items-center justify-between gap-3 rounded-md border border-border-soft px-3 py-2">
             <span className="text-sm text-fg">
-              {t(locale, 'schedule.remindOnRunLabel')}
+              {scheduleText(locale, 'reminder')}
             </span>
             <input
               type="checkbox"
@@ -263,12 +336,12 @@ export default function ScheduledTaskDialog({
         <footer className="flex items-center justify-between gap-2 border-t border-border-soft px-4 py-3">
           <button
             type="button"
-            disabled={!initialTask || saving}
+            disabled={!canDelete || saving}
             onClick={remove}
             className="inline-flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm text-fg-dim transition-colors hover:border-status-error/70 hover:text-status-error disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Trash2 size={14} />
-            <span>{t(locale, 'schedule.delete')}</span>
+            <span>{scheduleText(locale, 'delete')}</span>
           </button>
           <div className="flex items-center gap-2">
             <button
@@ -283,7 +356,7 @@ export default function ScheduledTaskDialog({
               type="button"
               disabled={saving}
               onClick={() => void save()}
-              className="inline-flex items-center gap-2 rounded-md border border-accent/50 bg-accent/15 px-3 py-2 text-sm text-accent transition-colors hover:bg-accent/25 disabled:cursor-wait disabled:opacity-60"
+            className="scheduled-task-primary disabled:cursor-wait disabled:opacity-60"
             >
               <Save size={14} />
               <span>{t(locale, 'common.save')}</span>

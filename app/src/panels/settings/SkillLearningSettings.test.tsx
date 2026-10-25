@@ -138,7 +138,7 @@ describe('SkillLearningSettings', () => {
       ['最大复盘轮数', 'maxRounds', 6, 8],
       ['累计输入上限（tokens）', 'maxInputTokens', 48000, 24000],
       ['累计输出上限（tokens）', 'maxOutputTokens', 6000, 4000],
-      ['总超时（毫秒）', 'timeoutMs', 90000, 60000],
+      ['总超时（毫秒）', 'timeoutMs', 600000, 60000],
       ['闲置提醒（天）', 'staleAfterDays', 30, 45],
       ['归档阈值（天）', 'archiveAfterDays', 90, 120],
     ];
