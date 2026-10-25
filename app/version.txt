@@ -7,5 +7,5 @@
     "macos": "https://github.com/wellingfeng/UltraGameStudio/releases/download/v0.5.20/UltraGameStudio_0.5.20_universal.dmg",
     "linux": "https://github.com/wellingfeng/UltraGameStudio/releases/download/v0.5.20/UltraGameStudio_0.5.20_amd64.AppImage"
   },
-  "url": "https://github.com/wellingfeng/UltraGameStudio/releases/latest"
+  "url": "https://github.com/wellingfeng/UltraGameStudio/releases/tag/v0.5.20"
 }
