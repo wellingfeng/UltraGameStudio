@@ -3,6 +3,7 @@ import { lstat, mkdir, open, readFile, readdir, realpath, rename, rm, link, unli
 import { basename, dirname, isAbsolute, join, parse, relative, resolve, sep } from 'node:path';
 import { hostname } from 'node:os';
 import { isMap, parseDocument } from 'yaml';
+import { createSkillCandidateService } from './skill-candidate-service.mjs';
 
 const MAX_MAIN_CHARS = 100_000;
 const MAX_SUPPORT_CHARS = 1_000_000;
@@ -279,9 +280,12 @@ async function acquireRootLock(stateDir, timeoutMs) {
   };
 }
 
-export function createWorkspaceSkillService({ dir, hostId, workspaceId, faultInjector, lockTimeoutMs = 5000 }) {
+export function createWorkspaceSkillService({ dir, hostId, workspaceId, faultInjector, lockTimeoutMs = 5000, candidateService }) {
   if (!dir || !hostId || !workspaceId) throw new Error('trusted dir/hostId/workspaceId are required');
   const workspace = resolve(dir);
+  // Node CLI shares the local authoritative file. Remote hosts inject a
+  // server-derived namespaced service, never a namespace supplied in a request.
+  const candidates = candidateService ?? createSkillCandidateService({ dir: workspace });
   const root = join(workspace, '.ultragamestudio', 'skills');
   const stateDir = join(root, '.state');
   const rootId = `project:${sha(`${hostId}\0${workspaceId}`).slice(0, 24)}`;
@@ -638,6 +642,14 @@ export function createWorkspaceSkillService({ dir, hostId, workspaceId, faultInj
     const result = intent.result;
     if (intent.status !== 'awaiting_approval') return result;
     try {
+      validateIntent(intent, input.batchId);
+      // Legacy intents predate the proposal budget. Count actual absent-before
+      // main packages, not a stored proposal or its createPackage flags. Keep
+      // this approval-only: recovery must still undo already-dispatched bytes.
+      const newPackages = new Set(intent.operations.filter((operation) =>
+        operation.filePath === 'SKILL.md' && operation.beforeHash === null && operation.afterHash !== null
+      ).map((operation) => operation.name.toLowerCase()));
+      if (newPackages.size > 1) throw new Error('at most one new class-level skill create is allowed per batch');
       const listed = await catalog(state);
       for (const operation of intent.operations) {
         const entry = listed.entries.find((item) => item.skillId === operation.skillId);
@@ -912,6 +924,55 @@ export function createWorkspaceSkillService({ dir, hostId, workspaceId, faultInj
     if (names.length) await saveState(state);
     return blocked;
   }
+  async function syncCandidateControl(input, result, state) {
+    if (!['applied', 'rejected', 'conflicted'].includes(result.status)) return result;
+    try {
+      const before = await candidates.load();
+      const originalBatch = input.action === 'rollback' ? input.rollbackId.slice('rollback_'.length) : input.batchId;
+      const matches = before.candidates.filter((candidate) => candidate.submission?.batchId === originalBatch &&
+        (input.action !== 'rollback' || candidate.submission.rollbackId === input.rollbackId));
+      if (!matches.length) return result; // Explicit controls may have no candidate.
+      if (matches.length !== 1 || (input.action !== 'rollback' && result.batchId !== originalBatch)) throw new Error('SKILL_CANDIDATE_CONTROL_TARGET_MISMATCH');
+      const candidate = matches[0];
+      const submission = candidate.submission;
+      const nextState = input.action === 'rollback' && result.status === 'applied' ? 'rolled_back'
+        : result.status === 'applied' ? 'applied' : result.status === 'rejected' ? 'rejected' : 'conflicted';
+      if (submission.state === nextState) return result; // Idempotent observation.
+      const allowed = submission.state === 'staged' ? ['applied', 'rejected', 'conflicted']
+        : submission.state === 'applied' ? ['rolled_back', 'conflicted'] : [];
+      const targetRevision = result.revision || submission.targetRevision;
+      if (!allowed.includes(nextState) || typeof targetRevision !== 'string' || !targetRevision) throw new Error('SKILL_CANDIDATE_INVALID_TRANSITION');
+      candidate.submitted = true;
+      candidate.submission = { ...submission, state: nextState, targetRevision,
+        ...(result.rollbackId ? { rollbackId: result.rollbackId } : {}) };
+      // Exact-revision CAS; no retries, automatic reopen or source erasure.
+      await candidates.compareAndSwap(before.revision ?? 0, before);
+      const saved = await candidates.load();
+      const actual = saved.candidates.find((item) => item.id === candidate.id);
+      if ((saved.revision ?? 0) <= (before.revision ?? 0) || actual?.submitted !== true ||
+        JSON.stringify(actual.sources) !== JSON.stringify(candidate.sources) ||
+        JSON.stringify(actual.submission) !== JSON.stringify(candidate.submission)) throw new Error('SKILL_CANDIDATE_CONTROL_UNCONFIRMED');
+    } catch (error) {
+      // Auxiliary state never replaces a host-confirmed commit/undo with failure.
+      result.riskReasons = [...new Set([...result.riskReasons, `candidate submission sync failed: ${error.message}`])];
+      // recoverPending rebuilds history from durable intents on every request;
+      // keep this auxiliary diagnostic with that receipt, not only state.json.
+      try {
+        const intentPath = join(stateDir, 'transactions', result.batchId, 'intent.json');
+        await assertSafeSkillPath(intentPath);
+        const persisted = JSON.parse(await readFile(intentPath, 'utf8'));
+        validateIntent(persisted, result.batchId);
+        if (persisted.result.status === result.status) {
+          persisted.result.riskReasons = result.riskReasons;
+          await durableJson(intentPath, persisted);
+        }
+      } catch { /* Diagnostic persistence cannot invalidate a confirmed commit. */ }
+      state.history = state.history.filter((item) => item.batchId !== result.batchId);
+      state.history.push(result);
+      await saveState(state).catch(() => {}); // Best-effort diagnostic only.
+    }
+    return result;
+  }
   async function request(input) {
     const origin = bindOrigin(input?.origin);
     const run = chain.then(async () => {
@@ -931,9 +992,9 @@ export function createWorkspaceSkillService({ dir, hostId, workspaceId, faultInj
           : config.mode === 'approve-all' || input.mode === 'approve-all' ? 'approve-all' : 'auto-safe';
         return await manage({ ...input, mode }, origin, state);
       }
-      if (input.action === 'approve') return await approve(input, state);
-      if (input.action === 'reject') return await reject(input, state);
-      if (input.action === 'rollback') return await rollback(input, origin, state);
+      if (input.action === 'approve') return await syncCandidateControl(input, await approve(input, state), state);
+      if (input.action === 'reject') return await syncCandidateControl(input, await reject(input, state), state);
+      if (input.action === 'rollback') return await syncCandidateControl(input, await rollback(input, origin, state), state);
       const listed = await catalog(state);
       if (input.action === 'import') return await importSkill(input, origin, state, listed);
       if (input.action === 'archive' || input.action === 'restore') return await archiveOrRestore(input, origin, state, listed);

@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -115,6 +116,197 @@ test('multi-create rejection also protects approve-all mixed batches without par
   assert.deepEqual(result.changes, []);
   assert.equal(await readFile(join(root, 'disk-check', 'SKILL.md'), 'utf8'), read.content);
   for (const name of ['first-rejected-class', 'second-rejected-class']) await assert.rejects(readFile(join(root, name, 'SKILL.md')), { code: 'ENOENT' });
+});
+
+async function legacyMultiCreate(t) {
+  const value = await fixture(t);
+  const pending = await value.request('manage', { mode: 'approve-all', evidence,
+    proposal: proposal([{ action: 'create', name: 'legacy-first', content: skill('legacy-first') }]) });
+  assert.equal(pending.status, 'awaiting_approval');
+  const transactionDir = join(value.root, '.state', 'transactions', pending.batchId);
+  const intentPath = join(transactionDir, 'intent.json');
+  const intent = JSON.parse(await readFile(intentPath, 'utf8'));
+  const hash = (text) => createHash('sha256').update(text).digest('hex');
+  const rootId = `project:${hash(`${origin.hostId}\0${origin.workspaceId}`).slice(0, 24)}`;
+  const name = 'legacy-second';
+  const after = skill(name);
+  const second = { ...intent.operations[0], name, target: `${name}/SKILL.md`, after, afterHash: hash(after),
+    skillId: `skill:${hash(`${origin.hostId}\0${origin.workspaceId}\0${rootId}\0${name}`)}` };
+  intent.operations.push(second);
+  intent.result.changes.push({ ...second });
+  await writeFile(join(transactionDir, 'stage-1'), after);
+  await writeFile(intentPath, JSON.stringify(intent));
+  return { ...value, pending, intent, intentPath, transactionDir };
+}
+
+test('legacy durable multi-create approval is refused before any target is published', async (t) => {
+  const { request, root, dir, pending, intentPath } = await legacyMultiCreate(t);
+  const original = await readFile(join(root, 'disk-check', 'SKILL.md'));
+  const result = await request('approve', { batchId: pending.batchId });
+  assert.equal(result.status, 'failed', 'legacy durable pending batches must not bypass the host create budget');
+  assert.equal(result.operationsApplied, 0);
+  assert.match(result.error, /at most one|one.*create|one new.*skill/);
+  for (const name of ['legacy-first', 'legacy-second']) await assert.rejects(readFile(join(root, name, 'SKILL.md')), { code: 'ENOENT' });
+  assert.deepEqual(await readFile(join(root, 'disk-check', 'SKILL.md')), original);
+  const saved = JSON.parse(await readFile(intentPath, 'utf8'));
+  assert.ok(saved.operations.every((operation) => operation.phase === 'staged' && !operation.createdPackage));
+  const fresh = module.createWorkspaceSkillService({ dir, hostId: origin.hostId, workspaceId: origin.workspaceId });
+  assert.equal((await fresh.request({ action: 'approve', origin, batchId: pending.batchId })).status, 'failed');
+  assert.equal((await fresh.request({ action: 'history', origin })).results.find((item) => item.batchId === pending.batchId).operationsApplied, 0);
+});
+
+test('recovery still restores already-dispatched legacy multi-create transactions', async (t) => {
+  const { root, dir, intent, intentPath, transactionDir } = await legacyMultiCreate(t);
+  // A disk crash fixture: old host already published both staged files but not
+  // the terminal intent. Recovery must undo, not reject the legacy shape first.
+  for (const [index, operation] of intent.operations.entries()) {
+    await mkdir(join(root, operation.name));
+    await writeFile(join(root, operation.target), await readFile(join(transactionDir, `stage-${index}`)));
+    operation.phase = 'applied'; operation.createdPackage = true;
+  }
+  intent.status = 'prepared';
+  await writeFile(intentPath, JSON.stringify(intent));
+  const fresh = module.createWorkspaceSkillService({ dir, hostId: origin.hostId, workspaceId: origin.workspaceId });
+  assert.deepEqual((await fresh.request({ action: 'list', origin })).entries.map((entry) => entry.name), ['disk-check']);
+  for (const operation of intent.operations) await assert.rejects(readFile(join(root, operation.target)), { code: 'ENOENT' });
+  const saved = JSON.parse(await readFile(intentPath, 'utf8'));
+  assert.equal(saved.status, 'failed');
+  assert.ok(saved.operations.every((operation) => operation.phase === 'recovered'));
+  assert.equal(saved.result.operationsApplied, 0);
+});
+
+test('approval accepts one create plus an existing additive patch and rollback restores exact bytes', async (t) => {
+  const { request, root, dir } = await fixture(t);
+  const entry = (await request('list')).entries[0];
+  const read = await request('view', { skillId: entry.skillId });
+  const content = skill('approved-mixed');
+  const pending = await request('manage', { mode: 'approve-all', evidence, proposal: proposal([
+    { action: 'create', name: 'approved-mixed', content },
+    { action: 'patch', skillId: entry.skillId, oldString: 'Read the actual disk before changing it.',
+      newString: 'Read the actual disk before changing it.\nKeep the exact source receipt.', expectedHash: read.hash, readReceiptId: read.readReceiptId },
+  ]) });
+  assert.equal(pending.status, 'awaiting_approval');
+  const applied = await request('approve', { batchId: pending.batchId });
+  assert.equal(applied.status, 'applied', applied.error);
+  assert.equal(applied.operationsApplied, 2);
+  assert.equal(await readFile(join(root, 'approved-mixed', 'SKILL.md'), 'utf8'), content);
+  const fresh = module.createWorkspaceSkillService({ dir, hostId: origin.hostId, workspaceId: origin.workspaceId });
+  assert.equal((await fresh.request({ action: 'view', origin, skillId: entry.skillId })).hash,
+    applied.changes.find((change) => change.skillId === entry.skillId).afterHash);
+  const undone = await fresh.request({ action: 'rollback', origin, rollbackId: applied.rollbackId });
+  assert.equal(undone.status, 'applied', undone.error);
+  assert.equal(undone.operationsApplied, 2);
+  assert.equal(await readFile(join(root, 'disk-check', 'SKILL.md'), 'utf8'), read.content);
+  await assert.rejects(readFile(join(root, 'approved-mixed', 'SKILL.md')), { code: 'ENOENT' });
+});
+
+test('Node filesystem host controls sync the original candidate batch and retain replay sources', async (t) => {
+  const { request, root, dir } = await fixture(t);
+  const { createSkillCandidateService } = await import('../src/skill-candidate-service.mjs');
+  const candidates = createSkillCandidateService({ dir });
+  const pending = await request('manage', { mode: 'approve-all', evidence,
+    proposal: proposal([{ action: 'create', name: 'candidate-control', content: skill('candidate-control') }]) });
+  assert.equal(pending.status, 'awaiting_approval');
+  const source = JSON.stringify([origin.sessionId, origin.turnId]);
+  await candidates.compareAndSwap(0, { version: 1, revision: 0, candidates: [{ id: 'control-candidate', lesson: pending.lesson, context: 'a disk task',
+    sources: [source], consecutive: 2, submitted: true, submission: { state: 'staged', batchId: pending.batchId, targetRevision: 'before-target' } }], seenSources: [source] });
+  const applied = await request('approve', { batchId: pending.batchId });
+  assert.equal(applied.status, 'applied', applied.error);
+  assert.equal(await readFile(join(root, 'candidate-control', 'SKILL.md'), 'utf8'), skill('candidate-control'));
+  const approved = await candidates.load();
+  assert.equal(approved.candidates[0].submission.state, 'applied', 'direct Node/backend controls must not leave candidates staged');
+  assert.equal(approved.candidates[0].submission.batchId, pending.batchId);
+  assert.equal(approved.candidates[0].submission.targetRevision, applied.revision);
+  assert.equal(approved.candidates[0].submission.rollbackId, applied.rollbackId);
+  const undone = await request('rollback', { rollbackId: applied.rollbackId });
+  assert.equal(undone.status, 'applied', undone.error);
+  await assert.rejects(readFile(join(root, 'candidate-control', 'SKILL.md')), { code: 'ENOENT' });
+  const rolled = await candidates.load();
+  assert.equal(rolled.candidates[0].submission.state, 'rolled_back');
+  assert.equal(rolled.candidates[0].submission.batchId, pending.batchId, 'rollback maps to its original batch, not the new undo transaction');
+  assert.equal(rolled.candidates[0].submission.targetRevision, undone.revision);
+  assert.equal(rolled.candidates[0].submitted, true);
+  assert.deepEqual(rolled.candidates[0].sources, [source]);
+  assert.deepEqual(rolled.seenSources, [source]);
+});
+
+test('host rejection and stale approval CAS update only their exact candidate submissions', async (t) => {
+  const { request, root, dir } = await fixture(t);
+  const { createSkillCandidateService } = await import('../src/skill-candidate-service.mjs');
+  const candidates = createSkillCandidateService({ dir });
+  for (const [action, expected] of [['reject', 'rejected'], ['approve', 'conflicted']]) {
+    const name = `control-${expected}`;
+    const pending = await request('manage', { mode: 'approve-all', evidence,
+      proposal: proposal([{ action: 'create', name, content: skill(name) }]) });
+    const before = await candidates.load();
+    const sources = [JSON.stringify([origin.sessionId, name])];
+    before.candidates.push({ id: name, lesson: pending.lesson, context: 'control task', sources, consecutive: 2, submitted: true,
+      submission: { state: 'staged', batchId: pending.batchId, targetRevision: `base-${name}` } });
+    before.seenSources = before.candidates.flatMap((candidate) => candidate.sources);
+    await candidates.compareAndSwap(before.revision, before);
+    if (action === 'approve') { await mkdir(join(root, name)); await writeFile(join(root, name, 'SKILL.md'), skill(name, 'An external edit wins.')); }
+    const result = await request(action, { batchId: pending.batchId });
+    assert.equal(result.status, expected, result.error);
+    const after = await candidates.load();
+    const synced = after.candidates.find((candidate) => candidate.id === name);
+    assert.equal(synced.submission.state, expected);
+    assert.equal(synced.submission.batchId, pending.batchId);
+    assert.equal(synced.submission.targetRevision, `base-${name}`);
+    assert.equal(synced.submitted, true); assert.deepEqual(synced.sources, sources);
+    const bytes = await readFile(join(dir, '.ultragamestudio', 'skill-learning', 'pre-review.v1.json'));
+    await request(action, { batchId: pending.batchId });
+    assert.deepEqual(await readFile(join(dir, '.ultragamestudio', 'skill-learning', 'pre-review.v1.json')), bytes, 'idempotent controls do not consume another CAS revision');
+    if (action === 'approve') assert.equal(await readFile(join(root, name, 'SKILL.md'), 'utf8'), skill(name, 'An external edit wins.'));
+    else await assert.rejects(readFile(join(root, name, 'SKILL.md')), { code: 'ENOENT' });
+  }
+});
+
+test('candidate CAS conflict after real approval keeps the applied result and exact filesystem commit', async (t) => {
+  const { dir, root } = await fixture(t);
+  const { createSkillCandidateService } = await import('../src/skill-candidate-service.mjs');
+  const candidates = createSkillCandidateService({ dir });
+  let race = false;
+  const injected = { load: () => candidates.load(), compareAndSwap: async (revision, list) => {
+    if (race) { const concurrent = await candidates.load(); await candidates.compareAndSwap(concurrent.revision, concurrent); }
+    return candidates.compareAndSwap(revision, list);
+  } };
+  const service = module.createWorkspaceSkillService({ dir, hostId: origin.hostId, workspaceId: origin.workspaceId, candidateService: injected });
+  const pending = await service.request({ action: 'manage', origin, mode: 'approve-all', evidence,
+    proposal: proposal([{ action: 'create', name: 'sync-conflict-commit', content: skill('sync-conflict-commit') }]) });
+  const source = JSON.stringify([origin.sessionId, origin.turnId]);
+  await candidates.compareAndSwap(0, { version: 1, revision: 0, candidates: [{ id: 'sync-conflict', lesson: pending.lesson, context: '', sources: [source],
+    consecutive: 2, submitted: true, submission: { state: 'staged', batchId: pending.batchId, targetRevision: 'base' } }], seenSources: [source] });
+  race = true;
+  const result = await service.request({ action: 'approve', origin, batchId: pending.batchId });
+  assert.equal(result.status, 'applied', 'candidate auxiliary failure must not hide a real commit');
+  assert.equal(result.operationsApplied, 1);
+  assert.ok(result.riskReasons.some((reason) => reason.includes('SKILL_CANDIDATE_CONFLICT')));
+  assert.equal(await readFile(join(root, 'sync-conflict-commit', 'SKILL.md'), 'utf8'), skill('sync-conflict-commit'));
+  const saved = await candidates.load();
+  assert.equal(saved.candidates[0].submission.state, 'staged');
+  assert.deepEqual(saved.seenSources, [source]);
+  const restarted = module.createWorkspaceSkillService({ dir, hostId: origin.hostId, workspaceId: origin.workspaceId });
+  const history = await restarted.request({ action: 'history', origin });
+  assert.ok(history.results.find((item) => item.batchId === result.batchId).riskReasons.some((reason) => reason.includes('SKILL_CANDIDATE_CONFLICT')),
+    'candidate auxiliary failures must remain diagnostic after host restart');
+  race = false;
+  const reconciled = await service.request({ action: 'approve', origin, batchId: pending.batchId });
+  assert.equal(reconciled.status, 'applied');
+  assert.equal((await candidates.load()).candidates[0].submission.state, 'applied', 'an explicit retry reconciles the same journal receipt, never republishes');
+  const undone = await service.request({ action: 'rollback', origin, rollbackId: result.rollbackId });
+  assert.equal(undone.status, 'applied');
+  await assert.rejects(readFile(join(root, 'sync-conflict-commit', 'SKILL.md')), { code: 'ENOENT' });
+});
+
+test('explicit controls without a candidate leave candidate storage absent', async (t) => {
+  const { request, dir } = await fixture(t);
+  const pending = await request('manage', { mode: 'approve-all', evidence,
+    proposal: proposal([{ action: 'create', name: 'explicit-control', content: skill('explicit-control') }]) });
+  const result = await request('approve', { batchId: pending.batchId });
+  assert.equal(result.status, 'applied');
+  const undone = await request('rollback', { rollbackId: result.rollbackId });
+  assert.equal(undone.status, 'applied');
+  await assert.rejects(readFile(join(dir, '.ultragamestudio', 'skill-learning', 'pre-review.v1.json')), { code: 'ENOENT' });
 });
 
 test('patches a fresh-read managed file and creates its linked reference as one batch', async (t) => {

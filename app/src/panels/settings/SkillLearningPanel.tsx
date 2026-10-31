@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { Locale } from '@/lib/i18n';
 import { loadSkillLearningConfig, normalizeSkillLearningConfig, onSkillLearningConfigChanged, saveSkillLearningConfig } from '@/lib/skillLearningConfig';
-import { createSkillHost, type SkillControlHost } from '@/lib/skills';
+import { createSkillHost, readPersistedSkillSourceSession, type SkillControlHost } from '@/lib/skills';
 import { tauriAvailable } from '@/lib/tauri';
 import { getRemoteWorkspace, isRemoteWorkspacePath, remoteWorkspaceIdFromPath, RunnerClient } from '@/lib/remoteWorkspace';
 import { REMOTE_SKILL_HOST_ID } from '@ugs/protocol';
 import { createRemoteSkillControlHost } from '@/lib/remoteSkillLearning';
 import { historyStore } from '@/store/history/store';
 import type { SessionRecord, SessionSummary } from '@/store/history/types';
-import { useStore } from '@/store/useStore';
+import { retryPersistedSkillLearning, useStore } from '@/store/useStore';
 import type { Message } from '@/store/types';
 import { listGatewayRunOptions } from '@/lib/modelGateway/resolver';
 import { resolveSkillReviewGatewayRoute } from '@/lib/modelGateway/skillReviewGateway';
@@ -38,6 +38,16 @@ interface SourceReview {
 const originFields = ['hostId', 'workspaceId', 'sessionId', 'turnId', 'runId'] as const;
 const originKey = (origin: SkillOrigin) => JSON.stringify([...originFields.map((key) => origin[key]), origin.cwd ?? null]);
 const sameOrigin = (left: SkillOrigin, right: SkillOrigin) => originKey(left) === originKey(right);
+// A reviewer owns a fresh run, but must retain the exact source location.
+const sameSourceOrigin = (left: SkillOrigin, right: SkillOrigin) =>
+  [left, right].every((origin) => originFields.every((key) => typeof origin[key] === 'string' && !!origin[key]))
+  && (['hostId', 'workspaceId', 'sessionId', 'turnId', 'cwd'] as const).every((key) => left[key] === right[key]);
+
+/** All live owners count, even when their session is not the selected view. */
+function useLifecycleForegroundBusy() {
+  return useStore((s) => s.aiStreaming || s.aiEditingSessions.length > 0 || s.chattingSessions.length > 0
+    || s.runningSessions.length > 0 || s.jobSessions.length > 0);
+}
 
 /** Resolve reviewer HTTP capability separately from the source execution transport. */
 function reviewModelOptions(reviewTransport: SkillLearningConfig['reviewTransport'], zh: boolean): SkillLearningModelOption[] {
@@ -66,6 +76,7 @@ function sourceReviews(record: SessionRecord): SourceReview[] {
     const origin = state?.origin ?? message.skillContext?.origin;
     if (!origin || originFields.some((key) => typeof origin[key] !== 'string' || !origin[key])
       || origin.hostId !== 'local' || origin.workspaceId !== record.workspaceId || origin.sessionId !== record.id
+      || state?.sourceSession !== undefined || message.skillContext?.sourceSession !== undefined
       || origin.cwd?.startsWith('remote://')) continue;
     reviews.set(originKey(origin), { origin: { ...origin }, messageId: message.id, ...(state ? { state } : {}) });
   }
@@ -76,9 +87,11 @@ export default function SkillLearningPanel(props: SkillLearningPanelProps) {
   return props.remote ? <RemoteSkillLearningPanel {...props} /> : <LocalSkillLearningPanel {...props} />;
 }
 
+interface RemoteBinding { readonly client: RunnerClient; readonly projectId: string; readonly serverUrl: string }
+
 function RemoteSkillLearningPanel({ scope, locale = 'zh-CN', workspaceId, workspacePath }: SkillLearningPanelProps) {
   const zh = locale === 'zh-CN';
-  const [binding, setBinding] = useState<{ client: RunnerClient; projectId: string }>();
+  const [binding, setBinding] = useState<RemoteBinding>();
   const bindingRef = useRef(binding);
   bindingRef.current = binding;
   const [config, setConfig] = useState<SkillLearningConfig>();
@@ -101,11 +114,13 @@ function RemoteSkillLearningPanel({ scope, locale = 'zh-CN', workspaceId, worksp
       if (!remote?.projectId) return;
       const client = await RunnerClient.fromWorkspaceAsync(remoteId);
       if (!client) return;
+      const serverUrl = client.serverUrl;
       const project = await client.getProject(remote.projectId);
       if (!project.id) throw new Error('REMOTE_SKILL_PROJECT_REQUIRED');
       const loaded = normalizeSkillLearningConfig(await client.getProjectSkillConfig(project.id));
+      if (client.serverUrl !== serverUrl) throw new Error('REMOTE_SKILL_SERVER_MISMATCH');
       if (cancelled) return;
-      setBinding({ client, projectId: project.id }); setConfig(loaded);
+      setBinding(Object.freeze({ client, projectId: project.id, serverUrl })); setConfig(loaded);
     })().catch((cause) => { if (!cancelled) setError(cause instanceof Error ? cause.message : String(cause)); });
     return () => { cancelled = true; bindingRef.current = undefined; };
   }, [scope, workspaceId, workspacePath]);
@@ -114,6 +129,7 @@ function RemoteSkillLearningPanel({ scope, locale = 'zh-CN', workspaceId, worksp
     if (!control || inFlight.current) return;
     inFlight.current = true; setSaving(true); setStatus(''); setError('');
     try {
+      if (control.client.serverUrl !== control.serverUrl) throw new Error('REMOTE_SKILL_SERVER_MISMATCH');
       const requested = normalizeSkillLearningConfig(value);
       const saved = normalizeSkillLearningConfig(await control.client.saveProjectSkillConfig(control.projectId, requested));
       const actual = normalizeSkillLearningConfig(await control.client.getProjectSkillConfig(control.projectId));
@@ -158,13 +174,14 @@ function remoteSourceReviews(record: SessionRecord, projectId: string, serverUrl
 
 function RemoteSkillSourceControls({ workspaceId, binding, config, locale, saving, onChange }: {
   workspaceId?: string;
-  binding?: { client: RunnerClient; projectId: string };
+  binding?: RemoteBinding;
   config: SkillLearningConfig;
   locale: Locale;
   saving: boolean;
   onChange: (config: SkillLearningConfig) => void;
 }) {
   const zh = locale === 'zh-CN';
+  const lifecycleForegroundBusy = useLifecycleForegroundBusy();
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
   const activeSessionId = useStore((s) => s.activeSessionId);
   const learningRevision = useStore((s) => s.messages.map((m) => m.skillLearning ? JSON.stringify([m.id, m.skillLearning]) : m.skillContext ? JSON.stringify([m.id, m.skillContext]) : '').join('|'));
@@ -178,7 +195,7 @@ function RemoteSkillSourceControls({ workspaceId, binding, config, locale, savin
   const [controller, setController] = useState<{ host: SkillControlHost; source: SourceReview }>();
   const controllerRef = useRef(controller); controllerRef.current = controller;
   const [reason, setReason] = useState('');
-  const reviews = useMemo(() => record && binding ? remoteSourceReviews(record, binding.projectId, binding.client.serverUrl) : [], [record, binding]);
+  const reviews = useMemo(() => record && binding ? remoteSourceReviews(record, binding.projectId, binding.serverUrl) : [], [record, binding]);
   const source = reviews.find((review) => originKey(review.origin) === selectedOrigin) ?? reviews.at(-1);
   useEffect(() => {
     let cancelled = false;
@@ -194,7 +211,7 @@ function RemoteSkillSourceControls({ workspaceId, binding, config, locale, savin
       if (!saved || saved.workspaceId !== workspaceId || saved.id !== selected) { setSessions(listed); return; }
       setSessions(listed.some((item) => item.id === saved.id) ? listed : [{ id: saved.id, title: saved.title }, ...listed]);
       setRecord(saved);
-      setReason(remoteSourceReviews(saved, binding.projectId, binding.client.serverUrl).length ? '' : (zh
+      setReason(remoteSourceReviews(saved, binding.projectId, binding.serverUrl).length ? '' : (zh
         ? '此会话缺少匹配的远程来源、持久化位置或执行服务器。控制已禁用，不会改写来源。'
         : 'This session has no matching remote origin, saved locator or execution server. Controls are disabled; the source is never rewritten.'));
     })().catch((cause) => { if (!cancelled) setReason(cause instanceof Error ? cause.message : String(cause)); });
@@ -204,6 +221,7 @@ function RemoteSkillSourceControls({ workspaceId, binding, config, locale, savin
     let cancelled = false;
     setController(undefined); setEntries([]); setHistory([]);
     if (!source || !binding) return;
+    if (binding.client.serverUrl !== binding.serverUrl) { setReason('REMOTE_SKILL_SERVER_MISMATCH'); return; }
     const host = createRemoteSkillControlHost({ client: binding.client, projectId: binding.projectId, origin: source.origin, mode: source.state?.mode ?? 'off' });
     void Promise.all([host.list(), host.history()]).then(([catalog, saved]) => {
       if (cancelled) return;
@@ -223,6 +241,7 @@ function RemoteSkillSourceControls({ workspaceId, binding, config, locale, savin
     const control = controller;
     const previous = entries.find((entry) => entry.skillId === skillId);
     if (!control || !previous) throw new Error('SKILL_CONTROL_UNAVAILABLE');
+    if (!binding || binding.client.serverUrl !== binding.serverUrl) throw new Error('REMOTE_SKILL_SERVER_MISMATCH');
     const changed = action === 'policy' ? await control.host.setPolicy(skillId, policy ?? {}) : action === 'archive' ? await control.host.archive(skillId) : await control.host.restore(skillId);
     if (changed.skillId !== previous.skillId || changed.rootId !== previous.rootId || changed.scope !== previous.scope) throw new Error('SKILL_IDENTITY_MISMATCH');
     const catalog = await control.host.list();
@@ -236,8 +255,9 @@ function RemoteSkillSourceControls({ workspaceId, binding, config, locale, savin
     const message = record?.messages.find((candidate) => candidate.skillLearning?.result?.batchId === state.result?.batchId && !!candidate.skillLearning && sameOrigin(candidate.skillLearning.origin, state.origin));
     const actionId = action === 'rollback' ? state.result?.rollbackId : state.result?.batchId;
     const locator = message?.skillLearning?.sourceSession;
-    if (!control || !record || !message || !actionId || !locator || !binding || locator.serverUrl !== binding.client.serverUrl
+    if (!control || !record || !message || !actionId || !locator || !binding || locator.serverUrl !== binding.serverUrl
       || locator.workspaceId !== record.workspaceId || locator.sessionId !== record.id || !sameOrigin(state.origin, control.source.origin)) throw new Error('SKILL_REVIEW_MESSAGE_REQUIRED');
+    if (binding.client.serverUrl !== binding.serverUrl) throw new Error('REMOTE_SKILL_SERVER_MISMATCH');
     const actions = useStore.getState();
     const result = await actions.reviewSkillLearningAction(state, action, actionId);
     if (!sameOrigin(result.origin, state.origin) || (action !== 'rollback' && result.batchId !== state.result?.batchId)) throw new Error('SKILL_RESULT_ORIGIN_MISMATCH');
@@ -259,7 +279,12 @@ function RemoteSkillSourceControls({ workspaceId, binding, config, locale, savin
         {reviews.map((review) => <option key={originKey(review.origin)} value={originKey(review.origin)}>{review.state?.result?.lesson || review.origin.turnId} · {review.origin.runId}</option>)}
       </select></label>}
     {reason && <p role="status" className="break-words text-xs text-fg-faint">{reason}</p>}
+    <p role="status" className="break-words text-xs text-fg-dim">{zh
+      ? '远程空闲评估不可用：缺少服务器认证的服务器/租户命名空间，不借用本地或路径作用域。此远程宿主尚不支持从已保存快照重试。'
+      : 'Remote idle evaluation unavailable: authenticated server/tenant namespace missing; local or path scopes are never borrowed. Retry from a saved snapshot is unavailable on this remote host.'}</p>
     <fieldset disabled={saving} className="min-w-0"><SkillLearningSettings config={config} locale={locale} entries={entries} history={history} onChange={onChange}
+      lifecycleScopeKey={undefined} lifecycleForegroundBusy={lifecycleForegroundBusy} lifecycleProtection={() => ({})}
+      onRetryState={undefined}
       onPolicyChange={controller ? (id, policy) => mutate(id, 'policy', policy) : undefined}
       onArchive={controller ? (id) => mutate(id, 'archive') : undefined}
       onRestore={controller ? (id) => mutate(id, 'restore') : undefined}
@@ -278,6 +303,9 @@ function LocalSkillLearningPanel({ scope, locale = 'zh-CN', workspaceId, initial
     m.skillLearning ? JSON.stringify([m.id, m.skillLearning.origin, m.skillLearning.status, m.skillLearning.result?.batchId])
       : m.skillContext ? JSON.stringify([m.id, m.skillContext.origin]) : '').join('|'));
   const sourceWorkspaceId = scope === 'workspace' ? workspaceId : activeWorkspaceId;
+  // Native historyRootPath is the host-owned storage namespace, not the task cwd.
+  const historyRootPath = useStore((s) => s.historyRootPath);
+  const lifecycleForegroundBusy = useLifecycleForegroundBusy();
   const [config, setConfig] = useState(() => loadSkillLearningConfig(id));
   const [status, setStatus] = useState('');
   const [error, setError] = useState('');
@@ -297,6 +325,9 @@ function LocalSkillLearningPanel({ scope, locale = 'zh-CN', workspaceId, initial
   const reviews = useMemo(() => record ? sourceReviews(record) : [], [record]);
   const source = reviews.find((review) => originKey(review.origin) === selectedOrigin) ?? reviews.at(-1);
   const modelOptions = useMemo(() => reviewModelOptions(config.reviewTransport, zh), [config.reviewTransport, modelRevision, zh]);
+  const scopedEntries = entries.filter((entry) => entry.scope === 'external' || entry.scope === (scope === 'global' ? 'global' : 'project'));
+  // The catalog contract exposes no trusted creation or cron metadata. Unknown stays unknown.
+  const lifecycleProtection = () => ({});
   const effectiveSelection = config.reviewSelection ? { ...config.reviewSelection, modelOverride: config.reviewSelection.model }
     : record?.workflow?.meta.gateway?.defaults;
   const capability = {
@@ -408,6 +439,62 @@ function LocalSkillLearningPanel({ scope, locale = 'zh-CN', workspaceId, initial
     return result;
   };
 
+  const retryReview = async (state: SkillReviewState): Promise<void> => {
+    const control = controller;
+    const frozen = structuredClone(state);
+    setError('');
+    try {
+      if (!control || !frozen.resume || frozen.origin.hostId !== 'local' || frozen.sourceSession
+        || !sameSourceOrigin(frozen.resume.job.origin, frozen.origin)
+        || !sameOrigin(frozen.origin, control.source.origin)) throw new Error('SKILL_REVIEW_SOURCE_UNAVAILABLE');
+      const { workspaceId: sourceWorkspace, sessionId: sourceSession } = frozen.origin;
+      const before = await readPersistedSkillSourceSession(sourceWorkspace, sourceSession);
+      const saved = before?.messages.find((message) => message.id === control.source.messageId)?.skillLearning;
+      if (before?.workspaceId !== sourceWorkspace || before.id !== sourceSession || !saved || saved.sourceSession
+        || !sameOrigin(saved.origin, frozen.origin) || JSON.stringify(saved) !== JSON.stringify(frozen)) throw new Error('SKILL_REVIEW_MESSAGE_REQUIRED');
+      const previousState = JSON.stringify(saved);
+      // resumeSkillLearningReview retains the source snapshot and selection,
+      // changing only explicit admission and these current policy overrides.
+      const currentConfig = loadSkillLearningConfig(sourceWorkspace);
+      const job = frozen.resume.job;
+      const retryResume = { ...frozen.resume, job: { ...job, explicit: true, config: {
+        ...job.config, enabled: currentConfig.enabled, mode: currentConfig.mode === 'off' ? 'off' : job.config.mode,
+        reviewSelection: currentConfig.reviewSelection ?? job.config.reviewSelection,
+        reviewTransport: currentConfig.reviewTransport ?? job.config.reviewTransport,
+      } } };
+      await retryPersistedSkillLearning(frozen);
+      const after = await readPersistedSkillSourceSession(sourceWorkspace, sourceSession);
+      const originalNextMessage = after?.messages.find((message) => message.id === control.source.messageId);
+      const originalNext = originalNextMessage?.skillLearning;
+      // The retry controller may update the frozen card or persist a fresh review
+      // run. Only a new card for this exact captured source can replace it.
+      const freshReviews = after?.messages.filter((message) => !before!.messages.some((old) => old.id === message.id)
+        && message.id === `skill-learning:${message.skillLearning?.origin.runId}`
+        && message.skillLearning && sameSourceOrigin(message.skillLearning.origin, frozen.origin)) ?? [];
+      if (freshReviews.length > 1) throw new Error('SKILL_HISTORY_SAVE_UNCONFIRMED');
+      const nextMessage = originalNext && JSON.stringify(originalNext) !== previousState ? originalNextMessage
+        : freshReviews[0] ?? originalNextMessage;
+      const next = nextMessage?.skillLearning;
+      if (after?.workspaceId !== sourceWorkspace || after.id !== sourceSession || !next || next.sourceSession
+        || !sameSourceOrigin(next.origin, frozen.origin) || next.mode !== frozen.mode
+        || (JSON.stringify(next.resume) !== JSON.stringify(frozen.resume) && JSON.stringify(next.resume) !== JSON.stringify(retryResume))
+        || next.result && !sameOrigin(next.result.origin, next.origin)) throw new Error('SKILL_HISTORY_SAVE_UNCONFIRMED');
+      if (JSON.stringify(next) === previousState) throw new Error('SKILL_RETRY_STATE_UNCONFIRMED');
+      // Cache is only the expected write payload, never proof of durability.
+      const acknowledged = (await historyStore.getSession(sourceWorkspace, sourceSession))?.messages
+        .find((message) => message.id === nextMessage!.id)?.skillLearning;
+      if (!acknowledged || JSON.stringify(acknowledged) !== JSON.stringify(next)) throw new Error('SKILL_HISTORY_SAVE_UNCONFIRMED');
+      if (controllerRef.current === control) {
+        setRecord(after);
+        setHistory((current) => current.map((item) => item === state ? next : item));
+      }
+    } catch (cause) {
+      // Keep persistence failures visible even if a metadata reload remounts the card.
+      setError(cause instanceof Error ? cause.message : String(cause));
+      throw cause;
+    }
+  };
+
   return <div className="min-w-0 space-y-3" data-skill-learning-scope={scope}>
     <p className="text-xs leading-relaxed text-fg-faint">{scope === 'global'
       ? (zh ? '全局偏好即时保存；项目覆盖不会修改全局配置。' : 'Global preferences save immediately. Project overrides do not change them.')
@@ -427,11 +514,20 @@ function LocalSkillLearningPanel({ scope, locale = 'zh-CN', workspaceId, initial
       </select>
     </label>}
     {sourceReason && <p role="status" className="break-words text-xs text-fg-faint">{sourceReason}</p>}
-    <SkillLearningSettings config={config} locale={locale} modelOptions={modelOptions} capability={capability} entries={entries} history={history}
+    {controller && <p role="status" className="break-words text-xs text-fg-dim">{zh
+      ? '宿主尚未提供创建与定时任务来源信息；归档建议不可用，仅提供观测提醒。'
+      : 'Host creation and cron provenance unavailable; archive recommendations are disabled. Observation hints only.'}</p>}
+    <SkillLearningSettings config={config} locale={locale} modelOptions={modelOptions} capability={capability} entries={scopedEntries} history={history}
+      lifecycleProtection={lifecycleProtection}
+      lifecycleForegroundBusy={lifecycleForegroundBusy}
+      lifecycleScopeKey={controller && tauriAvailable() && historyRootPath
+        ? JSON.stringify(scope === 'workspace' ? ['local', historyRootPath, 'workspace', controller.source.origin.workspaceId] : ['local', historyRootPath, 'global']) : undefined}
       onPolicyChange={controller ? (skillId, policy) => mutateEntry(skillId, 'policy', policy) : undefined}
       onArchive={controller ? (skillId) => mutateEntry(skillId, 'archive') : undefined}
       onRestore={controller ? (skillId) => mutateEntry(skillId, 'restore') : undefined}
       onReviewAction={controller ? reviewAction : undefined}
+      onRetryState={controller && controller.source.state?.resume
+        && sameSourceOrigin(controller.source.state.resume.job.origin, controller.source.origin) ? retryReview : undefined}
       onChange={(value) => {
       try {
         if (scope === 'workspace' && !id) throw new Error('SKILL_WORKSPACE_REQUIRED');

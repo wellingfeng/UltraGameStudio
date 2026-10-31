@@ -959,6 +959,8 @@ export function startRemoteChatTurn(options: StartRemoteChatTurnOptions): void {
       ? Object.freeze({ sessionId: sourceSessionId, turnId: sourceMessageId }) : undefined;
     if (explicitSkillIds?.length && (!skillSource || !config.projectId)) throw new Error('REMOTE_SKILL_SOURCE_UNAVAILABLE');
     if (skillSource && config.projectId) {
+      await sourceReady;
+      if (foregroundEnded) return;
       const prelaunchOrigin: SkillOrigin = Object.freeze({ hostId: REMOTE_SKILL_HOST_ID,
         workspaceId: config.projectId, ...skillSource, runId: shortId('skill-prelaunch') });
       try {
@@ -1007,12 +1009,14 @@ export function startRemoteChatTurn(options: StartRemoteChatTurnOptions): void {
         throw new Error('REMOTE_SKILL_JOB_ORIGIN_MISMATCH');
       }
       if (options.onSkillContext) {
-        await options.onSkillContext({ origin: structuredClone(job.skillOrigin),
+        const sourceSession = Object.freeze({ workspaceId: sourceSessionKey.workspaceId!, sessionId: sourceSessionId!, serverUrl: client.serverUrl });
+        await options.onSkillContext({ origin: structuredClone(job.skillOrigin), sourceSession,
           loadedSkills: structuredClone(skillContext.loadedSkills), catalogRevision: skillContext.catalogRevision });
         if (foregroundEnded) return;
         learningSource = { client, projectId: config.projectId, origin: Object.freeze({ ...job.skillOrigin }),
           userText: userPrompt, loadedSkills: structuredClone(skillContext.loadedSkills), selection,
-          signal: options.ch.abortController.signal, onState: options.onSkillReviewState };
+          signal: options.ch.abortController.signal,
+          onState: (state) => options.onSkillReviewState?.({ ...structuredClone(state), sourceSession: { ...sourceSession } }) };
       }
     }
     currentStatus = job.status;
@@ -1034,6 +1038,37 @@ export function startRemoteChatTurn(options: StartRemoteChatTurnOptions): void {
       },
       onResult: finish,
       onError: fail,
+      onClose: () => {
+        if (foregroundEnded) return;
+        // EOF is not a task result. Read the exact submitted job once; do not
+        // resubmit, poll or infer success from a terminal status event alone.
+        const lookup = new AbortController();
+        const timeout = globalThis.setTimeout(() => {
+          stopLookup();
+          fail(new Error('远程事件流已结束，读取任务终态超时。'));
+        }, 10_000);
+        const cleanupLookup = () => {
+          globalThis.clearTimeout(timeout);
+          signal.removeEventListener('abort', stopLookup);
+        };
+        const stopLookup = () => { lookup.abort(); cleanupLookup(); };
+        signal.addEventListener('abort', stopLookup, { once: true });
+        void (async () => {
+          try {
+            const savedJob = await client.getJob(job.id, { signal: lookup.signal });
+            if (foregroundEnded) return;
+            if (savedJob.id !== job.id || !TERMINAL_STATUSES.has(savedJob.status)) {
+              fail(new Error('远程事件流已结束，但未取得该任务的终态；请检查服务端任务记录。'));
+              return;
+            }
+            finish(savedJob);
+          } catch (error) {
+            if (!foregroundEnded) fail(error);
+          } finally { cleanupLookup(); }
+        })().catch(() => {
+          // Observer failures must not retain the already-settled foreground.
+        });
+      },
     });
 
   })().catch(fail);

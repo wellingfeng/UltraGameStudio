@@ -10,7 +10,7 @@ import type { Message } from '@/store/types';
 import { openLocalPath } from '@/lib/tauri';
 
 vi.mock('@/components/ai/MessageContent', () => ({ default: ({ text }: { text: string }) => <div>{text}</div> }));
-vi.mock('@/components/ai/FilePreviewDrawer', () => ({ default: ({ refData, cwd, onClose }: { refData: { path: string } | null; cwd?: string; onClose: () => void }) => refData ? <aside data-preview-path={refData.path} data-preview-cwd={cwd}><button onClick={onClose}>关闭预览</button></aside> : null }));
+vi.mock('@/components/ai/FilePreviewDrawer', () => ({ default: ({ refData, cwd, overlayContainerRef, onClose }: { refData: { path: string } | null; cwd?: string; overlayContainerRef?: { current: HTMLElement | null }; onClose: () => void }) => refData ? <aside data-preview-path={refData.path} data-preview-cwd={cwd} data-preview-host={overlayContainerRef?.current?.className}><button onClick={onClose}>关闭预览</button></aside> : null }));
 vi.mock('@/lib/tauri', async (original) => ({ ...await original<typeof import('@/lib/tauri')>(), openLocalPath: vi.fn().mockResolvedValue(true) }));
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let root: Root | undefined;
@@ -54,6 +54,7 @@ describe('定时任务页面', () => {
     await click('DOCX工作周报.docx下载工作周报（Word）');
     expect(container.querySelector('[data-preview-path]')?.getAttribute('data-preview-path')).toBe('.ultragamestudio/docs/dev/weekly-reports/工作周报.docx');
     expect(container.querySelector('[data-preview-cwd]')?.getAttribute('data-preview-cwd')).toBe('E:/TaskWorkspace');
+    expect(container.querySelector('[data-preview-host]')?.getAttribute('data-preview-host')).toBe('scheduled-tasks-main');
     await act(async () => (container.querySelector('button[aria-label="在文件夹中显示：工作周报.docx"]') as HTMLButtonElement).click());
     expect(openLocalPath).toHaveBeenCalledWith('.ultragamestudio/docs/dev/weekly-reports/工作周报.docx', { cwd: 'E:/TaskWorkspace', reveal: true });
     expect(useStore.getState().activeSessionId).toBe('current');

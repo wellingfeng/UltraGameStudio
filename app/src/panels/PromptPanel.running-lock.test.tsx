@@ -1076,6 +1076,39 @@ describe('PromptPanel running lock', () => {
     }
   });
 
+  it('keeps message actions available for tool-only assistant responses', async () => {
+    resetStoreForPromptLock('design');
+    useStore.setState({
+      workflow: simpleBlueprint('Plain chat'),
+      messages: [
+        { id: 'm_user', role: 'user', text: '生成文件', createdAt: 1 },
+        {
+          id: 'm_ai',
+          role: 'assistant',
+          text: encodeToolPatch({
+            id: 'tool-only',
+            name: 'Write',
+            status: 'done',
+            result: '文件已生成',
+          }),
+          createdAt: 2,
+        },
+      ] as Message[],
+    });
+    const view = await renderChatDock();
+
+    try {
+      expect(view.container.querySelectorAll('button[aria-label="复制 AI 回答"]')).toHaveLength(0);
+      expect(buttonByAriaLabel(view.container, '创建会话分支')).toBeDefined();
+      expect(buttonByAriaLabel(view.container, '重新生成回答')).toBeDefined();
+      expect(buttonByAriaLabel(view.container, '切换模型回答')).toBeDefined();
+      expect(buttonByAriaLabel(view.container, '翻译回答').disabled).toBe(true);
+      expect(buttonByAriaLabel(view.container, '删除回答')).toBeDefined();
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   it('translates the final assistant answer through the public translation service', async () => {
     resetStoreForPromptLock('design');
     const originalSendPrompt = useStore.getState().sendPrompt;

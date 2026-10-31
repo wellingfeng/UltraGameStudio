@@ -1,9 +1,11 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { Code2, FileWarning, Globe2, Loader2, RotateCw } from 'lucide-react';
 import type { LocalFilePreview } from '@/lib/tauri';
 import { embedLocalHtmlResources, resolveHtmlAssetUrl, rewriteLocalAssetsInHtml } from './lib/localHtmlAssets';
 import { themePreviewHtml, usePreviewTheme } from './lib/previewTheme';
+import PreviewZoomControls from './PreviewZoomControls';
+import { useCtrlWheelZoom, usePreviewZoom, withPreviewInteractions } from './lib/previewZoom';
 
 type HtmlState = { html: string; source: string } | { error: string } | null;
 
@@ -12,6 +14,9 @@ export default function HtmlPreviewPane({ file }: { file: LocalFilePreview }) {
   const [state, setState] = useState<HtmlState>(null);
   const [mode, setMode] = useState<'preview' | 'source'>('preview');
   const [revision, setRevision] = useState(0);
+  const { zoom, setZoom, frameRef, onFrameLoad } = usePreviewZoom(file.path);
+  const sourceRef = useRef<HTMLPreElement>(null);
+  useCtrlWheelZoom(sourceRef, zoom, setZoom, `${mode}:${state && 'html' in state ? 'ready' : 'loading'}`);
   useEffect(() => setMode('preview'), [file.path]);
   useEffect(() => {
     const controller = new AbortController();
@@ -58,7 +63,7 @@ export default function HtmlPreviewPane({ file }: { file: LocalFilePreview }) {
     });
     return () => controller.abort();
   }, [file.path, file.streamPath, file.text, revision]);
-  const srcDoc = useMemo(() => state && 'html' in state ? themePreviewHtml(state.html, theme) : '', [state, theme]);
+  const srcDoc = useMemo(() => state && 'html' in state ? withPreviewInteractions(themePreviewHtml(state.html, theme)) : '', [state, theme]);
   return <div className="flex min-h-0 flex-1 flex-col">
     <div role="toolbar" aria-label="HTML 预览工具" className="flex shrink-0 items-center gap-1 border-b border-border-soft bg-panel px-3 py-1.5">
       <button type="button" aria-label="显示 HTML 预览" aria-pressed={mode === 'preview'}
@@ -71,6 +76,7 @@ export default function HtmlPreviewPane({ file }: { file: LocalFilePreview }) {
         className={`flex items-center gap-1 rounded px-2 py-1 text-xs hover:bg-panel-2 ${mode === 'source' ? 'bg-panel-2 text-fg' : 'text-fg-dim'}`}>
         <Code2 size={13} />源码
       </button>
+      <PreviewZoomControls zoom={zoom} onZoom={setZoom} />
       <button type="button" aria-label="刷新 HTML 预览" title="重新读取文件" disabled={!state}
         onClick={() => setRevision(value => value + 1)}
         className="ml-auto flex h-6 w-6 items-center justify-center rounded text-fg-dim hover:bg-panel-2 hover:text-fg disabled:opacity-40">
@@ -82,9 +88,9 @@ export default function HtmlPreviewPane({ file }: { file: LocalFilePreview }) {
       : <>
         {/* Scripts support interactive artifacts; the opaque origin keeps app/IPC access blocked.
             Keep the iframe mounted when viewing source so its scroll and interaction state survive. */}
-        <iframe title={file.fileName} sandbox="allow-scripts" srcDoc={srcDoc} hidden={mode !== 'preview'}
+        <iframe ref={frameRef} onLoad={onFrameLoad} title={file.fileName} sandbox="allow-scripts" srcDoc={srcDoc} hidden={mode !== 'preview'}
           className="min-h-0 flex-1 border-0 bg-bg" />
-        {mode === 'source' && <pre aria-label="HTML 源码" className="m-0 min-h-0 flex-1 overflow-auto bg-bg p-4 font-mono text-xs leading-5 text-fg"><code>{state.source}</code></pre>}
+        {mode === 'source' && <pre ref={sourceRef} aria-label="HTML 源码" className="m-0 min-h-0 flex-1 overflow-auto bg-bg p-4 font-mono text-xs leading-5 text-fg"><code style={{ zoom }}>{state.source}</code></pre>}
       </>}
   </div>;
 }

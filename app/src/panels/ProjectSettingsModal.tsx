@@ -1,3 +1,6 @@
+import { cancelCatalogDiscovery } from "@/lib/tools/client";
+import { ToolCatalogPanel } from "@/components/ai/ToolCatalogPanel";
+import { projectCatalog, catalogScope, isProtocolConnected } from "@/lib/tools/catalog";
 import { isSupportedWorkspacePath } from '@/lib/cloudProjects';
 import {
   useCallback,
@@ -757,13 +760,13 @@ function ProbeBadge({ result }: { result?: ProjectMcpProbeResult }) {
     <span
       className={cn(
         'rounded border px-2 py-0.5 text-[11px]',
-        result.ok
+        result.ok && result.status === 'connected'
           ? 'border-status-success/40 bg-status-success/10 text-status-success'
           : 'border-status-error/40 bg-status-error/10 text-status-error',
       )}
       title={result.message}
     >
-      {result.ok ? tr('已连接', locale) : tr('失败', locale)}
+      {result.ok && result.status === 'connected' ? tr('已连接', locale) : result.status === 'reachable' ? '仅端点响应' : tr('失败', locale)}
     </span>
   );
 }
@@ -1632,9 +1635,32 @@ function ProjectSettingsModalContent({
   const [settings, setSettings] = useState<ProjectSettings>(() =>
     projectSettingsFromMetadata(workspace.metadata),
   );
+  const catalogSettingsRef = useRef(settings);
+  catalogSettingsRef.current = settings;
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [probing, setProbing] = useState(false);
+  const catalogProbeIds = useRef<string[]>([]);
+  const catalogProbeGeneration = useRef(0);
+  const [catalogProbeStartedAt, setCatalogProbeStartedAt] = useState(0);
+  const [catalogProbeElapsed, setCatalogProbeElapsed] = useState(0);
+  useEffect(() => {
+    if (!probing) return;
+    const timer = setInterval(() => setCatalogProbeElapsed(Math.floor((Date.now() - catalogProbeStartedAt) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [probing, catalogProbeStartedAt]);
+  useEffect(() => () => {
+    catalogProbeGeneration.current++;
+    for (const id of catalogProbeIds.current) void cancelCatalogDiscovery(id);
+  }, [workspace.id]);
+  const cancelProjectCatalog = useCallback(() => {
+    catalogProbeGeneration.current++;
+    for (const id of catalogProbeIds.current) void cancelCatalogDiscovery(id);
+    catalogProbeIds.current = [];
+    setProbing(false);
+    setStatus('目录发现已取消；仅回收 UGS 探测连接。');
+  }, []);
+
   const [lspProbing, setLspProbing] = useState(false);
   const [lspInstallingId, setLspInstallingId] = useState<string | null>(null);
   const [lspInstallResults, setLspInstallResults] = useState<
@@ -2473,10 +2499,16 @@ function ProjectSettingsModalContent({
       setStatus(tr('没有可探测的 MCP server', locale));
       return;
     }
+    const generation = ++catalogProbeGeneration.current;
+    catalogProbeIds.current = [];
+    setCatalogProbeStartedAt(Date.now());
+    setCatalogProbeElapsed(0);
     setProbing(true);
     setStatus(tr('探测中...', locale));
     const results: ProjectMcpProbeResult[] = [];
-    for (const server of enabledServers) {
+    await Promise.allSettled(enabledServers.map(async (server) => {
+      const requestId = `tool-catalog-${workspace.id}-${generation}-${crypto.randomUUID()}`;
+      catalogProbeIds.current.push(requestId);
       const result = await probeProjectMcpServer(workspacePath, {
         id: server.id,
         transport: server.transport,
@@ -2484,7 +2516,7 @@ function ProjectSettingsModalContent({
         args: server.args,
         env: server.env,
         url: server.url,
-      }).catch((err): ProjectMcpProbeResult => ({
+      }, requestId).catch((err): ProjectMcpProbeResult => ({
         serverId: server.id,
         ok: false,
         status: 'probe-error',
@@ -2492,21 +2524,27 @@ function ProjectSettingsModalContent({
         toolsCount: null,
         checkedAtMs: Date.now(),
       }));
+      if (generation !== catalogProbeGeneration.current) return;
       results.push(result);
-    }
+      setStatus(`目录发现 ${results.length}/${enabledServers.length} 已返回；${server.label}：${result.message}`);
+      updateServer(server.id, { lastProbe: result });
+    }));
+    if (generation !== catalogProbeGeneration.current) return;
+    catalogProbeIds.current = [];
     const resultById = new Map(results.map((result) => [result.serverId, result]));
+    const latest = catalogSettingsRef.current;
     const next: ProjectSettings = {
-      ...settings,
+      ...latest,
       mcp: {
-        ...settings.mcp,
-        servers: settings.mcp.servers.map((server) => {
+        ...latest.mcp,
+        servers: latest.mcp.servers.map((server) => {
           const result = resultById.get(server.id);
           return result ? { ...server, lastProbe: result } : server;
         }),
       },
     };
     setSettings(next);
-    await persistSettings(next);
+    setDirty(true);
     const okCount = results.filter((result) => result.ok).length;
     setStatus(
       locale === 'zh-CN'
@@ -2514,7 +2552,7 @@ function ProjectSettingsModalContent({
         : `Probe complete: ${okCount}/${results.length} connected`,
     );
     setProbing(false);
-  }, [persistSettings, settings, workspacePath, locale]);
+  }, [settings, workspacePath, locale, updateServer, workspace.id]);
 
   const lspConfigFromDefinition = useCallback(
     (
@@ -3611,7 +3649,7 @@ function ProjectSettingsModalContent({
                 <div className="mt-1 text-lg font-semibold text-fg">
                   {settings.mcp.enabled
                     ? settings.mcp.servers.filter(
-                        (server) => server.enabled && server.lastProbe?.ok,
+                        (server) => server.enabled && isProtocolConnected(server.lastProbe),
                       ).length
                     : 0}
                 </div>
@@ -3654,7 +3692,7 @@ function ProjectSettingsModalContent({
                 <div className="mt-1 text-lg font-semibold text-fg">
                   {settings.lsp.enabled
                     ? settings.lsp.servers.filter(
-                        (server) => server.enabled && server.lastProbe?.ok,
+                        (server) => server.enabled && isProtocolConnected(server.lastProbe),
                       ).length
                     : 0}
                 </div>
@@ -3916,7 +3954,7 @@ function ProjectSettingsModalContent({
         (server) => server.id === UE_MCP_SERVER_ID,
       );
       const ueMcpConnected =
-        settings.mcp.enabled && ueMcpServer?.enabled && ueMcpServer.lastProbe?.ok;
+        settings.mcp.enabled && ueMcpServer?.enabled && ueMcpServer.lastProbe?.ok && ueMcpServer.lastProbe.status === 'connected';
       const ueMcpConfigured = Boolean(ueMcpServer);
       const blueprintInstalled =
         blueprintStatus?.installed ?? blueprintInstallResult?.ok ?? false;
@@ -4287,6 +4325,16 @@ function ProjectSettingsModalContent({
                 </div>
               </div>
 
+              <details className="rounded-md border border-border-soft p-3">
+                <summary className="cursor-pointer text-xs text-fg-dim">查看项目发现工具（仅探测缓存）</summary>
+                {probing && <div role="status" className="mt-2 flex items-center gap-3 text-xs text-fg-faint">
+                  <span>目录发现进行中 · 已等待 {catalogProbeElapsed} 秒</span>
+                  <button type="button" onClick={cancelProjectCatalog} className="rounded border border-border-soft px-2 py-1 hover:border-accent">取消目录发现</button>
+                </div>}
+                <div className="mt-3"><ToolCatalogPanel mode="project"
+                  scope={catalogScope(workspace.id, null, { adapter: "project" })}
+                  snapshot={projectCatalog(catalogScope(workspace.id, null, { adapter: "project" }), settings.mcp.servers, settings.mcp.enabled)} /></div>
+              </details>
               <div className="grid gap-3">
                 {settings.mcp.servers.length === 0 ? (
                   <div className="rounded-md border border-border-soft bg-bg-alt p-4 text-sm text-fg-faint">
@@ -4470,7 +4518,7 @@ function ProjectSettingsModalContent({
         : 0;
       const availableIds = new Set([
         ...settings.lsp.servers
-          .filter((server) => server.lastProbe?.ok)
+          .filter((server) => isProtocolConnected(server.lastProbe))
           .map((server) => server.id),
         ...Object.values(lspAvailabilityProbes)
           .filter((probe) => probe.ok)

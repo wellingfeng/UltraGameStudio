@@ -147,21 +147,52 @@ fn process_fixture_helper() {
                 revision: None,
             };
             s.record_evidence(&o, &[evidence]).unwrap();
+            let existing = s
+                .list(&o)
+                .unwrap()
+                .entries
+                .into_iter()
+                .find(|entry| entry.name == "first-package")
+                .unwrap();
+            let owner = SkillService::new(base.join("global"));
+            owner
+                .bind_run(o.clone(), LearningMode::AutoSafe, SkillActor::User)
+                .unwrap();
+            owner
+                .set_policy(
+                    &o,
+                    &existing.skill_id,
+                    &SkillPolicy {
+                        auto_editable: Some(true),
+                        ..SkillPolicy::default()
+                    },
+                )
+                .unwrap();
+            let read = s.view(&o, &existing.skill_id, None).unwrap();
             let p = SkillProposal {
                 version: 1,
                 kind: "propose".into(),
                 lesson: "Validate the complete batch before publication.".into(),
                 evidence_ids: vec!["correction-process".into()],
-                operations: ["first-package", "second-package"]
-                    .iter()
-                    .map(|name| SkillOperation::Create {
-                        name: (*name).into(),
+                // Keep two genuine package publishes without violating the
+                // host's one-new-class budget: one existing additive patch.
+                operations: vec![
+                    SkillOperation::Patch {
+                        skill_id: existing.skill_id,
+                        file_path: None,
+                        old_string: "Read all files before changing them.".into(),
+                        new_string: "Read all files before changing them. Validate both packages before publication.".into(),
+                        expected_hash: read.hash,
+                        read_receipt_id: read.read_receipt_id,
+                    },
+                    SkillOperation::Create {
+                        name: "second-package".into(),
                         content: skill(
-                            name,
-                            "Read all files and validate both packages before changing them.",
+                            "second-package",
+                            "Read all files before changing them. Validate both packages before publication.",
                         ),
-                    })
-                    .collect(),
+                    },
+                ],
             };
             if mode == "revoke-after-commit" {
                 let s = std::sync::Arc::new(s);
@@ -306,6 +337,10 @@ fn two_real_process_writers_allow_only_one_fresh_cas_update() {
 #[test]
 fn revoke_after_commit_start_waits_and_preserves_applied_publication_truth() {
     let f = Fixture::new("revoke-committing");
+    f.write(
+        "project/.ultragamestudio/skills/first-package/SKILL.md",
+        &skill("first-package", "Read all files before changing them."),
+    );
     let mut writer = child(&f, "revoke-after-commit");
     wait_file(&f.0.join("revoke-blocked"));
     f.write("release-writer", "finish the acquired commit boundary");
@@ -316,12 +351,19 @@ fn revoke_after_commit_start_waits_and_preserves_applied_publication_truth() {
     assert_eq!(result["applied"]["operationsApplied"], 2);
     assert_eq!(result["late"]["status"], "cancelled");
     for name in ["first-package", "second-package"] {
-        assert!(f
-            .project()
-            .join(".ultragamestudio/skills")
-            .join(name)
-            .join("SKILL.md")
-            .is_file());
+        assert_eq!(
+            std::fs::read_to_string(
+                f.project()
+                    .join(".ultragamestudio/skills")
+                    .join(name)
+                    .join("SKILL.md")
+            )
+            .unwrap(),
+            skill(
+                name,
+                "Read all files before changing them. Validate both packages before publication."
+            )
+        );
     }
     assert!(!f
         .project()
@@ -361,6 +403,13 @@ fn killed_mid_batch_writer_is_recovered_before_blocked_reader_returns() {
         "project/.ultragamestudio/skills/existing/SKILL.md",
         &skill("existing", "Untouched sentinel."),
     );
+    f.write(
+        "project/.ultragamestudio/skills/first-package/SKILL.md",
+        &skill("first-package", "Read all files before changing them."),
+    );
+    let before_first =
+        super::service::read_package(&f.project().join(".ultragamestudio/skills/first-package"))
+            .unwrap();
     let before =
         super::service::read_package(&f.project().join(".ultragamestudio/skills/existing"))
             .unwrap();
@@ -369,11 +418,15 @@ fn killed_mid_batch_writer_is_recovered_before_blocked_reader_returns() {
     let published = ["first-package", "second-package"]
         .iter()
         .filter(|name| {
-            f.project()
-                .join(".ultragamestudio/skills")
-                .join(name)
-                .join("SKILL.md")
-                .is_file()
+            std::fs::read_to_string(
+                f.project()
+                    .join(".ultragamestudio/skills")
+                    .join(name)
+                    .join("SKILL.md"),
+            )
+            .map_or(false, |text| {
+                text.contains("Validate both packages before publication.")
+            })
         })
         .count();
     assert_eq!(
@@ -389,12 +442,18 @@ fn killed_mid_batch_writer_is_recovered_before_blocked_reader_returns() {
     wait_child(&mut reader);
     let catalog: SkillCatalog =
         serde_json::from_slice(&std::fs::read(f.0.join("reader-result.json")).unwrap()).unwrap();
-    assert_eq!(catalog.entries.len(), 1);
-    assert_eq!(catalog.entries[0].name, "existing");
-    assert!(!f
-        .project()
-        .join(".ultragamestudio/skills/first-package")
-        .exists());
+    let mut names = catalog
+        .entries
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["existing", "first-package"]);
+    assert_eq!(
+        super::service::read_package(&f.project().join(".ultragamestudio/skills/first-package"))
+            .unwrap(),
+        before_first
+    );
     assert!(!f
         .project()
         .join(".ultragamestudio/skills/second-package")

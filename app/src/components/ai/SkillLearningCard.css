@@ -1,0 +1,105 @@
+.ugs-skill-review {
+  position: relative;
+  --review-ink: var(--fg);
+  --review-info: color-mix(in srgb, var(--status-info) 45%, var(--fg));
+  --review-running: color-mix(in srgb, var(--status-running) 45%, var(--fg));
+  --review-warning: color-mix(in srgb, var(--status-warning) 45%, var(--fg));
+  --review-success: color-mix(in srgb, var(--status-success) 45%, var(--fg));
+  --review-error: color-mix(in srgb, var(--status-error) 45%, var(--fg));
+  --review-interrupted: color-mix(in srgb, var(--status-interrupted) 45%, var(--fg));
+}
+.ugs-skill-review[data-tone='info'] { --review-ink: var(--review-info); }
+.ugs-skill-review[data-tone='running'] { --review-ink: var(--review-running); }
+.ugs-skill-review[data-tone='warning'] { --review-ink: var(--review-warning); }
+.ugs-skill-review[data-tone='success'] { --review-ink: var(--review-success); }
+.ugs-skill-review[data-tone='error'] { --review-ink: var(--review-error); }
+.ugs-skill-review[data-tone='interrupted'] { --review-ink: var(--review-interrupted); }
+.ugs-skill-review .text-fg-dim, .ugs-skill-learning-settings .text-fg-dim { color: color-mix(in srgb, var(--fg-dim) 70%, var(--fg)); }
+.ugs-review-label { color: var(--review-ink); }
+.ugs-review-error, .ugs-review-diff-remove { color: var(--review-error); }
+.ugs-review-diff-add { color: var(--review-success); }
+.ugs-skill-review[data-active='true'] { border-bottom-color: var(--review-ink); }
+.ugs-skill-review[data-active='true']::after {
+  content: '';
+  position: absolute;
+  pointer-events: none;
+  bottom: -1px;
+  left: 0;
+  width: 20%;
+  height: 1px;
+  background: var(--review-ink);
+  animation: ugs-review-edge 3s linear infinite;
+}
+@keyframes ugs-review-edge { from { transform: translateX(0); } to { transform: translateX(400%); } }
+
+/* Hermes-style transcript scaffolding, not another panel in the reply. */
+.ugs-review-strip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 0 0.5rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  --review-muted: var(--fg-dim);
+  --review-muted: light-dark(var(--fg-dim), var(--fg-faint));
+}
+.ugs-review-disclosure { flex: 0 1 auto; max-width: 100%; }
+.ugs-review-summary {
+  display: flex;
+  align-items: center;
+  gap: 0.375rem;
+  min-height: 24px;
+  max-width: 100%;
+  width: fit-content;
+  padding: 2px 0;
+  border-radius: 3px;
+  line-height: 20px;
+  list-style: none;
+  cursor: pointer;
+  outline: none;
+  color: var(--review-muted);
+}
+.ugs-review-summary::-webkit-details-marker { display: none; }
+.ugs-review-glyph { display: inline-flex; flex-shrink: 0; color: inherit; }
+.ugs-review-strip .ugs-review-label { position: relative; min-width: 0; color: inherit; font-weight: 400; overflow-wrap: anywhere; }
+.ugs-review-meta {
+  flex: 1 1 0px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: inherit;
+  font-variant-numeric: tabular-nums;
+}
+.ugs-review-chevron, .ugs-review-separator { flex-shrink: 0; color: inherit; opacity: 0.65; }
+.ugs-review-disclosure[open] > .ugs-review-summary .ugs-review-chevron { transform: rotate(90deg); }
+.ugs-review-summary:hover .ugs-review-chevron { opacity: 1; }
+.ugs-review-summary:focus-visible, .ugs-review-action:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.ugs-review-body { margin: 4px 0 8px 20px; max-height: 320px; overflow-y: auto; overscroll-behavior: contain; }
+.ugs-review-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.ugs-review-actions:empty { display: none; }
+.ugs-review-action {
+  min-height: 24px;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--accent);
+  font-size: 12px;
+  line-height: 20px;
+  cursor: pointer;
+}
+.ugs-review-action:hover { text-decoration: underline; text-underline-offset: 3px; }
+.ugs-review-action:disabled { opacity: 0.5; cursor: not-allowed; }
+/* Chat learning is quiet scaffolding; history retains semantic status colors. */
+.ugs-review-strip[data-active='true']::after { display: none; animation: none; }
+@media (pointer: coarse) {
+  .ugs-review-summary, .ugs-review-action { min-height: 44px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ugs-skill-review[data-active='true']::after { animation: none; display: none; }
+}
+@media (forced-colors: active) {
+  .ugs-review-summary { color: CanvasText; }
+}

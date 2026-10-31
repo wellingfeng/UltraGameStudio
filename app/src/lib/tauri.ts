@@ -325,6 +325,7 @@ export interface ProjectMcpProbeServerConfig {
   args?: string[] | null;
   env?: Record<string, string> | null;
   url?: string | null;
+  headers?: Record<string, string>;
 }
 
 export interface ProjectMcpProbeResult {
@@ -334,6 +335,11 @@ export interface ProjectMcpProbeResult {
   message: string;
   toolsCount?: number | null;
   checkedAtMs: number;
+  tools?: import('./tools/types').McpToolDefinition[];
+  catalogCoverage?: 'full' | 'unknown';
+  protocolVersion?: string | null;
+  serverInfo?: Record<string, unknown> | null;
+  capabilities?: Record<string, unknown> | null;
 }
 
 export interface ProjectLspProbeServerConfig {
@@ -1359,15 +1365,13 @@ export async function scanProjectEnvironment(
 export async function probeProjectMcpServer(
   rootPath: string,
   server: ProjectMcpProbeServerConfig,
+  requestId?: string,
 ): Promise<ProjectMcpProbeResult> {
   if (!tauriAvailable()) {
     throw new Error('NO_BACKEND');
   }
   const invoke = await getInvoke();
-  return invoke<ProjectMcpProbeResult>('project_mcp_probe', {
-    rootPath,
-    server,
-  });
+  return invoke<ProjectMcpProbeResult>('project_mcp_probe', { rootPath, server, requestId });
 }
 
 /** Probe whether an LSP server command is available locally. */

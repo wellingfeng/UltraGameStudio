@@ -86,6 +86,73 @@ describe('apiConfig secure record merge semantics', () => {
     }
   });
 
+  it('does not re-import an individually cleared provider key from stale inline metadata', async () => {
+    mocks.secureSecretGetMany.mockResolvedValue({
+      'providers.apiKeys.v1': JSON.stringify({ p2: 'k2' }),
+      'gateway.channelApiKeys.v1': JSON.stringify({ '["p2","default"]': 'k2' }),
+    });
+    const secure = await import('@/lib/secureStorage');
+    secure.resetSecureStorageForTests();
+    await secure.initializeSecureStorage();
+    window.localStorage.setItem(PROVIDERS_KEY, JSON.stringify([
+      { id: 'p1', kind: 'anthropic', name: 'p1', apiKey: 'dummy-cleared', baseUrl: 'https://example.test' },
+      { id: 'p2', kind: 'anthropic', name: 'p2', baseUrl: 'https://example.test' },
+    ]));
+    const api = await import('@/lib/apiConfig');
+    expect(api.listProviders().find(provider => provider.id === 'p1')?.apiKey).toBe('');
+    api.updateProvider('p2', { name: 'Edited' });
+    await secure.flushSecureStorage();
+    expect(secure.readSecureRecord('providers.apiKeys.v1')).toEqual({ p2: 'k2' });
+  });
+
+  it('does not re-import a cleared entry from a record first created during the current session', async () => {
+    mocks.secureSecretGetMany.mockResolvedValue({});
+    const secure = await import('@/lib/secureStorage');
+    secure.resetSecureStorageForTests();
+    await secure.initializeSecureStorage();
+    await secure.writeSecureRecordAwaited('providers.apiKeys.v1', { p1: 'new-p1', p2: 'k2' });
+    await secure.writeSecureRecordAwaited('gateway.channelApiKeys.v1', { '["p1","default"]': 'new-p1', '["p2","default"]': 'k2' });
+    seedProviderList(['p1', 'p2']);
+    secure.flushSecretsToLocalStorageFallback();
+    const mirror = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new DOMException('quota exhausted', 'QuotaExceededError');
+    });
+    try {
+      const api = await import('@/lib/apiConfig');
+      api.updateProvider('p1', { apiKey: '' });
+      await secure.flushSecureStorage();
+      expect(api.listProviders().find(provider => provider.id === 'p1')?.apiKey).toBe('');
+      await secure.flushSecureStorage();
+      expect(secure.readSecureRecord('providers.apiKeys.v1')).toEqual({ p2: 'k2' });
+    } finally {
+      mirror.mockRestore();
+    }
+  });
+
+  it('does not re-import an individually cleared gateway key from stale inline metadata', async () => {
+    mocks.secureSecretGetMany.mockResolvedValue({
+      'providers.apiKeys.v1': JSON.stringify({ p2: 'k2' }),
+      'gateway.channelApiKeys.v1': JSON.stringify({ '["p2","default"]': 'k2' }),
+    });
+    const secure = await import('@/lib/secureStorage');
+    secure.resetSecureStorageForTests();
+    await secure.initializeSecureStorage();
+    window.localStorage.setItem('ugs_model_gateway_v1', JSON.stringify({ version: 1, providers: [{
+      id: 'p1', kind: 'anthropic', adapter: 'claude-code', name: 'p1', channels: [{
+        id: 'default', name: 'Default', apiKey: 'dummy-cleared', route: { transport: 'cli' },
+      }],
+    }] }));
+    const gateway = await import('@/lib/gatewayConfig');
+    const config = gateway.loadGatewayConfig();
+    expect(config.providers[0].channels[0].apiKey || '').toBe('');
+    gateway.saveGatewayConfig(config);
+    await secure.flushSecureStorage();
+    const record = secure.readSecureRecord('gateway.channelApiKeys.v1');
+    expect(record['["p2","default"]']).toBe('k2');
+    expect(record).not.toHaveProperty('["p1","default"]');
+    expect(Object.values(record)).not.toContain('dummy-cleared');
+  });
+
   it('updateProvider with an empty apiKey clears exactly that token', async () => {
     seedProviderList(['p1', 'p2']);
     const secure = await import('@/lib/secureStorage');
@@ -104,5 +171,28 @@ describe('apiConfig secure record merge semantics', () => {
     await secure.flushSecureStorage();
 
     expect(lastProvidersWrite()).toEqual({ p1: 'k1' });
+  });
+
+  it('clearing a provider also clears its exact default gateway recovery mirror', async () => {
+    seedProviderList(['p1', 'p2']);
+    mocks.secureSecretGetMany.mockResolvedValue({
+      'providers.apiKeys.v1': JSON.stringify({ p1: 'k1', p2: 'k2' }),
+      'gateway.channelApiKeys.v1': JSON.stringify({
+        '["p1","default"]': 'k1',
+        '["p2","default"]': 'k2',
+        '["p1","other"]': 'other-key',
+      }),
+    });
+    const secure = await import('@/lib/secureStorage');
+    secure.resetSecureStorageForTests();
+    await secure.initializeSecureStorage();
+    const { updateProvider } = await import('@/lib/apiConfig');
+    updateProvider('p1', { apiKey: '' });
+    await secure.flushSecureStorage();
+
+    expect(secure.readSecureRecord('gateway.channelApiKeys.v1')).toEqual({
+      '["p2","default"]': 'k2',
+      '["p1","other"]': 'other-key',
+    });
   });
 });

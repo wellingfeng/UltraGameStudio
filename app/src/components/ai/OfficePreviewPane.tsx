@@ -5,9 +5,14 @@ import { previewOfficeDocument, type OfficePreview } from '@/lib/tauri';
 import { useStore } from '@/store/useStore';
 import { t, tArgs } from '@/lib/i18n';
 import { usePreviewTheme } from './lib/previewTheme';
+import PreviewZoomControls from './PreviewZoomControls';
+import { usePreviewZoom, withPreviewInteractions } from './lib/previewZoom';
 
 const DOCX_MIME =
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+// Office previews previously disabled scripts entirely. Only the injected
+// interaction script is allowed; document-provided scripts remain blocked.
+const OFFICE_PREVIEW_NONCE = Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('');
 
 /** Rendered inside the sandboxed preview iframe; keeps the extracted OOXML
  *  readable without pulling a stylesheet into the app bundle. */
@@ -35,7 +40,7 @@ type OfficeState =
   | { status: 'error'; message: string };
 
 function wrapOfficeHtml(body: string, theme: string): string {
-  return `<!doctype html><html><head><meta charset="utf-8"><style>${theme}${OFFICE_STYLE}</style></head><body>${body}</body></html>`;
+  return withPreviewInteractions(`<!doctype html><html><head><meta charset="utf-8"><style>${theme}${OFFICE_STYLE}</style></head><body>${body}</body></html>`, OFFICE_PREVIEW_NONCE);
 }
 
 /**
@@ -61,6 +66,7 @@ export default function OfficePreviewPane({
   const theme = usePreviewTheme();
   const [state, setState] = useState<OfficeState>({ status: 'loading' });
   const [pageNumber, setPageNumber] = useState(1);
+  const { zoom, setZoom, frameRef, onFrameLoad } = usePreviewZoom(path);
 
   useEffect(() => {
     let disposed = false;
@@ -142,9 +148,12 @@ export default function OfficePreviewPane({
   if (state.status === 'docx') {
     return (
       <div className="flex min-h-0 flex-1 flex-col bg-bg">
+        <div className="flex shrink-0 justify-end border-b border-border-soft bg-panel px-3 py-1.5"><PreviewZoomControls zoom={zoom} onZoom={setZoom} /></div>
         <iframe
+          ref={frameRef}
+          onLoad={onFrameLoad}
           title={fileName}
-          sandbox=""
+          sandbox="allow-scripts"
           srcDoc={wrapOfficeHtml(state.html, theme)}
           className="min-h-0 flex-1 border-0 bg-bg"
         />
@@ -161,6 +170,7 @@ export default function OfficePreviewPane({
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg">
       <div className="flex shrink-0 items-center justify-center gap-3 border-b border-border-soft bg-panel px-3 py-1.5 text-xs text-fg-dim">
+        <PreviewZoomControls zoom={zoom} onZoom={setZoom} />
         <button
           type="button"
           className={navButton}
@@ -192,8 +202,10 @@ export default function OfficePreviewPane({
         )}
       </div>
       <iframe
+        ref={frameRef}
+        onLoad={onFrameLoad}
         title={`${fileName} · ${current?.index ?? 1}`}
-        sandbox=""
+        sandbox="allow-scripts"
         srcDoc={wrapOfficeHtml(current?.html ?? '', theme)}
         className="min-h-0 flex-1 border-0 bg-bg"
       />

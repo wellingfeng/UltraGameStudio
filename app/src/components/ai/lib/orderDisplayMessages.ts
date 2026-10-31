@@ -1,5 +1,14 @@
 import type { Message } from '@/store/types';
 
+/** Collapse edited resends without mutating the actual conversation history. */
+export function hideReplacedUserMessages(messages: Message[]): Message[] {
+  const replacedIds = new Set(messages.flatMap((message) =>
+    message.role === 'user' && message.replacesMessageId ? [message.replacesMessageId] : []));
+  return replacedIds.size
+    ? messages.filter((message) => message.role !== 'user' || !replacedIds.has(message.id))
+    : messages;
+}
+
 /**
  * Display-only chronological ordering for the AI-return stream.
  *
@@ -23,6 +32,10 @@ export function orderDisplayMessages(
   messages: Message[],
   queuedMessageIds: readonly string[] = [],
 ): Message[] {
+  // Keep actual sends in durable/model history; collapse revisions only in UI.
+  // Resolve the whole chain before queue partitioning, including pending edits.
+  const visible = hideReplacedUserMessages(messages);
+  if (visible.length !== messages.length) return orderDisplayMessages(visible, queuedMessageIds);
   if (queuedMessageIds.length > 0) {
     const byId = new Map(messages.map((message) => [message.id, message]));
     const queued = queuedMessageIds.flatMap((id) => {

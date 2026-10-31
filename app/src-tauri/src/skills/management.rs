@@ -206,6 +206,16 @@ impl SkillService {
         let root = self.batch_root(origin, &grant, batch_id)?;
         let guard = RootGuard::open(&root)?;
         let mut batch = load_pending(&guard, origin, batch_id)?;
+        // Older persisted proposals must not bypass the current create budget.
+        if batch
+            .packages
+            .iter()
+            .filter(|package| package.before.is_empty())
+            .count()
+            > 1
+        {
+            return Err("at most one new class-level skill create is allowed per batch".into());
+        }
         for p in &mut batch.packages {
             let current = guard.metadata(&p.skill_id)?;
             if current.archived {
@@ -266,6 +276,19 @@ impl SkillService {
         if grant.revoked || grant.mode == LearningMode::Off {
             result.status = "cancelled".into();
             result.error = Some("run authority revoked or learning off".into());
+            return Ok(result);
+        }
+        // Reject direct-host over-budget batches before root discovery can
+        // open a ledger or recovery transaction, including approve-all mode.
+        if proposal
+            .operations
+            .iter()
+            .filter(|operation| matches!(operation, SkillOperation::Create { .. }))
+            .count()
+            > 1
+        {
+            result.error =
+                Some("at most one new class-level skill create is allowed per batch".into());
             return Ok(result);
         }
         let root = match self.management_root(origin, &grant, proposal) {

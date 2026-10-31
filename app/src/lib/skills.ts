@@ -1,4 +1,6 @@
 import { tauriAvailable } from '@/lib/tauri';
+import { SCHEDULED_TASK_SCOPE, SCHEDULED_TASK_HISTORY_DIR } from '@/lib/scheduledTaskScope';
+import type { SessionRecord } from '@/store/history/types';
 import type {
   SkillCatalog, SkillEntry, SkillEvidence, SkillHostPort, SkillLearningMode,
   SkillMutationResult, SkillOrigin, SkillProposal, SkillReadResult,
@@ -70,8 +72,38 @@ async function localSkillRequest<T>(request: SkillServiceRequest): Promise<T> {
   return invoke<T>('skills_request', { request });
 }
 
+/** Fresh storage read, never historyStore's optimistic/session-record cache. */
+export async function readPersistedSkillSourceSession(workspaceId: string, sessionId: string): Promise<SessionRecord | null> {
+  if ([workspaceId, sessionId].some((id) => !id || id.length > 256 || /[\\/:\u0000]/.test(id) || id === '.' || id === '..')) {
+    throw new Error('SKILL_SOURCE_NOT_PERSISTED');
+  }
+  // Match the existing history backend, including its separate cron bucket.
+  const directory = workspaceId === SCHEDULED_TASK_SCOPE
+    ? `${SCHEDULED_TASK_HISTORY_DIR}/sessions` : `workspaces/${workspaceId}/sessions`;
+  const relPath = `${directory}/${sessionId}.json`;
+  const raw = tauriAvailable()
+    ? await (await import('@tauri-apps/api/core')).invoke<string | null>('history_read_json', { relPath })
+    : typeof window === 'undefined' ? null : window.localStorage.getItem(`ultragamestudio.history.v1:${relPath}`);
+  if (raw === null) return null;
+  if (typeof raw !== 'string') throw new Error('SKILL_SOURCE_MESSAGE_NOT_PERSISTED');
+  const record: SessionRecord = JSON.parse(raw);
+  if (!record || !Array.isArray(record.messages)) throw new Error('SKILL_SOURCE_MESSAGE_NOT_PERSISTED');
+  return record;
+}
+
 async function localSkillBind(request: SkillRunBindingRequest): Promise<void> {
   if (!tauriAvailable()) throw new Error('SKILL_HOST_UNAVAILABLE');
+  if (request.actor === 'background') {
+    const { workspaceId, sessionId, turnId } = request.origin;
+    const record = await readPersistedSkillSourceSession(workspaceId, sessionId);
+    const matches = record?.messages.filter((message) => message.id === turnId) ?? [];
+    if (!record || record.workspaceId !== workspaceId || (record.sessionId ?? record.id) !== sessionId || record.deletedAt ||
+      matches.length !== 1 || matches[0].role !== 'user' || typeof matches[0].text !== 'string') {
+      throw new Error('SKILL_SOURCE_MESSAGE_NOT_PERSISTED');
+    }
+    // Disk is authoritative. Do not add sourceMessage to this deny-unknown-
+    // fields IPC contract: native host independently reads the same source ID.
+  }
   const { invoke } = await import('@tauri-apps/api/core');
   await invoke('skills_bind_run', { request });
 }
@@ -97,10 +129,14 @@ export function createSkillHost(options: CreateSkillHostOptions): SkillExecution
   const transport = options.request ?? localSkillRequest;
   const bind = options.bind ?? (options.request ? undefined : localSkillBind);
   const revoke = options.revoke ?? (options.request ? undefined : localSkillRevoke);
+  // The native host confirms a tombstone under its commit/grant lock. An
+  // arbitrary injected transport does not promise to reject a later bind.
+  const nativeRevocation = !options.request && !options.bind && !options.revoke;
   let revoked = false;
   let revocation: Promise<void> | undefined;
   const bindings = new Map<'background' | 'user', Promise<unknown>>();
   let backgroundBound = false;
+  let backgroundSettled = false;
   const requestFor = (actor: 'background' | 'user'): SkillRequestTransport => async <T>(payload: SkillServiceRequest): Promise<T> => {
     const snapshot = structuredClone(payload);
     let bound = bindings.get(actor);
@@ -112,6 +148,10 @@ export function createSkillHost(options: CreateSkillHostOptions): SkillExecution
         if (actor === 'background') backgroundBound = true;
       })();
       bindings.set(actor, bound);
+      if (actor === 'background') {
+        backgroundSettled = false;
+        void bound.then(() => { backgroundSettled = true; }, () => { backgroundSettled = true; });
+      }
     }
     await bound;
     if (actor === 'background' && (revoked || signal?.aborted)) throw new Error('SKILL_REVIEW_CANCELLED');
@@ -126,6 +166,17 @@ export function createSkillHost(options: CreateSkillHostOptions): SkillExecution
       revocation ??= (async () => {
         const background = bindings.get('background');
         if (!background) return;
+        if (backgroundSettled && !backgroundBound) return;
+        if (nativeRevocation) {
+          try {
+            await revoke!({ ...origin });
+            void background.catch(() => {});
+            return;
+          } catch {
+            // Unconfirmed cancellation cannot release a still-pending grant.
+            // Fall back to actual binding completion and ordinary revocation.
+          }
+        }
         await background.catch(() => {});
         if (!backgroundBound) return;
         await revoke?.({ ...origin });
@@ -176,6 +227,8 @@ export function createSkillHost(options: CreateSkillHostOptions): SkillExecution
         await bind?.({ origin: { ...origin }, mode, actor: 'background', evidence: structuredClone(facts) });
       });
       bindings.set('background', registration);
+      backgroundSettled = false;
+      void registration.then(() => { backgroundSettled = true; }, () => { backgroundSettled = true; });
       await registration;
       await backgroundRequest<unknown>({ action: 'usage', origin: { ...origin }, mode, skillId,
         kind: 'used-with-evidence', evidenceIds: facts.map((item) => item.evidenceId), evidence: facts });

@@ -5,10 +5,30 @@ import { loadSkillContext } from '@/runtime/skills/context';
 import type { LoadedSkillContext, LoadSkillContextOptions } from '@/runtime/skills/context';
 import { SkillEvidenceCollector, redactSkillText } from '@/runtime/skills/evidence';
 import { runSkillReview } from '@/runtime/skills/review';
-import { SkillReviewScheduler } from '@/runtime/skills/trigger';
+import { SkillReviewScheduler, shouldTriggerSkillReview } from '@/runtime/skills/trigger';
 import { SkillLearningQueue } from './skillLearningQueue';
+import { beginReviewForeground } from '@/runtime/memory/review';
 import type { SkillControlHost, SkillServiceRequest } from './skills';
 import type { SkillCatalog, SkillEntry, SkillHostPort, SkillLearningJob, SkillLearningMode, SkillMutationResult, SkillOrigin, SkillReadResult, SkillReviewModelPort, SkillReviewState } from '@/runtime/skills/types';
+
+import type { SkillCandidateStore } from '@/runtime/skills/preReview';
+
+export interface RemoteSkillCandidateClient {
+  skillCandidateRequest(projectId: string, request: { action: 'load' | 'compare_and_swap'; origin: SkillOrigin;
+    list?: import('@/runtime/skills/preReview').SkillCandidateList; expectedRevision?: number }): Promise<import('@/runtime/skills/preReview').SkillCandidateList>;
+}
+
+export function createRemoteSkillCandidateStore(options: { client: RunnerClient; projectId: string; origin: SkillOrigin }): SkillCandidateStore {
+  const origin = boundRemoteOrigin(options.projectId, options.origin);
+  const client = options.client as RunnerClient & Partial<RemoteSkillCandidateClient>;
+  const request = (payload: Parameters<RemoteSkillCandidateClient['skillCandidateRequest']>[1]) => {
+    if (typeof client.skillCandidateRequest !== 'function') throw new Error('REMOTE_SKILL_CANDIDATE_HOST_UNAVAILABLE');
+    return client.skillCandidateRequest(options.projectId, payload);
+  };
+  return { load: () => request({ action: 'load', origin: { ...origin } }),
+    save: async (list) => { await request({ action: 'compare_and_swap', origin: { ...origin },
+      list: structuredClone(list), expectedRevision: list.revision ?? 0 }); } };
+}
 
 export interface RequestRemoteContextOptions extends Omit<LoadSkillContextOptions, 'host'> {
   client: RunnerClient;
@@ -94,13 +114,17 @@ export interface FinishRemoteLearningOptions {
 }
 
 const schedulers = new Map<string, SkillReviewScheduler>();
-const reviewQueue = new SkillLearningQueue<FinishRemoteLearningOptions, SkillMutationResult | undefined>();
+// Failed/cancelled attempts may retain evidence, but never redispatch their source.
+const dispatchedSources = new WeakMap<SkillReviewScheduler, Set<string>>();
+const reviewQueue = new SkillLearningQueue<FinishRemoteLearningOptions, SkillMutationResult | undefined>('skills:remote');
 const pendingReviews = new Map<string, string>();
 let queueSequence = 0;
 
 /** Call before remote foreground work; release in finally before calling finishRemoteLearning. */
 export function beginRemoteSkillForeground(): () => void {
-  return reviewQueue.foregroundStarted();
+  const releaseQueue = reviewQueue.foregroundStarted();
+  const releaseShared = beginReviewForeground('skills:remote');
+  return () => { releaseQueue(); releaseShared(); };
 }
 
 /** Uses the authenticated server snapshot, not UI tool cards or a job's process exit. */
@@ -136,12 +160,20 @@ export async function finishRemoteLearning(options: FinishRemoteLearningOptions)
   const scopeKey = JSON.stringify([client.serverUrl, projectId, origin.sessionId]);
   let scheduler = schedulers.get(scopeKey);
   if (!scheduler) { scheduler = new SkillReviewScheduler(); schedulers.set(scopeKey, scheduler); }
-  const decision = scheduler.observe({ origin, userText: options.userText, finalAnswer: options.finalAnswer, evidence,
-    loadedSkills: options.loadedSkills ?? [], config });
+  const sourceKey = JSON.stringify([origin.turnId, origin.runId]);
+  let dispatched = dispatchedSources.get(scheduler);
+  if (!dispatched) { dispatched = new Set(); dispatchedSources.set(scheduler, dispatched); }
+  if (dispatched.has(sourceKey)) return undefined;
+  const triggerJob: SkillLearningJob = { origin, userText: options.userText, finalAnswer: options.finalAnswer, evidence,
+    loadedSkills: options.loadedSkills ?? [], config };
+  const decision = scheduler.observe(triggerJob);
   const boundScheduler = scheduler;
   if (!decision.eligible) return undefined;
+  const publishUndispatched = (error: string, status: 'cancelled' | 'failed' = 'cancelled') => {
+    try { options.onState?.({ status, origin: { ...origin }, mode: config.mode, error }); } catch { /* Observers cannot grant authority. */ }
+  };
   try { options.onState?.({ status: 'queued', origin: { ...origin }, mode: config.mode }); } catch { /* Observers cannot grant authority. */ }
-  if (options.signal?.aborted) return undefined;
+  if (options.signal?.aborted) { publishUndispatched('SKILL_REVIEW_CANCELLED'); return undefined; }
   const queueKey = JSON.stringify([scopeKey, ++queueSequence]);
   const superseded = pendingReviews.get(scopeKey);
   if (superseded) reviewQueue.cancel(superseded);
@@ -156,15 +188,22 @@ export async function finishRemoteLearning(options: FinishRemoteLearningOptions)
     });
     if (!ready) {
       if (pendingReviews.get(scopeKey) === queueKey) pendingReviews.delete(scopeKey);
+      publishUndispatched('SKILL_REVIEW_CANCELLED');
       return undefined;
     }
   }
-  if (pendingReviews.get(scopeKey) !== queueKey) return undefined;
+  if (pendingReviews.get(scopeKey) !== queueKey) { publishUndispatched('SKILL_REVIEW_SUPERSEDED'); return undefined; }
   const cancelQueued = () => reviewQueue.cancel(queueKey);
   options.signal?.addEventListener('abort', cancelQueued, { once: true });
   const pending = reviewQueue.enqueue(queueKey, options, async (_options, queueSignal) => {
   if (options.signal?.aborted || queueSignal.aborted) return undefined;
   const scheduler = boundScheduler;
+  // finish(failed) clears scheduler pending. Only an undispatched, independently
+  // eligible fresh source can restore it; retained failed evidence is not a retry.
+  if (pendingReviews.get(scopeKey) === queueKey && !dispatched.has(sourceKey) &&
+    scheduler.nextReadyAt() === undefined && shouldTriggerSkillReview({ origin, evidence, config, terminal: 'completed' }).eligible) {
+    scheduler.observe(triggerJob);
+  }
   const remainingReadyAt = scheduler.nextReadyAt();
   if (remainingReadyAt !== undefined && remainingReadyAt > Date.now()) {
     const ready = await new Promise<boolean>((resolve) => {
@@ -186,6 +225,7 @@ export async function finishRemoteLearning(options: FinishRemoteLearningOptions)
   if (pendingReviews.get(scopeKey) !== queueKey) return undefined;
   const reservation = scheduler.take();
   if (!reservation) return undefined;
+  dispatched.add(sourceKey);
   if (pendingReviews.get(scopeKey) === queueKey) pendingReviews.delete(scopeKey);
   const job = { ...reservation.job, config: { ...reservation.job.config,
     mode: reservation.job.explicit ? reservation.job.config.mode : 'approve-all' as const } };
@@ -207,9 +247,9 @@ export async function finishRemoteLearning(options: FinishRemoteLearningOptions)
     }
     if (!model) throw new Error('SKILL_REVIEW_UNAVAILABLE: no configured completion-only HTTP route');
     const host: SkillHostPort = {
-      list: () => client.skillRequest<SkillCatalog>(projectId, { action: 'list', origin: job.origin, mode: job.config.mode }),
+      list: () => client.skillRequest<SkillCatalog>(projectId, { action: 'list', origin: job.origin, mode: job.config.mode }, { signal: controller.signal }),
       view: (read) => client.skillRequest<SkillReadResult>(projectId, { action: 'view', origin: job.origin, mode: job.config.mode,
-        skillId: read.skillId, ...(read.filePath === undefined ? {} : { filePath: read.filePath }) }),
+        skillId: read.skillId, ...(read.filePath === undefined ? {} : { filePath: read.filePath }) }, { signal: controller.signal }),
       // Do not pass an abort signal after dispatch: the host must return its real commit/recovery.
       manage: async (proposal) => {
         const result = await client.skillRequest<SkillMutationResult>(projectId, { action: 'manage', origin: job.origin,
@@ -224,8 +264,8 @@ export async function finishRemoteLearning(options: FinishRemoteLearningOptions)
         return result;
       },
     };
-    const { createSkillCandidateStore } = await import('./skillCandidateStore');
-    result = await runSkillReview(job, { host, model, signal: controller.signal, candidateStore: createSkillCandidateStore(job.origin),
+    result = await runSkillReview(job, { host, model, signal: controller.signal,
+      candidateStore: createRemoteSkillCandidateStore({ client, projectId, origin: job.origin }),
       onState: (state) => options.onState?.({ ...structuredClone(state), mode: job.config.mode }) });
   } catch (error) {
     result = { status: 'failed', batchId: `review-${job.origin.runId}`, origin: job.origin, lesson: '',
@@ -237,6 +277,9 @@ export async function finishRemoteLearning(options: FinishRemoteLearningOptions)
     queueSignal.removeEventListener('abort', abort);
   }
   scheduler.finish(reservation.id, result.status);
+  // Successful coverage keeps the scheduler's evidence watermark fence. Only
+  // unresolved attempts need an extra source fence against automatic replay.
+  if (!['failed', 'conflicted', 'needs_recovery', 'cancelled'].includes(result.status)) dispatched.delete(sourceKey);
   return result;
   });
   if (options.signal?.aborted) cancelQueued();
@@ -245,7 +288,11 @@ export async function finishRemoteLearning(options: FinishRemoteLearningOptions)
     if (pendingReviews.get(scopeKey) === queueKey) pendingReviews.delete(scopeKey);
   });
   const result = queued.status === 'completed' ? queued.result : undefined;
-  if (!result) return undefined;
+  if (!result) {
+    publishUndispatched(queued.status === 'failed' ? String(queued.error) :
+      options.signal?.aborted ? 'SKILL_REVIEW_CANCELLED' : 'SKILL_REVIEW_NOT_DISPATCHED', queued.status === 'failed' ? 'failed' : 'cancelled');
+    return undefined;
+  }
   try { options.onResult?.(structuredClone(result)); } catch { /* Observers cannot hide a real commit. */ }
   return result;
 }

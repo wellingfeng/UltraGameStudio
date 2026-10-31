@@ -107,11 +107,13 @@ async function withEnv(
     UGS_HOME: process.env.UGS_HOME,
     OPENAI_API_KEY: process.env.OPENAI_API_KEY,
     OPENAI_BASE_URL: process.env.OPENAI_BASE_URL,
+    UGS_CODEX_CHANNEL_KEY: process.env.UGS_CODEX_CHANNEL_KEY,
   };
   process.env.CODEX_HOME = vars.codexHome;
   process.env.UGS_HOME = vars.ugsHome;
   delete process.env.OPENAI_API_KEY;
   delete process.env.OPENAI_BASE_URL;
+  delete process.env.UGS_CODEX_CHANNEL_KEY;
   try {
     const captured = stubSpawn();
     await spawnCliAgent('codex-prompt', {

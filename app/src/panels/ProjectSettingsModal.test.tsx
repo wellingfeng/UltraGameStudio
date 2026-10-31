@@ -811,3 +811,23 @@ describe('ProjectSettingsModal game project tabs', () => {
     }
   });
 });
+
+
+describe('ProjectSettingsModal tool catalogue', () => {
+  it('renders cached MCP schemas through the shared directory component', async () => {
+    const configured: WorkspaceSummary = { ...workspace, metadata: { projectSettings: {
+      mcp: { enabled: true, servers: [{ id: 'fixture', label: '目录测试服务', source: 'custom', enabled: true,
+        transport: 'stdio', args: [], env: {}, lastProbe: { serverId: 'fixture', ok: true, status: 'connected',
+          message: '分页发现完成', checkedAtMs: 10, catalogCoverage: 'full', tools: [
+            { name: 'fixture_lookup', inputSchema: { type: 'object', properties: { query: { type: 'string' } } } },
+          ] } }] },
+    } } };
+    const view = await renderEmbeddedProjectTab('mcp', unknownScan(), configured);
+    try {
+      expect(view.container.textContent).toContain('查看项目发现工具');
+      expect(view.container.textContent).toContain('fixture_lookup');
+      expect(view.container.textContent).toContain('仅上次发现');
+      expect(view.container.querySelector('pre')?.textContent).toContain('query');
+    } finally { await view.cleanup(); }
+  });
+});

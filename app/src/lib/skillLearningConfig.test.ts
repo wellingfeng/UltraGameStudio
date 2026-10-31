@@ -12,6 +12,11 @@ afterEach(() => {
 });
 
 describe('skill learning configuration', () => {
+  it('keeps every background write approval-gated regardless of explicit-command preference', () => {
+    for (const mode of ['auto-safe', 'approve-all', 'off'] as const) {
+      expect(learningConfig.getBackgroundSkillWriteMode({ ...learningConfig.DEFAULT_SKILL_LEARNING_CONFIG, mode })).toBe('approve-all');
+    }
+  });
   it('migrates the legacy timeout while preserving custom limits', () => {
     expect(configModule.normalizeSkillLearningConfig({ timeoutMs: 90000 }).timeoutMs).toBe(600000);
     expect(configModule.normalizeSkillLearningConfig({ timeoutMs: 120000 }).timeoutMs).toBe(120000);

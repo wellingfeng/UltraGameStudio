@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import Sidebar from '@/panels/Sidebar';
 import { MainSurfaceProvider } from '@/components/MainSurface';
-import WorkspaceMainSurface from '@/components/WorkspaceMainSurface';
+import WorkspaceToolsLayout from '@/components/floatingTools/WorkspaceToolsLayout';
 import ProjectFileTree from '@/panels/ProjectFileTree';
 import ScheduledTaskRunner from '@/components/ScheduledTaskRunner';
 import MessagePlatformRunner from '@/components/MessagePlatformRunner';
@@ -89,8 +89,8 @@ export default function App() {
           <div id="ugs-left-sidebar" className={sidebarOpen ? 'hidden md:block' : 'hidden'}>
             <Sidebar />
           </div>
-          <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-            <WorkspaceMainSurface />
+          <main className="flex min-h-0 min-w-0 flex-1">
+            <WorkspaceToolsLayout />
           </main>
           <div className="hidden lg:block">
             <ProjectFileTree />

@@ -123,7 +123,7 @@ function formatTime(ts: number): string {
   return `${d.getMonth() + 1}/${d.getDate()} ${hhmm}`;
 }
 
-const WORKFLOW_HISTORY_PAGE_SIZE = 5;
+const WORKFLOW_HISTORY_PAGE_SIZE = 10;
 const WORKSPACE_HEADER_VISIBLE_PATHS = 2;
 const MAX_SESSION_RENAME_LENGTH = 80;
 type SidebarLiveState = {

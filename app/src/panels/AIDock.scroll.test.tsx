@@ -225,18 +225,27 @@ describe('AIDock stream scroll state', () => {
 
       // 系统默认 claude-code CLI 走 `--effort`，级别是它自己的 5 档。
       const trigger = view.container.querySelector<HTMLButtonElement>(
-        'button[title="思考深度"]',
+        'button[title="模型版本"]',
       );
       expect(trigger).toBeInstanceOf(HTMLButtonElement);
       expect(trigger?.textContent).toContain('默认');
+      expect(view.container.querySelector('button[title="思考深度"]')).toBeNull();
 
       await act(async () => {
         trigger?.click();
       });
 
+      const selectedModel = view.container.querySelector<HTMLButtonElement>(
+        '[role="listbox"] button[role="option"][aria-selected="true"]',
+      );
+      expect(selectedModel).toBeInstanceOf(HTMLButtonElement);
+      await act(async () => {
+        selectedModel?.click();
+      });
+
       const labels = Array.from(
-        view.container.querySelectorAll<HTMLButtonElement>(
-          '[role="listbox"] button[role="option"]',
+        document.querySelectorAll<HTMLButtonElement>(
+          '[role="menu"] button[role="menuitemradio"]',
         ),
       ).map((option) => option.textContent ?? '');
       expect(labels.some((label) => label.includes('低'))).toBe(true);
@@ -251,8 +260,8 @@ describe('AIDock stream scroll state', () => {
       expect(defaultLabel).toMatch(/实际默认|由 CLI 自身默认档决定|不传档位参数/);
 
       const maxOption = Array.from(
-        view.container.querySelectorAll<HTMLButtonElement>(
-          '[role="listbox"] button[role="option"]',
+        document.querySelectorAll<HTMLButtonElement>(
+          '[role="menu"] button[role="menuitemradio"]',
         ),
       ).find((option) => option.textContent?.includes('最高'));
       await act(async () => {
@@ -261,8 +270,59 @@ describe('AIDock stream scroll state', () => {
       expect(
         useStore.getState().workflow.meta.gateway?.defaults?.thinkingLevel,
       ).toBe('max');
+      expect(trigger?.textContent).toContain('最高');
+      expect(document.querySelector('[role="menu"]')).toBeNull();
     } finally {
       await view.cleanup();
+    }
+  });
+
+  it('switches model and applies that model’s own thinking levels together', async () => {
+    resetChatSession('s_model_thinking_levels', []);
+    const previousOverrides = useStore.getState().thinkingLevelOverrides;
+    useStore.setState({ thinkingLevelOverrides: 'sonnet=low\nopus=high', thinkingLevelsEnabled: true });
+    const view = await renderChatDock();
+
+    try {
+      const trigger = view.container.querySelector<HTMLButtonElement>('button[title="模型版本"]');
+      await act(async () => { trigger?.click(); });
+      const opus = Array.from(view.container.querySelectorAll<HTMLButtonElement>('[role="option"]'))
+        .find((option) => option.textContent?.toLowerCase().includes('opus'));
+      expect(opus).toBeInstanceOf(HTMLButtonElement);
+      await act(async () => { opus?.click(); });
+      const levels = Array.from(document.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]'));
+      expect(levels.some((option) => option.textContent?.startsWith('低'))).toBe(false);
+      const high = levels.find((option) => option.textContent?.startsWith('高'));
+      expect(high).toBeInstanceOf(HTMLButtonElement);
+      await act(async () => { high?.click(); });
+      const selection = useStore.getState().workflow.meta.gateway?.defaults;
+      expect(selection?.modelClass?.toLowerCase()).toContain('opus');
+      expect(selection?.thinkingLevel).toBe('high');
+      expect(trigger?.textContent).toContain('高');
+    } finally {
+      await view.cleanup();
+      useStore.setState({ thinkingLevelOverrides: previousOverrides });
+    }
+  });
+
+  it('keeps model selection usable when thinking levels are disabled', async () => {
+    resetChatSession('s_model_without_thinking', []);
+    const previousEnabled = useStore.getState().thinkingLevelsEnabled;
+    useStore.setState({ thinkingLevelsEnabled: false });
+    const view = await renderChatDock();
+    try {
+      const trigger = view.container.querySelector<HTMLButtonElement>('button[title="模型版本"]');
+      expect(trigger?.textContent).not.toContain('默认（不指定）');
+      await act(async () => { trigger?.click(); });
+      const opus = Array.from(view.container.querySelectorAll<HTMLButtonElement>('[role="option"]'))
+        .find((option) => option.textContent?.toLowerCase().includes('opus'));
+      expect(opus).toBeInstanceOf(HTMLButtonElement);
+      await act(async () => { opus?.click(); });
+      expect(document.querySelector('[role="menu"]')).toBeNull();
+      expect(useStore.getState().workflow.meta.gateway?.defaults?.modelClass?.toLowerCase()).toContain('opus');
+    } finally {
+      await view.cleanup();
+      useStore.setState({ thinkingLevelsEnabled: previousEnabled });
     }
   });
 

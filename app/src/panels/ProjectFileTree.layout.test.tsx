@@ -7,8 +7,8 @@ import ProjectFileTree from './ProjectFileTree';
 import SessionChangesSummary from '@/components/ai/SessionChangesSummary';
 import { collectSessionFileChanges } from '@/lib/turnFileChanges';
 import { encodeToolPatch } from '@/components/ai/lib/toolEvent';
-import { requestProjectRightPanelFilePreview, requestProjectRightPanelToggle, requestProjectRightPanelSessionFiles } from './projectRightPanelEvents';
-import { listWorkspaceDirectory, previewLocalFile } from '@/lib/tauri';
+import { requestProjectRightPanelFilePreview, requestProjectRightPanelToggle, requestProjectRightPanelSessionFiles, requestProjectRightPanelTab } from './projectRightPanelEvents';
+import { listWorkspaceDirectory, previewLocalFile, workspaceFileDiff } from '@/lib/tauri';
 
 // Only the desktop filesystem boundary is stubbed; the panel, store, resize
 // hook, file tree, and embedded preview remain their real implementations.
@@ -79,6 +79,29 @@ function panel(): HTMLElement {
 }
 
 describe('ProjectFileTree on-demand layout', () => {
+  it('通过快捷工具打开、切换并收起指定文件标签', async () => {
+    await renderPanel();
+    await act(async () => requestProjectRightPanelTab('session'));
+    expect(panel().querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain('会话文件');
+    await act(async () => requestProjectRightPanelTab('files'));
+    expect(panel().querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain('文件');
+    await act(async () => requestProjectRightPanelTab('files'));
+    expect(container.querySelector('aside')).toBeNull();
+  });
+  it('reads line changes when a local file is opened from the file tree', async () => {
+    useStore.setState({ composer: { ...defaultComposer, workspace: 'E:/Game' } });
+    vi.mocked(listWorkspaceDirectory).mockResolvedValueOnce({
+      rootPath: 'E:/Game', relativePath: '', truncated: false, totalEntries: 1,
+      entries: [{ path: 'E:/Game/main.cpp', relativePath: 'main.cpp', name: 'main.cpp', kind: 'file', hidden: false }],
+    });
+    vi.mocked(workspaceFileDiff).mockClear();
+    await renderPanel();
+    await act(async () => requestProjectRightPanelToggle());
+    const file = panel().querySelector<HTMLButtonElement>('button[title="E:/Game/main.cpp"]');
+    expect(file).not.toBeNull();
+    await act(async () => file!.click());
+    expect(workspaceFileDiff).toHaveBeenCalledWith('E:/Game', 'E:/Game/main.cpp');
+  });
   it.each(['files', 'session'])('locks the %s tab across outside clicks, session changes and remounts', async (tab) => {
     await renderPanel();
     await act(async () => {

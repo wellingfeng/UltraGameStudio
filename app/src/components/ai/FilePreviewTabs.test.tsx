@@ -33,6 +33,12 @@ beforeEach(async () => {
 afterEach(async () => { await act(async () => root.unmount()); host.remove(); useFilePreviewTabs.setState({ tabs: [], activeByScope: {} }); });
 async function click(selector: string) { await act(async () => host.querySelector<HTMLButtonElement>(selector)!.click()); }
 
+it('uses diagonal arrows for the main preview action', () => {
+  const button = host.querySelector<HTMLButtonElement>('[aria-label="在主区域预览"]')!;
+  expect(button.querySelector('.lucide-maximize-2')).not.toBeNull();
+  expect(button.querySelector('.lucide-app-window')).toBeNull();
+});
+
 it('promotes the right preview into a file tab and returns to chat without discarding reader state', async () => {
   await click('[aria-label="在主区域预览"]');
   expect(host.querySelectorAll('[aria-label="在主区域预览"]')).toHaveLength(0);

@@ -14,9 +14,15 @@
 
 import { readSettingsRaw, writeSettingsRaw } from '@/lib/generationSettingsStore';
 import { setMemoryLimits, setMemoryNudgeThresholdPct } from '@/lib/memoryStore';
+import { readMemoryJson, compareExchangeMemoryJson } from './memoryTransactions';
+import type { MemoryReviewSchedulerState } from '@/runtime/memory/review';
+import { cancelMemoryReviews } from '@/runtime/memory/review';
+import type { MemoryReviewSource } from './memoryPending';
+import type { ReviewCompletionUsage } from './modelGateway/reviewCompletionGateway';
 
 const REL_PATH = 'settings/memoryConfig.v1.json';
 const LEGACY_KEY = 'ultragamestudio.memoryConfig.v1';
+
 
 export interface MemoryConfig {
   /** Inject the frozen memory snapshot into the chat system prompt. */
@@ -178,7 +184,75 @@ export function saveMemoryConfig(config: MemoryConfig): MemoryConfig {
   writeSettingsRaw(REL_PATH, LEGACY_KEY, JSON.stringify(next));
   setMemoryLimits({ memory: next.memoryCharLimit, user: next.userCharLimit });
   setMemoryNudgeThresholdPct(next.nudgeThresholdPct);
+  if (!next.reviewEnabled || !next.writeEnabled) cancelMemoryReviews();
+
   return next;
+}
+
+export interface MemoryReviewJournalJob {
+  id: string; source: MemoryReviewSource;
+  phase: 'reading' | 'applied' | 'awaiting_approval' | 'noop' | 'failed' | 'cancelled';
+  appliedOps: number; queuedOps: number; updatedAt: number;
+  /** Exact assistant captured by the producer; absent in legacy journals. */
+  assistantMessageId?: string;
+  error?: string; usage?: ReviewCompletionUsage; recordingError?: string;
+}
+export interface MemoryReviewJournal { version: 1; scheduler: MemoryReviewSchedulerState; jobs: MemoryReviewJournalJob[] }
+export const MEMORY_REVIEW_JOURNAL_PATH = 'memories/review-jobs.v1.json';
+function validMemoryReviewJournal(value: unknown): value is MemoryReviewJournal {
+  const record = (entry: unknown): entry is Record<string, unknown> => !!entry && typeof entry === 'object' && !Array.isArray(entry);
+  const knownFields = (entry: Record<string, unknown>, keys: string[]) => Object.keys(entry).every(key => keys.includes(key));
+  const text = (entry: unknown): entry is string => typeof entry === 'string' && entry.length > 0;
+  const count = (entry: unknown) => typeof entry === 'number' && Number.isSafeInteger(entry) && entry >= 0;
+  const strings = (entry: unknown, max: number): entry is string[] => Array.isArray(entry) && entry.length <= max &&
+    entry.every(text) && new Set(entry).size === entry.length;
+  const pairs = (entry: unknown, max: number, validValue: (entry: unknown) => boolean) => Array.isArray(entry) && entry.length <= max &&
+    entry.every((pair) => Array.isArray(pair) && pair.length === 2 && text(pair[0]) && validValue(pair[1])) &&
+    new Set(entry.map((pair) => pair[0])).size === entry.length;
+  const validFence = (fence: unknown) => fence === undefined || (Array.isArray(fence) && fence.length === 2048 &&
+    fence.every((word) => count(word) && (word as number) <= 0xffffffff));
+  if (!record(value) || !knownFields(value, ['version', 'scheduler', 'jobs']) || value.version !== 1 ||
+      !record(value.scheduler) || !Array.isArray(value.jobs) || value.jobs.length > 100) return false;
+  const scheduler = value.scheduler;
+  if (!knownFields(scheduler, ['consumed', 'attempted', 'lastCompleted', 'consumedFence', 'attemptedFence']) ||
+      !pairs(scheduler.consumed, 128, (ids) => strings(ids, 256)) || !strings(scheduler.attempted, 256) ||
+      !pairs(scheduler.lastCompleted, 128, count) || !validFence(scheduler.consumedFence) || !validFence(scheduler.attemptedFence)) return false;
+  const seen = new Set<string>();
+  return value.jobs.every((job) => {
+    if (!record(job) || !knownFields(job, ['id', 'source', 'phase', 'appliedOps', 'queuedOps', 'updatedAt',
+        'assistantMessageId', 'error', 'usage', 'recordingError']) || !text(job.id) || seen.has(job.id) || !record(job.source) ||
+        !['reading', 'applied', 'awaiting_approval', 'noop', 'failed', 'cancelled'].includes(job.phase as string) ||
+        !count(job.appliedOps) || !count(job.queuedOps) || !count(job.updatedAt)) return false;
+    seen.add(job.id);
+    const source = job.source;
+    if (!knownFields(source, ['hostId', 'namespaceId', 'workspaceId', 'sessionId', 'turnId', 'sourceMessageId', 'runId', 'cwd']) ||
+        !['hostId', 'namespaceId', 'sessionId', 'turnId', 'sourceMessageId', 'runId'].every((key) => text(source[key])) ||
+        typeof source.workspaceId !== 'string' || (source.cwd !== undefined && !text(source.cwd))) return false;
+    if ((job.assistantMessageId !== undefined && !text(job.assistantMessageId)) ||
+        (job.error !== undefined && typeof job.error !== 'string') ||
+        (job.recordingError !== undefined && typeof job.recordingError !== 'string')) return false;
+    if (job.usage !== undefined && (!record(job.usage) || !knownFields(job.usage, ['calls', 'inputTokens', 'outputTokens', 'estimated']) ||
+        !count(job.usage.calls) || !count(job.usage.inputTokens) ||
+        (job.usage.outputTokens !== undefined && !count(job.usage.outputTokens)) || typeof job.usage.estimated !== 'boolean')) return false;
+    return true;
+  });
+}
+function parseMemoryReviewJournal(raw: string): MemoryReviewJournal {
+  let value: unknown;
+  try { value = JSON.parse(raw); } catch { throw new Error('MEMORY_REVIEW_JOURNAL_INVALID'); }
+  if (!validMemoryReviewJournal(value)) throw new Error('MEMORY_REVIEW_JOURNAL_INVALID');
+  return value;
+}
+export async function loadMemoryReviewJournal(): Promise<{ raw: string | null; value: MemoryReviewJournal }> {
+  const raw = await readMemoryJson(MEMORY_REVIEW_JOURNAL_PATH);
+  if (raw === null) return { raw, value: { version: 1, scheduler: { consumed: [], attempted: [], lastCompleted: [] }, jobs: [] } };
+  return { raw, value: parseMemoryReviewJournal(raw) };
+}
+export async function saveMemoryReviewJournal(expectedRaw: string | null, value: MemoryReviewJournal, signal?: AbortSignal): Promise<void> {
+  // Match native validation: neither a malformed base nor payload may be repaired by CAS.
+  if (expectedRaw !== null) parseMemoryReviewJournal(expectedRaw);
+  if (!validMemoryReviewJournal(value)) throw new Error('MEMORY_REVIEW_JOURNAL_INVALID');
+  await compareExchangeMemoryJson(MEMORY_REVIEW_JOURNAL_PATH, expectedRaw, JSON.stringify(value), signal);
 }
 
 // --- background-review rate-limit timestamp ---------------------------------

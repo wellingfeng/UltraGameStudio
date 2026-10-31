@@ -18,14 +18,20 @@ mod cc_switch_import;
 mod cli_runtime;
 mod dsh_log;
 mod free_proxy;
+mod floating_browser;
 mod history;
 mod kimi_log;
 mod message_platforms;
+mod memory_transactions;
+mod skill_candidates;
 mod proxy_http;
 mod secure_store;
 mod skills;
 mod storage_paths;
 mod system_file_preview;
+mod temporary_chat;
+mod tools;
+use tools::mcp::{ProbeResult as ProjectMcpProbeResult, ServerConfig as ProjectMcpProbeServerConfig};
 
 /// Windows CreateProcess flag: don't allocate a console window for the child.
 /// Without this, spawning the `claude` console binary pops up a black terminal
@@ -2600,6 +2606,14 @@ async fn skills_request(app: AppHandle, window: tauri::WebviewWindow, request: s
     })).await.map_err(|e|format!("skills request worker failed: {e}"))?
 }
 
+#[tauri::command]
+async fn skill_candidates_request(window: tauri::WebviewWindow, request: serde_json::Value) -> Result<serde_json::Value, String> {
+    require_skill_app(&window)?;
+    let host = Arc::clone(skill_desktop_host()?);
+    tauri::async_runtime::spawn_blocking(move || host.candidate_request(request))
+        .await.map_err(|e|format!("skill candidate worker failed: {e}"))?
+}
+
 fn skill_install_root(
     target_id: &str,
     project_root: Option<&Path>,
@@ -4710,28 +4724,6 @@ struct ProjectEnvironmentScan {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct ProjectMcpProbeServerConfig {
-    id: String,
-    transport: String,
-    command: Option<String>,
-    args: Option<Vec<String>>,
-    env: Option<HashMap<String, String>>,
-    url: Option<String>,
-}
-
-#[derive(serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProjectMcpProbeResult {
-    server_id: String,
-    ok: bool,
-    status: String,
-    message: String,
-    tools_count: Option<usize>,
-    checked_at_ms: u64,
-}
-
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ProjectLspProbeServerConfig {
     id: String,
     command: Option<String>,
@@ -5392,341 +5384,16 @@ async fn project_environment_scan(root_path: String) -> Result<ProjectEnvironmen
         .map_err(|e| format!("项目检测任务失败: {e}"))?
 }
 
-fn project_probe_parse_line(
-    line: &str,
-    initialize_seen: &mut bool,
-) -> Option<Result<Option<usize>, String>> {
-    let trimmed = line.trim();
-    if !trimmed.starts_with('{') {
-        return None;
-    }
-    let value = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
-    let id = value.get("id").and_then(|item| item.as_i64());
-    if let Some(error) = value.get("error") {
-        return Some(Err(format!("MCP 返回错误: {error}")));
-    }
-    match id {
-        Some(1) => {
-            if value.get("result").is_some() {
-                *initialize_seen = true;
-            }
-            Some(Ok(None))
-        }
-        Some(2) => {
-            let tools_count = value
-                .pointer("/result/tools")
-                .and_then(|tools| tools.as_array())
-                .map(|tools| tools.len())
-                .unwrap_or(0);
-            Some(Ok(Some(tools_count)))
-        }
-        _ => None,
-    }
-}
-
-fn project_mcp_probe_stdio(
-    root: &Path,
-    server: &ProjectMcpProbeServerConfig,
-) -> ProjectMcpProbeResult {
-    let command = match server
-        .command
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        Some(command) => project_expand_path_text(command),
-        None => {
-            return ProjectMcpProbeResult {
-                server_id: server.id.clone(),
-                ok: false,
-                status: "missing-command".to_string(),
-                message: "MCP 命令为空。".to_string(),
-                tools_count: None,
-                checked_at_ms: now_ms(),
-            };
-        }
-    };
-
-    let root_text = project_path_display(root);
-    let args: Vec<String> = server
-        .args
-        .clone()
-        .unwrap_or_default()
-        .into_iter()
-        .map(|arg| project_expand_path_text(&arg.replace("{workspace}", &root_text)))
-        .collect();
-
-    let mut cmd = new_spawn_command(&command);
-    cmd.current_dir(root);
-    cmd.args(&args);
-    if let Some(env) = &server.env {
-        for (key, value) in env {
-            if !key.trim().is_empty() {
-                cmd.env(key, value.replace("{workspace}", &root_text));
-            }
-        }
-    }
-    cmd.env("MCP_CLIENT_NAME", "UltraGameStudio");
-    cmd.stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            return ProjectMcpProbeResult {
-                server_id: server.id.clone(),
-                ok: false,
-                status: "spawn-failed".to_string(),
-                message: format!("启动 MCP 失败: {e}"),
-                tools_count: None,
-                checked_at_ms: now_ms(),
-            };
-        }
-    };
-
-    let Some(mut stdin) = child.stdin.take() else {
-        terminate_child_tree(&mut child);
-        return ProjectMcpProbeResult {
-            server_id: server.id.clone(),
-            ok: false,
-            status: "stdin-unavailable".to_string(),
-            message: "MCP stdin 不可用。".to_string(),
-            tools_count: None,
-            checked_at_ms: now_ms(),
-        };
-    };
-
-    let (tx, rx) = std::sync::mpsc::channel::<String>();
-    if let Some(stdout) = child.stdout.take() {
-        let tx_out = tx.clone();
-        std::thread::spawn(move || {
-            for line in std::io::BufReader::new(stdout)
-                .lines()
-                .map_while(Result::ok)
-            {
-                let _ = tx_out.send(line);
-            }
-        });
-    }
-    if let Some(stderr) = child.stderr.take() {
-        let tx_err = tx.clone();
-        std::thread::spawn(move || {
-            for line in std::io::BufReader::new(stderr)
-                .lines()
-                .map_while(Result::ok)
-            {
-                let _ = tx_err.send(line);
-            }
-        });
-    }
-
-    let init = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-03-26",
-            "capabilities": {},
-            "clientInfo": {
-                "name": "UltraGameStudio",
-                "version": env!("CARGO_PKG_VERSION")
-            }
-        }
-    });
-    let initialized = serde_json::json!({
-        "jsonrpc": "2.0",
-        "method": "notifications/initialized",
-        "params": {}
-    });
-    let tools = serde_json::json!({
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/list",
-        "params": {}
-    });
-    let payload = format!("{init}\n{initialized}\n{tools}\n");
-    if let Err(e) = stdin
-        .write_all(payload.as_bytes())
-        .and_then(|_| stdin.flush())
-    {
-        terminate_child_tree(&mut child);
-        return ProjectMcpProbeResult {
-            server_id: server.id.clone(),
-            ok: false,
-            status: "write-failed".to_string(),
-            message: format!("写入 MCP 握手失败: {e}"),
-            tools_count: None,
-            checked_at_ms: now_ms(),
-        };
-    }
-    drop(stdin);
-
-    let mut initialize_seen = false;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
-    loop {
-        while let Ok(line) = rx.try_recv() {
-            if let Some(parsed) = project_probe_parse_line(&line, &mut initialize_seen) {
-                match parsed {
-                    Ok(Some(tools_count)) => {
-                        terminate_child_tree(&mut child);
-                        let _ = child.wait();
-                        return ProjectMcpProbeResult {
-                            server_id: server.id.clone(),
-                            ok: true,
-                            status: "connected".to_string(),
-                            message: format!("MCP 已连接，发现 {tools_count} 个工具。"),
-                            tools_count: Some(tools_count),
-                            checked_at_ms: now_ms(),
-                        };
-                    }
-                    Ok(None) => {}
-                    Err(message) => {
-                        terminate_child_tree(&mut child);
-                        let _ = child.wait();
-                        return ProjectMcpProbeResult {
-                            server_id: server.id.clone(),
-                            ok: false,
-                            status: "protocol-error".to_string(),
-                            message,
-                            tools_count: None,
-                            checked_at_ms: now_ms(),
-                        };
-                    }
-                }
-            }
-        }
-
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                return ProjectMcpProbeResult {
-                    server_id: server.id.clone(),
-                    ok: false,
-                    status: "exited".to_string(),
-                    message: format!("MCP 进程提前退出: {status}"),
-                    tools_count: None,
-                    checked_at_ms: now_ms(),
-                };
-            }
-            Ok(None) => {}
-            Err(e) => {
-                terminate_child_tree(&mut child);
-                return ProjectMcpProbeResult {
-                    server_id: server.id.clone(),
-                    ok: false,
-                    status: "wait-failed".to_string(),
-                    message: format!("等待 MCP 失败: {e}"),
-                    tools_count: None,
-                    checked_at_ms: now_ms(),
-                };
-            }
-        }
-
-        if std::time::Instant::now() >= deadline {
-            terminate_child_tree(&mut child);
-            let _ = child.wait();
-            let detail = if initialize_seen {
-                "initialize 成功，但 tools/list 超时。"
-            } else {
-                "initialize 未完成。"
-            };
-            return ProjectMcpProbeResult {
-                server_id: server.id.clone(),
-                ok: false,
-                status: "timeout".to_string(),
-                message: format!("MCP 探测超时：{detail}"),
-                tools_count: None,
-                checked_at_ms: now_ms(),
-            };
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    }
-}
-
-fn project_mcp_probe_blocking(
-    root_path: String,
-    server: ProjectMcpProbeServerConfig,
-) -> Result<ProjectMcpProbeResult, String> {
-    let root = project_scan_root(&root_path)?;
-    if server.transport == "stdio" {
-        return Ok(project_mcp_probe_stdio(&root, &server));
-    }
-    if server.transport == "streamable-http" || server.transport == "http" {
-        let Some(url) = server
-            .url
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            return Ok(ProjectMcpProbeResult {
-                server_id: server.id,
-                ok: false,
-                status: "missing-url".to_string(),
-                message: "MCP URL 为空。".to_string(),
-                tools_count: None,
-                checked_at_ms: now_ms(),
-            });
-        };
-        let result = ureq::get(url)
-            .timeout(std::time::Duration::from_secs(4))
-            .call();
-        return Ok(match result {
-            Ok(response) => ProjectMcpProbeResult {
-                server_id: server.id,
-                ok: true,
-                status: "reachable".to_string(),
-                message: format!("HTTP MCP 端点可访问：HTTP {}", response.status()),
-                tools_count: None,
-                checked_at_ms: now_ms(),
-            },
-            Err(ureq::Error::Status(code, _)) if code == 400 || code == 404 || code == 405 => {
-                ProjectMcpProbeResult {
-                    server_id: server.id,
-                    ok: true,
-                    status: "reachable".to_string(),
-                    message: format!("HTTP MCP 端点有响应：HTTP {code}"),
-                    tools_count: None,
-                    checked_at_ms: now_ms(),
-                }
-            }
-            Err(err) => ProjectMcpProbeResult {
-                server_id: server.id,
-                ok: false,
-                status: "http-unreachable".to_string(),
-                message: format!("HTTP MCP 端点不可访问：{err}"),
-                tools_count: None,
-                checked_at_ms: now_ms(),
-            },
-        });
-    }
-    Ok(ProjectMcpProbeResult {
-        server_id: server.id,
-        ok: false,
-        status: "unsupported-transport".to_string(),
-        message: format!(
-            "暂不支持自动探测 {} 传输{}。",
-            server.transport,
-            server
-                .url
-                .as_deref()
-                .filter(|url| !url.trim().is_empty())
-                .map(|url| format!("（{url}）"))
-                .unwrap_or_default()
-        ),
-        tools_count: None,
-        checked_at_ms: now_ms(),
-    })
-}
-
 #[tauri::command]
 async fn project_mcp_probe(
     root_path: String,
     server: ProjectMcpProbeServerConfig,
+    request_id: Option<String>,
 ) -> Result<ProjectMcpProbeResult, String> {
-    tauri::async_runtime::spawn_blocking(move || project_mcp_probe_blocking(root_path, server))
-        .await
-        .map_err(|e| format!("MCP 探测任务失败: {e}"))?
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = project_scan_root(&root_path)?;
+        Ok(tools::mcp::probe(&root, &server, request_id))
+    }).await.map_err(|e| format!("MCP 发现任务失败: {e}"))?
 }
 
 fn project_lsp_probe_blocking(server: ProjectLspProbeServerConfig) -> ProjectLspProbeResult {
@@ -8891,6 +8558,19 @@ fn run_workspace_status_command(
     )
 }
 
+fn workspace_status_command(root: &Path, program: &str, args: &[&str]) -> Command {
+    let mut cmd = new_spawn_command(program);
+    cmd.current_dir(root);
+    if program.eq_ignore_ascii_case("p4") {
+        // P4 uses inherited PWD when present, even after current_dir changes.
+        // Pin its config/client lookup to the requested directory; p4 cannot
+        // resolve Windows verbatim (\\?\) paths passed via -d.
+        cmd.arg("-d").arg(display_preview_path(root));
+    }
+    cmd.args(args);
+    cmd
+}
+
 fn run_workspace_status_command_with_timeout(
     root: &Path,
     program: &str,
@@ -8910,10 +8590,8 @@ fn run_workspace_status_command_with_timeout(
     let stderr_file =
         std::fs::File::create(&stderr_path).map_err(|e| format!("创建状态错误缓存失败: {e}"))?;
 
-    let mut cmd = new_spawn_command(program);
-    cmd.current_dir(root)
-        .args(args)
-        .stdin(Stdio::null())
+    let mut cmd = workspace_status_command(root, program, args);
+    cmd.stdin(Stdio::null())
         .stdout(Stdio::from(stdout_file))
         .stderr(Stdio::from(stderr_file));
 
@@ -10093,12 +9771,15 @@ fn p4_workspace_file_change(
         p4_status_command_timeout(),
     ) {
         Ok(output) if output.timed_out => return Some(Err("P4 diff 读取超时".to_string())),
+        Ok(output) if !output.success => {
+            return Some(Err(format!("P4 diff 读取失败: {}", workspace_status_error(&output))));
+        }
         Ok(output) => {
             workspace_change_file_from_unified_diff(relative_path, status_for_diff, &output.stdout)
                 .into_iter()
                 .collect()
         }
-        Err(_) => Vec::new(),
+        Err(err) => return Some(Err(format!("P4 diff 读取失败: {err}"))),
     };
 
     Some(Ok(workspace_single_change_from_status_and_diff(
@@ -12200,7 +11881,7 @@ fn office_sorted_entries(
 
 /// Text runs of a slide, one paragraph per `<a:t>` run group. PowerPoint keeps
 /// no paragraph boundary we can trust, so runs become lines.
-fn pptx_page_html(slide_xml: &str, index: u32) -> String {
+fn pptx_page_html(slide_xml: &str, index: u32, images: &[String], skipped_images: bool) -> String {
     let mut html = format!("<h2>第 {index} 页</h2>");
     let mut wrote = false;
     for run in collect_element_inner(slide_xml, "a:t") {
@@ -12214,10 +11895,91 @@ fn pptx_page_html(slide_xml: &str, index: u32) -> String {
         html.push_str("</p>");
         wrote = true;
     }
-    if !wrote {
+    for image in images {
+        html.push_str("<p><img alt=\"幻灯片图片\" src=\"");
+        html.push_str(image);
+        html.push_str("\"></p>");
+        wrote = true;
+    }
+    if skipped_images {
+        html.push_str("<p class=\"preview-empty\">部分图片因格式或大小限制无法预览。</p>");
+    }
+    if !wrote && !skipped_images {
         html.push_str("<p class=\"preview-empty\">本页没有可提取的文本（可能是图片或图表）。</p>");
     }
     html
+}
+
+/// Read an OOXML attribute from an element opener, supporting both quote styles.
+fn ooxml_attribute<'a>(opener: &'a str, name: &str) -> Option<&'a str> {
+    let mut rest = opener;
+    while let Some(index) = rest.find(name) {
+        let before = rest[..index].chars().next_back();
+        let after = rest[index + name.len()..].trim_start();
+        if before.is_some_and(char::is_whitespace) && after.starts_with('=') {
+            let value = after[1..].trim_start();
+            let quote = value.chars().next()?;
+            if quote == '\'' || quote == '"' {
+                let value = &value[1..];
+                return value.find(quote).map(|end| &value[..end]);
+            }
+        }
+        rest = &rest[index + name.len()..];
+    }
+    None
+}
+
+/// Extract only embedded slide images. Bound IPC size and reject external or
+/// traversal relationships instead of reading arbitrary archive entries.
+fn pptx_slide_images(
+    archive: &mut zip::ZipArchive<std::fs::File>,
+    slide_xml: &str,
+    index: u32,
+    remaining_bytes: &mut u64,
+) -> (Vec<String>, bool) {
+    use base64::Engine;
+    let relationships = read_zip_entry(archive, &format!("ppt/slides/_rels/slide{index}.xml.rels"))
+        .unwrap_or_default();
+    let mut targets = HashMap::new();
+    for element in relationships.split('<').filter(|part| part.strip_prefix("Relationship").is_some_and(|rest| rest.starts_with(char::is_whitespace))) {
+        let opener = element.split('>').next().unwrap_or("");
+        if !ooxml_attribute(opener, "Type").is_some_and(|value| value.ends_with("/image"))
+            || ooxml_attribute(opener, "TargetMode") == Some("External") {
+            continue;
+        }
+        if let (Some(id), Some(target)) = (ooxml_attribute(opener, "Id"), ooxml_attribute(opener, "Target")) {
+            targets.insert(id.to_string(), unescape_ooxml_text(target));
+        }
+    }
+    let mut images = Vec::new();
+    let mut skipped = false;
+    for element in slide_xml.split('<').filter(|part| part.strip_prefix("a:blip").is_some_and(|rest| rest.starts_with(char::is_whitespace))) {
+        let opener = element.split('>').next().unwrap_or("");
+        let Some(id) = ooxml_attribute(opener, "r:embed") else { continue; };
+        let Some(target) = targets.get(id) else { skipped = true; continue; };
+        let path = if let Some(path) = target.strip_prefix("../media/") {
+            format!("ppt/media/{path}")
+        } else if let Some(path) = target.strip_prefix("/ppt/media/") {
+            format!("ppt/media/{path}")
+        } else { skipped = true; continue; };
+        if path.contains('\\') || path.split('/').any(|part| part == ".." || part == "." || part.is_empty()) {
+            skipped = true;
+            continue;
+        }
+        let mime = match path.rsplit('.').next().unwrap_or("").to_ascii_lowercase().as_str() {
+            "png" => "image/png", "jpg" | "jpeg" => "image/jpeg", "gif" => "image/gif",
+            "webp" => "image/webp", "bmp" => "image/bmp", "svg" => "image/svg+xml",
+            _ => { skipped = true; continue; }
+        };
+        let Ok(mut entry) = archive.by_name(&path) else { skipped = true; continue; };
+        let size = entry.size();
+        if size > 10 * 1024 * 1024 || size > *remaining_bytes { skipped = true; continue; }
+        let mut bytes = Vec::with_capacity(size as usize);
+        if entry.read_to_end(&mut bytes).is_err() { skipped = true; continue; }
+        *remaining_bytes -= size;
+        images.push(format!("data:{mime};base64,{}", base64::engine::general_purpose::STANDARD.encode(bytes)));
+    }
+    (images, skipped)
 }
 
 fn xlsx_cell_text(inner: &str, opener: &str, shared: &[String]) -> String {
@@ -12282,13 +12044,15 @@ fn preview_office_document_blocking(
             let slides = office_sorted_entries(&mut archive, "ppt/slides/slide");
             let page_count = slides.len() as u32;
             let mut pages = Vec::new();
+            let mut remaining_image_bytes = 20 * 1024 * 1024;
             for (index, name) in slides.into_iter().take(max_pages) {
                 let Some(xml) = read_zip_entry(&mut archive, &name) else {
                     continue;
                 };
+                let (images, skipped_images) = pptx_slide_images(&mut archive, &xml, index, &mut remaining_image_bytes);
                 pages.push(OfficePreviewPage {
                     index,
-                    html: pptx_page_html(&xml, index),
+                    html: pptx_page_html(&xml, index, &images, skipped_images),
                 });
             }
             Ok(OfficePreview {
@@ -18376,7 +18140,21 @@ async fn ai_cli_runtime(
         .map(|_| skills::native_launch::NativeSkillCliOwner::register(&run_id))
         .transpose()?;
     tauri::async_runtime::spawn_blocking(move || -> Result<AiCliResult, String> {
-        let env_vars = normalize_spawn_env(env_vars);
+        let mut env_vars = normalize_spawn_env(env_vars);
+        // Resolve the shipped CLI here: the agent's cwd need not be the UGS repository.
+        if let Some(env) = env_vars.as_mut().filter(|env| env.contains_key("UGS_TOOL_CATALOG_SCOPE")) {
+            if let Ok(path) = locate_ugs_cli(cwd.as_deref(), &app) {
+                env.insert("UGS_TOOLS_CLI".into(), path.to_string_lossy().into_owned());
+                if let Ok(root) = storage_paths::global_root() {
+                    env.insert("UGS_HOME".into(), root.to_string_lossy().into_owned());
+                }
+            }
+        }
+        let prompt = tools::agent_access::guidance(env_vars.as_ref())
+            .map(|guidance| format!("{guidance}{prompt}"))
+            .unwrap_or(prompt);
+        let catalog_owner = tools::session::Owner(tools::session::Capture::start(
+            env_vars.as_ref(), &adapter, model.as_deref(), &run_id));
         let progress_model_hint = gateway_progress_model_hint(env_vars.as_ref());
         let extra_workspace_paths =
             normalize_extra_workspace_paths(cwd.as_deref(), extra_workspace_paths);
@@ -19704,6 +19482,8 @@ async fn ai_cli_runtime(
         let stdout = child.stdout.take();
         let app2 = app.clone();
         let run2 = run_id.clone();
+        let catalog_reader = catalog_owner.0.clone();
+        let catalog_codex_stdin = codex_stdin.clone();
         let native_scope_reader = native_scope.clone();
         let native_run2 = native_scope.as_ref()
             .map(|scope| scope.invocation().execution_run_id().to_owned())
@@ -19876,6 +19656,7 @@ async fn ai_cli_runtime(
                     if scope.invocation().observe_native_event(&mut payload).is_err() { return; }
                     payload["requestRunId"] = run2.clone().into();
                 }
+                if let Some(catalog) = &catalog_reader { catalog.observe(&payload); }
                 let _ = app2.emit(event, payload);
             };
             let mut init_done = false;
@@ -20186,10 +19967,45 @@ async fn ai_cli_runtime(
                         }
                     }
                     if parse_codex {
+                        if let (Some(catalog), Ok(raw)) = (&catalog_reader, serde_json::from_str::<serde_json::Value>(line)) {
+                            let id = raw["id"].as_str().unwrap_or("");
+                            if id.starts_with("ugs-catalog-") {
+                                if let Some(error) = raw.get("error") {
+                                    catalog.failure(error["message"].as_str().unwrap_or("Codex 目录查询失败"));
+                                } else {
+                                    match catalog.codex_page(id, &raw["result"]) {
+                                        Ok(Some((request_id, cursor))) => {
+                                            if let Some(stdin) = &catalog_codex_stdin {
+                                                let thread = codex_thread_id_reader.lock().ok().and_then(|v| v.clone());
+                                                if let Err(e) = write_codex_app_server_message(stdin, &serde_json::json!({
+                                                    "id":request_id,"method":"mcpServerStatus/list",
+                                                    "params":{"threadId":thread,"cursor":cursor}
+                                                })) { catalog.failure(&e); }
+                                            }
+                                        },
+                                        Ok(None) => {},
+                                        Err(e) => catalog.failure(&e),
+                                    }
+                                }
+                                continue;
+                            }
+                        }
                         let event: CodexLiteEvent = match serde_json::from_str(&line) {
                             Ok(event) => event,
                             Err(_) => continue,
                         };
+                        if matches!(event.method.as_deref(), Some("mcpServerStatus/updated" | "mcpServer/startupStatus/updated")) {
+                            if let (Some(catalog), Some(stdin)) = (&catalog_reader, &catalog_codex_stdin) {
+                                catalog.failure("MCP 状态变更；正在刷新当前线程目录");
+                                let thread = codex_thread_id_reader.lock().ok().and_then(|v| v.clone());
+                                if let Some(thread) = thread {
+                                    if let Err(e) = write_codex_app_server_message(stdin, &serde_json::json!({
+                                        "id":catalog.begin_codex(),"method":"mcpServerStatus/list",
+                                        "params":{"threadId":thread}
+                                    })) { catalog.failure(&e); }
+                                }
+                            }
+                        }
                         if let Some(id) = event.id.as_ref().and_then(|id| {
                             id.as_str()
                                 .map(ToString::to_string)
@@ -20225,6 +20041,11 @@ async fn ai_cli_runtime(
                                 {
                                     if let Ok(mut current) = codex_thread_id_reader.lock() {
                                         *current = Some(thread_id.to_string());
+                                    }
+                                    if let (Some(catalog), Some(stdin)) = (&catalog_reader, &catalog_codex_stdin) {
+                                        if let Err(e) = write_codex_app_server_message(stdin, &serde_json::json!({
+                                            "id":catalog.begin_codex(),"method":"mcpServerStatus/list","params":{"threadId":thread_id}
+                                        })) { catalog.failure(&e); }
                                     }
                                 }
                             } else if id == "ugs-turn-start" {
@@ -20507,6 +20328,7 @@ async fn ai_cli_runtime(
                             if !init_done
                                 && v.get("subtype").and_then(|s| s.as_str()) == Some("init")
                             {
+                                if let Some(catalog) = &catalog_reader { catalog.claude_init(&v); }
                                 init_done = true;
                                 let model = progress_model_hint2
                                     .as_deref()
@@ -21378,6 +21200,22 @@ mod tests {
         assert!(preview.pages[0].html.contains("第一页"));
         assert!(preview.pages[1].html.contains("第二页"));
         assert!(!preview.pages.iter().any(|page| page.html.contains("第三页")));
+    }
+
+    #[test]
+    fn office_pptx_preview_extracts_embedded_images_and_rejects_external_targets() {
+        let dir = preview_fixture_dir("office-images");
+        let pptx = dir.join("deck.pptx");
+        write_test_zip(&pptx, &[
+            ("ppt/slides/slide1.xml", "<p:sld><a:t>说明</a:t><a:blip r:embed=\"rId1\"/><a:blip r:embed='rId2'/></p:sld>"),
+            ("ppt/slides/_rels/slide1.xml.rels", "<Relationships><Relationship Id=\"rId1\" Type=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image\" Target=\"../media/image1.png\"/><Relationship Id='rId2' Type='http://schemas.openxmlformats.org/officeDocument/2006/relationships/image' Target='https://example.com/image.png' TargetMode='External'/></Relationships>"),
+            ("ppt/media/image1.png", "sample image"),
+        ]);
+        let preview = preview_office_document_blocking(pptx.to_string_lossy().to_string(), None, None).unwrap();
+        let html = &preview.pages[0].html;
+        assert!(html.contains("data:image/png;base64,c2FtcGxlIGltYWdl"));
+        assert!(html.contains("部分图片因格式或大小限制无法预览"));
+        assert!(!html.contains("https://example.com"));
     }
 
     /// XLSX 的文本多数存在 sharedStrings 里，单元格只放索引；直接读 `<v>` 会
@@ -24328,6 +24166,29 @@ requires_openai_auth = true\n";
     }
 
     #[test]
+    fn p4_status_command_pins_directory_before_config_lookup() {
+        let command = workspace_status_command(
+            Path::new(r"\\?\E:\Depot\Engine"), "p4", &["diff", "-f", "-du0", "Main.cpp"],
+        );
+        let args: Vec<_> = command.get_args().map(|arg| arg.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, vec!["-d", r"E:\Depot\Engine", "diff", "-f", "-du0", "Main.cpp"]);
+        let git = workspace_status_command(Path::new("."), "git", &["status"]);
+        assert_eq!(git.get_args().collect::<Vec<_>>(), vec![std::ffi::OsStr::new("status")]);
+    }
+
+    #[test]
+    #[ignore = "requires an existing modified P4 file and local authentication"]
+    fn workspace_file_diff_reads_real_p4_file() {
+        let root = std::env::var("UGS_TEST_DIFF_ROOT").expect("UGS_TEST_DIFF_ROOT");
+        let path = std::env::var("UGS_TEST_DIFF_FILE").expect("UGS_TEST_DIFF_FILE");
+        let diff = workspace_file_diff_blocking(root, path)
+            .expect("single-file diff request should succeed")
+            .expect("modified P4 file should have a diff");
+        assert!(!diff.lines.is_empty(), "modified P4 file lost its line diff");
+        println!("{}", serde_json::to_string(&diff).unwrap());
+    }
+
+    #[test]
     fn p4_workspace_status_specs_scan_root_files_before_directories() {
         let root =
             std::env::temp_dir().join(format!("ugs-p4-specs-{}-{}", std::process::id(), now_ms()));
@@ -24780,6 +24641,7 @@ pub fn run() {
             skills_bind_run,
             skills_revoke_run,
             skills_request,
+            skill_candidates_request,
             skill_install_targets,
             install_skill_from_url,
             install_skill_from_zip_url,
@@ -24806,6 +24668,8 @@ pub fn run() {
             engine_reveal_asset,
             project_environment_scan,
             project_mcp_probe,
+            tools::tool_catalog_read,
+            tools::mcp::tool_catalog_cancel,
             project_lsp_probe,
             project_lsp_install,
             unity_mcp_setup_project,
@@ -24847,7 +24711,10 @@ pub fn run() {
             ugs_job_wrapper_path,
             history::history_root,
             history::history_read_json,
+            history::memory_read_json,
+            history::memory_compare_exchange_json,
             history::history_write_json,
+            history::history_delete_session_backups,
             history::history_remove,
             history::history_list_dir,
             cc_switch_import::import_cc_switch_claude,
@@ -24857,6 +24724,18 @@ pub fn run() {
             free_proxy::free_proxy_ensure,
             free_proxy::free_proxy_stop,
             proxy_http::proxy_http,
+            temporary_chat::temporary_chat_models,
+            temporary_chat::temporary_chat_start,
+            temporary_chat::temporary_chat_cancel,
+            temporary_chat::temporary_chat_window_open,
+            temporary_chat::temporary_chat_window_close,
+            floating_browser::floating_browser_open,
+            floating_browser::floating_browser_bounds,
+            floating_browser::floating_browser_action,
+            floating_browser::floating_browser_current_url,
+            floating_browser::floating_browser_page_context,
+            floating_browser::floating_browser_close,
+            floating_browser::floating_browser_open_system_file,
             cache_cleanup::manual_cache_cleanup,
             autosave::autosave_now,
             autosave::autosave_config,

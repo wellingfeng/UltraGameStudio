@@ -68,47 +68,45 @@ function findSentinel(
   return m ? { index: m.index, length: m[0].length } : null;
 }
 
-/** Extract the first balanced top-level JSON object substring, or null. */
-function firstJsonObject(text: string): string | null {
-  const start = text.indexOf('{');
-  if (start === -1) return null;
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = start; i < text.length; i += 1) {
-    const ch = text[i];
-    if (inStr) {
-      if (esc) esc = false;
-      else if (ch === '\\') esc = true;
-      else if (ch === '"') inStr = false;
-      continue;
-    }
-    if (ch === '"') inStr = true;
-    else if (ch === '{') depth += 1;
-    else if (ch === '}') {
-      depth -= 1;
-      if (depth === 0) return text.slice(start, i + 1);
-    }
-  }
-  return null;
-}
 
-function normalizeOp(raw: unknown): MemoryOp | null {
-  if (!raw || typeof raw !== 'object') return null;
+
+export function normalizeMemoryOp(raw: unknown): MemoryOp | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const obj = raw as Record<string, unknown>;
+  if (Object.keys(obj).some((key) => !['action', 'content', 'oldText', 'old_text', 'importance'].includes(key))) return null;
   const action = obj.action;
   if (action !== 'add' && action !== 'replace' && action !== 'remove') return null;
-  const op: MemoryOp = { action };
-  if (typeof obj.content === 'string') op.content = obj.content;
-  // Accept both camelCase (oldText) and snake_case (old_text) from models.
+  if ('oldText' in obj && 'old_text' in obj) return null;
   const old = obj.oldText ?? obj.old_text;
-  if (typeof old === 'string') op.oldText = old;
-  // Importance tier is free-form from the model (must/important/minor plus
-  // English/Chinese aliases); the store normalizes it on write.
-  if (typeof obj.importance === 'string' && obj.importance.trim()) {
-    op.importance = obj.importance;
+  if (action !== 'remove' && (typeof obj.content !== 'string' || !obj.content.trim())) return null;
+  if (action === 'remove' && ('content' in obj || 'importance' in obj)) return null;
+  if (action === 'add' && ('oldText' in obj || 'old_text' in obj)) return null;
+  if (action !== 'add' && (typeof old !== 'string' || !old.trim())) return null;
+  if ('importance' in obj && (typeof obj.importance !== 'string' ||
+      !['must', 'critical', '必须', 'important', '重要', 'minor', 'low', 'trivial', '不重要'].includes(obj.importance.trim().toLowerCase()))) return null;
+  return {
+    action,
+    ...(typeof obj.content === 'string' ? { content: obj.content } : {}),
+    ...(typeof old === 'string' ? { oldText: old } : {}),
+    ...(typeof obj.importance === 'string' ? { importance: obj.importance } : {}),
+  };
+}
+
+/** Validate the WHOLE submission before any host read or mutation. */
+export function normalizeMemoryRequests(raw: unknown): MemoryWriteRequest[] | null {
+  if (!Array.isArray(raw)) return null;
+  const requests: MemoryWriteRequest[] = [];
+  for (const value of raw) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    const obj = value as Record<string, unknown>;
+    if (Object.keys(obj).some((key) => !['target', 'operations'].includes(key))) return null;
+    if (obj.target !== 'user' && obj.target !== 'memory') return null;
+    if (!Array.isArray(obj.operations) || !obj.operations.length) return null;
+    const operations = obj.operations.map(normalizeMemoryOp);
+    if (operations.some((op) => op === null)) return null;
+    requests.push({ target: obj.target, operations: operations as MemoryOp[] });
   }
-  return op;
+  return requests;
 }
 
 /**
@@ -126,31 +124,27 @@ export function parseMemoryWrites(text: string): MemoryWriteRequest[] {
     if (!open) break;
     const afterOpen = text.slice(open.index + open.length);
     const close = findSentinel(afterOpen, MEMORY_CLOSE_RE);
-    if (!close) break;
-    const body = afterOpen.slice(0, close.index);
+    if (!close) return []; // one incomplete block invalidates the whole payload
+    const body = afterOpen.slice(0, close.index).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
     cursor = open.index + open.length + close.index + close.length;
 
-    const span = firstJsonObject(body);
-    if (!span) continue;
     let raw: Record<string, unknown>;
     try {
-      raw = JSON.parse(span) as Record<string, unknown>;
+      raw = JSON.parse(body) as Record<string, unknown>;
     } catch {
-      continue;
+      return [];
     }
-    const target = raw.target === 'user' ? 'user' : raw.target === 'memory' ? 'memory' : null;
-    if (!target) continue;
-
-    // Accept either an `operations` array or a single inline op.
-    let ops: MemoryOp[] = [];
-    if (Array.isArray(raw.operations)) {
-      ops = raw.operations.map(normalizeOp).filter((o): o is MemoryOp => o !== null);
-    } else {
-      const single = normalizeOp(raw);
-      if (single) ops = [single];
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return [];
+    let request: unknown = raw;
+    if (!('operations' in raw)) {
+      const { target, ...inline } = raw;
+      const single = normalizeMemoryOp(inline);
+      if (!single) return [];
+      request = { target, operations: [single] };
     }
-    if (ops.length === 0) continue;
-    out.push({ target, operations: ops });
+    const requests = normalizeMemoryRequests([request]);
+    if (!requests) return [];
+    out.push(...requests);
   }
   return out;
 }

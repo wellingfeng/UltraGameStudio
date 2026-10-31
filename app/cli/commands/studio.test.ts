@@ -185,7 +185,9 @@ describe('ugs studio', () => {
     expect(calls[0]).toContain('Run check.mjs and read CHECK PASSED');
     expect(calls[calls.length - 1]).toContain('Run check.mjs and read CHECK PASSED');
     expect(second.verification).toMatchObject({ exitCode: 0, passed: true });
-  });
+  // Two real filesystem/verify-command runs and HTTP review exceed Vitest's
+  // default 5s under suite contention; match the adjacent HTTP integration.
+  }, 20000);
 
   it('delivers the full Node managed skill to planner and execution and reports unsafe CLI review unavailable', async () => {
     const packageDir = join(dir, '.ultragamestudio', 'skills', 'verify-work');

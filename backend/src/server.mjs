@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import http from 'node:http';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { makeAuthorizer } from './auth.mjs';
@@ -44,6 +45,7 @@ import {
   saveWorkspaceUpload,
 } from './workspace-files.mjs';
 import { createWorkspaceSkillService, assertSafeSkillPath } from './workspace-skill-service.mjs';
+import { createSkillCandidateService } from './skill-candidate-service.mjs';
 import { listWorkspaceSkills } from './workspace-skills.mjs';
 import {
   readUserSettingJson,
@@ -113,6 +115,8 @@ const cfg = {
   jwtSecret: makeJwtSecret(process.env.UGS_RUNNER_JWT_SECRET),
   workdir: resolve(process.env.UGS_RUNNER_WORKDIR || process.env.FUC_RUNNER_WORKDIR || './workspaces'),
   datadir: resolve(process.env.UGS_RUNNER_DATADIR || process.env.FUC_RUNNER_DATADIR || './data'),
+  tenantId: process.env.UGS_RUNNER_TENANT_ID || 'self-hosted',
+  serverId: process.env.UGS_RUNNER_SERVER_ID || createHash('sha256').update(resolve(process.env.UGS_RUNNER_DATADIR || process.env.FUC_RUNNER_DATADIR || './data')).digest('hex'),
   maxConcurrency: Number(process.env.UGS_RUNNER_MAX_CONCURRENCY || process.env.FUC_RUNNER_MAX_CONCURRENCY || 2),
   jobTimeoutMs: Number(process.env.UGS_RUNNER_JOB_TIMEOUT || process.env.FUC_RUNNER_JOB_TIMEOUT || 1800) * 1000,
   execAllowlist: (process.env.UGS_RUNNER_EXEC_ALLOWLIST || process.env.FUC_RUNNER_EXEC_ALLOWLIST || '')
@@ -408,16 +412,46 @@ function projectWorkspaceDir(project) {
 }
 
 const projectSkillServices = new Map();
-async function projectSkillService(project) {
+async function projectSkillDirectory(project) {
   const dir = projectWorkspaceDir(project);
   // Do not clone/pull for a skill mutation: the authenticated checkout must
   // already exist, and no request can select an alternate root or host global.
   await assertSafeSkillPath(cfg.workdir, { allowMissing: true });
   await assertSafeSkillPath(dir, { allowMissing: true });
   const bound = await assertWorkspaceBoundary(cfg.workdir, dir, { create: true });
+  return bound.target;
+}
+async function projectSkillService(project) {
+  const dir = await projectSkillDirectory(project);
   const key = `${project.userId ?? 'default'}:${project.id}`;
-  if (!projectSkillServices.has(key)) projectSkillServices.set(key, createWorkspaceSkillService({ dir: bound.target, hostId: REMOTE_SKILL_HOST_ID, workspaceId: project.id }));
+  if (!projectSkillServices.has(key)) projectSkillServices.set(key, createWorkspaceSkillService({ dir, hostId: REMOTE_SKILL_HOST_ID, workspaceId: project.id,
+    candidateService: projectCandidateService(project, dir) }));
   return projectSkillServices.get(key);
+}
+function projectCandidateService(project, dir) {
+  return createSkillCandidateService({ dir, namespace: {
+    tenantId: cfg.tenantId, serverId: cfg.serverId, accountId: project.userId ?? 'default', workspaceId: project.id,
+  } });
+}
+
+async function requirePersistedCandidateSource(project, userId, origin) {
+  const fields = ['hostId', 'workspaceId', 'sessionId', 'turnId', 'runId'];
+  const source = structuredClone(store.getJob(origin.runId));
+  const matches = (job) => job && job.id === origin.runId && job.projectId === project.id &&
+    job.userId === userId && job.status === 'done' && typeof job.prompt === 'string' && job.prompt.trim() &&
+    job.skillOrigin && Object.keys(job.skillOrigin).length === fields.length &&
+    fields.every((key) => job.skillOrigin[key] === origin[key]);
+  if (!matches(source)) throw new Error('SKILL_CANDIDATE_SOURCE_UNAVAILABLE');
+  // A completed optimistic record or an acknowledged no-op write is not a
+  // persisted source. Fence all queued writes, then read the backing file.
+  let written; let disk;
+  do {
+    written = store._writeChain;
+    await written;
+    disk = JSON.parse(await readFile(store.file, 'utf8'));
+  } while (store._writeChain !== written);
+  if (disk.projects?.[project.id]?.userId !== userId || !matches(disk.jobs?.[origin.runId]) ||
+    disk.jobs[origin.runId].prompt !== source.prompt) throw new Error('SKILL_CANDIDATE_SOURCE_NOT_PERSISTED');
 }
 
 function nativeSkillEvidenceKind(message, exitCode) {
@@ -942,6 +976,37 @@ const server = http.createServer(async (req, res) => {
       const config = req.method === 'PUT' ? await service.setConfig(body) : await service.getConfig();
       return send(res, 200, { ok: true, config });
     } catch (error) { return send(res, error.code === 'SKILL_BUSY' ? 409 : 400, { ok: false, error: String(error?.message ?? error) }); }
+  }
+
+  const candidateProjectId = path.endsWith('/skill-service/candidates')
+    ? matchRemoteRunnerProjectSkillServicePath(path.slice(0, -'/candidates'.length)) : null;
+  if (candidateProjectId && req.method === 'POST') {
+    const userId = currentUserId(req);
+    const project = store.getProject(candidateProjectId, userId);
+    if (!project) return send(res, 404, { ok: false, error: 'not found' });
+    const body = await readJson(req);
+    if (body === BODY_TOO_LARGE) return send(res, 413, { ok: false, error: 'skill candidate request is too large' });
+    const fields = ['action', 'origin', 'list', 'expectedRevision'];
+    const originFields = ['hostId', 'workspaceId', 'sessionId', 'turnId', 'runId'];
+    if (!body || typeof body !== 'object' || Array.isArray(body) || Object.keys(body).some((key) => !fields.includes(key)) ||
+      !['load', 'compare_and_swap'].includes(body.action) || !body.origin || typeof body.origin !== 'object' || Array.isArray(body.origin) ||
+      Object.keys(body.origin).length !== originFields.length || Object.keys(body.origin).some((key) => !originFields.includes(key)) ||
+      body.origin.hostId !== REMOTE_SKILL_HOST_ID || body.origin.workspaceId !== project.id ||
+      ['sessionId', 'turnId', 'runId'].some((key) => typeof body.origin[key] !== 'string' || !body.origin[key] || body.origin[key].length > 200) ||
+      (body.action === 'load' && (body.list !== undefined || body.expectedRevision !== undefined))) {
+      return send(res, 400, { ok: false, error: 'invalid skill candidate request; client namespace/root/authority overrides are forbidden' });
+    }
+    const origin = Object.freeze({ ...body.origin });
+    try {
+      await requirePersistedCandidateSource(project, userId, origin);
+      const dir = await projectSkillDirectory(project);
+      const service = projectCandidateService(project, dir);
+      const result = body.action === 'load' ? await service.load() : await service.compareAndSwap(body.expectedRevision, body.list);
+      return send(res, 200, { ok: true, result });
+    } catch (error) {
+      const conflict = ['SKILL_CANDIDATE_CONFLICT', 'SKILL_CANDIDATE_LOCKED_NEEDS_RECOVERY'].includes(error.message);
+      return send(res, conflict ? 409 : 400, { ok: false, error: String(error?.message ?? error) });
+    }
   }
 
   // Unified camelCase wire contract shared with Rust skills_request. The route

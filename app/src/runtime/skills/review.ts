@@ -2,7 +2,7 @@ import { parseSkillReviewMessage } from './protocol';
 import { redactSkillText } from './evidence';
 import { trustedSkillEvidence } from './trigger';
 import { estimateTokenCount } from '../tokenEstimate';
-import { observeSkillCandidate, markSkillCandidateSubmitted, type SkillCandidateStore } from './preReview';
+import { observeSkillCandidate, markSkillCandidateSubmitted, reserveSkillCandidateSubmission, type SkillCandidateStore } from './preReview';
 import type { SkillHostPort, SkillLearningJob, SkillMutationResult, SkillProposal, SkillReadRequest, SkillReadResult, SkillReviewModelPort, SkillReviewState, SkillReviewUsage } from './types';
 
 export const SKILL_REVIEW_SYSTEM = `You are an independent skill reviewer, not a coding agent.
@@ -138,6 +138,7 @@ export async function runSkillReview(job: SkillLearningJob, options: SkillReview
     let finished = false;
     let candidateChecked = false;
     let repeatedCount: number | undefined;
+    let candidateReservation: string | undefined;
     for (let round = 0; round < Math.min(6, job.config.maxRounds); round++) {
       state('proposing');
       check();
@@ -255,17 +256,24 @@ export async function runSkillReview(job: SkillLearningJob, options: SkillReview
         if (repeatedCount !== undefined) message = { ...message, lesson: `相同经验已在不同任务中连续出现 ${repeatedCount} 次。\n${message.lesson}` };
         state('applying');
         check();
+        if (!job.explicit && options.candidateStore && !candidateReservation) {
+          candidateReservation = await guarded(reserveSkillCandidateSubmission(job, options.candidateStore, catalog.revision,
+            reads.map((read) => ({ skillId: read.entry.skillId, revision: read.revision }))));
+          check();
+        }
         // No abort race after dispatch: a real commit/recovery must remain visible.
         result = await options.host.manage(message);
-        if (!job.explicit && options.candidateStore && ['awaiting_approval', 'applied'].includes(result.status)) {
-          // Host outcomes stay authoritative even if auxiliary dedup storage fails.
-          await markSkillCandidateSubmitted(job, options.candidateStore).catch(() => {});
-        }
         if (result.status === 'failed' && result.operationsApplied === 0 && !signal.aborted && !corrected &&
           /(?:invalid.*(?:yaml|frontmatter|name|content|proposal)|(?:yaml|frontmatter).*invalid|patch must match exactly once)/i.test(result.error ?? '')) {
           corrected = true;
           validationError = redactSkillText(result.error ?? 'Host validation failed', 1024);
           continue;
+        }
+        if (!job.explicit && options.candidateStore) {
+          // Host outcomes stay authoritative even if auxiliary dedup storage fails.
+          await markSkillCandidateSubmitted(job, options.candidateStore, result, catalog.revision, candidateReservation).catch((error) => {
+            result = { ...result, error: [result.error, `SKILL_CANDIDATE_SYNC_FAILED: ${String(error)}`].filter(Boolean).join('; ') };
+          });
         }
       } else result.lesson = message.reason;
       finished = true;
@@ -283,7 +291,8 @@ export async function runSkillReview(job: SkillLearningJob, options: SkillReview
       usage.totalTokens = undefined;
       usage.estimated = true;
     }
-    const result: SkillMutationResult = { status: exhaustedBudget || timedOut ? 'failed' : signal.aborted ? 'cancelled' : 'failed', batchId: `review-${job.origin.runId}`,
+    const candidateConflict = /SKILL_CANDIDATE_(?:CONFLICT|RESERVATION_CONFLICT)/.test(String(error));
+    const result: SkillMutationResult = { status: exhaustedBudget || timedOut ? 'failed' : signal.aborted ? 'cancelled' : candidateConflict ? 'conflicted' : 'failed', batchId: `review-${job.origin.runId}`,
       origin: { ...job.origin }, lesson: '', operationsApplied: 0, changes: [], riskReasons: [], error: String(error) };
     result.usage = { ...usage };
     state(result.status, result);

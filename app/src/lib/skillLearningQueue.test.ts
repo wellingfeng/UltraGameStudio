@@ -1,5 +1,6 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { SkillLearningQueue } from './skillLearningQueue';
+import { acquireReviewBackground } from '@/runtime/memory/review';
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -8,6 +9,21 @@ function deferred<T>() {
 }
 
 describe('skill learning foreground priority', () => {
+  it('retains shared-slot work behind memory and wakes on release without timer polling', async () => {
+    const memory = acquireReviewBackground('memory')!;
+    const queue = new SkillLearningQueue<string, string>('skills:test');
+    const ran: string[] = [];
+    const pending = queue.enqueue('source', 'reserved-evidence', async (job) => { ran.push(job); return job; });
+    const timer = vi.spyOn(globalThis, 'setTimeout');
+    try {
+      for (let i = 0; i < 12; i++) await Promise.resolve();
+      expect(ran).toEqual([]);
+      expect(timer).not.toHaveBeenCalled();
+      memory.release();
+      await expect(pending).resolves.toEqual({ status: 'completed', result: 'reserved-evidence' });
+      expect(ran).toEqual(['reserved-evidence']);
+    } finally { memory.release(); queue.cancel(); await pending; timer.mockRestore(); }
+  });
   it('reviews a completed session while an unrelated session is still running', async () => {
     const queue = new SkillLearningQueue<string, string>();
     const releaseOther = queue.foregroundStarted('session-b');

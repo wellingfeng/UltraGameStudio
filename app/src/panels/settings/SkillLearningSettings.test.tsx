@@ -30,6 +30,61 @@ function skillEntry(overrides: Partial<SkillEntry> = {}): SkillEntry {
 }
 
 describe('SkillLearningSettings', () => {
+  it('forwards the exact resultless source snapshot to the retry controller', async () => {
+    const origin = { hostId:'local', workspaceId:'ws', sessionId:'s', turnId:'t', runId:'r' };
+    const saved = { status:'failed' as const, origin, error:'SKILL_REVIEW_INTERRUPTED', resume:{ job:{ origin, userText:'saved user', finalAnswer:'saved final', evidence:[], loadedSkills:[], config:DEFAULT_SKILL_LEARNING_CONFIG }, selection:{ adapter:'codex', modelClass:'review' } } };
+    const retry = vi.fn(async () => undefined);
+    await act(async () => { root.render(<Settings config={DEFAULT_SKILL_LEARNING_CONFIG} onChange={vi.fn()} history={[saved]} onRetryState={retry} />); });
+    const button = container.querySelector<HTMLButtonElement>('button[aria-label="重新复盘"]');
+    expect(button).not.toBeNull();
+    await act(async () => { button!.click(); });
+    expect(retry).toHaveBeenCalledExactlyOnceWith(saved);
+  });
+  it('does not offer resultless retry without a saved snapshot even when a state controller exists', async () => {
+    const origin = { hostId: 'local', workspaceId: 'ws', sessionId: 's', turnId: 't', runId: 'r' };
+    await act(async () => { root.render(<Settings config={DEFAULT_SKILL_LEARNING_CONFIG} onChange={vi.fn()} history={[{ status:'failed', origin, error:'SKILL_REVIEW_INTERRUPTED' }]} onRetryState={vi.fn()} />); });
+    expect(container.querySelector('button[aria-label="重新复盘"]')).toBeNull();
+    expect(container.textContent).toContain('缺少可恢复的证据快照');
+  });
+  it('keeps safety and policy explanations readable rather than using faint text', async () => {
+    await act(async () => { root.render(<Settings config={DEFAULT_SKILL_LEARNING_CONFIG} onChange={vi.fn()} />); });
+    expect(container.querySelector('.text-fg-faint')).toBeNull();
+  });
+  it('gives select and numeric controls a minimum keyboard/touch target height', async () => {
+    await act(async () => { root.render(<Settings config={DEFAULT_SKILL_LEARNING_CONFIG} onChange={vi.fn()} />); });
+    for (const control of container.querySelectorAll('select,input[type="number"]')) expect(control.className).toContain('min-h-11');
+  });
+  it('mounts an idle advisory entry without automatically archiving any package', async () => {
+    vi.useFakeTimers();
+    const onArchive = vi.fn();
+    const config = { ...DEFAULT_SKILL_LEARNING_CONFIG, autoArchive: true };
+    await act(async () => { root.render(<Settings config={config} onChange={vi.fn()} entries={[skillEntry({ pinned: false })]} lifecycleScopeKey="source-ws" onArchive={onArchive} />); });
+    expect(container.querySelector('[data-lifecycle-skill-id]')).toBeNull();
+    await act(async () => { vi.advanceTimersByTime(120000); });
+    expect(container.querySelector('[data-lifecycle-skill-id="skill-a"]')?.textContent).toContain('首次观测');
+    expect(container.textContent).toContain('尚无任务采用验证');
+    expect(onArchive).not.toHaveBeenCalled();
+    await act(async () => { root.unmount(); });
+    root = createRoot(container);
+    vi.useRealTimers();
+  });
+  it('keeps failed, cancelled, noop and active history visible even when learning is off', async () => {
+    const origin = { hostId: 'local', workspaceId: 'ws-history', sessionId: 's-history', turnId: 't', runId: 'r' };
+    const history: SkillReviewState[] = (['queued', 'reading', 'proposing', 'applying', 'noop', 'failed', 'cancelled'] as const)
+      .map((status) => ({ status, origin: { ...origin, runId: status }, error: status === 'failed' ? 'HTTP unavailable' : undefined }));
+    await act(async () => { root.render(<Settings config={{ ...DEFAULT_SKILL_LEARNING_CONFIG, enabled: false, mode: 'off' }} onChange={vi.fn()} history={history} />); });
+    expect(container.querySelectorAll('article')).toHaveLength(7);
+    expect(container.textContent).toContain('HTTP unavailable');
+    expect(container.textContent).toContain('s-history');
+    expect(container.querySelector('button[aria-label="重新复盘"]')).toBeNull();
+  });
+  it('describes background automatic submission honestly for legacy auto-safe preferences', async () => {
+    await act(async () => { root.render(<Settings config={DEFAULT_SKILL_LEARNING_CONFIG} onChange={vi.fn()} />); });
+    expect(container.textContent).toContain('后台自动送审，不自动保存');
+    expect(container.textContent).toContain('连续两次');
+    expect(container.textContent).toContain('0.95');
+    expect(container.querySelector('option[value="auto-safe"]')?.textContent).not.toContain('低风险自动保存');
+  });
   it('configures the reviewer HTTP protocol separately from source-session execution', async () => {
     const onChange = vi.fn();
     const selection = { adapter: 'codex', modelClass: 'exact-review-model', providerId: 'review-provider', channelId: 'review-channel' };
@@ -92,7 +147,7 @@ describe('SkillLearningSettings', () => {
     await act(async () => { approvals[1].click(); });
     expect(onReviewAction).toHaveBeenCalledExactlyOnceWith(b, 'approve');
     expect(container.querySelectorAll('article')[0].textContent).toContain('待批准');
-    expect(container.querySelectorAll('article')[1].textContent).toContain('已学会');
+    expect(container.querySelectorAll('article')[1].textContent).toContain('经验已保存');
   });
 
   it('offers auto-safe, approve-all and off using the completed-tool activity metric', async () => {
@@ -337,7 +392,7 @@ describe('SkillLearningSettings', () => {
     expect(onApprove).toHaveBeenCalledExactlyOnceWith('batch-old-project');
     expect(container.querySelector('[role="alert"]')?.textContent).toContain('原项目落盘失败');
     expect(container.textContent).toContain('学习失败');
-    expect(container.textContent).not.toContain('已学会');
+    expect(container.textContent).not.toContain('经验已保存');
   });
 
   it('forwards fresh review retries from conflicted history without approving the stale batch', async () => {
@@ -353,7 +408,7 @@ describe('SkillLearningSettings', () => {
     await act(async () => { retry!.click(); });
     expect(onRetry).toHaveBeenCalledExactlyOnceWith('conflicted-history');
     expect(container.querySelector('[role="status"]')?.textContent).toContain('待批准');
-    expect(container.textContent).not.toContain('已学会');
+    expect(container.textContent).not.toContain('经验已保存');
   });
 
   it('retains rollback action when rendering rehydrated review states in history', async () => {
@@ -365,7 +420,7 @@ describe('SkillLearningSettings', () => {
     const history = JSON.parse(JSON.stringify([{ status: 'applied', origin: result.origin, result, action: 'rollback' }]));
     await act(async () => { root.render(<Settings config={DEFAULT_SKILL_LEARNING_CONFIG} onChange={vi.fn()} history={history} />); });
     expect(container.querySelector('[role="status"]')?.textContent).toContain('已撤销');
-    expect(container.textContent).not.toContain('已学会');
+    expect(container.textContent).not.toContain('经验已保存');
     expect(container.textContent).toContain('restored-v1');
   });
 });

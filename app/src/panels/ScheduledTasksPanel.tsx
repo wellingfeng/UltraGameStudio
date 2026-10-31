@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
 import { AlarmClock, ArrowLeft, Pause, Pencil, Play, Plus, Rocket, Search, Zap } from 'lucide-react';
 import { createScheduledTaskSession, sessionLiveStatus, useStore } from '@/store/useStore';
 import { collectScheduledSessions, type ScheduledSession } from '@/lib/scheduledTaskSessions';
@@ -21,7 +21,7 @@ import './ScheduledTasksPanel.css';
 
 const entryKey = ({ session, workspaceId }: ScheduledSession) => `${workspaceId ?? ''}/${session.id}`;
 
-function TaskResults({ entry, locale }: { entry: ScheduledSession; locale: Locale }) {
+function TaskResults({ entry, locale, previewContainerRef }: { entry: ScheduledSession; locale: Locale; previewContainerRef: RefObject<HTMLElement> }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [live, setLive] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -76,12 +76,13 @@ function TaskResults({ entry, locale }: { entry: ScheduledSession; locale: Local
         {message.role === 'assistant' && <MessageArtifacts text={message.text} cwd={messageCwd} onOpenFile={onOpenFile} />}
       </article>;
     })}</div>
-    <FilePreviewDrawer refData={preview?.ref ?? null} cwd={preview?.cwd} onClose={() => setPreview(null)} />
+    <FilePreviewDrawer refData={preview?.ref ?? null} cwd={preview?.cwd} overlayContainerRef={previewContainerRef} onClose={() => setPreview(null)} />
   </section>;
 }
 
 export default function ScheduledTasksPanel({ locale, onClose }: { locale: Locale; onClose: () => void }) {
   const panel = useRef<HTMLElement>(null);
+  const previewContainerRef = useRef<HTMLElement>(null);
   const sessions = useStore((s) => s.sessions);
   const sessionTree = useStore((s) => s.sessionTree);
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
@@ -173,7 +174,7 @@ export default function ScheduledTasksPanel({ locale, onClose }: { locale: Local
             </div>
           </div>
         </nav>
-        <main className="scheduled-tasks-main">
+        <main ref={previewContainerRef} className="scheduled-tasks-main">
           <div className="scheduled-tasks-content">
             {error && <p role="alert" className="mb-4 text-sm text-status-error">{error}</p>}
             {shown.length === 0 ? <div className="flex min-h-[280px] h-full flex-col items-center justify-center gap-3 text-center">
@@ -208,7 +209,7 @@ export default function ScheduledTasksPanel({ locale, onClose }: { locale: Local
                   <h3 className="scheduled-task-label">{scheduleText(locale, 'prompt')}</h3>
                   <p className="scheduled-task-prompt">{task.reminderText}</p>
                   {task.lastError && <p className="mb-3 break-words text-xs text-status-error">{task.lastError}</p>}
-                  <TaskResults key={key} entry={entry} locale={locale} />
+                  <TaskResults key={key} entry={entry} locale={locale} previewContainerRef={previewContainerRef} />
                 </article>;
               })}
             </div>}

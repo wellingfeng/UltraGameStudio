@@ -1,4 +1,19 @@
-import { afterEach, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+import type { SkillCandidateList } from '@/runtime/skills/preReview';
+import type { RemoteSkillCandidateClient } from './remoteSkillLearning';
+
+// Candidate-host fixture only; no local storage fallback and no L4 claim.
+let fixtureCandidates: SkillCandidateList;
+beforeEach(() => {
+  fixtureCandidates = { version: 1, revision: 0, candidates: [] };
+  Object.assign(RunnerClient.prototype, { skillCandidateRequest: async (_project: string, request: Parameters<RemoteSkillCandidateClient['skillCandidateRequest']>[1]) => {
+    if (request.action === 'compare_and_swap') {
+      if (request.expectedRevision !== fixtureCandidates.revision) throw new Error('SKILL_CANDIDATE_CONFLICT');
+      fixtureCandidates = { ...structuredClone(request.list!), revision: request.expectedRevision! + 1 };
+    }
+    return structuredClone(fixtureCandidates);
+  } });
+});
 import { RunnerClient, REMOTE_SKILL_HOST_ID } from '@ugs/protocol';
 import type { SkillEntry, SkillOrigin, SkillReadResult } from '@/runtime/skills/types';
 import { DEFAULT_SKILL_LEARNING_CONFIG } from './skillLearningConfig';
@@ -8,7 +23,7 @@ const load = (): Promise<typeof import('./remoteSkillLearning') | null> => impor
 const origin: SkillOrigin = { hostId: REMOTE_SKILL_HOST_ID, workspaceId: 'remote-project', sessionId: 'source-session', turnId: 'source-turn', runId: 'preload-run' };
 const entry: SkillEntry = { skillId: 'skill:remote-read', rootId: 'project:remote', name: 'remote-read', description: 'Use when reading a remote project.', scope: 'project', source: 'ugs-managed', relativePath: 'remote-read', revision: 'remote-revision', hash: 'remote-hash', readOnly: false, autoEditable: true, contentLocked: false, pinned: false, state: 'active', files: ['SKILL.md'] };
 const read: SkillReadResult = { entry, relativePath: 'SKILL.md', content: '---\nname: remote-read\ndescription: Use when reading a remote project.\n---\nRead the authoritative remote disk, not a local copy.\n', revision: entry.revision, hash: entry.hash, fullRead: true, readReceiptId: 'remote-receipt', files: entry.files };
-afterEach(() => { window.localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { delete (RunnerClient.prototype as RunnerClient & Partial<RemoteSkillCandidateClient>).skillCandidateRequest; window.localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 it('preloads fresh remote content with the bound project origin and no owner authority', async () => {
   const remote = await load();
@@ -146,6 +161,8 @@ it('publishes the frozen queued origin before dispatch and honors cancellation f
     userCorrections: [{ text: 'Read before editing.', occurredAt: 1 }], signal: controller.signal,
     model: { capability: 'completion-only', complete }, onState })).toBeUndefined();
   expect(onState).toHaveBeenCalledWith({ status: 'queued', origin: runOrigin, mode: 'auto-safe' });
+  expect(onState.mock.calls.map(([state]) => state.status)).toEqual(['queued', 'cancelled']);
+  expect(onState.mock.calls.at(-1)?.[0]).toMatchObject({ origin: runOrigin, mode: 'auto-safe' });
   expect(complete).not.toHaveBeenCalled();
 });
 
@@ -295,15 +312,58 @@ it('a newer remote turn supersedes a cooling review without inheriting its callb
   const common = { client, projectId: first.workspaceId, userText: 'Correction.', finalAnswer: 'Done.', userCorrections: [{ text: 'Read before editing.', occurredAt: 1 }], model: { capability: 'completion-only' as const, complete } };
   await remote!.finishRemoteLearning({ ...common, origin: first });
   const secondResult = vi.fn();
-  const secondPending = remote!.finishRemoteLearning({ ...common, origin: second, onResult: secondResult });
+  const secondState = vi.fn();
+  const secondPending = remote!.finishRemoteLearning({ ...common, origin: second, onResult: secondResult, onState: secondState });
   await new Promise((resolve) => setTimeout(resolve, 10));
   const thirdResult = vi.fn();
   const thirdPending = remote!.finishRemoteLearning({ ...common, origin: third, onResult: thirdResult });
   expect(await secondPending).toBeUndefined();
+  expect(secondState.mock.calls.map(([state]) => state.status)).toEqual(['queued', 'cancelled']);
+  expect(secondState.mock.calls.at(-1)?.[0]).toMatchObject({ origin: second, mode: 'auto-safe' });
   expect(await thirdPending).toMatchObject({ status: 'noop', origin: third });
   expect(secondResult).not.toHaveBeenCalled();
   expect(thirdResult).toHaveBeenCalledWith(expect.objectContaining({ origin: third }));
   expect(complete).toHaveBeenCalledTimes(2);
+});
+
+it('a failed remote attempt preserves a fresh queued source without redispatching the failed source', async () => {
+  const remote = await load();
+  const first = { ...origin, sessionId: 'failed-fresh-session', runId: 'job-failed-fresh-first' };
+  const second = { ...first, turnId: 'fresh-turn', runId: 'job-failed-fresh-second' };
+  const client = new RunnerClient('https://failed-fresh-runner.test', 'fixture-auth');
+  let release!: () => void;
+  const barrier = new Promise<void>((resolve) => { release = resolve; });
+  let started!: () => void;
+  const firstStarted = new Promise<void>((resolve) => { started = resolve; });
+  const failedComplete = vi.fn(async () => { started(); await barrier; throw new Error('controlled remote rejection'); });
+  const freshComplete = vi.fn(async () => ({ text: '{"version":1,"kind":"noop","reason":"新的任务已复盘。"}' }));
+  vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+    const path = new URL(url).pathname;
+    const source = path.endsWith(first.runId) ? first : second;
+    return Response.json(path.startsWith('/jobs/')
+      ? { ok: true, job: { id: source.runId, projectId: source.workspaceId, skillOrigin: source, status: 'done', messages: [], logs: [] } }
+      : path.endsWith('/config') ? { ok: true, config: { ...DEFAULT_SKILL_LEARNING_CONFIG, cooldownMs: 0 } }
+        : { ok: true, result: { revision: 'empty', entries: [] } });
+  }));
+  const common = { client, projectId: first.workspaceId, userText: '真实纠正。', finalAnswer: '已完成。',
+    userCorrections: [{ text: '先读取完整文件。', occurredAt: 1 }] };
+  const firstPending = remote!.finishRemoteLearning({ ...common, origin: first, model: { capability: 'completion-only', complete: failedComplete } });
+  await firstStarted;
+  const onState = vi.fn();
+  const secondPending = remote!.finishRemoteLearning({ ...common, origin: second, onState,
+    model: { capability: 'completion-only', complete: freshComplete } });
+  try {
+    await vi.waitFor(() => expect(onState).toHaveBeenCalledWith(expect.objectContaining({ status: 'queued', origin: second })));
+    release();
+    expect(await firstPending).toMatchObject({ status: 'failed', origin: first });
+    expect(await secondPending).toMatchObject({ status: 'noop', origin: second });
+    expect(freshComplete).toHaveBeenCalledTimes(1);
+    expect(onState.mock.calls.map(([state]) => state.status)).toEqual(['queued', 'reading', 'proposing', 'noop']);
+    expect(await remote!.finishRemoteLearning({ ...common, origin: first,
+      model: { capability: 'completion-only', complete: failedComplete } })).toBeUndefined();
+    expect(failedComplete).toHaveBeenCalledTimes(1);
+    expect(freshComplete).toHaveBeenCalledTimes(1);
+  } finally { release(); await firstPending; await secondPending; }
 });
 
 it('remote native evidence retains an explicit null primary tool exit instead of falling back to zero', async () => {
@@ -336,7 +396,9 @@ it('finish rejects a real job snapshot that was relabelled to another captured s
 });
 
 it('a captured remote source survives UI navigation and a late abort cannot hide an applied host commit', async () => {
-  vi.spyOn(await import('@/runtime/skills/preReview'), 'observeSkillCandidate').mockResolvedValue({ eligible: true, consecutive: 2 });
+  fixtureCandidates = { version: 1, revision: 0, lastId: 'commit-candidate', candidates: [{
+    id: 'commit-candidate', lesson: 'Verify before learning.', context: 'Earlier task.',
+    sources: [JSON.stringify(['prior-commit-session', 'prior-commit-turn'])], consecutive: 1, submitted: false }] };
   const remote = await load();
   const savedOrigin = { ...origin, sessionId: 'late-commit-session', runId: 'job-late-commit' };
   const mutableOrigin = { ...savedOrigin };
@@ -353,7 +415,9 @@ it('a captured remote source survives UI navigation and a late abort cannot hide
     if (body?.action === 'manage') { controller.abort(); expect(init?.signal).toBeUndefined(); }
     return new Response(JSON.stringify(path.startsWith('/jobs/') ? { ok: true, job: { id: savedOrigin.runId, projectId: savedOrigin.workspaceId, skillOrigin: savedOrigin, status: 'done', messages: [{ at: 10, role: 'tool', kind: 'tool', runId: savedOrigin.runId, toolCallId: 'native-check', toolName: 'command_execution', phase: 'end', provenance: 'native-tool', status: 'success', toolExitCode: 0, args: { command: 'node --test' }, result: '# tests 1\n# pass 1\n# fail 0\n' }], result: { exitCode: 0 }, logs: [] } } : path.endsWith('/config') ? { ok: true, config: { ...DEFAULT_SKILL_LEARNING_CONFIG, activityThreshold: 1, cooldownMs: 0 } } : { ok: true, result: body?.action === 'manage' ? committed : { revision: 'empty', entries: [] } }), { status: 200 });
   }));
-  const complete = vi.fn(async () => ({ text: JSON.stringify({ version: 1, kind: 'propose', lesson: committed.lesson, evidenceIds: [nativeId], operations: [{ action: 'create', name: 'late-rule', content: '---\nname: late-rule\ndescription: Use when verifying a late commit.\n---\nKeep the actual result.' }] }), usage: { inputTokens: 1, outputTokens: 1 } }));
+  const complete = vi.fn(async (request: { system: string }) => ({ text: request.system.includes('语义比对器')
+    ? JSON.stringify({ candidateId: 'commit-candidate', similarity: 0.99 })
+    : JSON.stringify({ version: 1, kind: 'propose', lesson: committed.lesson, evidenceIds: [nativeId], operations: [{ action: 'create', name: 'late-rule', content: '---\nname: late-rule\ndescription: Use when verifying a late commit.\n---\nKeep the actual result.' }] }), usage: { inputTokens: 1, outputTokens: 1 } }));
   const onState = vi.fn();
   const onResult = vi.fn(() => { throw new Error('fixture observer failure'); });
   expect(await remote!.finishRemoteLearning({ client, projectId: savedOrigin.workspaceId, origin: mutableOrigin,
@@ -380,7 +444,9 @@ it('a throwing or mutating remote result observer cannot rewrite the host outcom
 });
 
 it('remote review refuses a host mutation result whose origin belongs to another source', async () => {
-  vi.spyOn(await import('@/runtime/skills/preReview'), 'observeSkillCandidate').mockResolvedValue({ eligible: true, consecutive: 2 });
+  fixtureCandidates = { version: 1, revision: 0, lastId: 'source-candidate', candidates: [{
+    id: 'source-candidate', lesson: 'Check the original source.', context: 'Earlier source task.',
+    sources: [JSON.stringify(['prior-source-session', 'prior-source-turn'])], consecutive: 1, submitted: false }] };
   const remote = await load();
   const runOrigin = { ...origin, sessionId: 'mutation-result-source', runId: 'job-mutation-result-source' };
   const onState = vi.fn();
@@ -399,7 +465,8 @@ it('remote review refuses a host mutation result whose origin belongs to another
   const result = await remote!.finishRemoteLearning({ client: new RunnerClient('https://mutation-result-runner.test', 'fixture-auth'),
     projectId: runOrigin.workspaceId, origin: runOrigin, userText: 'Correction.', finalAnswer: 'Done.',
     userCorrections: [{ text: 'Read before editing.', occurredAt: 1 }], onState,
-    model: { capability: 'completion-only', complete: async (request) => ({ text: JSON.stringify({ version: 1,
+    model: { capability: 'completion-only', complete: async (request) => ({ text: request.system.includes('语义比对器')
+      ? JSON.stringify({ candidateId: 'source-candidate', similarity: 0.99 }) : JSON.stringify({ version: 1,
       kind: 'propose', lesson: 'Check the original source.', evidenceIds: JSON.parse(request.userContent).evidence
         .map((item: { evidenceId: string }) => item.evidenceId), operations: [{ action: 'create', name: 'source-check',
           content: '---\nname: source-check\ndescription: Use when checking the original source.\n---\nVerify the source.' }] }) }) } });

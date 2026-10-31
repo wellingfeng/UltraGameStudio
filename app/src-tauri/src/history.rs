@@ -13,6 +13,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::storage_paths;
 
+#[path = "history_retention.rs"]
+mod history_retention;
+use history_retention::delete_session_backups;
+
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 
@@ -350,6 +354,13 @@ fn prune_backup_siblings(root: &Path, rel_path: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+pub async fn history_delete_session_backups(rel_path: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || delete_session_backups(&global_history_root()?, &rel_path))
+        .await
+        .map_err(|error| format!("清理会话备份调度失败: {error}"))?
+}
+
 fn maybe_prune_backup_root(root: &Path) {
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -442,6 +453,43 @@ fn validate_json(json: &str) -> Result<(), String> {
         .map_err(|e| format!("JSON 无效: {e}"))
 }
 
+fn is_memory_path(rel: &str) -> bool {
+    normalized_rel_segments(rel)
+        .ok()
+        .and_then(|parts| parts.first().cloned())
+        .is_some_and(|part| part.eq_ignore_ascii_case("memories"))
+}
+
+#[tauri::command]
+pub async fn memory_read_json(window: tauri::WebviewWindow, rel_path: String) -> Result<Option<String>, String> {
+    crate::require_skill_app(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::memory_transactions::read_at(&global_history_root()?, &rel_path)
+    })
+    .await
+    .map_err(|e| format!("memory_read_json dispatch failed: {e}"))?
+}
+
+#[tauri::command]
+pub async fn memory_compare_exchange_json(
+    window: tauri::WebviewWindow,
+    rel_path: String,
+    expected_json: Option<String>,
+    json: String,
+) -> Result<String, String> {
+    crate::require_skill_app(&window)?;
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::memory_transactions::compare_exchange_at(
+            &global_history_root()?,
+            &rel_path,
+            expected_json.as_deref(),
+            &json,
+        )
+    })
+    .await
+    .map_err(|e| format!("memory_compare_exchange_json dispatch failed: {e}"))?
+}
+
 /// Return the absolute path of the `.ultragamestudio` root, creating it on first
 /// access. The frontend uses this for diagnostics; it must not hardcode the
 /// path.
@@ -465,6 +513,9 @@ pub async fn history_read_json(rel_path: String) -> Result<Option<String>, Strin
             return Err("history_read_json 只接受 .json 路径".into());
         }
         let root = global_history_root()?;
+        if is_memory_path(&rel_path) {
+            return crate::memory_transactions::read_at(&root, &rel_path);
+        }
         let path = safe_join(&root, &rel_path)?;
         match fs::read_to_string(&path) {
             Ok(s) => {
@@ -496,6 +547,12 @@ pub async fn history_write_json(rel_path: String, json: String) -> Result<(), St
         validate_json(&json)?;
 
         let root = global_history_root()?;
+        if is_memory_path(&rel_path) {
+            return Err(
+                "Memory writes require exact memory_compare_exchange_json; legacy overwrite denied"
+                    .into(),
+            );
+        }
         let path = safe_join(&root, &rel_path)?;
         if path.exists() && path.is_dir() {
             return Err(format!("目标是目录，不能写入 JSON: {}", path.display()));
@@ -520,6 +577,9 @@ pub async fn history_write_json(rel_path: String, json: String) -> Result<(), St
 pub async fn history_remove(rel_path: String, soft: bool) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let root = global_history_root()?;
+        if is_memory_path(&rel_path) {
+            return Err("Memory removal requires a scoped CAS transaction".into());
+        }
         let path = safe_join(&root, &rel_path)?;
         if !path.exists() {
             return Ok(());

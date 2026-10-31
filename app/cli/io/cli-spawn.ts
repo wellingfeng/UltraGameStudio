@@ -1,3 +1,5 @@
+import { captureToolCatalog } from './tool-catalog';
+import { prepareToolCatalogAccess } from './tool-catalog-access';
 /**
  * Node `child_process.spawn` port of the Tauri `ai_cli` command
  * (`src-tauri/src/lib.rs`). It reproduces the exact argv, stdin handling,
@@ -616,6 +618,12 @@ export async function spawnCliAgent(prompt: string, opts: SpawnCliAgentOpts): Pr
 }
 
 function spawnCliAgentProcess(prompt: string, opts: SpawnCliAgentOpts): Promise<string> {
+  const accessEnv = { ...process.env, ...opts.env };
+  const guidance = prepareToolCatalogAccess(accessEnv);
+  if (guidance) {
+    prompt = guidance + prompt;
+    opts = { ...opts, env: { ...opts.env, UGS_TOOLS_CLI: accessEnv.UGS_TOOLS_CLI! } };
+  }
   const protocol = adapterProtocol(opts.adapter);
   const parseNative = createCliNativeToolParser({ adapter: opts.adapter, runId: opts.runId ?? randomUUID() });
   if (protocol === 'claude') {
@@ -725,6 +733,7 @@ function spawnCliAgentProcess(prompt: string, opts: SpawnCliAgentOpts): Promise<
       return;
     }
 
+    const catalog = captureToolCatalog(env, opts.adapter, opts.model, opts.runId ?? randomUUID());
     const timeoutSecs = resolveTimeoutSecs(opts.timeoutSeconds);
     const idleSecs = resolveIdleTimeoutSecs(opts.idleTimeoutSeconds);
 
@@ -745,6 +754,7 @@ function spawnCliAgentProcess(prompt: string, opts: SpawnCliAgentOpts): Promise<
 
     const finishReject = (msg: string) => {
       if (settled) return;
+      catalog?.finish();
       settled = true;
       cleanupTimers();
       cleanupTempDirs();
@@ -752,6 +762,7 @@ function spawnCliAgentProcess(prompt: string, opts: SpawnCliAgentOpts): Promise<
     };
     const finishResolve = (out: string) => {
       if (settled) return;
+      catalog?.finish();
       settled = true;
       cleanupTimers();
       cleanupTempDirs();
@@ -813,7 +824,9 @@ function spawnCliAgentProcess(prompt: string, opts: SpawnCliAgentOpts): Promise<
         }));
         return;
       }
+      catalog?.init(v);
       for (const event of parseNative(v)) {
+        catalog?.observe(event);
         try { opts.onNativeToolEvent?.(event); } catch { /* Auxiliary observers cannot break the foreground task. */ }
       }
       if (isCodex) {

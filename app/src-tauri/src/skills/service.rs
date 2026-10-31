@@ -10,6 +10,7 @@ pub(super) struct RunGrant {
     pub mode: LearningMode,
     pub actor: SkillActor,
     pub revoked: bool,
+    pub bound: bool,
     pub evidence: std::collections::BTreeMap<String, super::types::SkillEvidence>,
 }
 
@@ -77,11 +78,11 @@ impl SkillService {
         };
         let mut grants = self.grants.lock().map_err(|_| "grant lock poisoned")?;
         let mut candidate = if let Some(prior) = grants.get(&origin.run_id) {
-            if prior.origin != origin || prior.mode != mode || prior.actor != actor {
-                return Err("run already bound to another authority".into());
-            }
             if prior.revoked {
                 return Err("run authority revoked".into());
+            }
+            if prior.origin != origin || prior.mode != mode || prior.actor != actor {
+                return Err("run already bound to another authority".into());
             }
             prior.clone()
         } else {
@@ -91,6 +92,7 @@ impl SkillService {
                 mode,
                 actor,
                 revoked: false,
+                bound: true,
                 evidence: std::collections::BTreeMap::new(),
             }
         };
@@ -101,12 +103,42 @@ impl SkillService {
     }
 
     pub fn revoke_run(&self, origin: &SkillOrigin) -> Result<(), String> {
-        self.authority(origin)?;
+        if origin.host_id != "local"
+            || [
+                &origin.workspace_id,
+                &origin.session_id,
+                &origin.turn_id,
+                &origin.run_id,
+            ]
+            .iter()
+            .any(|id| id.is_empty() || id.len() > 256 || id.contains('\0'))
+        {
+            return Err("invalid origin identifier".into());
+        }
+        // This is the same lock held through a dispatched commit. A revoke
+        // acknowledgement cannot overtake that commit or a concurrent bind.
         let mut grants = self.grants.lock().map_err(|_| "grant lock poisoned")?;
-        grants
-            .get_mut(&origin.run_id)
-            .ok_or("unbound origin")?
-            .revoked = true;
+        if let Some(grant) = grants.get_mut(&origin.run_id) {
+            if &grant.origin != origin {
+                return Err("origin does not match frozen host binding".into());
+            }
+            grant.revoked = true;
+        } else {
+            // Trusted app cancellation may arrive while source validation is
+            // still reading. Retain its exact identity so a late bind is denied.
+            grants.insert(
+                origin.run_id.clone(),
+                RunGrant {
+                    origin: origin.clone(),
+                    cwd: None,
+                    mode: LearningMode::Off,
+                    actor: SkillActor::Background,
+                    revoked: true,
+                    bound: false,
+                    evidence: std::collections::BTreeMap::new(),
+                },
+            );
+        }
         Ok(())
     }
 
@@ -126,6 +158,9 @@ impl SkillService {
     pub(super) fn authority(&self, origin: &SkillOrigin) -> Result<RunGrant, String> {
         let grants = self.grants.lock().map_err(|_| "grant lock poisoned")?;
         let grant = grants.get(&origin.run_id).ok_or("unbound origin")?;
+        if !grant.bound {
+            return Err("run authority revoked before binding".into());
+        }
         if &grant.origin != origin {
             return Err("origin does not match frozen host binding".into());
         }

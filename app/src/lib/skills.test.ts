@@ -2,6 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { createSkillControlHost, createSkillHost, type SkillServiceRequest } from './skills';
 import type { SkillCatalog, SkillOrigin, SkillProposal } from '@/runtime/skills/types';
 
+const native = vi.hoisted(() => ({ invoke: vi.fn(), getSession: vi.fn() }));
+vi.mock('@/lib/tauri', () => ({ tauriAvailable: () => true }));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }));
+vi.mock('@/store/history/store', () => ({ historyStore: { getSession: native.getSession } }));
+
 const origin = (): SkillOrigin => ({
   hostId: 'local', workspaceId: 'workspace-a', sessionId: 'session-a',
   turnId: 'turn-a', runId: 'run-a', cwd: 'E:/project-a',
@@ -15,6 +20,76 @@ const proposal: SkillProposal = {
 };
 
 describe('origin-bound skill host', () => {
+  it('awaits native revoke acknowledgement without waiting for a pending bind and denies late dispatch', async () => {
+    let releaseBind!: () => void;
+    let acknowledge!: () => void;
+    const bindGate = new Promise<void>((resolve) => { releaseBind = resolve; });
+    const revokeGate = new Promise<void>((resolve) => { acknowledge = resolve; });
+    let tombstone = false;
+    native.invoke.mockReset().mockImplementation(async (command) => {
+      if (command === 'history_read_json') return JSON.stringify({ id: 'session-a', workspaceId: 'workspace-a',
+        messages: [{ id: 'turn-a', role: 'user', text: 'Persisted source.' }] });
+      if (command === 'skills_bind_run') { await bindGate; if (tombstone) throw new Error('run authority revoked'); }
+      if (command === 'skills_revoke_run') { await revokeGate; tombstone = true; }
+      return { revision: 'empty', entries: [] };
+    });
+    const host = createSkillHost({ origin: origin(), mode: 'auto-safe', evidence: [] });
+    const list = host.list(); void list.catch(() => {});
+    await vi.dynamicImportSettled();
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    expect(native.invoke.mock.calls.some(([command]) => command === 'skills_bind_run')).toBe(true);
+    let settled = false;
+    const revoked = host.revoke().then(() => { settled = true; });
+    await vi.dynamicImportSettled();
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    const revokeDispatchedBeforeBind = native.invoke.mock.calls.some(([command]) => command === 'skills_revoke_run');
+    expect(settled).toBe(false);
+    acknowledge();
+    for (let i = 0; i < 30; i++) await Promise.resolve();
+    const revokedBeforeBind = settled;
+    releaseBind(); await revoked; await list.catch(() => {});
+    expect({ revokeDispatchedBeforeBind, revokedBeforeBind }).toEqual({ revokeDispatchedBeforeBind: true, revokedBeforeBind: true });
+    expect(tombstone).toBe(true);
+    expect(native.invoke.mock.calls.some(([command]) => command === 'skills_request')).toBe(false);
+    await expect(host.manage(proposal)).rejects.toThrow('SKILL_REVIEW_CANCELLED');
+  });
+
+  it('does not assume that a custom revoke prevents a late custom bind', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const bind = vi.fn(async () => { await gate; });
+    const revoke = vi.fn(async () => {});
+    const request = vi.fn(async () => ({}));
+    const host = createSkillHost({ origin: origin(), mode: 'auto-safe', evidence: [], bind, revoke,
+      request: async <T>(): Promise<T> => await request() as T });
+    const list = host.list(); void list.catch(() => {});
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    let settled = false; const revoked = host.revoke().then(() => { settled = true; });
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(settled).toBe(false); expect(revoke).not.toHaveBeenCalled();
+    release(); await revoked; await expect(list).rejects.toThrow('SKILL_REVIEW_CANCELLED');
+    expect(revoke).toHaveBeenCalledTimes(1); expect(request).not.toHaveBeenCalled();
+  });
+
+  it('refuses native authority for an empty persisted session even when ready resolves', async () => {
+    native.invoke.mockReset().mockImplementation(async (command) => command === 'history_read_json'
+      ? JSON.stringify({ id: 'session-a', workspaceId: 'workspace-a', messages: [] }) : { revision: 'empty', entries: [] });
+    native.getSession.mockReset().mockResolvedValue({ id: 'session-a', workspaceId: 'workspace-a', messages: [] });
+    const host = createSkillHost({ origin: origin(), mode: 'auto-safe', evidence: [], ready: Promise.resolve() });
+    await expect(host.list()).rejects.toThrow('SKILL_SOURCE_MESSAGE_NOT_PERSISTED');
+    expect(native.invoke.mock.calls.map(([command]) => command)).toEqual(['history_read_json']);
+  });
+
+  it('re-reads native storage instead of granting authority from a stale session cache', async () => {
+    native.getSession.mockReset().mockResolvedValue({ id: 'session-a', workspaceId: 'workspace-a',
+      messages: [{ id: 'turn-a', role: 'user', text: 'Cached but absent on disk.' }] });
+    native.invoke.mockReset().mockImplementation(async (command) => command === 'history_read_json'
+      ? JSON.stringify({ id: 'session-a', workspaceId: 'workspace-a', messages: [] }) : { revision: 'empty', entries: [] });
+    const host = createSkillHost({ origin: origin(), mode: 'auto-safe', evidence: [], ready: Promise.resolve() });
+    await expect(host.list()).rejects.toThrow('SKILL_SOURCE_MESSAGE_NOT_PERSISTED');
+    expect(native.invoke.mock.calls.some(([command]) => command === 'skills_bind_run')).toBe(false);
+  });
+
   it('awaits persisted-session readiness and binds once before any local request', async () => {
     let release!: () => void;
     const ready = new Promise<void>((resolve) => { release = resolve; });

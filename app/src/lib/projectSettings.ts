@@ -613,7 +613,7 @@ export function projectHealth(
   const enabledServers = settings.mcp.enabled
     ? settings.mcp.servers.filter((server) => server.enabled)
     : [];
-  const connected = enabledServers.find((server) => server.lastProbe?.ok);
+  const connected = enabledServers.find((server) => server.lastProbe?.ok && server.lastProbe.status === 'connected');
   if (connected) {
     return {
       tone: 'connected',

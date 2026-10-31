@@ -39,7 +39,7 @@
 .scheduled-task-dot { width: 5px; height: 5px; flex-shrink: 0; border-radius: 50%; border: 1px solid var(--fg-faint); }
 .scheduled-task-dot.is-enabled { background: var(--fg-dim); border-color: var(--fg-dim); }
 .scheduled-task-add { display: flex; justify-content: center; align-items: center; width: 100%; height: 30px; color: var(--fg-faint); border-radius: 3px; }
-.scheduled-tasks-main { display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
+.scheduled-tasks-main { position: relative; display: flex; flex-direction: column; flex: 1; min-width: 0; min-height: 0; }
 .scheduled-tasks-content { flex: 1; min-height: 0; overflow-y: auto; padding: 24px 24px 32px; }
 .scheduled-task-detail { width: 100%; min-width: 0; }
 .scheduled-task-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 20px; }

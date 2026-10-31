@@ -41,6 +41,299 @@ fn proposal(content: &str) -> SkillProposal {
     SkillProposal { version: 1, kind: "propose".into(), lesson: "Read complete files before changing them, because a summary omits existing constraints.".into(), evidence_ids: vec!["correction-1".into()], operations: vec![SkillOperation::Create { name: "complete-reading".into(), content: content.into() }] }
 }
 
+fn assert_multi_create_has_no_side_effects(mode: LearningMode) {
+    let f = Fixture::new("multi-create-no-side-effects");
+    let (s, o) = service(&f, "run-multi-create", mode);
+    s.record_evidence(&o, &[evidence(&o)]).unwrap();
+    f.write("project/keep.txt", "Unchanged project bytes.\n");
+    f.write("global/keep.txt", "Unchanged global bytes.\n");
+    let before_project = super::service::read_package(&f.project()).unwrap();
+    let before_global = super::service::read_package(&f.global()).unwrap();
+    let p = SkillProposal {
+        operations: ["first-new-class", "second-new-class"]
+            .into_iter()
+            .map(|name| SkillOperation::Create {
+                name: name.into(),
+                content: skill(name, "Read complete files before applying a lesson."),
+            })
+            .collect(),
+        ..proposal("")
+    };
+    // Bypass the reviewer parser and call the real filesystem host directly.
+    let result = s.manage(&o, &p).unwrap();
+    assert_eq!(
+        result.status, "failed",
+        "approval mode must not permit multiple creates"
+    );
+    assert_eq!(result.operations_applied, 0);
+    assert!(result.changes.is_empty());
+    assert!(result.rollback_id.is_none());
+    assert!(result.error.as_deref().unwrap().contains("at most one"));
+    assert_eq!(
+        super::service::read_package(&f.project()).unwrap(),
+        before_project
+    );
+    assert_eq!(
+        super::service::read_package(&f.global()).unwrap(),
+        before_global
+    );
+    assert!(
+        !f.project().join(".ultragamestudio").exists(),
+        "rejected batches must not create a root, stage or audit ledger"
+    );
+    assert!(!f.global().join("skills").exists());
+}
+
+#[test]
+fn approve_all_rejects_multiple_creates_before_any_files_or_audit() {
+    assert_multi_create_has_no_side_effects(LearningMode::ApproveAll);
+}
+
+#[test]
+fn auto_safe_rejects_multiple_creates_before_any_files_or_audit() {
+    assert_multi_create_has_no_side_effects(LearningMode::AutoSafe);
+}
+
+#[test]
+fn approve_all_rejects_multi_create_mixed_batch_without_changing_existing_ledger() {
+    let f = Fixture::new("multi-create-existing-ledger");
+    f.write(
+        "project/.ultragamestudio/skills/existing/SKILL.md",
+        &skill("existing", "Keep every original rule."),
+    );
+    f.write(
+        "project/.ultragamestudio/skills/existing/references/keep.md",
+        "Unchanged supporting bytes.\n",
+    );
+    let (s, o) = service(&f, "run-multi-create-mixed", LearningMode::ApproveAll);
+    s.record_evidence(&o, &[evidence(&o)]).unwrap();
+    let entry = s.list(&o).unwrap().entries.remove(0);
+    let read = s.view(&o, &entry.skill_id, None).unwrap();
+    let mut operations = vec![SkillOperation::Patch {
+        skill_id: entry.skill_id,
+        file_path: None,
+        old_string: "Keep every original rule.".into(),
+        new_string: "Keep every original rule. Read the complete target first.".into(),
+        expected_hash: read.hash,
+        read_receipt_id: read.read_receipt_id,
+    }];
+    operations.extend(
+        ["first-new-class", "second-new-class"]
+            .into_iter()
+            .map(|name| SkillOperation::Create {
+                name: name.into(),
+                content: skill(name, "Check the complete target before publishing."),
+            }),
+    );
+    // Include the existing SQLite receipt/audit bytes in the readback snapshot.
+    let before = super::service::read_package(&f.0).unwrap();
+    let result = s
+        .manage(
+            &o,
+            &SkillProposal {
+                operations,
+                ..proposal("")
+            },
+        )
+        .unwrap();
+    assert_eq!(result.status, "failed");
+    assert_eq!(result.operations_applied, 0);
+    assert!(result.changes.is_empty());
+    assert!(result.error.as_deref().unwrap().contains("at most one"));
+    assert_eq!(super::service::read_package(&f.0).unwrap(), before);
+    assert!(!f
+        .project()
+        .join(".ultragamestudio/skills/.state/transactions")
+        .exists());
+    let user = SkillService::new(f.global());
+    user.bind_run(o.clone(), LearningMode::ApproveAll, SkillActor::User)
+        .unwrap();
+    assert!(user.approve(&o, &result.batch_id).is_err());
+    assert!(user.history(&o).unwrap().is_empty());
+}
+
+fn assert_one_create_additive_batch(mode: LearningMode) {
+    let f = Fixture::new("one-create-additive");
+    let original = skill("existing", "Keep every original rule.");
+    f.write(
+        "project/.ultragamestudio/skills/existing/SKILL.md",
+        &original,
+    );
+    f.write(
+        "project/.ultragamestudio/skills/existing/references/keep.md",
+        "Unchanged supporting bytes.\n",
+    );
+    let (s, o) = service(&f, "run-one-create-additive", mode);
+    s.record_evidence(&o, &[evidence(&o)]).unwrap();
+    let entry = s.list(&o).unwrap().entries.remove(0);
+    let user = SkillService::new(f.global());
+    user.bind_run(o.clone(), mode, SkillActor::User).unwrap();
+    user.set_policy(
+        &o,
+        &entry.skill_id,
+        &SkillPolicy {
+            auto_editable: Some(true),
+            ..SkillPolicy::default()
+        },
+    )
+    .unwrap();
+    let read = s.view(&o, &entry.skill_id, None).unwrap();
+    let new_content = skill("one-new-class", "Verify the full target before publishing.");
+    let p = SkillProposal {
+        operations: vec![
+            SkillOperation::Create {
+                name: "one-new-class".into(),
+                content: new_content.clone(),
+            },
+            SkillOperation::Patch {
+                skill_id: entry.skill_id.clone(),
+                file_path: None,
+                old_string: "Keep every original rule.".into(),
+                new_string: "Keep every original rule. Read the complete target first.".into(),
+                expected_hash: read.hash,
+                read_receipt_id: read.read_receipt_id,
+            },
+        ],
+        ..proposal("")
+    };
+    let root = f.project().join(".ultragamestudio/skills");
+    let result = s.manage(&o, &p).unwrap();
+    let applied = if mode == LearningMode::ApproveAll {
+        assert_eq!(result.status, "awaiting_approval");
+        assert_eq!(result.operations_applied, 0);
+        assert_eq!(
+            std::fs::read_to_string(root.join("existing/SKILL.md")).unwrap(),
+            original
+        );
+        assert!(!root.join("one-new-class").exists());
+        user.approve(&o, &result.batch_id).unwrap()
+    } else {
+        result
+    };
+    assert_eq!(applied.status, "applied", "{:?}", applied.error);
+    assert_eq!(applied.operations_applied, 2);
+    assert_eq!(applied.changes.len(), 2);
+    assert_eq!(
+        std::fs::read_to_string(root.join("one-new-class/SKILL.md")).unwrap(),
+        new_content
+    );
+    let updated = original.replace(
+        "Keep every original rule.",
+        "Keep every original rule. Read the complete target first.",
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("existing/SKILL.md")).unwrap(),
+        updated
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("existing/references/keep.md")).unwrap(),
+        "Unchanged supporting bytes.\n"
+    );
+    let fresh = SkillService::new(f.global());
+    let next = origin(&f, "run-fresh-read");
+    fresh
+        .bind_run(next.clone(), mode, SkillActor::User)
+        .unwrap();
+    let entries = fresh.list(&next).unwrap().entries;
+    assert_eq!(entries.len(), 2);
+    for (name, content) in [("existing", updated), ("one-new-class", new_content)] {
+        let id = &entries
+            .iter()
+            .find(|entry| entry.name == name)
+            .unwrap()
+            .skill_id;
+        let readback = fresh.view(&next, id, None).unwrap();
+        assert_eq!(readback.content, content);
+        assert_eq!(
+            applied
+                .changes
+                .iter()
+                .find(|change| &change.skill_id == id)
+                .unwrap()
+                .after_hash,
+            Some(readback.hash)
+        );
+    }
+    assert_eq!(user.history(&o).unwrap()[0].status, "applied");
+    let rolled = user
+        .rollback(&o, applied.rollback_id.as_deref().unwrap())
+        .unwrap();
+    assert_eq!(rolled.status, "applied");
+    assert_eq!(rolled.operations_applied, 2);
+    assert_eq!(
+        std::fs::read_to_string(root.join("existing/SKILL.md")).unwrap(),
+        original
+    );
+    assert!(!root.join("one-new-class").exists());
+    assert!(!f.global().join("skills/one-new-class").exists());
+}
+
+#[test]
+fn auto_safe_allows_one_create_with_existing_additive_patch() {
+    assert_one_create_additive_batch(LearningMode::AutoSafe);
+}
+
+#[test]
+fn approve_all_allows_one_create_with_existing_additive_patch_after_approval() {
+    assert_one_create_additive_batch(LearningMode::ApproveAll);
+}
+
+#[test]
+fn approval_rejects_legacy_multi_create_pending_batch_before_publication() {
+    use super::catalog::identity;
+    use super::service::Snapshot;
+    use super::state::RootGuard;
+    use super::transactions::{self, Batch, PackageChange};
+    let f = Fixture::new("legacy-multi-create-approval");
+    let user = SkillService::new(f.global());
+    let o = origin(&f, "run-legacy-multi-create");
+    user.bind_run(o.clone(), LearningMode::ApproveAll, SkillActor::User)
+        .unwrap();
+    let root = user.create_root(&o, &user.authority(&o).unwrap()).unwrap();
+    let mut pending = transactions::result(&o, "Legacy multiple-create proposal").unwrap();
+    pending.status = "awaiting_approval".into();
+    let batch = Batch {
+        version: 1,
+        root_id: root.root_id.clone(),
+        result: pending.clone(),
+        packages: ["legacy-first", "legacy-second"]
+            .into_iter()
+            .map(|name| PackageChange {
+                relative_path: name.into(),
+                skill_id: identity(&[&o.host_id, &o.workspace_id, &root.root_id, name]),
+                name: name.into(),
+                before: Snapshot::new(),
+                after: Snapshot::from([(
+                    "SKILL.md".into(),
+                    skill(name, "Read full targets before publishing.").into_bytes(),
+                )]),
+                before_metadata: Default::default(),
+                after_metadata: Default::default(),
+            })
+            .collect(),
+        evidence: vec![],
+        proposal: None,
+    };
+    // Model the valid durable format produced before this host limit existed.
+    let guard = RootGuard::open(&root).unwrap();
+    let dir = transactions::save_batch(&root, &batch).unwrap();
+    guard.save_result(&pending).unwrap();
+    guard.commit().unwrap();
+    drop(guard);
+    let before = super::service::read_package(&f.0).unwrap();
+    let outcome = user.approve(&o, &pending.batch_id);
+    assert!(
+        outcome.is_err(),
+        "approval must not publish a legacy multi-create batch: {outcome:?}"
+    );
+    assert!(outcome.unwrap_err().contains("at most one"));
+    assert_eq!(super::service::read_package(&f.0).unwrap(), before);
+    assert!(!root.path.join("legacy-first").exists());
+    assert!(!root.path.join("legacy-second").exists());
+    assert!(!dir.join("applying").exists());
+    assert!(!dir.join("applied.json").exists());
+}
+
 #[test]
 fn revocation_before_pending_save_cancels_the_real_manage_request() {
     use std::sync::{mpsc, Arc};

@@ -92,6 +92,19 @@ describe('HTML theme preview', () => {
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(fetch.mock.calls[1][1].cache).toBe('no-store');
   });
+  it('changes only the preview zoom and accepts messages only from its iframe', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('<p>正文</p>')));
+    await act(async () => root.render(createElement(HtmlPreviewPane, { file })));
+    const frame = container.querySelector('iframe')!;
+    const original = frame.srcdoc;
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="放大预览"]')!.click());
+    expect(container.querySelector('output')?.textContent).toBe('120%');
+    expect(frame.srcdoc).toBe(original);
+    await act(async () => window.dispatchEvent(new MessageEvent('message', { source: window, data: { type: 'ugs-preview-zoom', value: 3 } })));
+    expect(container.querySelector('output')?.textContent).toBe('120%');
+    await act(async () => window.dispatchEvent(new MessageEvent('message', { source: frame.contentWindow, data: { type: 'ugs-preview-zoom', value: 1.5 } })));
+    expect(container.querySelector('output')?.textContent).toBe('150%');
+  });
   it('shows file loading failures instead of an empty preview', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response('', { status: 404 })));
     await act(async () => root.render(createElement(HtmlPreviewPane, { file })));

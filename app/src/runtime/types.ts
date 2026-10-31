@@ -397,7 +397,7 @@ export interface RunContext {
     model?: SkillReviewModelPort;
     explicitSkillIds?: readonly string[];
     signal?: AbortSignal;
-    onLoaded?: (result: LoadedSkillContext) => void;
+    onLoaded?: (result: LoadedSkillContext) => void | Promise<void>;
   };
   /** Native event sink; not a decoder of rendered tool-card text. */
   onToolEvent?: (event: SkillNativeToolEvent) => void;

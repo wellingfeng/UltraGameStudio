@@ -100,9 +100,10 @@ import {
   setActiveGatewaySelection,
 } from '@/lib/gatewayConfig';
 import { getCliRuntimeSnapshot } from '@/lib/cliConfig';
+import { readPersistedSkillSourceSession } from '@/lib/skills';
 import { beginSkillLearningTurn, performSkillReviewAction, requestExplicitSkillLearning, resumeSkillLearningReview, isSkillReviewLive } from '@/lib/skillLearningDesktop';
 import { loadSkillLearningConfig } from '@/lib/skillLearningConfig';
-import type { SkillMutationResult, SkillOrigin, SkillReviewState } from '@/runtime/skills/types';
+import type { SkillLearningJob, SkillMutationResult, SkillOrigin, SkillReviewState } from '@/runtime/skills/types';
 import { ensureFreeProxy, isFreeChannelSelection } from '@/lib/freeChannels';
 import { getManifestModeEnabled } from '@/lib/manifestMode';
 import {
@@ -274,12 +275,11 @@ import {
 import { runtimeAdapterLabel, type RuntimeAdapterId } from '@/lib/adapters';
 import {
   applyMemoryWrites,
-  getMemoryUsage,
   renderFrozenMemorySnapshot,
   renderMemorySnapshotCompact,
 } from '@/lib/memoryStore';
-import { runConsolidatingReview } from '@/lib/memoryConsolidate';
-import { makeReviewInvoker } from '@/lib/memoryRefresh';
+import { beginMemoryReviewTurn, cancelMemoryReviews } from '@/lib/memoryReviewDesktop';
+import { buildMemoryReviewMessages, preemptReviewBackground } from '@/runtime/memory/review';
 import { renderKnowledgeBaseContextForPrompt } from '@/lib/knowledgeBase';
 import {
   MEMORY_WRITE_INSTRUCTION,
@@ -307,16 +307,7 @@ import {
   type SessionSearchHit,
 } from '@/lib/sessionSearch';
 import { searchSessionsIndexed } from '@/lib/sessionIndex';
-import {
-  loadMemoryConfig,
-  getLastReviewAt,
-  setLastReviewAt,
-} from '@/lib/memoryConfig';
-import {
-  shouldRunReview,
-  buildReviewTranscript,
-  formatReviewMemoryContext,
-} from '@/core/memoryReview';
+import { loadMemoryConfig } from '@/lib/memoryConfig';
 import {
   INTERACTION_PROTOCOL,
   detectFallbackInteraction,
@@ -2123,12 +2114,14 @@ export function normalizeScheduledTask(
   if (raw.timeZone !== undefined && (typeof raw.timeZone !== 'string' || !validTimeZone(raw.timeZone))) return undefined;
   if (raw.onceAt !== undefined && (typeof raw.onceAt !== 'number' || !Number.isFinite(raw.onceAt) || raw.cronExpression !== undefined)) return undefined;
   if (raw.promptLocale !== undefined && !SUPPORTED_LOCALES.includes(raw.promptLocale)) return undefined;
+  if (raw.maxHistoryRuns !== undefined && (!Number.isSafeInteger(raw.maxHistoryRuns) || raw.maxHistoryRuns < 1)) return undefined;
   return {
     ...(typeof raw.name === 'string' ? { name: raw.name.trim() } : {}),
     ...(typeof raw.templateId === 'string' ? { templateId: raw.templateId } : {}),
     ...(raw.cronExpression !== undefined ? { cronExpression: raw.cronExpression.trim() } : {}),
     ...(raw.timeZone !== undefined ? { timeZone: raw.timeZone } : {}),
     ...(raw.promptLocale !== undefined ? { promptLocale: raw.promptLocale } : {}),
+    ...(raw.maxHistoryRuns !== undefined ? { maxHistoryRuns: raw.maxHistoryRuns } : {}),
     ...(raw.onceAt !== undefined ? { onceAt: raw.onceAt } : {}),
     ...(typeof raw.lastError === 'string' ? { lastError: raw.lastError } : {}),
     enabled: raw.enabled,
@@ -2910,6 +2903,37 @@ function pruneAiEditSourcesForDeletion(
       aiEditSnapshots.set(ch.key, cloneAiEditSnapshot(ch));
     }
   }
+}
+
+export async function pruneScheduledTaskHistory(workspaceId: string, sessionId: string): Promise<void> {
+  flushAiEditPersistKey(aiEditPersistKey(workspaceId, sessionId));
+  const result = await historyStore.pruneScheduledTaskHistory(workspaceId, sessionId, () => new Set(
+    getAiEditChannelsForSession(workspaceId, sessionId).flatMap((channel) => [...(channel.ownedMessageIds ?? [])]),
+  ));
+  if (!result) return;
+  if (!result.removedIds.length) {
+    if (result.backupError) throw result.backupError;
+    return;
+  }
+  const removedIds = new Set(result.removedIds);
+  pruneAiEditSourcesForDeletion(workspaceId, sessionId, removedIds);
+  useStore.setState((state) => {
+    const viewing = state.activeWorkspaceId === workspaceId && state.activeSessionId === sessionId;
+    const messages = viewing ? removeMessagesById(state.messages, removedIds) : undefined;
+    const sourceMessages = messages ?? getAiEditViewSource(workspaceId, sessionId)?.messages ?? result.record.messages;
+    const last = [...sourceMessages].reverse().find((message) => message.text.trim());
+    const update = (session: Session): Session => sessionMatchesTarget(session, sessionId, workspaceId)
+      ? { ...session, messageCount: sourceMessages.length, preview: last ? previewFromText(last.text) : undefined }
+      : session;
+    return {
+      ...(messages ? { messages, workflow: simpleWorkflowFromMessages(state.workflow, messages) } : {}),
+      sessions: state.sessions.map(update),
+      sessionTree: state.sessionTree[workspaceId]
+        ? { ...state.sessionTree, [workspaceId]: state.sessionTree[workspaceId].map(update) }
+        : state.sessionTree,
+    };
+  });
+  if (result.backupError) throw result.backupError;
 }
 
 export function applyPromptTitle(
@@ -4395,6 +4419,7 @@ async function runScheduledTaskHistorySession(
     if (sessionLiveStatus(sessionKey, useStore.getState())) throw new Error(scheduleText(state.locale, 'busy'));
     if (!useStore.getState().sendPrompt(normalizedTask.reminderText, {
       locale: normalizedTask.promptLocale,
+      scheduledTaskRun: true,
       externalSession: { workspaceId: SCHEDULED_TASK_SCOPE, sessionId, messages },
     })) throw new Error(scheduleText(state.locale, 'failed'));
     return;
@@ -4418,7 +4443,7 @@ async function runScheduledTaskHistorySession(
   }
 
   if (current.workflow.meta?.simple === true || target.isWorkflow === false) {
-    if (!current.sendPrompt(normalizedTask.reminderText, { locale: normalizedTask.promptLocale })) {
+    if (!current.sendPrompt(normalizedTask.reminderText, { locale: normalizedTask.promptLocale, scheduledTaskRun: true })) {
       throw new Error(scheduleText(state.locale, 'failed'));
     }
     return;
@@ -4940,8 +4965,17 @@ export const useStore = create<StoreState>((set, get) => ({
   runScheduledTaskSession: (sessionId, workspaceId, scheduledTask) =>
     runScheduledTaskHistorySession(sessionId, workspaceId, scheduledTask),
 
-  setBackgroundJobState: (jobSessions, jobSessionProgress, jobDetails = []) =>
-    useStore.setState({ jobSessions, jobSessionProgress, jobDetails }),
+  setBackgroundJobState: (jobSessions, jobSessionProgress, jobDetails = []) => {
+    const previousJobs = useStore.getState().jobSessions;
+    useStore.setState({ jobSessions, jobSessionProgress, jobDetails });
+    for (const key of previousJobs) {
+      if (!key.workspaceId || !key.sessionId || hasSessionKey(jobSessions, key)) continue;
+      const state = useStore.getState();
+      if (!sessionLiveStatus(key, state) && sessionForKey(state, key)?.scheduledTask?.maxHistoryRuns !== undefined) {
+        void pruneScheduledTaskHistory(key.workspaceId, key.sessionId).catch((error) => console.warn('[scheduled-task] 清理历史失败', error));
+      }
+    }
+  },
 
   // AI-driven graph edit (design mode only).
   //
@@ -5171,6 +5205,29 @@ export const useStore = create<StoreState>((set, get) => ({
     return true;
   },
 
+  reviseChatMessage: (messageId, text) => get().sendPrompt(text, { reviseMessageId: messageId }),
+
+  selectChatRevision: (messageId, index) => {
+    const state = get();
+    const position = state.messages.findIndex((message) => message.id === messageId);
+    const message = state.messages[position];
+    if (!state.workflow.meta?.simple || message?.role !== 'user' || !message.chatRevisions?.length ||
+        !Number.isInteger(index) || index < 0 || index > (message.chatRevisions?.length ?? 0) ||
+        isWorkflowReadOnly(state) || getAiEditChatChannels(state.activeWorkspaceId, state.activeSessionId).length) return false;
+    const versions = chatRevisionVersions(state.messages, position);
+    const selected = versions.splice(index, 1)[0];
+    if (!selected || index === (message.chatRevisionIndex ?? versions.length)) return false;
+    const restored = selected.messages.map((item, offset) => offset === 0
+      ? { ...item, chatRevisions: versions, chatRevisionIndex: index,
+          editedAt: Math.max(Date.now(), (message.editedAt ?? message.createdAt) + 1) } : item);
+    const messages = [...state.messages.slice(0, position), ...restored];
+    invalidateChatRevisionSources(state, state.messages.slice(position));
+    const workflow = simpleWorkflowFromMessages(state.workflow, messages);
+    set({ messages, workflow, ...activeMessageSummaryPatch(state, messages) });
+    void persistCurrentConversation(messages).catch((error) => console.warn('[chat-revision] 版本保存失败', error));
+    return true;
+  },
+
   deleteQueuedChatMessage: (messageId) => {
     const entry = queuedChatTurnEntryForMessage(messageId);
     if (!entry) return false;
@@ -5276,6 +5333,13 @@ export const useStore = create<StoreState>((set, get) => ({
         messages: target.messages, mode: 'design' };
     }
     if (isWorkflowReadOnly(state)) return false;
+    const revisionPosition = options?.reviseMessageId
+      ? state.messages.findIndex((message) => message.id === options.reviseMessageId) : -1;
+    const revisionMessage = revisionPosition >= 0 ? state.messages[revisionPosition] : undefined;
+    if (options?.reviseMessageId) {
+      if (options.externalSession || !state.workflow.meta?.simple || revisionMessage?.role !== 'user' || revisionMessage.localOnly ||
+          revisionMessage.interaction || state.queuedChatMessageIds.includes(revisionMessage.id)) return false;
+    }
     // Image generation is routed explicitly (the /image-mode-* sticky mode and
     // /image one-shot command in AIDock), never inferred from message text here.
     // sendPrompt always means AI editing / workflow authoring.
@@ -5307,11 +5371,24 @@ export const useStore = create<StoreState>((set, get) => ({
     // node by withCapturedStartInputs at every commit. Empty ⇒ no-op.
     const provenance: GenProvenance = {};
 
-    const userMsg: Message = {
+    const userMsg: Message = revisionMessage ? {
+      ...revisionMessage,
+      id: shortId('m'),
+      text: trimmed,
+      createdAt: state.messages.reduce((latest, message) => Math.max(latest, message.createdAt + 1), Date.now()),
+      editedAt: Math.max(Date.now(), (revisionMessage.editedAt ?? revisionMessage.createdAt) + 1),
+      replacesMessageId: revisionMessage.id,
+      chatRevisions: undefined,
+      chatRevisionIndex: undefined,
+      interjected: undefined,
+      interjectedReplyId: undefined,
+      skillContext: undefined,
+    } : {
       id: shortId('m'),
       role: 'user',
       text: trimmed,
       createdAt: Date.now(),
+      ...(options?.scheduledTaskRun ? { scheduledTaskRun: true } : {}),
     };
     linkMessageManagedAssets(userMsg, aiEditingSession);
     const promptUpdate = applyPromptTitle(
@@ -5322,7 +5399,7 @@ export const useStore = create<StoreState>((set, get) => ({
     const activeSession = sessionForKey(state, aiEditingSession);
     const simpleMode = promptUpdate.workflow.meta?.simple === true;
     const replayFavoriteSimpleChat =
-      simpleMode && activeSession?.favorite === true && aiEditingSession.workspaceId !== SCHEDULED_TASK_SCOPE;
+      !revisionMessage && simpleMode && activeSession?.favorite === true && aiEditingSession.workspaceId !== SCHEDULED_TASK_SCOPE;
     const baseMessages = replayFavoriteSimpleChat ? [] : state.messages;
     const channelWorkflow = replayFavoriteSimpleChat
       ? setStartUserInputs(promptUpdate.workflow, [])
@@ -5335,7 +5412,7 @@ export const useStore = create<StoreState>((set, get) => ({
     );
     const chatMode = simpleMode;
     const ch: AiEditChannel = {
-      key: chatMode ? chatTurnKey(chSessionKey, userMsg.id) : chSessionKey,
+      key: chatMode ? `${chatTurnKey(chSessionKey, userMsg.id)}${revisionMessage ? `::revision::${userMsg.editedAt}` : ''}` : chSessionKey,
       sessionKey: chSessionKey,
       workspaceId: aiEditingSession.workspaceId,
       sessionId: aiEditingSession.sessionId,
@@ -5353,6 +5430,7 @@ export const useStore = create<StoreState>((set, get) => ({
     let skillLearningTurn: ReturnType<typeof beginSkillLearningTurn> | undefined;
     let skillExecutionOrigin: SkillOrigin | undefined;
     let nativeSkillTools: NativeCliSkillToolsOptions | undefined;
+    preemptReviewBackground('memory'); // Preempt dispatched work; retain undispatched completed turns.
     addAiEditChannel(ch);
     if (aiEditViewActive(ch)) {
       set({
@@ -5367,21 +5445,12 @@ export const useStore = create<StoreState>((set, get) => ({
       promptUpdate.workflow.meta.name !== state.workflow.meta.name
         ? promptUpdate.workflow.meta.name
         : null;
-    if (ch.workspaceId && ch.sessionId) {
-      if (replayFavoriteSimpleChat) {
-        void historyStore
-          .updateSession(ch.workspaceId, ch.sessionId, {
-            messages: ch.messages,
-            ...(ch.workflowSession ? { workflow: ch.workflow } : {}),
-            meta: emptyRunMeta(),
-          })
-          .catch(() => {});
-      } else {
-        void historyStore
-          .appendMessage(ch.workspaceId, ch.sessionId, userMsg)
-          .catch(() => {});
-      }
-    }
+    // Capture the actual append/update outcome, not just session existence.
+    // A later optimistic transcript write cannot repair this turn's failed fence.
+    const sourceMessageReady = persistReviewSourceMessage(ch, userMsg, replayFavoriteSimpleChat
+      ? { messages: structuredClone(ch.messages), ...(ch.workflowSession ? { workflow: ch.workflow } : {}), meta: emptyRunMeta() }
+      : undefined);
+    void sourceMessageReady.catch((error) => console.warn('[review-source] 来源消息保存失败', error));
 
     const ir = ch.workflow;
     // Simple-workflow mode: the AI dock is a plain CLI/chat. The user's input
@@ -5791,6 +5860,10 @@ ${previousReply.slice(0, 4000)}
       const envWithSession: Record<string, string> = { ...(opts.env ?? {}) };
       if (ch.sessionId) envWithSession.UGS_SESSION_ID = ch.sessionId;
       if (ch.workspaceId) envWithSession.UGS_WORKSPACE_ID = ch.workspaceId;
+      envWithSession.UGS_TOOL_CATALOG_SCOPE = JSON.stringify({
+        workspaceId: ch.workspaceId ?? '', sessionId: ch.sessionId ?? '', agentId: cli.selection.adapter,
+        providerId: cli.selection.providerId ?? '', channelId: cli.selection.channelId ?? '', model: cli.selection.modelOverride?.trim() || cli.selection.modelClass?.trim() || '',
+      });
       const liveSteerSupported = await aiCliSteerSupported(
         cli.adapter,
         opts.cliCommand,
@@ -5808,6 +5881,7 @@ ${previousReply.slice(0, 4000)}
         native: liveSteerSupported,
       };
       syncQueuedChatMessageIds();
+      autoSteerChatRevisions(ch.sessionKey ?? ch.key);
       // Capture the backend's real token usage (claude/codex emit cache hits
       // via the `ai-cli-usage` event). When present we record it as authoritative
       // so the status bar shows the true cache percentage instead of `--`.
@@ -6353,6 +6427,14 @@ ${previousReply.slice(0, 4000)}
         startRemoteChatTurn({
           ch,
           prompt: trimmed,
+          sourceMessageId: userMsg.id,
+          ready: sourceMessageReady,
+          explicitSkillIds: selectedSkillIds,
+          onSkillContext: (context) => persistSkillContextForSource(ch, userMsg.id, context),
+          onSkillReviewState: (reviewState) => {
+            void persistSkillLearningStateForSource(ch, reviewState).catch((error) =>
+              console.warn('[skills] 远程来源学习结果回存失败', error));
+          },
           workspacePath: workspaceRootPath,
           locale: state.locale,
           projectEngineGuidance,
@@ -6418,6 +6500,7 @@ ${previousReply.slice(0, 4000)}
           ? await renderMemorySnapshotCompact(
               workspaceMemoryId,
               memoryConfig.compactSnapshotCharLimit,
+              snapshotFreezeKey,
             ).catch(() => '')
           : '';
         const knowledgeContext = state.composer.knowledgeBaseMode
@@ -6581,9 +6664,16 @@ ${previousReply.slice(0, 4000)}
         }, 1_000);
         let skillFinalAnswer = '';
         let skillTerminal: 'completed' | 'cancelled' | 'failed' = 'failed';
+        const memoryReviewTurn = ch.workspaceId && ch.sessionId ? beginMemoryReviewTurn({
+          source: { hostId: 'local', namespaceId: 'local', workspaceId: ch.workspaceId,
+            sessionId: ch.sessionId, turnId: userMsg.id, sourceMessageId: userMsg.id,
+            runId: ch.key, ...(workspaceRootPath ? { cwd: workspaceRootPath } : {}) },
+          config: memoryConfig, ready: sourceMessageReady, signal: ch.abortController.signal,
+          messages: buildMemoryReviewMessages(ch.messages),
+        }) : undefined;
         try {
           if (tauriAvailable()) {
-            const ready = waitForPersistedSkillSource(ch.workspaceId, ch.sessionId);
+            const ready = sourceMessageReady;
             // Automatic context is advisory when history is unavailable; explicit
             // selection remains fail-closed through the host's same barrier.
             void ready.catch(() => {});
@@ -6610,6 +6700,7 @@ ${previousReply.slice(0, 4000)}
           if (skillLearningTurn) {
             try {
               const context = await skillLearningTurn.loadContext();
+              await sourceMessageReady;
               requestTurnText = context.prompt;
               chatPrompt += context.prompt.slice(turnText.length);
               const contextPersisted = persistSkillContextForSource(ch, userMsg.id, {
@@ -6624,6 +6715,7 @@ ${previousReply.slice(0, 4000)}
             } catch (error) {
               if (selectedSkillIds.length || ch.abortController.signal.aborted) throw error;
               console.warn('[skills] 本轮技能上下文不可用', error);
+              if (ch.workspaceId && ch.sessionId) pushAssistant(`技能来源不可用：${String(error)}`);
             }
           }
           let routeLine = gatewayRouteLine(directRoute);
@@ -7109,77 +7201,8 @@ ${previousReply.slice(0, 4000)}
                 console.warn('[memory] 写入失败', err);
               });
           }
-          // Background self-review (stage 5): when enabled and rate-limit/signal
-          // gates pass, fork a cheap fire-and-forget model call that replays the
-          // transcript and proposes durable memory. Spends model quota, so it is
-          // OFF by default and bounded by shouldRunReview().
-          {
-            const reviewWsKey = ch.workspaceId || '';
-            const transcriptMsgs = [
-              ...priorMessages.map((m) => ({ role: m.role, text: m.text })),
-              { role: 'user' as const, text: turnText },
-              { role: 'assistant' as const, text: finalAnswer },
-            ];
-            if (
-              shouldRunReview(
-                memoryConfig,
-                getLastReviewAt(reviewWsKey),
-                transcriptMsgs.length,
-              )
-            ) {
-              setLastReviewAt(reviewWsKey);
-              void (async () => {
-                try {
-                  const transcript = buildReviewTranscript(transcriptMsgs);
-                  // Feed the review the live inventory of both stores so a full
-                  // store is consolidated (merge/drop) instead of every add
-                  // being rejected at the char limit. Mirrors Hermes' "current
-                  // entries on overflow" affordance in its memory tool.
-                  const [userUsage, memUsage] = await Promise.all([
-                    getMemoryUsage('user'),
-                    getMemoryUsage('memory', workspaceMemoryId),
-                  ]);
-                  const contexts = [
-                    formatReviewMemoryContext({
-                      label: '用户画像（全局）',
-                      entries: userUsage.entries,
-                      used: userUsage.used,
-                      limit: userUsage.limit,
-                    }),
-                    formatReviewMemoryContext({
-                      label: '助手笔记（本项目）',
-                      entries: memUsage.entries,
-                      used: memUsage.used,
-                      limit: memUsage.limit,
-                    }),
-                  ];
-                  const mainInvoke = (system: string, userContent: string) =>
-                    completeDirectWithSpeed({ system, userContent });
-                  await runConsolidatingReview({
-                    // Cheap-model pin (reviewPreferCheapModel +
-                    // reviewModelSelection), falling back to the main route.
-                    invokeModel: makeReviewInvoker(memoryConfig, mainInvoke),
-                    // Two-stage summary replay: compress the overflow head
-                    // into a digest instead of truncating it away. The
-                    // pre-built transcript stays as the no-digest fallback.
-                    transcript,
-                    messages: transcriptMsgs,
-                    summarize: makeReviewInvoker(memoryConfig, mainInvoke),
-                    contexts,
-                    workspaceId: workspaceMemoryId,
-                    evictOnOverflow: memoryConfig.evictOnOverflow,
-                    // Autonomous review writes stage for approval when
-                    // approvalRequired is on (Hermes write_approval); the
-                    // foreground UGS_MEMORY path above stays direct.
-                    approvalMode: memoryConfig.approvalRequired ? 'queue' : 'direct',
-                    source: 'review',
-                  });
-                } catch {
-                  /* review is best-effort; never disturb the chat turn */
-                }
-              })();
-            }
-          }
+          // Memory review scheduling is finalized after the real terminal state.
+
           // Re-attach the tool sentinels captured while streaming so the answer
           // bubble keeps its tool cards AND the session-files list keeps the
           // files this turn touched (it parses <<UGS_TOOL>> sentinels from the
@@ -7281,6 +7304,10 @@ ${previousReply.slice(0, 4000)}
           }
         } finally {
           globalThis.clearInterval(timingRefresh);
+          // Model/CLI work is terminal. File-summary reads may still be slow,
+          // but cannot keep unrelated memory/skill reviews behind a foreground owner.
+          skillLearningTurn?.endForeground?.();
+          memoryReviewTurn?.endForeground?.();
           try {
             const ownedMessages = ch.messages.filter((message) =>
               ch.ownedMessageIds?.has(message.id) ?? message.id === activeId);
@@ -7306,10 +7333,14 @@ ${previousReply.slice(0, 4000)}
             linkMessageManagedAssets(message, { sessionId: ch.sessionId, workspaceId: ch.workspaceId }, workspaceRootPath || undefined);
           }
           removeAiEditChannel(ch);
-          skillLearningTurn?.finish({
+          // Both foreground owners must close before memory attempts shared admission.
+          void skillLearningTurn?.finish({
             finalAnswer: skillFinalAnswer,
             terminal: ch.abortController.signal.aborted ? 'cancelled' : skillTerminal,
-          });
+          }).catch((error) => console.warn('[skills] 回顾任务失败', error));
+          void memoryReviewTurn?.finish(ch.abortController.signal.aborted ? 'cancelled' : skillTerminal,
+            buildMemoryReviewMessages(ch.messages)).catch((error) =>
+              console.warn('[memory-review] 回顾任务失败', error));
         }
       };
       // Every simple-chat turn enters the per-session FIFO. Normal sends stay
@@ -7837,6 +7868,28 @@ function formatRunWorkspaceSuffix(config: RunConfig): string {
 
 const chatNativeSessions = new Map<string, ChatNativeSession>();
 
+function chatRevisionVersions(messages: Message[], position: number): { messages: Message[]; savedAt: number }[] {
+  const message = messages[position];
+  const versions = [...(message.chatRevisions ?? [])];
+  const tail = messages.slice(position).map((item, index) => {
+    if (index !== 0) return item;
+    const plain = { ...item };
+    delete plain.chatRevisions;
+    delete plain.chatRevisionIndex;
+    return plain;
+  });
+  versions.splice(message.chatRevisionIndex ?? versions.length, 0, { messages: tail, savedAt: Date.now() });
+  return versions;
+}
+
+function invalidateChatRevisionSources(state: StoreState, tail: Message[]): void {
+  const key = runKey(state.activeWorkspaceId, state.activeSessionId);
+  for (const nativeKey of chatNativeSessions.keys()) {
+    if (nativeKey.startsWith(`${key}::`)) chatNativeSessions.delete(nativeKey);
+  }
+  pruneAiEditSourcesForDeletion(state.activeWorkspaceId, state.activeSessionId, new Set(tail.map((message) => message.id)));
+}
+
 const CHAT_INTERRUPTED_NOTICE = '⏹ 会话已中断';
 
 function isChatInterruptedNotice(message: Message): boolean {
@@ -8135,6 +8188,7 @@ function enqueueChatTurn(
   };
   chatTurnQueueEntries.set(ch.key, entry);
   syncQueuedChatMessageIds();
+  autoSteerChatRevisions(sessionKey);
   const prev = chatTurnQueues.get(sessionKey) ?? Promise.resolve();
   const next = prev.catch(() => {}).then(async () => {
     if (entry.cancelled || !aiEditRegistered(ch)) return;
@@ -8159,6 +8213,17 @@ function enqueueChatTurn(
     }
   });
   return next;
+}
+
+/** Edited prompts reuse native in-turn steering; other transports keep FIFO. */
+function autoSteerChatRevisions(sessionKey: string): void {
+  for (const entry of chatTurnQueueEntries.values()) {
+    if (entry.sessionKey !== sessionKey || entry.started || entry.cancelled || entry.steering) continue;
+    const message = entry.channel.messages.find((item) => item.id === entry.messageId);
+    if (message?.replacesMessageId && runningSteerEntryForQueued(entry)?.channel.liveSteer?.native) {
+      void trySteerQueuedCliTurn(entry);
+    }
+  }
 }
 
 function clearPendingChatTurns(sessionKey: string): void {
@@ -8420,10 +8485,15 @@ export function removeAiEditChannel(ch: AiEditChannel | null): void {
   resolvePendingAiEditInteractions(ch);
   activeAiEdits.delete(ch.key);
   syncAiEditingSessions();
+  if (ch.workspaceId && ch.sessionId && !sessionLiveStatus(sessionKey, useStore.getState()) &&
+      sessionForKey(useStore.getState(), sessionKey)?.scheduledTask?.maxHistoryRuns !== undefined) {
+    void pruneScheduledTaskHistory(ch.workspaceId, ch.sessionId).catch((error) => console.warn('[scheduled-task] 清理历史失败', error));
+  }
   refreshSessionChangesForKey(sessionKey, rootPath);
 }
 
 function stopActiveChat(): void {
+  cancelMemoryReviews();
   const state = useStore.getState();
   const key = activeWorkflowSessionKey(state);
   const channels = getAiEditChatChannels(key.workspaceId, key.sessionId);
@@ -8631,6 +8701,56 @@ const AI_EDIT_PERSIST_DEBOUNCE_MS = 750;
 
 const pendingSessionCreations = new Map<string, Promise<void>>();
 
+/** Exact source-message fence shared by chat, remote and review producers. */
+export function persistReviewSourceMessage(
+  source: Pick<AiEditChannel, 'workspaceId' | 'sessionId'>,
+  message: Message,
+  replacement?: SessionPatch,
+  writeMode: 'append' | 'upsert' = 'append',
+): Promise<void> {
+  const { workspaceId, sessionId } = source;
+  const captured = structuredClone(message);
+  if (!workspaceId || !sessionId || captured.role !== 'user' || !captured.id) {
+    return Promise.reject(new Error('SKILL_SOURCE_MESSAGE_REQUIRED'));
+  }
+  const capturedReplacement = replacement === undefined ? undefined : structuredClone(replacement);
+  const append = () => capturedReplacement
+    ? historyStore.updateSession(workspaceId, sessionId, capturedReplacement).then(() => {})
+    : writeMode === 'upsert' ? historyStore.upsertMessage(workspaceId, sessionId, captured, true)
+      : historyStore.appendMessage(workspaceId, sessionId, captured);
+  // Creation enters history's FIFO before publication; snapshot its Promise so
+  // a settled/replaced pending map entry cannot change this turn's outcome.
+  const creation = pendingSessionCreations.get(runKey(workspaceId, sessionId));
+  const written = creation ? creation.then(append) : append();
+  return written.then(() => assertPersistedReviewSourceMessage({ workspaceId, sessionId }, captured));
+}
+
+function reviewSourceContent(message: Message): string {
+  // Native JSON writers may reorder object keys. Array order and all literal
+  // multimodal values still belong to the exact source-content fence.
+  return JSON.stringify((message as Message & { content?: unknown }).content ?? null, (_key, value: unknown) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)))
+      : value);
+}
+
+export async function assertPersistedReviewSourceMessage(
+  source: Pick<AiEditChannel, 'workspaceId' | 'sessionId'>, message: Message,
+): Promise<void> {
+  const { workspaceId, sessionId } = source;
+  const expected = structuredClone(message);
+  if (!workspaceId || !sessionId || !expected.id || expected.role !== 'user' || typeof expected.text !== 'string') {
+    throw new Error('SKILL_SOURCE_NOT_PERSISTED');
+  }
+  const record = await readPersistedSkillSourceSession(workspaceId, sessionId);
+  const matches = record?.messages.filter((item) => item.id === expected.id) ?? [];
+  if (!record || record.workspaceId !== workspaceId || (record.sessionId ?? record.id) !== sessionId || record.deletedAt ||
+    matches.length !== 1 || matches[0].role !== 'user' || matches[0].text !== expected.text ||
+    reviewSourceContent(matches[0]) !== reviewSourceContent(expected)) {
+    throw new Error('SKILL_SOURCE_MESSAGE_NOT_PERSISTED');
+  }
+}
+
 async function waitForPersistedSkillSource(
   workspaceId: string | null,
   sessionId: string | null,
@@ -8721,22 +8841,65 @@ async function reviewPersistedSkillLearningAction(
   return result;
 }
 
+/** Compare persisted JSON values, independent of native object-key ordering. */
+function skillReviewSnapshot(state: SkillReviewState): string {
+  return JSON.stringify(state, (_key, value: unknown) =>
+    value !== null && typeof value === 'object' && !Array.isArray(value)
+      ? Object.fromEntries(Object.entries(value).sort(([left], [right]) => left.localeCompare(right)))
+      : value);
+}
+
 const skillRetries = new Set<string>();
 export async function retryPersistedSkillLearning(state: SkillReviewState): Promise<void> {
-  const source = skillHistorySource(state);
-  const record = await historyStore.getSession(source.workspaceId, source.sessionId);
-  const saved = record?.messages.find((message) => message.skillLearning && sameSkillOrigin(message.skillLearning.origin, state.origin))?.skillLearning;
-  if (!saved?.resume || !['failed', 'cancelled', 'conflicted'].includes(saved.status)) throw new Error('SKILL_REVIEW_SOURCE_UNAVAILABLE');
-  if (isSkillReviewLive(saved.origin.runId) || skillRetries.has(saved.origin.runId)) return;
-  skillRetries.add(saved.origin.runId);
+  const frozen = structuredClone(state);
+  const expected = skillReviewSnapshot(frozen);
+  const source = skillHistorySource(frozen);
+  if (!frozen.resume || frozen.origin.hostId !== 'local' || !['failed', 'cancelled', 'conflicted'].includes(frozen.status) ||
+    !sameSkillOrigin({ ...frozen.resume.job.origin, runId: frozen.origin.runId }, frozen.origin)) {
+    throw new Error('SKILL_REVIEW_SOURCE_UNAVAILABLE');
+  }
+  const runId = frozen.origin.runId;
+  if (isSkillReviewLive(runId) || skillRetries.has(runId)) return;
+  // Own admission before any await; concurrent callers cannot bill this review twice.
+  skillRetries.add(runId);
   let writes = Promise.resolve();
   try {
-    await resumeSkillLearningReview(saved, (next) => {
-      writes = writes.then(() => persistSkillLearningStateForSource(source, next));
+    await waitForPersistedSkillSource(source.workspaceId, source.sessionId);
+    const native = await readPersistedSkillSourceSession(source.workspaceId, source.sessionId);
+    // Reacquire the cache after the native await; another writer may replace its record.
+    const record = await historyStore.getSession(source.workspaceId, source.sessionId);
+    const matches = record?.messages.filter((message) => message.skillLearning && sameSkillOrigin(message.skillLearning.origin, frozen.origin)) ?? [];
+    const persisted = native?.messages.filter((message) => message.skillLearning && sameSkillOrigin(message.skillLearning.origin, frozen.origin)) ?? [];
+    if (!record || !native || native.workspaceId !== source.workspaceId || (native.sessionId ?? native.id) !== source.sessionId || native.deletedAt ||
+      matches.length !== 1 || persisted.length !== 1 || matches[0].id !== persisted[0].id ||
+      record.messages.filter((message) => message.id === matches[0].id).length !== 1 ||
+      native.messages.filter((message) => message.id === persisted[0].id).length !== 1 ||
+      skillReviewSnapshot(matches[0].skillLearning!) !== expected || skillReviewSnapshot(persisted[0].skillLearning!) !== expected) {
+      throw new Error('SKILL_REVIEW_MESSAGE_REQUIRED');
+    }
+    let terminal: SkillReviewState | undefined;
+    const result = await resumeSkillLearningReview(frozen, (next) => {
+      terminal = structuredClone(next);
+      // A failed progress write must not prevent recording the already-running job's terminal result.
+      writes = writes.catch(() => {}).then(() => persistSkillLearningStateForSource(source, next));
       void writes.catch(() => {});
     });
-    await writes;
-  } finally { skillRetries.delete(saved.origin.runId); }
+    try {
+      await writes;
+      const after = await readPersistedSkillSourceSession(source.workspaceId, source.sessionId);
+      const finalMessages = terminal ? after?.messages.filter((message) => message.id === `skill-learning:${terminal!.origin.runId}`) ?? [] : [];
+      if (!after || after.workspaceId !== source.workspaceId || (after.sessionId ?? after.id) !== source.sessionId || after.deletedAt ||
+        !terminal || terminal.status !== result.status || !terminal.result ||
+        skillReviewSnapshot({ ...terminal, result }) !== skillReviewSnapshot(terminal) || finalMessages.length !== 1 ||
+        !finalMessages[0].skillLearning || skillReviewSnapshot(finalMessages[0].skillLearning) !== skillReviewSnapshot(terminal)) {
+        throw new Error('SKILL_RETRY_STATE_UNCONFIRMED');
+      }
+    } catch (error) {
+      // History failure must not cancel or redispatch a host-confirmed applied result.
+      const recordingError = `SKILL_HISTORY_SAVE_UNCONFIRMED: SKILL_RETRY_STATE_UNCONFIRMED: ${String(error)}`;
+      throw Object.assign(new Error([frozen.error, recordingError].filter(Boolean).join('; ')), { result: structuredClone(result), recordingError });
+    }
+  } finally { skillRetries.delete(runId); }
 }
 
 function startExplicitSkillLearning(kind: 'learn' | 'refine', text: string): boolean {
@@ -8795,12 +8958,15 @@ function startExplicitSkillLearning(kind: 'learn' | 'refine', text: string): boo
 }
 
 async function persistSkillContextForSource(
-  source: AiEditChannel, messageId: string, context: NonNullable<Message['skillContext']>,
+  source: Pick<AiEditChannel, 'workspaceId' | 'sessionId' | 'messages'>, messageId: string, context: NonNullable<Message['skillContext']>,
 ): Promise<void> {
   const metadata = structuredClone(context);
   const { workspaceId, sessionId } = source;
-  if (!workspaceId || !sessionId || metadata.origin.workspaceId !== workspaceId ||
-    metadata.origin.sessionId !== sessionId || metadata.origin.turnId !== messageId) {
+  const locator = metadata.origin.hostId === REMOTE_SKILL_HOST_ID
+    ? metadata.sourceSession : { workspaceId: metadata.origin.workspaceId, sessionId: metadata.origin.sessionId };
+  if (!workspaceId || !sessionId || locator?.workspaceId !== workspaceId ||
+    locator.sessionId !== sessionId || metadata.origin.sessionId !== sessionId || metadata.origin.turnId !== messageId ||
+    metadata.origin.hostId === REMOTE_SKILL_HOST_ID && (!metadata.sourceSession?.serverUrl || metadata.origin.cwd !== undefined)) {
     throw new Error('SKILL_SOURCE_ORIGIN_MISMATCH');
   }
   await waitForPersistedSkillSource(workspaceId, sessionId);
@@ -8808,9 +8974,9 @@ async function persistSkillContextForSource(
   if (!message || message.role !== 'user') throw new Error('SKILL_SOURCE_MESSAGE_REQUIRED');
   const updated = { ...message, skillContext: metadata };
   source.messages = source.messages.map((item) => item.id === messageId ? updated : item);
-  aiEditCommitMessages(source, true);
+  if ('abortController' in source) aiEditCommitMessages(source as AiEditChannel, true);
   await historyStore.upsertMessage(workspaceId, sessionId, updated, true);
-  const saved = (await historyStore.getSession(workspaceId, sessionId))?.messages.find((item) => item.id === messageId);
+  const saved = (await readPersistedSkillSourceSession(workspaceId, sessionId))?.messages.find((item) => item.id === messageId);
   if (!saved?.skillContext || !sameSkillOrigin(saved.skillContext.origin, metadata.origin) ||
     saved.skillContext.catalogRevision !== metadata.catalogRevision) throw new Error('SKILL_CONTEXT_NOT_PERSISTED');
 }
@@ -8853,9 +9019,12 @@ export function persistSkillLearningStateForSource(
       skillLearning: frozen,
     };
     await historyStore.upsertMessage(workspaceId, sessionId, message, true);
-    const record = await historyStore.getSession(workspaceId, sessionId);
-    const saved = record?.messages.find((item) => item.id === message.id);
-    if (!saved?.skillLearning || !sameSkillOrigin(saved.skillLearning.origin, frozen.origin)) {
+    // A cached acknowledgement can exist even when the backend wrote no bytes.
+    const record = await readPersistedSkillSourceSession(workspaceId, sessionId);
+    const matches = record?.messages.filter((item) => item.id === message.id) ?? [];
+    const saved = matches[0];
+    if (!record || record.workspaceId !== workspaceId || (record.sessionId ?? record.id) !== sessionId || record.deletedAt ||
+      matches.length !== 1 || saved.role !== 'assistant' || !saved.skillLearning || skillReviewSnapshot(saved.skillLearning) !== skillReviewSnapshot(frozen)) {
       throw new Error('SKILL_RESULT_NOT_PERSISTED');
     }
     const merge = (messages: Message[]) => messages.some((item) => item.id === saved.id)
@@ -8957,7 +9126,7 @@ function aiEditOwnedMessages(ch: AiEditChannel): Message[] {
  * answer stamps a later one, and a still-streaming reply carries none.
  */
 export function messageFreshness(message: Message): number {
-  return message.completedAt ?? message.createdAt;
+  return Math.max(message.editedAt ?? 0, message.completedAt ?? message.createdAt);
 }
 
 /**
@@ -10180,7 +10349,7 @@ function stopWorkflowRun(): void {
 
   // Flip the channel to cancelled FIRST so the run loop's `stillRunning()` short-
   // circuits, then record the interrupted state.
-  ch.cancelled = true;
+  cancelGuiSkillRun(ch);
   ch.runState = {
     ...ch.runState,
     ...Object.fromEntries(
@@ -10251,6 +10420,7 @@ async function invokeAgentCli(
     sessionId?: string;
     resume?: boolean;
     selection?: GatewaySelection;
+    onToolEvent?: RuntimeRunContext['onToolEvent'];
   } = {},
 ): Promise<string> {
   const runId = makeCliRunId();
@@ -10268,6 +10438,8 @@ async function invokeAgentCli(
       timeoutSeconds: opts.timeoutSeconds,
       idleTimeoutSeconds: opts.idleTimeoutSeconds,
       runId,
+      onTool: opts.onToolEvent,
+      signal: guiSkillRuns.get(ch)?.signal,
       onUsage: (raw) => {
         realUsage = mergeUsageReports(realUsage, usageReportFromCliUsage(raw));
       },
@@ -10337,7 +10509,7 @@ function buildGuiGateway(ch: RunChannel): RunGateway {
         env: cli.env,
       };
     },
-    completeText: async ({ selection, model, omitModel, prompt, onDelta }) => {
+    completeText: async ({ selection, model, omitModel, prompt, onDelta, onToolEvent }) => {
       // Re-resolve the full direct route (apiKey/baseUrl/transport) off the
       // selection, then apply the per-call model override exactly as the
       // pre-refactor invokeGatewayAgent did.
@@ -10352,6 +10524,8 @@ function buildGuiGateway(ch: RunChannel): RunGateway {
         permission: ch.config.permission,
         cwd: ch.config.cwd,
         forceCli: preferCliForProjectMcp,
+        signal: guiSkillRuns.get(ch)?.signal,
+        onToolEvent,
         onDelta,
       });
       return { text, adapter: direct.adapter };
@@ -10368,6 +10542,7 @@ function buildGuiGateway(ch: RunChannel): RunGateway {
         idleTimeoutSeconds: opts.idleTimeoutSeconds,
         cliCommand: opts.cliCommand,
         onProgress: opts.onProgress,
+        onToolEvent: opts.onToolEvent,
         sessionId: opts.sessionId,
         resume: opts.resume,
       }),
@@ -10561,6 +10736,14 @@ function buildGuiCallbacks(
  * GUI gateway. The engine never reads these globals — they are resolved here and
  * injected.
  */
+const guiSkillRuns = new WeakMap<RunChannel, AbortController>();
+
+/** A stopped DAG revokes its foreground learning authority immediately. */
+export function cancelGuiSkillRun(ch: RunChannel): void {
+  ch.cancelled = true;
+  guiSkillRuns.get(ch)?.abort();
+}
+
 function buildGuiRunContext(ch: RunChannel, workflow: IRGraph): RuntimeRunContext {
   const state = useStore.getState();
   const { personalInstructions, personalInstructionsByModel } = state;
@@ -10678,7 +10861,7 @@ function runMaxRetries(): number {
  * downstream nodes via data edges, and drive per-node run badges. Aborts on 停止;
  * returns to design mode when finished.
  */
-async function executeViaCliInterpreter(
+export async function executeViaCliInterpreter(
   ch: RunChannel,
   workflow: IRGraph,
   adapter: string,
@@ -10689,6 +10872,18 @@ async function executeViaCliInterpreter(
     seedNodeHashes?: Record<string, string>;
   } = {},
 ): Promise<void> {
+  // Freeze source before proxy/route awaits or UI navigation. Reuse the exact
+  // user message, never a run log or a model-generated node summary.
+  const sourceMessage = ch.messages.findLast((message) => message.role === 'user');
+  const capturedSource = sourceMessage ? structuredClone(sourceMessage) : undefined;
+  const sourceReady = capturedSource ? assertPersistedReviewSourceMessage(ch, capturedSource)
+    .then(() => persistReviewSourceMessage(ch, capturedSource, undefined, 'upsert')) : undefined;
+  void sourceReady?.catch(() => {});
+  const controller = new AbortController();
+  guiSkillRuns.set(ch, controller);
+  let learningTurn: ReturnType<typeof beginSkillLearningTurn> | undefined;
+  let terminal: 'completed' | 'cancelled' | 'failed' = 'failed';
+  let finalAnswer = '';
   const launchSelection =
     ch.config.gatewaySelection ??
     workflowDefaultGatewaySelection(workflow, ch.config.model);
@@ -10730,6 +10925,29 @@ async function executeViaCliInterpreter(
   const context = buildGuiRunContext(ch, workflow);
 
   try {
+    if (capturedSource && ch.workspaceId && ch.sessionId) {
+      await sourceReady;
+      if (!stillRunning(ch) || controller.signal.aborted) return;
+      const origin: SkillOrigin = Object.freeze({ hostId: 'local', workspaceId: ch.workspaceId,
+        sessionId: ch.sessionId, turnId: capturedSource.id, runId: makeCliRunId(),
+        ...(ch.config.cwd ? { cwd: ch.config.cwd } : {}) });
+      learningTurn = beginSkillLearningTurn({ origin, prompt: capturedSource.text,
+        selection: context.selection, ready: sourceReady, signal: controller.signal,
+        onState: (state) => {
+          void persistSkillLearningStateForSource(ch, state).catch((error) =>
+            console.warn('[skills] DAG 来源学习结果回存失败', error));
+        } });
+      context.skillOrigin = origin;
+      context.onToolEvent = (event) => learningTurn!.onTool(event);
+      const delivered = new Map<string, SkillLearningJob['loadedSkills'][number]>();
+      context.skills = { origin, host: learningTurn.host, model: learningTurn.model, signal: controller.signal,
+        onLoaded: async (loaded) => {
+          for (const skill of loaded.loadedSkills) delivered.set(skill.skillId, structuredClone(skill));
+          const aggregate = { loadedSkills: [...delivered.values()].slice(-32), catalogRevision: loaded.catalogRevision };
+          learningTurn!.onLoaded(aggregate);
+          await persistSkillContextForSource(ch, capturedSource.id, { origin, ...aggregate });
+        } };
+    }
     const result = await executeWorkflowDag(workflow, callbacks, context, {
       resumeFromNodeId: options.resumeFromNodeId,
       seedOutputs: options.seedOutputs,
@@ -10737,6 +10955,8 @@ async function executeViaCliInterpreter(
       seedNodeHashes: options.seedNodeHashes,
     });
 
+    terminal = ch.cancelled || controller.signal.aborted ? 'cancelled' : result.success ? 'completed' : 'failed';
+    finalAnswer = Object.values(result.outputs).join('\n\n');
     // Record this run's per-node hashes so a later "continue" can validate which
     // cached outputs are still reusable (unchanged node + unchanged upstreams).
     if (result.nodeHashes) ch.nodeHashes = result.nodeHashes;
@@ -10785,6 +11005,13 @@ async function executeViaCliInterpreter(
       if (runViewActive(ch)) useStore.getState().setMode('design');
       finishRun(ch);
     }
+  } finally {
+    if (learningTurn) {
+      const actualTerminal = ch.cancelled || controller.signal.aborted ? 'cancelled' : terminal;
+      void learningTurn.finish({ finalAnswer, terminal: actualTerminal }).catch((error) =>
+        console.warn('[skills] DAG 后台回顾失败', error));
+    }
+    guiSkillRuns.delete(ch);
   }
 }
 

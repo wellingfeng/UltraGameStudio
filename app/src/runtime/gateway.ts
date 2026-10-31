@@ -91,7 +91,8 @@ export async function invokeAgent(
   if (context.skills) {
     const loaded = await loadSkillContext({ ...context.skills, prompt });
     prompt = loaded.prompt;
-    context.skills.onLoaded?.(loaded);
+    await context.skills.onLoaded?.(loaded);
+    if (context.skills.signal?.aborted) throw new Error('SKILL_CONTEXT_CANCELLED');
   }
   const direct = gateway.resolveDirectRoute(selection);
   if (direct) {

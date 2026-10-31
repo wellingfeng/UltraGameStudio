@@ -18,6 +18,7 @@ import {
   gatewayChannelSecretKey,
   readSecureRecord,
   readSecureRecordValue,
+  secureStorageAllowsInlineFallback,
   secureStorageAvailable,
   writeSecureRecord,
 } from '@/lib/secureStorage';
@@ -61,10 +62,7 @@ const DISK_BACKED_KEYS: Readonly<Record<string, string>> = {
 // once initializeGatewayConfigStore() has run under Tauri.
 const diskCache = new Map<string, string>();
 let diskReady = false;
-
-function tauriBacked(): boolean {
-  return diskReady && tauriAvailable();
-}
+const diskReadErrors = new Set<string>();
 
 async function getInvoke() {
   const { invoke } = await import('@tauri-apps/api/core');
@@ -77,7 +75,7 @@ async function getInvoke() {
 const pendingDiskWrites = new Map<string, Promise<void>>();
 
 function diskWriteSoon(key: string, relPath: string): void {
-  if (!tauriAvailable()) return;
+  if (!tauriAvailable() || diskReadErrors.has(key)) return;
   const previous = pendingDiskWrites.get(key) ?? Promise.resolve();
   const write = previous.catch(() => {}).then(async () => {
     const json = diskCache.get(key) ?? 'null';
@@ -125,17 +123,26 @@ function localStorageSet(key: string, value: string): boolean {
 export async function initializeGatewayConfigStore(): Promise<void> {
   if (diskReady) return;
   if (!tauriAvailable()) return;
+  let loaded = false;
   try {
     const invoke = await getInvoke();
-    await Promise.all(
+    const results = await Promise.allSettled(
       Object.entries(DISK_BACKED_KEYS).map(async ([key, relPath]) => {
-        const fromDisk = await invoke<string | null>('history_read_json', {
-          relPath,
-        });
+        // Retry only failed/unknown keys; a healthy cache may contain a newer
+        // queued edit than disk and must not be replaced by a read snapshot.
+        if (diskCache.has(key) && !diskReadErrors.has(key)) return;
+        let fromDisk: string | null;
+        try {
+          fromDisk = await invoke<string | null>('history_read_json', { relPath });
+          diskReadErrors.delete(key);
+        } catch (error) {
+          diskReadErrors.add(key);
+          throw error;
+        }
         if (fromDisk != null && fromDisk !== '' && fromDisk !== 'null') {
           diskCache.set(key, fromDisk);
           // Keep the localStorage mirror in sync for any sync reader.
-          localStorageSet(key, fromDisk);
+          if (secureStorageAvailable()) localStorageSet(key, fromDisk);
           return;
         }
         // One-time migration: seed disk from the legacy localStorage value.
@@ -145,24 +152,26 @@ export async function initializeGatewayConfigStore(): Promise<void> {
         } catch {
           legacy = null;
         }
+        diskCache.set(key, legacy ?? 'null');
         if (legacy != null) {
-          diskCache.set(key, legacy);
-          diskWriteSoon(key, relPath);
+          if (secureStorageAvailable()) diskWriteSoon(key, relPath);
         }
       }),
     );
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
+    loaded = true;
   } catch (err) {
     console.warn(
       '[gatewayConfig] disk init failed; keeping localStorage fallback',
       err,
     );
-  } finally {
-    diskReady = true;
   }
+  diskReady = loaded && diskReadErrors.size === 0;
 }
 
 function rawGet(key: string): string | null {
-  if (tauriBacked() && key in DISK_BACKED_KEYS) {
+  if (tauriAvailable() && key in DISK_BACKED_KEYS && diskCache.has(key)) {
     const cached = diskCache.get(key);
     if (cached != null) return cached && cached !== 'null' ? cached : null;
   }
@@ -193,7 +202,9 @@ function rawSet(key: string, value: string): void {
 function rawRemove(key: string): void {
   const relPath = DISK_BACKED_KEYS[key];
   if (relPath && tauriAvailable()) {
-    diskCache.delete(key);
+    // Retain authoritative absence: deleting the cache entry makes a retry
+    // reload an older on-disk pin while its queued deletion is still pending.
+    diskCache.set(key, 'null');
     try {
       if (hasWindow()) window.localStorage.removeItem(key);
     } catch {
@@ -217,6 +228,7 @@ export function resetGatewayConfigStoreForTests(): void {
   diskCache.clear();
   pendingDiskWrites.clear();
   diskReady = false;
+  diskReadErrors.clear();
 }
 
 function normalizeAdapter(value: unknown): RuntimeAdapterId {
@@ -350,14 +362,16 @@ function gatewayChannelApiKey(
   channelId: string,
   fallback?: string,
 ): string | undefined {
-  if (!secureStorageAvailable()) return fallback;
+  // The secure cache contains individually verified healthy records; a failure
+  // in a different record must not blank this channel's already loaded key.
   return (
     readSecureRecordValue(
       GATEWAY_CHANNEL_API_KEYS_SECRET,
       gatewayChannelSecretKey(providerId, channelId),
     ) ||
     readSecureRecordValue(PROVIDER_API_KEYS_SECRET, providerId) ||
-    fallback
+    (secureStorageAllowsInlineFallback(GATEWAY_CHANNEL_API_KEYS_SECRET)
+      && secureStorageAllowsInlineFallback(PROVIDER_API_KEYS_SECRET) ? fallback : undefined)
   );
 }
 
@@ -521,6 +535,9 @@ export function saveGatewayConfig(config: GatewayConfig): void {
   if (isRemoteProfileActive()) {
     saveGatewayConfigForRemoteProfile(config);
     return;
+  }
+  if (tauriAvailable() && (!secureStorageAvailable() || diskReadErrors.has(GATEWAY_CONFIG_STORAGE))) {
+    throw new Error('渠道安全存储尚未加载成功，已阻止覆盖网关配置。请重试后再保存。');
   }
   if (secureStorageAvailable()) {
     // Merge, never replace: this runs on every boot-time sync from the

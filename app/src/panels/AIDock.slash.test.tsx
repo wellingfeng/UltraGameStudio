@@ -133,6 +133,14 @@ const slashCatalogMock = vi.hoisted(() => ({
 const blueprintModeStatusMock = vi.hoisted(() => vi.fn());
 const blueprintModeInstallMock = vi.hoisted(() => vi.fn());
 
+// This DOM-only fixture exposes desktop controls, but has no native credential
+// backend. Its in-memory secure store is healthy; failure safety has its own IPC
+// tests and must not be bypassed in production just to render this fixture.
+vi.mock("@/lib/secureStorage", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/secureStorage")>();
+  return { ...actual, secureStorageAvailable: () => true };
+});
+
 vi.mock("@/lib/tauri", async (importOriginal) => {
   const actual = await importOriginal<typeof import("@/lib/tauri")>();
   return {

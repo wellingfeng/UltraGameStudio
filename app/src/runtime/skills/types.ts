@@ -135,6 +135,8 @@ export interface SkillReviewState {
   sourceSession?: SkillSourceSession;
   /** Policy frozen by the host for this review, not the current composer. */
   mode?: SkillLearningMode;
+  /** Host-only scheduling decision; never inferred from model-authored lesson/reason text. */
+  admission?: { status: 'not-admitted'; reason: string; completedActivities: number; activityThreshold: number };
   /** UI action context, retained on history reload; rollback is an applied transaction, not new learning. */
   action?: 'review' | 'approve' | 'reject' | 'rollback';
   /** Only trusted host mutation results prove persistence. */

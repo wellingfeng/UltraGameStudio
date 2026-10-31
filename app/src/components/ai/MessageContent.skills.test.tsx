@@ -23,14 +23,24 @@ afterEach(async () => {
 });
 
 describe('MessageContent learning surface', () => {
-  it.each(['queued', 'reading', 'proposing', 'applying', 'noop', 'failed', 'cancelled'] as const)(
-    'renders no empty message wrapper for %s', async (status) => {
+  it.each(['queued', 'reading', 'proposing', 'applying', 'failed', 'cancelled'] as const)(
+    'renders the real %s review even when the assistant text is empty', async (status) => {
       await act(async () => { root.render(<MessageContent text="" skillLearning={{ ...state, status }} />); });
-      expect(container.innerHTML).toBe('');
+      expect(container.querySelector('article')).not.toBeNull();
+      expect(container.querySelector('[role="status"]')?.textContent).toBeTruthy();
       await act(async () => { root.render(<MessageContent text="正常回答保留" skillLearning={{ ...state, status }} />); });
       expect(container.textContent).toContain('正常回答保留');
-      expect(container.querySelector('article')).toBeNull();
+      expect(container.querySelector('article')).not.toBeNull();
     });
+  it('omits an empty noop message but preserves real answer content beside a hidden noop review', async () => {
+    const noop = { ...state, status: 'noop' as const, result: { ...result, status: 'noop' as const } };
+    await act(async () => { root.render(<MessageContent text="" skillLearning={noop} />); });
+    expect(container.childElementCount).toBe(0);
+    await act(async () => { root.render(<MessageContent text="正常回答保留" skillLearning={noop} />); });
+    expect(container.textContent).toContain('正常回答保留');
+    expect(container.querySelector('article')).toBeNull();
+    expect(container.textContent).not.toContain(result.lesson);
+  });
   it('renders a structured learning card even for a textless history message and forwards its exact action', async () => {
     const onSkillApprove = vi.fn(async () => ({ ...result, status: 'applied' as const, operationsApplied: 1 }));
     await act(async () => {
@@ -42,6 +52,6 @@ describe('MessageContent learning surface', () => {
     expect(approve).not.toBeNull();
     await act(async () => { approve!.click(); });
     expect(onSkillApprove).toHaveBeenCalledExactlyOnceWith('batch-a');
-    expect(container.textContent).toContain('Learned');
+    expect(container.textContent).toContain('Lesson saved');
   });
 });

@@ -16,6 +16,15 @@ function ids(messages: Message[]): string[] {
 }
 
 describe('orderDisplayMessages', () => {
+  it('shows only the latest edited input across repeated sends and reloads without hiding replies', () => {
+    const messages = [msg('u1', 'user', 100), msg('a1', 'assistant', 200),
+      msg('u2', 'user', 300, { replacesMessageId: 'u1' }), msg('a2', 'assistant', 400),
+      msg('u3', 'user', 500, { replacesMessageId: 'u2' })];
+    expect(ids(orderDisplayMessages(JSON.parse(JSON.stringify(messages)), ['u3']))).toEqual(['a1', 'a2', 'u3']);
+    expect(ids(messages)).toEqual(['u1', 'a1', 'u2', 'a2', 'u3']);
+    expect(ids(orderDisplayMessages(messages.slice(0, -1)))).toEqual(['a1', 'u2', 'a2']);
+  });
+
   it('keeps queued prompts after an answered interaction and its later continuation', () => {
     const messages = [
       msg('u1', 'user', 100),

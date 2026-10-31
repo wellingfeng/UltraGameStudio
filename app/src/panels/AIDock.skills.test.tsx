@@ -64,14 +64,56 @@ async function submit(text: string) {
 }
 
 describe('AIDock explicit skill learning', () => {
-  it('hides completed noop rows after live updates and history reload without removing stored records', async () => {
+  it.each([
+    ['', 'zh-CN'],
+    ['  \n ', 'en-US'],
+    ['⏱ 17:50:58 → 17:51:02 · 耗时 4s\n⚙ 路由：Codex · 模型：review\n', 'zh-CN'],
+  ] as const)('renders a standalone review as only the colored strip, without assistant/time chrome (%j, %s)', async (text, locale) => {
+    const origin = { hostId: 'local', workspaceId: 'ws-strip', sessionId: 'session-strip', turnId: 'turn-strip', runId: 'run-strip' };
+    const message = { id: 'review-strip', role: 'assistant' as const, text, localOnly: true,
+      createdAt: new Date(2026, 9, 29, 17, 50, 58).getTime(), completedAt: new Date(2026, 9, 29, 17, 51, 2).getTime(),
+      skillLearning: { status: 'proposing' as const, origin } };
+    useStore.setState({ locale, messages: [message] });
+    await renderDock();
+    const assertStripOnly = () => {
+      const row = container.querySelector('[data-ugs-message-row]')!;
+      expect(row.textContent).not.toMatch(/⟳|assistant|17:50:58|17:51:02|耗时|Duration/i);
+      expect(row.querySelector('.ai-stream-text')).toBeNull();
+      expect(row.querySelector('summary [data-ugs-review-glyph]')).not.toBeNull();
+      expect(row.querySelector('summary [role="status"]')?.textContent).toBe(locale === 'zh-CN' ? '正在提炼经验' : 'Extracting lessons');
+      expect(row.querySelector<HTMLDetailsElement>('details[data-ugs-review-diagnostics]')?.open).toBe(false);
+    };
+    assertStripOnly();
+    expect(useStore.getState().messages[0]).toBe(message);
+    await act(async () => { useStore.setState({ messages: JSON.parse(JSON.stringify([message])) }); });
+    assertStripOnly();
+    expect(useStore.getState().messages[0]).toEqual(message);
+    expect(learnSkills).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('preserves the ordinary answer header, clock and body when a review is attached', async () => {
+    const origin = { hostId: 'local', workspaceId: 'ws-answer', sessionId: 'session-answer', turnId: 'turn-answer', runId: 'run-answer' };
+    useStore.setState({ messages: [{ id: 'answer-with-review', role: 'assistant', text: '正常回答仍然保留。',
+      createdAt: new Date(2026, 9, 29, 17, 50, 58).getTime(), completedAt: new Date(2026, 9, 29, 17, 51, 2).getTime(),
+      skillLearning: { status: 'reading', origin } }] });
+    await renderDock();
+    const row = container.querySelector('[data-ugs-message-row]')!;
+    expect(row.querySelector('[title="⟳ assistant"]')).not.toBeNull();
+    expect(row.textContent).toContain('17:50:58');
+    expect(row.textContent).toContain('耗时 4s');
+    expect(row.textContent).toContain('正常回答仍然保留。');
+    expect(row.querySelector('summary [data-ugs-review-glyph]')).not.toBeNull();
+  });
+
+  it('hides completed noop rows after live updates and history reload without rewriting stored records or normal answers', async () => {
     const origin = { hostId: 'local', workspaceId: 'ws-noop', sessionId: 'session-noop', turnId: 'turn-noop', runId: 'run-noop' };
     const message = { id: 'learning-noop', role: 'assistant' as const, text: '', localOnly: true, createdAt: 1,
       skillLearning: { status: 'proposing' as const, origin } };
     useStore.setState({ messages: [message] });
     await renderDock();
-    expect(container.textContent).not.toContain('正在提炼经验');
-    expect(container.querySelector('[data-ugs-message-row]')).toBeNull();
+    expect(container.textContent).toContain('正在提炼经验');
+    expect(container.querySelector('[data-ugs-message-row]')).not.toBeNull();
     const completed = { ...message, skillLearning: { status: 'noop' as const, origin,
       result: { status: 'noop' as const, batchId: 'batch-noop', origin, lesson: '已有规则覆盖本次操作。', operationsApplied: 0, changes: [], riskReasons: [],
         usage: { inputTokens: 13103, outputTokens: 198, calls: 1, estimated: false } } } };
@@ -79,18 +121,35 @@ describe('AIDock explicit skill learning', () => {
       expect(container.textContent).not.toContain('无新经验');
       expect(container.textContent).not.toContain('已有规则覆盖');
       expect(container.textContent).not.toContain('复盘用量');
-      expect(container.querySelector('[data-ugs-message-row]')).toBeNull();
+      expect(container.textContent).not.toContain('本轮未调用回顾模型');
+      expect(container.querySelector('article.ugs-skill-review')).toBeNull();
     };
     await act(async () => { useStore.setState({ messages: [completed] }); });
     assertHidden();
+    expect(container.querySelector('[data-ugs-message-row]')).toBeNull();
     expect(useStore.getState().messages[0]).toBe(completed);
     await act(async () => { useStore.setState({ messages: [] }); });
     await act(async () => { useStore.setState({ messages: JSON.parse(JSON.stringify([completed])) }); });
     assertHidden();
+    expect(container.querySelector('[data-ugs-message-row]')).toBeNull();
+    expect(useStore.getState().messages[0]).toEqual(completed);
     await act(async () => { useStore.setState({ messages: [{ ...completed, text: '正常回答仍然保留。' }] }); });
     expect(container.textContent).toContain('正常回答仍然保留。');
-    expect(container.textContent).not.toContain('无新经验');
+    assertHidden();
+    expect(container.querySelector('[data-ugs-message-row]')).not.toBeNull();
   });
+
+  it.each(['', '⏱ 17:50:58 → 17:51:02 · 耗时 4s\n⚙ 路由：Codex · 模型：review\n'])(
+    'omits resultless nonadmission including metadata-only text without leaving an assistant row (%j)', async text => {
+      const origin = { hostId: 'local', workspaceId: 'ws-skip', sessionId: 'session-skip', turnId: 'turn-skip', runId: 'run-skip' };
+      const message = { id: 'skipped-review', role: 'assistant' as const, text, localOnly: true, createdAt: 1,
+        skillLearning: { status: 'noop' as const, origin, admission: { status: 'not-admitted' as const, reason: 'insufficient-evidence', completedActivities: 3, activityThreshold: 10 } } };
+      useStore.setState({ messages: [message] });
+      await renderDock();
+      expect(container.querySelector('[data-ugs-message-row]')).toBeNull();
+      expect(container.textContent).not.toMatch(/未触发技能复盘|⟳|assistant/i);
+      expect(useStore.getState().messages[0]).toBe(message);
+    });
 
   it('renders a textless source-frozen history card and persists its action result to that message after navigation', async () => {
     const origin = { hostId: 'local', workspaceId: 'ws-source', sessionId: 'session-source', turnId: 'turn-source', runId: 'run-source', cwd: 'E:/Source' };

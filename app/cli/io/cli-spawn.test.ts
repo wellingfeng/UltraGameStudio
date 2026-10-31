@@ -18,6 +18,7 @@ import {
 
 const IS_WINDOWS = process.platform === 'win32';
 let dir: string;
+const ambientCatalogEnv: Record<string, string | undefined> = {};
 
 /**
  * Write a JS fixture + a platform shim that execs `node <fixture>` forwarding
@@ -114,13 +115,43 @@ process.stdin.on('end', () => {
 }
 
 beforeAll(() => {
+  for (const key of ['UGS_TOOL_CATALOG_SCOPE', 'UGS_TOOLS_CLI', 'UGS_SESSION_ID', 'UGS_WORKSPACE_ID']) {
+    ambientCatalogEnv[key] = process.env[key];
+    delete process.env[key];
+  }
   dir = mkdtempSync(join(tmpdir(), 'ugs-spawn-test-'));
 });
 afterAll(() => {
   rmSync(dir, { recursive: true, force: true });
+  for (const [key, value] of Object.entries(ambientCatalogEnv)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
 });
 
 describe('spawnCliAgent (claude stream-json)', () => {
+  it('passes automatic catalogue guidance and session identity to the spawned agent', async () => {
+    const output = join(dir, 'catalog-agent-access.json');
+    const scope = { workspaceId: 'w', sessionId: 's', agentId: 'claude-code', providerId: 'p', channelId: 'c', model: 'sonnet' };
+    const bin = makeFakeCli('catalog-agent-access', `
+const fs = require('node:fs');
+let input = '';
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', chunk => { input += chunk; });
+process.stdin.on('end', () => {
+  fs.writeFileSync(${JSON.stringify(output)}, JSON.stringify({ prompt: input, script: process.env.UGS_TOOLS_CLI, scope: process.env.UGS_TOOL_CATALOG_SCOPE }));
+  process.stdout.write(JSON.stringify({ type: 'result', result: 'OK' }) + '\\n');
+});`);
+    const result = await spawnCliAgent('查找编译工具', { adapter: 'claude-code', cliCommand: bin, cwd: dir,
+      env: { UGS_HOME: join(dir, 'catalog-agent-home'), UGS_TOOL_CATALOG_SCOPE: JSON.stringify(scope) } });
+    expect(result).toBe('OK');
+    const observed = JSON.parse(readFileSync(output, 'utf8'));
+    expect(observed.prompt).toContain('tools search');
+    expect(observed.prompt).toContain('无需用户打开面板');
+    expect(observed.prompt.endsWith('查找编译工具')).toBe(true);
+    expect(observed.script).toMatch(/ugs\.mjs$/);
+    expect(JSON.parse(observed.scope)).toEqual(scope);
+  });
   it('assembles claude argv, feeds prompt via stdin, prefers result over accumulated text', async () => {
     const argvOut = join(dir, 'argv-claude.json');
     const bin = makeFakeCli('fake-claude', fakeClaudeBody(argvOut));

@@ -59,11 +59,11 @@ describe('parseMemoryWrites', () => {
       content: '新内容',
       importance: 'minor',
     });
-    // Missing / non-string importance simply stays absent.
+    // A present but invalid importance invalidates the entire request.
     const plain = parseMemoryWrites(
       block('{"target":"user","operations":[{"action":"add","content":"x","importance":3}]}'),
     );
-    expect(plain[0].operations[0]).toEqual({ action: 'add', content: 'x' });
+    expect(plain).toEqual([]);
   });
 
   it('documents the importance field in the write instruction', () => {
@@ -83,6 +83,23 @@ describe('parseMemoryWrites', () => {
 
   it('rejects an invalid target', () => {
     expect(parseMemoryWrites(block('{"target":"nope","operations":[{"action":"add","content":"x"}]}'))).toEqual([]);
+  });
+
+  it('rejects every block when one operation in the payload is invalid', () => {
+    const valid = block('{"target":"user","operations":[{"action":"add","content":"safe"}]}');
+    const mixed = block('{"target":"memory","operations":[{"action":"add","content":"safe"},{"action":"execute","content":"unsafe"}]}');
+    expect(parseMemoryWrites(valid + mixed)).toEqual([]);
+  });
+
+  it.each([
+    '{"target":"user","root":"C:/","operations":[{"action":"add","content":"x"}]}',
+    '{"target":"user","operations":[{"action":"add","content":"x","approval":true}]}',
+    '{"target":"user","operations":[{"action":"add","content":"x","importance":3}]}',
+    '{"target":"user","operations":[{"action":"replace","oldText":"x","old_text":"y","content":"z"}]}',
+    '{"target":"user","operations":[{"action":"remove","oldText":"x","content":"y"}]}',
+    '{"target":"user","operations":[{"action":"add","content":"  "}]}',
+  ])('rejects unknown fields and invalid operation shapes: %s', (json) => {
+    expect(parseMemoryWrites(block(json))).toEqual([]);
   });
 
   it('rejects a block with no valid operations', () => {

@@ -6,7 +6,9 @@ import {
   useState,
   type CSSProperties,
   type ReactNode,
+  type RefObject,
 } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Code2,
   ExternalLink,
@@ -17,12 +19,14 @@ import {
   Image as ImageIcon,
   Loader2,
   Maximize2,
-  AppWindow,
+  MessageSquarePlus,
   Minimize2,
   Video,
   X,
 } from 'lucide-react';
 import { convertFileSrc } from '@tauri-apps/api/core';
+import { requestTemporaryChat } from '@/components/temporaryChat/TemporaryChatWindows';
+import { fileSource, registerVisibleSource } from '@/components/temporaryChat/context';
 import {
   openLocalPath,
   previewLocalFile,
@@ -50,6 +54,8 @@ import PdfPreview from './PdfPreview';
 import CopyButton from './CopyButton';
 import { directImagePreviewSource } from './lib/imagePreview';
 import ImagePreviewPane from './ImagePreviewPane';
+import PreviewZoomControls from './PreviewZoomControls';
+import { useCtrlWheelZoom, usePreviewZoom } from './lib/previewZoom';
 
 type PreviewState =
   | { status: 'idle' }
@@ -361,12 +367,17 @@ function DiffCodePreview({
   text,
   diff,
   language,
+  zoom,
+  onZoom,
 }: {
   text: string;
   diff: WorkspaceChangeFile | null;
   language: string;
+  zoom: number;
+  onZoom: (value: number) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  useCtrlWheelZoom(scrollRef, zoom, onZoom);
   const rows = useMemo(() => buildDiffPreviewRows(text, diff), [diff, text]);
   const highlightedRows = useMemo(
     () =>
@@ -394,7 +405,7 @@ function DiffCodePreview({
       <div ref={scrollRef} className="ai-file-preview-diff__scroll" tabIndex={0}>
         <div
           className="ai-file-preview-diff__code"
-          style={{ '--line-number-width': `${lineNumberWidth}ch` } as CSSProperties}
+          style={{ '--line-number-width': `${lineNumberWidth}ch`, zoom } as CSSProperties}
         >
           {highlightedRows.map((row) => (
             <div
@@ -442,6 +453,43 @@ function DiffCodePreview({
   );
 }
 
+function MarkdownFilePreview({ file, cwd, previewFile }: { file: LocalFilePreview; cwd?: string; previewFile: typeof previewLocalFile }) {
+  const { zoom, setZoom } = usePreviewZoom(file.path);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [image, setImage] = useState<{ src: string; alt: string } | null>(null);
+  useCtrlWheelZoom(scrollRef, zoom, setZoom);
+  useEffect(() => { setImage(null); }, [file.path]);
+  useEffect(() => {
+    if (!image) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.stopImmediatePropagation(); setImage(null); }
+    };
+    window.addEventListener('keydown', onKey, true);
+    return () => window.removeEventListener('keydown', onKey, true);
+  }, [image]);
+  return <div className="relative flex min-h-0 flex-1 flex-col bg-bg">
+    <div className="flex shrink-0 items-center gap-2 border-b border-border-soft px-3 py-1.5 font-mono text-[10px] text-fg-faint">
+      <FileText size={12} />{file.mime ?? 'text/markdown'} · {formatBytes(file.sizeBytes)}
+      <div className="ml-auto"><PreviewZoomControls zoom={zoom} onZoom={setZoom} /></div>
+    </div>
+    <div ref={scrollRef} className="min-h-0 flex-1 overflow-auto p-4">
+      <div style={{ zoom }} onClickCapture={(event) => {
+        const target = event.target;
+        if (!(target instanceof HTMLImageElement) || !(target.currentSrc || target.src)) return;
+        event.preventDefault(); event.stopPropagation();
+        setImage({ src: target.currentSrc || target.src, alt: target.alt || '图片预览' });
+      }}>
+        <Markdown text={file.text ?? ''} cwd={file.path ? parentDirectoryPath(file.path) : cwd}
+          onOpenFile={(ref) => { void previewFile(ref.path, { cwd: file.path ? parentDirectoryPath(file.path) : cwd }); }} />
+      </div>
+    </div>
+    {image && <div role="dialog" aria-label="图片查看" className="absolute inset-0 z-10 flex flex-col bg-bg">
+      <div className="flex justify-end border-b border-border-soft px-3 py-1.5"><button type="button" onClick={() => setImage(null)} className="rounded px-2 py-1 text-xs text-fg-dim hover:bg-panel-2">关闭</button></div>
+      <ImagePreviewPane src={image.src} alt={image.alt} />
+    </div>}
+  </div>;
+}
+
 export default function FilePreviewDrawer({
   refData,
   customContent = null,
@@ -450,6 +498,7 @@ export default function FilePreviewDrawer({
   diffEnabled = false,
   canOpenExternally = true,
   variant = 'overlay',
+  overlayContainerRef,
   active = true,
   onClose,
 }: {
@@ -460,6 +509,7 @@ export default function FilePreviewDrawer({
   diffEnabled?: boolean;
   canOpenExternally?: boolean;
   variant?: FilePreviewDrawerVariant;
+  overlayContainerRef?: RefObject<HTMLElement>;
   active?: boolean;
   onClose: () => void;
 }) {
@@ -484,7 +534,12 @@ export default function FilePreviewDrawer({
   const directImageSource = directImagePreviewSource(refData);
 
   useEffect(() => {
-    if (embedded) return;
+    if (!refData || customContent || directImageSource || !active) return;
+    return registerVisibleSource(fileSource(refData, cwd));
+  }, [refData, cwd, customContent, directImageSource, active]);
+
+  useEffect(() => {
+    if (embedded || overlayContainerRef) return;
     publishFilePreviewDrawerLayout({
       id: drawerId,
       open,
@@ -493,11 +548,11 @@ export default function FilePreviewDrawer({
         : 0,
       expanded: open && isExpanded,
     });
-  }, [drawerId, embedded, isExpanded, open, width]);
+  }, [drawerId, embedded, isExpanded, open, overlayContainerRef, width]);
 
   useEffect(
     () => () => {
-      if (embedded) return;
+      if (embedded || overlayContainerRef) return;
       publishFilePreviewDrawerLayout({
         id: drawerId,
         open: false,
@@ -505,7 +560,7 @@ export default function FilePreviewDrawer({
         expanded: false,
       });
     },
-    [drawerId, embedded],
+    [drawerId, embedded, overlayContainerRef],
   );
 
   useEffect(() => {
@@ -588,6 +643,7 @@ export default function FilePreviewDrawer({
   }, [embedded, main, onClose, open]);
 
   const file = state.status === 'ready' ? state.file : null;
+  const { zoom: textZoom, setZoom: setTextZoom } = usePreviewZoom(file?.path ?? '');
   const imageUrl = useBase64ObjectUrl(
     file?.kind === 'image' ? file.base64 : null,
     file?.kind === 'image' ? file.mime : null,
@@ -607,11 +663,6 @@ export default function FilePreviewDrawer({
     : '';
   const textPreviewMode =
     file?.kind === 'text' ? textPreviewModeFromPath(file.path, file.mime) : 'code';
-  const markdown = useMemo(() => {
-    if (!file || file.kind !== 'text' || file.text == null) return '';
-    if (textPreviewMode === 'markdown') return file.text;
-    return '';
-  }, [file, textPreviewMode]);
   const vcsDiff = diffState.status === 'ready' ? diffState.diff : null;
 
   if (!open) return null;
@@ -643,7 +694,14 @@ export default function FilePreviewDrawer({
               {path || customContent?.meta}
             </div>
           </div>
-          {!main && refData && !customContent && (
+          {refData && !customContent && !directImageSource && active && (
+            <button type="button" title="针对当前文件随手聊" aria-label="针对当前文件随手聊"
+              onClick={() => requestTemporaryChat(fileSource(refData, cwd))}
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg">
+              <MessageSquarePlus size={14} />
+            </button>
+          )}
+          {!main && !overlayContainerRef && refData && !customContent && (
             <button
               type="button"
               onClick={() => {
@@ -657,15 +715,15 @@ export default function FilePreviewDrawer({
               aria-label="在主区域预览"
               className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg"
             >
-              <AppWindow size={14} />
+              <Maximize2 size={14} />
             </button>
           )}
           {!embedded && (
             <button
               type="button"
               onClick={() => setIsExpanded((value) => !value)}
-              title={isExpanded ? '还原预览宽度' : '占满窗口'}
-              aria-label={isExpanded ? '还原预览宽度' : '占满窗口'}
+              title={isExpanded ? '还原预览宽度' : overlayContainerRef ? '占满区域' : '占满窗口'}
+              aria-label={isExpanded ? '还原预览宽度' : overlayContainerRef ? '占满区域' : '占满窗口'}
               className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg"
             >
               {isExpanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
@@ -816,23 +874,7 @@ export default function FilePreviewDrawer({
         )}
 
         {file?.kind === 'text' && textPreviewMode === 'markdown' && (
-          <div className="min-h-0 flex-1 overflow-auto bg-bg p-4">
-            <div className="mb-3 flex items-center gap-2 border-b border-border-soft pb-2 font-mono text-[10px] text-fg-faint">
-              <FileText size={12} />
-              {file.mime ?? 'text/markdown'} · {formatBytes(file.sizeBytes)}
-            </div>
-            {/* md 内的图片/文件引用以 md 所在目录为基准解析；点击可在
-                右侧预览里打开（本地图片走 previewLocalFile 的 asset scope）。 */}
-            <Markdown
-              text={markdown}
-              cwd={file.path ? parentDirectoryPath(file.path) : cwd}
-              onOpenFile={(ref) => {
-                void previewFile(ref.path, {
-                  cwd: file.path ? parentDirectoryPath(file.path) : cwd,
-                });
-              }}
-            />
-          </div>
+          <MarkdownFilePreview file={file} cwd={cwd} previewFile={previewFile} />
         )}
 
         {file?.kind === 'text' && textPreviewMode === 'code' && (
@@ -840,11 +882,25 @@ export default function FilePreviewDrawer({
             <div className="flex shrink-0 items-center gap-2 border-b border-border-soft px-3 py-1.5 font-mono text-[10px] text-fg-faint">
               <Code2 size={12} />
               {file.mime ?? 'text/plain'} · {formatBytes(file.sizeBytes)}
+              {diffEnabled && diffState.status === 'loading' && (
+                <span className="flex items-center gap-1"><Loader2 size={10} className="animate-spin" />读取差异中</span>
+              )}
+              {diffEnabled && diffState.status === 'ready' && vcsDiff && (
+                <span className="text-fg-dim">相对版本库 · +{vcsDiff.lines.filter((line) => isAddedDiffKind(line.kind)).length} / -{vcsDiff.lines.filter((line) => isDeletedDiffKind(line.kind)).length}</span>
+              )}
+              <div className="ml-auto"><PreviewZoomControls zoom={textZoom} onZoom={setTextZoom} /></div>
             </div>
+            {diffEnabled && diffState.status === 'error' && (
+              <div role="status" className="shrink-0 border-b border-status-error/30 bg-status-error/10 px-3 py-1.5 text-xs text-status-error">
+                差异读取失败：{diffState.message}
+              </div>
+            )}
             <DiffCodePreview
               text={file.text ?? ''}
               diff={vcsDiff}
               language={languageFromPath(file.path)}
+              zoom={textZoom}
+              onZoom={setTextZoom}
             />
           </div>
         )}
@@ -904,18 +960,22 @@ export default function FilePreviewDrawer({
     );
   }
 
-  return (
-    <div className="fixed inset-0 z-50 pointer-events-none">
+  const overlay = (
+    <div className={cn(overlayContainerRef ? 'absolute' : 'fixed', 'inset-0 z-50 pointer-events-none')}>
       <aside
         ref={asideRef}
         className={cn(
           'pointer-events-auto absolute bottom-0 right-0 top-0 flex flex-col bg-panel shadow-2xl',
           isExpanded ? 'left-0' : 'border-l border-border',
         )}
-        style={isExpanded ? undefined : { width }}
+        style={isExpanded ? undefined : { width, maxWidth: overlayContainerRef ? '100%' : undefined }}
       >
         {panelContent}
       </aside>
     </div>
   );
+  if (overlayContainerRef) {
+    return overlayContainerRef.current ? createPortal(overlay, overlayContainerRef.current) : null;
+  }
+  return overlay;
 }

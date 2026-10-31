@@ -9,6 +9,8 @@ import { afterEach, expect, it, vi } from 'vitest';
 import type { GatewayProvider } from './modelGateway/types';
 import type { SkillCatalog, SkillLearningMode, SkillMutationResult, SkillOrigin, SkillReviewState } from '@/runtime/skills/types';
 import type { SkillRunBindingRequest, SkillServiceRequest } from './skills';
+import type { SkillCandidateTransport } from './skillCandidateStore';
+import { createCandidateIpcFixture } from '@/test/nativePersistenceFixture';
 
 interface TestProxyHttpRequest {
   method: string;
@@ -61,6 +63,14 @@ it.each(['configured-http', 'explicit-http-for-cli'] as const)('holds the first 
   // for independent protocols need distinct source sessions rather than a reset.
   const origin: SkillOrigin = { hostId: 'local', workspaceId: 'fs-workspace', sessionId: `fs-source-${reviewRoute}`, turnId: 'fs-turn', runId: 'foreground-run' };
   const sessionPath = join(dir, 'source-session.json');
+  const candidates = await createCandidateIpcFixture(dir);
+  const fixtureErrors: unknown[] = [];
+  cleanup.push(async () => { expect(fixtureErrors).toEqual([]); });
+  const sourceText = new Map([
+    ['fs-turn', 'Verify the project dependency check.'],
+    ['repeated-turn', 'Verify the project dependency check again.'],
+    ['next-turn', 'Use manifest-first for the next dependency task.'],
+  ]);
   const service: { request(request: SkillServiceRequest): Promise<unknown> } = createWorkspaceSkillService({ dir, hostId: origin.hostId, workspaceId: origin.workspaceId });
   const bindings = new Map<string, SkillRunBindingRequest>();
   const calls: Array<{ command: string; request?: SkillServiceRequest | SkillRunBindingRequest }> = [];
@@ -69,6 +79,7 @@ it.each(['configured-http', 'explicit-http-for-cli'] as const)('holds the first 
   // The injected IPC host delegates HTTP to an actual loopback fetch, not a canned response.
   Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: seams.invoke } });
   seams.invoke.mockImplementation(async (command: string, args: { request?: (SkillServiceRequest & SkillRunBindingRequest) | TestProxyHttpRequest; origin?: SkillOrigin }) => {
+    try {
     if (command === 'proxy_http') {
       const request = args.request as TestProxyHttpRequest;
       expect(request.timeoutMs).toBeGreaterThan(0);
@@ -80,11 +91,19 @@ it.each(['configured-http', 'explicit-http-for-cli'] as const)('holds the first 
       return { status: response.status, statusText: response.statusText, url: response.url,
         headers: Array.from(response.headers, ([name, value]) => ({ name, value })), bodyBase64: bytes.toString('base64') };
     }
+    if (command === 'history_read_json') {
+      expect((args as { relPath?: string }).relPath).toBe(`workspaces/${origin.workspaceId}/sessions/${origin.sessionId}.json`);
+      return await readFile(sessionPath, 'utf8');
+    }
+    if (command === 'skill_candidates_request') return await candidates.request(args.request as unknown as Parameters<SkillCandidateTransport>[0]);
     const request = args.request as SkillServiceRequest & SkillRunBindingRequest;
     calls.push({ command, request: request && structuredClone(request) });
     if (command === 'skills_bind_run') {
       const saved = JSON.parse(await readFile(sessionPath, 'utf8'));
       expect(saved).toMatchObject({ workspaceId: request.origin.workspaceId, sessionId: request.origin.sessionId });
+      const source = saved.messages.filter((message: { id: string }) => message.id === request.origin.turnId);
+      expect(source).toHaveLength(1);
+      expect(source[0]).toMatchObject({ role: 'user', text: sourceText.get(request.origin.turnId) });
       bindings.set(key(request.origin, request.actor), structuredClone(request));
       return;
     }
@@ -93,7 +112,13 @@ it.each(['configured-http', 'explicit-http-for-cli'] as const)('holds the first 
 
     const actor = ['approve', 'reject', 'rollback', 'set_policy', 'archive', 'restore', 'import'].includes(request.action) ? 'user' : 'background';
     expect(bindings.has(key(request.origin, actor)) || (['list', 'view', 'history', 'usage'].includes(request.action) && bindings.has(key(request.origin, 'user')))).toBe(true);
-    return service.request(request);
+    return await service.request(request);
+    } catch (error) {
+      // Ordinary context/telemetry is best effort, but fixture bugs must never
+      // disappear into those production catches and create false green tests.
+      fixtureErrors.push(error);
+      throw error;
+    }
   });
 
   const content = '---\nname: manifest-first\ndescription: Use when choosing project dependencies.\n---\n\nRead the complete manifest before selecting dependencies so versions match the project.\n';
@@ -141,7 +166,10 @@ it.each(['configured-http', 'explicit-http-for-cli'] as const)('holds the first 
   const initialContext = turn.loadContext();
   await Promise.resolve();
   expect(calls).toEqual([]);
-  await writeFile(sessionPath, JSON.stringify({ workspaceId: origin.workspaceId, sessionId: origin.sessionId }));
+  const sourceSession = { workspaceId: origin.workspaceId, sessionId: origin.sessionId, messages: [
+    { id: origin.turnId, role: 'user', text: 'Verify the project dependency check.' },
+  ] };
+  await writeFile(sessionPath, JSON.stringify(sourceSession));
   release();
   await expect(initialContext).resolves.toMatchObject({ loadedSkills: [] });
 
@@ -159,9 +187,11 @@ it.each(['configured-http', 'explicit-http-for-cli'] as const)('holds the first 
   const finalAnswer = 'The real dependency check completed.';
 
   const first = await turn.finish({ finalAnswer, terminal: 'completed' });
-  expect(first).toMatchObject({ status: 'noop', operationsApplied: 0,
+  expect(first, first.error).toMatchObject({ status: 'noop', operationsApplied: 0,
     usage: { calls: 1, inputTokens: 41, outputTokens: 29, totalTokens: 70, estimated: false } });
   const repeatedOrigin = { ...origin, turnId: 'repeated-turn', runId: 'repeated-run' };
+  sourceSession.messages.push({ id: repeatedOrigin.turnId, role: 'user', text: 'Verify the project dependency check again.' });
+  await writeFile(sessionPath, JSON.stringify(sourceSession));
   const repeated = beginSkillLearningTurn({ origin: repeatedOrigin, prompt: 'Verify the project dependency check again.', selection, config, ready,
     onState: (state) => { states.push(state); } });
   const rechecked = await promisify(execFile)(process.execPath, ['--test', '--test-reporter=tap', checkPath]);
@@ -190,6 +220,8 @@ it.each(['configured-http', 'explicit-http-for-cli'] as const)('holds the first 
     : reviewerSelection);
 
   const nextOrigin = { ...origin, turnId: 'next-turn', runId: 'next-run' };
+  sourceSession.messages.push({ id: nextOrigin.turnId, role: 'user', text: 'Use manifest-first for the next dependency task.' });
+  await writeFile(sessionPath, JSON.stringify(sourceSession));
   const next = beginSkillLearningTurn({ origin: nextOrigin, prompt: 'Use manifest-first for the next dependency task.', selection, config, ready });
   const context = await next.loadContext();
 

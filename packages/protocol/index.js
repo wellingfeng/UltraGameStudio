@@ -526,9 +526,10 @@ export class RunnerClient {
     return res.ok;
   }
 
-  async getJob(id) {
+  async getJob(id, options) {
     const res = await fetch(this.url(REMOTE_RUNNER_API_PATHS.job(id)), {
       headers: this.headers(),
+      signal: options?.signal,
     });
     const data = await res.json();
     if (!res.ok || !data.ok || !data.job) {
@@ -699,6 +700,7 @@ export class RunnerClient {
           buffer = events.pop() ?? '';
           for (const chunk of events) dispatchRemoteRunnerSse(chunk, handlers);
         }
+        if (!controller.signal.aborted) handlers.onClose?.();
       } catch (err) {
         if (!controller.signal.aborted) {
           handlers.onError?.(err instanceof Error ? err : new Error(String(err)));

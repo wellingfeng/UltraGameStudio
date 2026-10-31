@@ -1,3 +1,5 @@
+import { acquireReviewBackground, subscribeReviewAvailable } from '@/runtime/memory/review';
+
 export type SkillQueueResult<T> =
   | { status: 'completed'; result: T }
   | { status: 'cancelled' }
@@ -10,12 +12,15 @@ interface QueueEntry<Job, Result> {
   resolve: (result: SkillQueueResult<Result>) => void;
 }
 
-/** One background reviewer per app, with explicit foreground ownership. */
+/** Optional renderer-wide admission; standalone queues keep caller-owned priority. */
 export class SkillLearningQueue<Job, Result> {
   private foregroundCount = 0;
   private foregroundByKey = new Map<string, number>();
   private pending = new Map<string, QueueEntry<Job, Result>>();
   private active: { entry: QueueEntry<Job, Result>; controller: AbortController } | null = null;
+  private stopWaiting?: () => void;
+
+  constructor(private readonly sharedOwner?: string) {}
 
   get foregroundActive(): boolean { return this.foregroundCount > 0 || this.foregroundByKey.size > 0; }
 
@@ -26,6 +31,7 @@ export class SkillLearningQueue<Job, Result> {
       entry.resolve({ status: 'cancelled' });
     }
     if (this.active && (key === undefined || this.active.entry.key === key)) this.active.controller.abort();
+    if (!this.pending.size) { this.stopWaiting?.(); this.stopWaiting = undefined; }
   }
 
   foregroundStarted(key?: string): () => void {
@@ -59,8 +65,17 @@ export class SkillLearningQueue<Job, Result> {
     if (this.foregroundCount || this.active) return;
     const entry = [...this.pending.values()].find((candidate) => !this.foregroundByKey.has(candidate.key));
     if (!entry) return;
+    const slot = this.sharedOwner === undefined ? undefined : acquireReviewBackground(this.sharedOwner);
+    if (this.sharedOwner !== undefined && !slot) {
+      this.stopWaiting ??= subscribeReviewAvailable(() => this.drain());
+      return; // Preserve the exact pending entry/reservation until admission.
+    }
+    this.stopWaiting?.();
+    this.stopWaiting = undefined;
     this.pending.delete(entry.key);
     const controller = new AbortController();
+    const abort = () => controller.abort(slot?.signal.reason);
+    slot?.signal.addEventListener('abort', abort, { once: true });
     this.active = { entry, controller };
     void Promise.resolve().then(() => {
       // Foreground/cancel may win after reservation but before this dispatch.
@@ -73,6 +88,8 @@ export class SkillLearningQueue<Job, Result> {
         : { status: 'failed', error }),
     ).finally(() => {
       this.active = null;
+      slot?.signal.removeEventListener('abort', abort);
+      slot?.release(); // The callback includes actual host completion and revocation.
       this.drain();
     });
   }

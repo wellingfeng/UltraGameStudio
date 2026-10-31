@@ -43,6 +43,19 @@ vi.mock('@/lib/tauri', async (importOriginal) => {
   };
 });
 
+// These DOM tests verify editing and the synchronous browser/quit fallback.
+// The Tauri flag above enables native event/UI paths, not a working key store.
+// Native durability and rejection are tested at the secure-storage seam.
+vi.mock('@/lib/secureStorage', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/secureStorage')>();
+  return {
+    ...actual,
+    secureStorageAvailable: () => false,
+    secureStorageAllowsInlineFallback: () => true,
+    flushSecureStorage: vi.fn(async () => undefined),
+  };
+});
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT =
   true;
 

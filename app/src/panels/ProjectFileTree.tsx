@@ -40,6 +40,8 @@ import GameTeamPanel, {
 import {
   OPEN_PROJECT_RIGHT_PANEL_FILE_PREVIEW_EVENT,
   OPEN_PROJECT_RIGHT_PANEL_SESSION_FILES_EVENT,
+  SELECT_PROJECT_RIGHT_PANEL_TAB_EVENT,
+  CLOSE_PROJECT_RIGHT_PANEL_EVENT,
   TOGGLE_PROJECT_RIGHT_PANEL_EVENT,
   PROJECT_RIGHT_PANEL_VISIBILITY_EVENT,
   type OpenProjectRightPanelFilePreviewEventDetail,
@@ -840,9 +842,6 @@ export default function ProjectFileTree() {
     return () => window.removeEventListener(TOGGLE_PROJECT_RIGHT_PANEL_EVENT, toggle);
   }, []);
   useEffect(() => {
-    window.dispatchEvent(new CustomEvent(PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, { detail: { open: panelOpen } }));
-  }, [panelOpen]);
-  useEffect(() => {
     setPanelOpen(panelLockedRef.current);
     setPreviewRef(null);
     setTeamDetailsPreview(null);
@@ -857,6 +856,9 @@ export default function ProjectFileTree() {
     );
     return stored === 'session' ? stored : 'files';
   });
+  useEffect(() => {
+    window.dispatchEvent(new CustomEvent(PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, { detail: { open: panelOpen, tab: panelTab } }));
+  }, [panelOpen, panelTab]);
   const [viewMode, setViewMode] = useState<ProjectTreeViewMode>(() => {
     if (typeof window === 'undefined') return 'tree';
     return window.localStorage.getItem('ultragamestudio.projectFileTreeView.v1') ===
@@ -1251,6 +1253,31 @@ export default function ProjectFileTree() {
       window.localStorage.setItem('ultragamestudio.projectRightPanelTab.v1', nextTab);
     }
   }, []);
+
+  useEffect(() => {
+    const selectTab = (event: Event) => {
+      const tab = (event as CustomEvent<{ tab: ProjectPanelTab }>).detail?.tab;
+      if (tab !== 'files' && tab !== 'session') return;
+      const close = panelOpen && panelTab === tab && !previewRef && !teamDetailsPreview;
+      setPreviewRef(null);
+      setTeamDetailsPreview(null);
+      setPreviewDiffEnabled(false);
+      updatePanelTab(tab);
+      setPanelOpen(!close);
+    };
+    const closePanel = () => {
+      setPanelOpen(false);
+      setPreviewRef(null);
+      setTeamDetailsPreview(null);
+      setPreviewDiffEnabled(false);
+    };
+    window.addEventListener(SELECT_PROJECT_RIGHT_PANEL_TAB_EVENT, selectTab);
+    window.addEventListener(CLOSE_PROJECT_RIGHT_PANEL_EVENT, closePanel);
+    return () => {
+      window.removeEventListener(SELECT_PROJECT_RIGHT_PANEL_TAB_EVENT, selectTab);
+      window.removeEventListener(CLOSE_PROJECT_RIGHT_PANEL_EVENT, closePanel);
+    };
+  }, [panelOpen, panelTab, previewRef, teamDetailsPreview, updatePanelTab]);
 
   useEffect(() => {
     const openSessionFiles = () => {
@@ -1718,7 +1745,7 @@ export default function ProjectFileTree() {
                     } else if (!virtualDeleted) {
                       setTeamDetailsPreview(null);
                       setPreviewCwd(selectedRootPath || undefined);
-                      setPreviewDiffEnabled(false);
+                      setPreviewDiffEnabled(true);
                       setPreviewRef(fileRefFromEntry(entry));
                     }
                   }}
@@ -1906,7 +1933,7 @@ export default function ProjectFileTree() {
                     ) {
                       setTeamDetailsPreview(null);
                       setPreviewCwd(selectedRootPath || undefined);
-                      setPreviewDiffEnabled(false);
+                      setPreviewDiffEnabled(true);
                       setPreviewRef(fileRefFromEntry(entry));
                     }
                   }}

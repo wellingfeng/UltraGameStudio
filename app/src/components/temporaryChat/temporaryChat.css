@@ -1,0 +1,14 @@
+/* Moon Begin: compact, independent floating chat windows. */
+.temporary-chat-error{position:fixed;right:12px;bottom:36px;z-index:1100;max-width:360px;padding:8px 12px;border:1px solid #7c4e4e;border-radius:8px;background:#2a1d1d;color:#ffc5c1;cursor:pointer}
+.temporary-chat-title:focus-visible,.temporary-chat-title button:focus-visible{outline:2px solid #a8b4cf;outline-offset:-3px}
+.temporary-chat-window{position:fixed;display:flex;flex-direction:column;box-sizing:border-box;width:360px;height:420px;min-width:min(300px,calc(100vw - 16px));min-height:240px;max-width:calc(100vw - 16px);max-height:calc(100vh - 52px);overflow:hidden;resize:both;background:#131314;color:#e3e3e3;border:1px solid #39393b;border-radius:16px;box-shadow:0 12px 40px #0006;font:13px/1.5 system-ui,'Microsoft YaHei',sans-serif}
+.temporary-chat-window.is-minimized{height:40px!important;min-height:40px;resize:none}
+.temporary-chat-title{display:flex;align-items:center;gap:7px;flex:0 0 38px;padding:0 7px 0 13px;cursor:move;touch-action:none;user-select:none}
+.temporary-chat-mark{font-size:17px;line-height:1;color:#a8c7fa}
+.temporary-chat-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.temporary-chat-name small{margin-left:4px;color:#929297;font-size:11px;font-weight:400}
+.temporary-chat-title button{display:grid;place-items:center;flex-shrink:0;width:26px;height:26px;padding:0;background:transparent;color:#a8a8ad;border:0;border-radius:50%;cursor:pointer}
+.temporary-chat-title button:hover{background:#2b2b2e;color:#f1f1f1}
+.temporary-chat-window iframe{display:block;flex:1;width:100%;min-height:0;border:0;background:#131314}
+.temporary-chat-window iframe[hidden]{display:none}
+/* Moon End */

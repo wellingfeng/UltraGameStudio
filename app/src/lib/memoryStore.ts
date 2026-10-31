@@ -36,8 +36,11 @@
  * what was evicted.
  */
 
-import { tauriAvailable } from './tauri';
+import { checkMemoryCancelled, compareExchangeMemoryJson, readMemoryJson, withMemoryLock } from './memoryTransactions';
+import { normalizeMemoryRequests } from '@/core/memoryProtocol';
+import { loadFrozenSnapshot, releaseFrozenSnapshot, resetSnapshotCache } from './memorySnapshots';
 import { scanMemoryContent, type MemorySafetyFinding } from './memorySafety';
+import type { MemoryReviewSource, MemorySourceConfirmation } from './memoryPending';
 
 export type MemoryTarget = 'memory' | 'user';
 
@@ -112,6 +115,8 @@ export function normalizeImportance(value: unknown): MemoryImportance | undefine
 /** One stored entry. `updatedAt` is epoch-ms of the last add/replace; `undefined`
  * for entries migrated from the legacy string[] shape (timestamp unknown). */
 export interface MemoryEntry {
+  /** Stable identity assigned only during a successful CAS migration/write. */
+  id?: string;
   text: string;
   updatedAt?: number;
   importance?: MemoryImportance;
@@ -121,9 +126,17 @@ export interface MemoryEntry {
  * On-disk shape. v2 stores structured entries; v1 (legacy) stored plain strings.
  * Both are accepted on read; writes always emit v2.
  */
+export interface MemoryCommitReceipt {
+  id: string; signature: string; appliedCount: number; skippedCount: number;
+  target?: MemoryTarget; workspaceId?: string; reviewSource?: MemoryReviewSource;
+  sourceConfirmation?: MemorySourceConfirmation;
+  before?: MemoryEntry[]; after?: MemoryEntry[]; afterRevision?: string; undoes?: string;
+}
 interface MemoryFile {
   version: 1 | 2;
   entries: (string | MemoryEntry)[];
+  revision?: string;
+  receipts?: MemoryCommitReceipt[];
 }
 
 /**
@@ -133,9 +146,20 @@ interface MemoryFile {
 interface NormalizedMemoryFile {
   version: 2;
   entries: MemoryEntry[];
+  raw: string | null;
+  revision?: string;
+  receipts?: MemoryCommitReceipt[];
 }
 
-const FALLBACK_PREFIX = 'ultragamestudio.memory.v1:';
+export interface MemoryBase {
+  target: MemoryTarget;
+  workspaceId?: string;
+  raw: string | null;
+  entries: MemoryEntry[];
+  revision?: string;
+}
+
+
 
 /**
  * Resolve the on-disk relative path for a target.
@@ -149,12 +173,11 @@ const FALLBACK_PREFIX = 'ultragamestudio.memory.v1:';
  */
 function relPathFor(target: MemoryTarget, workspaceId?: string): string {
   if (target === 'user') return 'memories/user.json';
-  const ws = (workspaceId ?? '').trim();
-  if (!ws) return 'memories/memory.json';
-  // Flatten the id into a filesystem-safe leaf; the history backend rejects
-  // path traversal, but keep it tidy regardless.
-  const safe = ws.replace(/[^A-Za-z0-9._-]/g, '_');
-  return `memories/workspaces/${safe}/memory.json`;
+  if (workspaceId === undefined || workspaceId === '') return 'memories/memory.json';
+  // Never repair IDs into a different project's leaf. Real workspace IDs are host-derived.
+  if (!/^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(workspaceId) || workspaceId.endsWith('.') ||
+      /^(?:con|prn|aux|nul|com[0-9]|lpt[0-9])(?:\.|$)/i.test(workspaceId)) throw new Error('Invalid memory workspace scope identity');
+  return `memories/workspaces/${workspaceId}/memory.json`;
 }
 
 // --- single-op / batch operation shapes --------------------------------------
@@ -175,6 +198,9 @@ export interface MemoryOp {
 
 export interface MemoryResult {
   success: boolean;
+  appliedCount?: number;
+  skippedCount?: number;
+  alreadyApplied?: boolean;
   target: MemoryTarget;
   /** Live entries after the operation (or the current entries on failure). */
   entries: MemoryEntry[];
@@ -196,6 +222,14 @@ export interface MemoryResult {
 
 /** Optional policy knobs for a batch (see `applyMemoryBatch`). */
 export interface MemoryBatchOptions {
+  signal?: AbortSignal;
+  /** Trusted producer guard, rechecked immediately before host CAS dispatch. */
+  beforeDispatch?: () => void;
+  /** Exact host bytes captured for this proposal; null means confirmed absent. */
+  expectedRaw?: string | null;
+  transactionId?: string;
+  reviewSource?: MemoryReviewSource;
+  sourceConfirmation?: MemorySourceConfirmation;
   /**
    * When the final result overflows the char limit, drop the OLDEST entries
    * (entries touched by THIS batch are never evicted) until it fits, instead of
@@ -213,85 +247,91 @@ export interface MemoryBatchOptions {
 
 // --- low-level IO (mirrors store/history/store.ts) ---------------------------
 
-async function getInvoke() {
-  const { invoke } = await import('@tauri-apps/api/core');
-  return invoke;
-}
 
-function hasLocalStorage(): boolean {
-  try {
-    return typeof window !== 'undefined' && !!window.localStorage;
-  } catch {
-    return false;
-  }
+
+function validSourceConfirmation(value: unknown): value is MemorySourceConfirmation {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const source = value as Partial<MemorySourceConfirmation>;
+  return Object.keys(source).every((key) => ['provenance', 'legacyId', 'confirmedAt', 'workspaceId', 'sessionId', 'sourceMessageId', 'message'].includes(key)) &&
+    source.provenance === 'user_confirmed_rebinding' && typeof source.workspaceId === 'string' &&
+    [source.legacyId, source.sessionId, source.sourceMessageId].every((field) => typeof field === 'string' && field.length > 0) &&
+    Number.isSafeInteger(source.confirmedAt) && source.confirmedAt! >= 0 &&
+    !!source.message && typeof source.message === 'object' && !Array.isArray(source.message) &&
+    source.message.id === source.sourceMessageId && source.message.role === 'user' && typeof source.message.text === 'string';
 }
 
 async function readFile(target: MemoryTarget, workspaceId?: string): Promise<NormalizedMemoryFile> {
-  const relPath = relPathFor(target, workspaceId);
-  let raw: string | null = null;
-  try {
-    if (tauriAvailable()) {
-      const invoke = await getInvoke();
-      raw = await invoke<string | null>('history_read_json', { relPath });
-    } else if (hasLocalStorage()) {
-      raw = window.localStorage.getItem(FALLBACK_PREFIX + relPath);
+  const raw = await readMemoryJson(relPathFor(target, workspaceId));
+  if (raw === null) return { version: 2, entries: [], raw };
+  const parsed = JSON.parse(raw) as Partial<MemoryFile>;
+  if (Object.keys(parsed ?? {}).some((key) => !['version', 'entries', 'revision', 'receipts'].includes(key))) throw new Error('Unknown memory JSON fields');
+  if (parsed?.revision !== undefined && typeof parsed.revision !== 'string') throw new Error('Invalid memory revision');
+  const validSnapshot = (value: unknown) => Array.isArray(value) && value.every((entry) => entry && typeof entry === 'object' &&
+    typeof entry.text === 'string' && entry.text.trim() && Object.keys(entry).every((key) => ['id', 'text', 'updatedAt', 'importance'].includes(key)) &&
+    (entry.id === undefined || (typeof entry.id === 'string' && !!entry.id)) &&
+    (entry.updatedAt === undefined || Number.isFinite(entry.updatedAt)) &&
+    (entry.importance === undefined || !!normalizeImportance(entry.importance)));
+  if (parsed?.receipts !== undefined && (!Array.isArray(parsed.receipts) || parsed.receipts.some((receipt) =>
+      !receipt || typeof receipt.id !== 'string' || typeof receipt.signature !== 'string' ||
+      Object.keys(receipt).some((key) => !['id', 'signature', 'appliedCount', 'skippedCount', 'target', 'workspaceId', 'reviewSource', 'sourceConfirmation', 'before', 'after', 'afterRevision', 'undoes'].includes(key)) ||
+      (receipt.before !== undefined && !validSnapshot(receipt.before)) || (receipt.after !== undefined && !validSnapshot(receipt.after)) ||
+      (receipt.afterRevision !== undefined && typeof receipt.afterRevision !== 'string') ||
+      (receipt.target !== undefined && !['memory', 'user'].includes(receipt.target)) ||
+      (receipt.workspaceId !== undefined && typeof receipt.workspaceId !== 'string') ||
+      (receipt.undoes !== undefined && typeof receipt.undoes !== 'string') ||
+      (receipt.sourceConfirmation !== undefined && !validSourceConfirmation(receipt.sourceConfirmation)) ||
+      (receipt.reviewSource !== undefined && (!receipt.reviewSource ||
+        typeof receipt.reviewSource.workspaceId !== 'string' ||
+        ['hostId', 'namespaceId', 'sessionId', 'turnId', 'sourceMessageId', 'runId'].some((key) =>
+          typeof receipt.reviewSource?.[key as keyof MemoryReviewSource] !== 'string' || !receipt.reviewSource[key as keyof MemoryReviewSource]) ||
+        (receipt.reviewSource.cwd !== undefined && (typeof receipt.reviewSource.cwd !== 'string' || !receipt.reviewSource.cwd)) ||
+        Object.keys(receipt.reviewSource).some((key) => !['hostId', 'namespaceId', 'workspaceId', 'sessionId', 'turnId', 'sourceMessageId', 'runId', 'cwd'].includes(key)))) ||
+      !Number.isInteger(receipt.appliedCount) || receipt.appliedCount < 0 || !Number.isInteger(receipt.skippedCount) || receipt.skippedCount < 0))) throw new Error('Invalid memory receipts');
+  if (!parsed || ![1, 2].includes(parsed.version as number) || !Array.isArray(parsed.entries)) {
+    throw new Error('Unknown memory JSON schema; refusing overwrite');
+  }
+  const entries = parsed.entries.map((e): MemoryEntry => {
+    if (typeof e === 'string' && e.trim()) return { text: e.trim() };
+    if (!e || typeof e !== 'object' || typeof e.text !== 'string' || !e.text.trim()) {
+      throw new Error('Invalid memory entry; refusing partial read');
     }
-  } catch {
-    raw = null;
-  }
-  if (!raw) return { version: 2, entries: [] };
-  try {
-    const parsed = JSON.parse(raw) as Partial<MemoryFile>;
-    const entries = Array.isArray(parsed.entries)
-      ? parsed.entries
-          .map((e): MemoryEntry | null => {
-            if (typeof e === 'string') {
-              const text = e.trim();
-              return text ? { text } : null;
-            }
-            if (e && typeof e === 'object' && typeof e.text === 'string') {
-              const text = e.text.trim();
-              if (!text) return null;
-              const updatedAt =
-                typeof e.updatedAt === 'number' && Number.isFinite(e.updatedAt)
-                  ? e.updatedAt
-                  : undefined;
-              const importance = normalizeImportance(e.importance);
-              return {
-                text,
-                ...(updatedAt !== undefined ? { updatedAt } : {}),
-                ...(importance ? { importance } : {}),
-              };
-            }
-            return null;
-          })
-          .filter((e): e is MemoryEntry => e !== null)
-      : [];
-    return { version: 2, entries };
-  } catch {
-    return { version: 2, entries: [] };
-  }
+    if (Object.keys(e).some((key) => !['id', 'text', 'updatedAt', 'importance'].includes(key)) ||
+        (e.id !== undefined && (typeof e.id !== 'string' || !e.id))) throw new Error('Invalid memory entry identity/fields');
+    if (e.updatedAt !== undefined && (typeof e.updatedAt !== 'number' || !Number.isFinite(e.updatedAt))) {
+      throw new Error('Invalid memory timestamp');
+    }
+    const importance = normalizeImportance(e.importance);
+    if (e.importance !== undefined && !importance) throw new Error('Invalid memory importance');
+    return { ...(e.id ? { id: e.id } : {}), text: e.text.trim(), ...(e.updatedAt !== undefined ? { updatedAt: e.updatedAt } : {}), ...(importance ? { importance } : {}) };
+  });
+  return { version: 2, entries, raw, revision: parsed.revision, receipts: parsed.receipts };
+}
+
+/** Captures a complete exact target; caller must freeze it before model dispatch. */
+export async function readMemoryBase(target: MemoryTarget, workspaceId?: string): Promise<MemoryBase> {
+  const file = await readFile(target, workspaceId);
+  return { target, ...(target === 'memory' && workspaceId !== undefined ? { workspaceId } : {}), raw: file.raw, entries: file.entries, revision: file.revision };
 }
 
 async function writeFile(
   target: MemoryTarget,
-  file: NormalizedMemoryFile,
-  workspaceId?: string,
+  file: { version: 2; entries: MemoryEntry[] },
+  workspaceId: string | undefined,
+  expectedRaw: string | null,
+  receipt?: MemoryCommitReceipt,
+  signal?: AbortSignal,
+  beforeDispatch?: () => void,
 ): Promise<void> {
   const relPath = relPathFor(target, workspaceId);
-  const json = JSON.stringify(file, null, 2);
-  if (tauriAvailable()) {
-    const invoke = await getInvoke();
-    await invoke<void>('history_write_json', { relPath, json });
-    return;
-  }
-  if (hasLocalStorage()) {
-    try {
-      window.localStorage.setItem(FALLBACK_PREFIX + relPath, json);
-    } catch {
-      /* non-fatal */
-    }
-  }
+  const previous = expectedRaw === null ? {} : JSON.parse(expectedRaw) as Partial<MemoryFile>;
+  const receipts = [...(previous.receipts ?? []), ...(receipt ? [receipt] : [])].slice(-64);
+  const entries = file.entries.map((entry) => ({ ...entry, id: entry.id ?? crypto.randomUUID() }));
+  const revision = crypto.randomUUID();
+  if (receipt) Object.assign(receipt, { target, ...(target === 'memory' && workspaceId !== undefined ? { workspaceId } : {}),
+    before: previous.entries?.map((entry) => typeof entry === 'string' ? { text: entry.trim() } : entry) ?? [], after: entries, afterRevision: revision });
+  const json = JSON.stringify({ ...file, entries,
+    revision, ...(receipts.length ? { receipts } : {}) }, null, 2);
+  await compareExchangeMemoryJson(relPath, expectedRaw, json, signal, beforeDispatch);
 }
 
 // --- helpers -----------------------------------------------------------------
@@ -489,7 +529,7 @@ export async function backfillMemoryTimestamps(
   const entries = file.entries.map((e) =>
     typeof e.updatedAt === 'number' ? e : { text: e.text, updatedAt: now },
   );
-  await writeFile(target, { version: 2, entries }, workspaceId);
+  await writeFile(target, { version: 2, entries }, workspaceId, file.raw);
   return entries;
 }
 
@@ -508,7 +548,33 @@ export async function applyMemoryBatch(
   workspaceId?: string,
   opts?: MemoryBatchOptions,
 ): Promise<MemoryResult> {
+  const requests = normalizeMemoryRequests([{ target, operations: ops }]);
+  if (!requests && ops.length) return result(target, [], false, 'Invalid memory operation payload');
+  const frozenOps = structuredClone(requests?.[0]?.operations ?? []);
+  const frozenOpts = opts ? { ...opts, reviewSource: opts.reviewSource ? structuredClone(opts.reviewSource) : undefined,
+    sourceConfirmation: opts.sourceConfirmation ? structuredClone(opts.sourceConfirmation) : undefined } : undefined;
+  return withMemoryLock(relPathFor(target, workspaceId), () => applyMemoryBatchLocked(target, frozenOps, workspaceId, frozenOpts));
+}
+
+async function applyMemoryBatchLocked(
+  target: MemoryTarget,
+  ops: MemoryOp[],
+  workspaceId?: string,
+  opts?: MemoryBatchOptions,
+): Promise<MemoryResult> {
+  checkMemoryCancelled(opts?.signal);
   const file = await readFile(target, workspaceId);
+  checkMemoryCancelled(opts?.signal);
+  const signature = opts?.transactionId ? JSON.stringify({ target, workspaceId,
+    base: opts.expectedRaw === null ? null : JSON.parse(opts.expectedRaw ?? '{}').revision ?? opts.expectedRaw, operations: ops }) : '';
+  const prior = opts?.transactionId ? file.receipts?.find((receipt) => receipt.id === opts.transactionId) : undefined;
+  if (prior) {
+    if (prior.signature !== signature) return result(target, file.entries, false, 'Memory transaction identity conflict');
+    return { ...result(target, file.entries, true), appliedCount: 0, skippedCount: ops.length, alreadyApplied: true };
+  }
+  if (opts && 'expectedRaw' in opts && opts.expectedRaw !== file.raw) {
+    return result(target, file.entries, false, 'Memory CAS conflict: proposal base changed');
+  }
   if (!ops.length) return result(target, file.entries, true);
 
   const now = Date.now();
@@ -552,19 +618,59 @@ export async function applyMemoryBatch(
         `Result would be ${charCount(kept)}/${limit} chars even after evicting older entries — the new content itself is over the limit.`,
       );
     }
-    await writeFile(target, { version: 2, entries: kept }, workspaceId);
+    await writeFile(target, { version: 2, entries: kept }, workspaceId, file.raw,
+      opts?.transactionId ? { id: opts.transactionId, signature, appliedCount: ops.length - skipped.length, skippedCount: skipped.length, reviewSource: opts.reviewSource, sourceConfirmation: opts.sourceConfirmation } : undefined, opts?.signal, opts?.beforeDispatch);
     return {
-      ...result(target, kept, true),
+      ...result(target, kept, true), appliedCount: ops.length - skipped.length, skippedCount: skipped.length,
       ...(skipped.length ? { skipped } : {}),
       ...(evicted.length ? { evicted: evicted.map((e) => e.text) } : {}),
     };
   }
 
-  await writeFile(target, { version: 2, entries: working }, workspaceId);
+  await writeFile(target, { version: 2, entries: working }, workspaceId, file.raw,
+    opts?.transactionId ? { id: opts.transactionId, signature, appliedCount: ops.length - skipped.length, skippedCount: skipped.length, reviewSource: opts.reviewSource, sourceConfirmation: opts.sourceConfirmation } : undefined, opts?.signal, opts?.beforeDispatch);
   return {
-    ...result(target, working, true),
+    ...result(target, working, true), appliedCount: ops.length - skipped.length, skippedCount: skipped.length,
     ...(skipped.length ? { skipped } : {}),
   };
+}
+
+export interface MemoryTransactionView extends MemoryCommitReceipt {
+  base: MemoryBase; canUndo: boolean; undoReason?: string;
+}
+/** Receipt availability is established by a fresh exact target read, not review-job status. */
+export async function readMemoryTransactionHistory(target: MemoryTarget, workspaceId?: string): Promise<MemoryTransactionView[]> {
+  const file = await readFile(target, workspaceId);
+  const base: MemoryBase = { target, workspaceId: target === 'memory' ? workspaceId : undefined, raw: file.raw, entries: file.entries, revision: file.revision };
+  return (file.receipts ?? []).map((receipt) => {
+    const reason = receipt.undoes ? '撤销审计' : file.receipts?.some((entry) => entry.undoes === receipt.id) ? '已撤销' :
+      !receipt.before || !receipt.after || !receipt.afterRevision ? '旧回执没有 before，不可撤销' :
+      receipt.target !== target || receipt.workspaceId !== base.workspaceId || receipt.afterRevision !== file.revision ||
+        JSON.stringify(receipt.after) !== JSON.stringify(file.entries) ? '目标已改变，撤销冲突' : undefined;
+    return { ...receipt, base, canUndo: !reason && receipt.appliedCount > 0, undoReason: reason };
+  });
+}
+
+/** Undo is a new single-target host CAS; neither the journal nor a queue ID authorizes it. */
+export async function undoMemoryTransaction(target: MemoryTarget, transactionId: string, workspaceId: string | undefined,
+  expectedRaw: string | null): Promise<MemoryResult> {
+  return withMemoryLock(relPathFor(target, workspaceId), async () => {
+    const file = await readFile(target, workspaceId);
+    if (file.receipts?.some((receipt) => receipt.undoes === transactionId)) {
+      return { ...result(target, file.entries, true), alreadyApplied: true, appliedCount: 0 };
+    }
+    const receipt = file.receipts?.find((entry) => entry.id === transactionId);
+    if (!receipt?.before || !receipt.after || !receipt.afterRevision) return result(target, file.entries, false, 'Legacy receipt has no before snapshot; cannot undo');
+    if (receipt.target !== target || receipt.workspaceId !== (target === 'memory' ? workspaceId : undefined) ||
+        file.raw !== expectedRaw || file.revision !== receipt.afterRevision || JSON.stringify(file.entries) !== JSON.stringify(receipt.after)) {
+      return result(target, file.entries, false, 'Memory undo CAS conflict: committed target changed');
+    }
+    await writeFile(target, { version: 2, entries: receipt.before }, workspaceId, file.raw, {
+      id: `undo:${transactionId}`, signature: JSON.stringify({ undoes: transactionId, afterRevision: receipt.afterRevision }),
+      appliedCount: 1, skippedCount: 0, undoes: transactionId, reviewSource: receipt.reviewSource, sourceConfirmation: receipt.sourceConfirmation,
+    });
+    return { ...result(target, (await readFile(target, workspaceId)).entries, true), appliedCount: 1 };
+  });
 }
 
 /** Convenience single-op wrapper. */
@@ -600,8 +706,32 @@ export async function setMemoryImportance(
       : e,
   );
   // JSON.stringify drops undefined fields, so the cleared tier simply vanishes.
-  await writeFile(target, { version: 2, entries }, workspaceId);
+  await writeFile(target, { version: 2, entries }, workspaceId, file.raw);
   return true;
+}
+
+/** Atomic metadata-only update tied to the model's exact pre-dispatch inventory. */
+export async function setMemoryImportances(
+  target: MemoryTarget, tags: { text: string; importance: MemoryImportance }[],
+  workspaceId: string | undefined, expectedRaw: string | null, signal?: AbortSignal,
+): Promise<number> {
+  const frozen = structuredClone(tags);
+  return withMemoryLock(relPathFor(target, workspaceId), async () => {
+    checkMemoryCancelled(signal);
+    const file = await readFile(target, workspaceId);
+    if (file.raw !== expectedRaw) return 0;
+    const seen = new Set<string>();
+    for (const tag of frozen) {
+      if (seen.has(tag.text) || !normalizeImportance(tag.importance) ||
+          file.entries.filter((entry) => entry.text === tag.text && !entry.importance).length !== 1) return 0;
+      seen.add(tag.text);
+    }
+    if (!frozen.length) return 0;
+    const byText = new Map(frozen.map((tag) => [tag.text, tag.importance]));
+    const entries = file.entries.map((entry) => byText.has(entry.text) ? { ...entry, importance: byText.get(entry.text)! } : entry);
+    await writeFile(target, { version: 2, entries }, workspaceId, file.raw, undefined, signal);
+    return frozen.length;
+  });
 }
 
 /**
@@ -713,7 +843,12 @@ export async function renderMemorySnapshot(workspaceId?: string): Promise<string
 export async function renderMemorySnapshotCompact(
   workspaceId?: string,
   maxChars = 600,
+  freezeKey?: string,
 ): Promise<string> {
+  if (freezeKey !== undefined) {
+    const text = (await frozenSessionSnapshot(workspaceId, freezeKey)).compact;
+    return text.length > maxChars ? `${text.slice(0, Math.max(0, maxChars - 1))}…` : text;
+  }
   const [userEntries, memEntries] = await Promise.all([
     loadMemory('user'),
     loadMemory('memory', workspaceId),
@@ -721,8 +856,8 @@ export async function renderMemorySnapshotCompact(
   return renderSnapshotText(userEntries, memEntries, maxChars);
 }
 
-const frozenSnapshots = new Map<string, string>();
-const FROZEN_SNAPSHOT_MAX = 32;
+
+
 
 /**
  * Session-frozen variant of `renderMemorySnapshot`. Caches the rendered block
@@ -734,21 +869,23 @@ export async function renderFrozenMemorySnapshot(
   workspaceId: string | undefined,
   freezeKey: string,
 ): Promise<string> {
-  const cached = frozenSnapshots.get(freezeKey);
-  if (cached !== undefined) return cached;
-  const snapshot = await renderMemorySnapshot(workspaceId);
-  frozenSnapshots.set(freezeKey, snapshot);
-  if (frozenSnapshots.size > FROZEN_SNAPSHOT_MAX) {
-    const oldest = frozenSnapshots.keys().next().value;
-    if (oldest !== undefined) frozenSnapshots.delete(oldest);
-  }
-  return snapshot;
+  return (await frozenSessionSnapshot(workspaceId, freezeKey)).full;
+}
+
+function frozenSessionSnapshot(workspaceId: string | undefined, freezeKey: string) {
+  return loadFrozenSnapshot(workspaceId, freezeKey, async () => {
+    const [user, memory] = await Promise.all([loadMemory('user'), loadMemory('memory', workspaceId)]);
+    return { full: renderSnapshotText(user, memory), compact: renderSnapshotText(user, memory, Number.MAX_SAFE_INTEGER) };
+  });
 }
 
 /** Drop every cached frozen snapshot (tests / force-refresh). */
 export function resetFrozenMemorySnapshot(): void {
-  frozenSnapshots.clear();
+  resetSnapshotCache();
 }
+
+/** Release runtime ownership only; reopening the session restores its durable original. */
+export const releaseFrozenMemorySnapshot = releaseFrozenSnapshot;
 
 /**
  * Apply parsed memory-write requests (from core/memoryProtocol) to disk. Each
@@ -761,8 +898,10 @@ export async function applyMemoryWrites(
   workspaceId?: string,
   opts?: MemoryBatchOptions,
 ): Promise<MemoryResult[]> {
+  const validated = normalizeMemoryRequests(requests);
+  if (!validated) return requests.map((req) => result(req.target, [], false, 'Invalid memory submission; entire payload rejected'));
   const results: MemoryResult[] = [];
-  for (const req of requests) {
+  for (const req of validated) {
     try {
       results.push(await applyMemoryBatch(req.target, req.operations, workspaceId, opts));
     } catch (err) {

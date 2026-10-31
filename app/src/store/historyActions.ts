@@ -29,6 +29,7 @@ import {
   sessionFromSummary,
   summaryFromRecord,
   normalizeScheduledTask,
+  pruneScheduledTaskHistory,
   sessionLiveStatus,
   visibleChatSessionSummaries,
   loadSessionTree,
@@ -324,6 +325,9 @@ export async function setWorkflowScheduledTaskHistorySession(
         : s.sessionTree,
     };
   });
+  if (normalizedTask?.maxHistoryRuns !== undefined && !sessionLiveStatus({ workspaceId, sessionId }, useStore.getState())) {
+    await pruneScheduledTaskHistory(workspaceId, sessionId);
+  }
 }
 
 async function activateWorkspacePath(path: string): Promise<void> {

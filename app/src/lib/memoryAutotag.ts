@@ -14,9 +14,11 @@
  * one bad batch never aborts the others.
  */
 
-import { getMemoryUsage, setMemoryImportance, type MemoryTarget } from '@/lib/memoryStore';
+import { readMemoryBase, setMemoryImportances, type MemoryTarget } from '@/lib/memoryStore';
+import { checkMemoryCancelled } from './memoryTransactions';
 
 export interface AutotagMemoryOptions {
+  signal?: AbortSignal;
   target: MemoryTarget;
   workspaceId?: string;
   /** Runs one model call; returns raw text. */
@@ -50,10 +52,13 @@ function parseTags(raw: string): { n: number; importance: string }[] {
   if (end <= start) return [];
   try {
     const parsed = JSON.parse(raw.slice(start, end + 1)) as unknown;
+    if (!parsed || typeof parsed !== 'object' || (!Array.isArray(parsed) && Object.keys(parsed).some((key) => key !== 'tags'))) return [];
     const list = Array.isArray(parsed)
       ? parsed
       : (parsed as { tags?: unknown })?.tags;
     if (!Array.isArray(list)) return [];
+    if (list.some((item) => !item || typeof item !== 'object' || Object.keys(item).some((key) => key !== 'n' && key !== 'importance') ||
+        !Number.isInteger(item.n) || typeof item.importance !== 'string' || !normalize(item.importance))) return [];
     return list
       .map((item) => item as { n?: unknown; importance?: unknown })
       .filter(
@@ -68,7 +73,8 @@ function parseTags(raw: string): { n: number; importance: string }[] {
 export async function autotagMemoryEntries(
   options: AutotagMemoryOptions,
 ): Promise<AutotagMemoryResult> {
-  const usage = await getMemoryUsage(options.target, options.workspaceId);
+  options = { ...options };
+  const usage = await readMemoryBase(options.target, options.workspaceId);
   // Only UNTAGGED entries — a tier the model or user already set stays put.
   const untagged = usage.entries.filter((e) => !e.importance);
   if (!untagged.length) return { candidates: 0, tagged: 0 };
@@ -76,6 +82,8 @@ export async function autotagMemoryEntries(
   const batchSize = Math.max(1, options.batchSize ?? DEFAULT_BATCH_SIZE);
   let tagged = 0;
   for (let i = 0; i < untagged.length; i += batchSize) {
+    checkMemoryCancelled(options.signal);
+    const base = i === 0 ? usage : await readMemoryBase(options.target, options.workspaceId);
     const batch = untagged.slice(i, i + batchSize);
     const listing = batch
       .map((e, j) => `${j + 1}. ${e.text}`)
@@ -87,23 +95,24 @@ export async function autotagMemoryEntries(
         `请为以下 ${batch.length} 条记忆条目评级：\n\n${listing}`,
       );
     } catch {
+      checkMemoryCancelled(options.signal);
       continue; // best-effort: a failed batch leaves its entries untagged
     }
-    // Index (1-based within the batch) → tier, then apply per entry.
-    const byIndex = new Map(parseTags(raw).map((t) => [t.n, t.importance]));
+    checkMemoryCancelled(options.signal);
+    // Index (1-based within the batch) → tier, then one exact-CAS metadata commit.
+    const parsedTags = parseTags(raw);
+    const byIndex = new Map(parsedTags.map((t) => [t.n, t.importance]));
+    if (parsedTags.length !== batch.length || byIndex.size !== batch.length ||
+        parsedTags.some((tag) => tag.n < 1 || tag.n > batch.length)) continue;
+    const tags: { text: string; importance: 'must' | 'important' | 'minor' }[] = [];
     for (let j = 0; j < batch.length; j += 1) {
       const tier = normalize(byIndex.get(j + 1) ?? '');
       if (!tier) continue;
       // Match by the entry's full text — setMemoryImportance requires a unique
       // substring, and full text is unique by construction (dedup on add).
-      const ok = await setMemoryImportance(
-        options.target,
-        batch[j].text,
-        tier,
-        options.workspaceId,
-      );
-      if (ok) tagged += 1;
+      tags.push({ text: batch[j].text, importance: tier });
     }
+    tagged += await setMemoryImportances(options.target, tags, options.workspaceId, base.raw, options.signal);
   }
   return { candidates: untagged.length, tagged };
 }

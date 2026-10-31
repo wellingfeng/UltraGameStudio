@@ -27,8 +27,10 @@ import { isSupportedProviderId } from '@/lib/cloudProjects';
 import {
   PROVIDER_API_KEYS_SECRET,
   GATEWAY_CHANNEL_API_KEYS_SECRET,
+  gatewayChannelSecretKey,
   readSecureRecord,
   readSecureRecordValue,
+  secureStorageAllowsInlineFallback,
   secureStorageAvailable,
   setSecureRecordValue,
   writeSecureRecord,
@@ -156,10 +158,7 @@ const DISK_BACKED_PATHS: Readonly<Record<string, string>> = {
 // once initializeApiConfigStore() has run under Tauri.
 const diskCache = new Map<string, string>();
 let diskReady = false;
-
-function tauriBacked(): boolean {
-  return diskReady && tauriAvailable();
-}
+const diskReadErrors = new Set<string>();
 
 async function getInvoke() {
   const { invoke } = await import('@tauri-apps/api/core');
@@ -173,7 +172,7 @@ async function getInvoke() {
 const pendingFlush = new Map<string, Promise<void>>();
 
 function diskWriteSoon(key: string, relPath: string): void {
-  if (!tauriAvailable()) return;
+  if (!tauriAvailable() || diskReadErrors.has(key)) return;
   const prev = pendingFlush.get(key) ?? Promise.resolve();
   const next = prev
     .catch(() => {})
@@ -221,7 +220,7 @@ function localStorageSet(key: string, value: string): boolean {
 }
 
 function rawGet(key: string): string | null {
-  if (tauriBacked() && key in DISK_BACKED_PATHS) {
+  if (tauriAvailable() && key in DISK_BACKED_PATHS && diskCache.has(key)) {
     const cached = diskCache.get(key);
     if (cached != null) return cached && cached !== 'null' ? cached : null;
   }
@@ -249,7 +248,7 @@ function rawSet(key: string, value: string): void {
 function rawRemove(key: string): void {
   const relPath = DISK_BACKED_PATHS[key];
   if (relPath && tauriAvailable()) {
-    diskCache.delete(key);
+    diskCache.set(key, 'null');
     diskWriteSoon(key, relPath);
   }
   try {
@@ -277,17 +276,26 @@ function notifyProviderConfigChanged(): void {
 export async function initializeApiConfigStore(): Promise<void> {
   if (diskReady) return;
   if (!tauriAvailable()) return;
+  let loaded = false;
   try {
     const invoke = await getInvoke();
-    await Promise.all(
+    const results = await Promise.allSettled(
       Object.entries(DISK_BACKED_PATHS).map(async ([key, relPath]) => {
-        const fromDisk = await invoke<string | null>('history_read_json', {
-          relPath,
-        });
+        // Retry only failed/unknown keys; a healthy cache may contain a newer
+        // queued edit than disk and must not be replaced by a read snapshot.
+        if (diskCache.has(key) && !diskReadErrors.has(key)) return;
+        let fromDisk: string | null;
+        try {
+          fromDisk = await invoke<string | null>('history_read_json', { relPath });
+          diskReadErrors.delete(key);
+        } catch (error) {
+          diskReadErrors.add(key);
+          throw error;
+        }
         if (fromDisk != null && fromDisk !== '' && fromDisk !== 'null') {
           diskCache.set(key, fromDisk);
           // Keep the localStorage mirror in sync for any sync reader.
-          localStorageSet(key, fromDisk);
+          if (secureStorageAvailable()) localStorageSet(key, fromDisk);
           return;
         }
         // One-time migration: seed disk from the legacy localStorage value.
@@ -297,26 +305,29 @@ export async function initializeApiConfigStore(): Promise<void> {
         } catch {
           legacy = null;
         }
+        diskCache.set(key, legacy ?? 'null');
         if (legacy != null) {
-          diskCache.set(key, legacy);
-          diskWriteSoon(key, relPath);
+          if (secureStorageAvailable()) diskWriteSoon(key, relPath);
         }
       }),
     );
+    const failed = results.find(result => result.status === 'rejected');
+    if (failed?.status === 'rejected') throw failed.reason;
+    loaded = true;
   } catch (err) {
     console.warn(
       '[apiConfig] disk init failed; keeping localStorage fallback',
       err,
     );
-  } finally {
-    diskReady = true;
   }
+  diskReady = loaded && diskReadErrors.size === 0;
 }
 
 /** Test-only: reset the in-memory disk cache between cases. */
 export function resetApiConfigStoreForTests(): void {
   diskCache.clear();
   diskReady = false;
+  diskReadErrors.clear();
 }
 
 const PROVIDER_KINDS: ProviderKind[] = [
@@ -517,6 +528,10 @@ function loadLocalProviders(): Provider[] {
     return [];
   }
 
+  // Failed reads are not absent files. Keep every recovery source untouched.
+  if (tauriAvailable() &&
+    (diskReadErrors.has(PROVIDERS_STORAGE) || !secureStorageAvailable())) return [];
+
   // Migration: synthesize a provider from the legacy single key (if any).
   const legacyKey = (rawGet(API_KEY_STORAGE) ?? '').trim();
   const legacyUrl = (rawGet(BASE_URL_STORAGE) ?? '').trim();
@@ -544,14 +559,14 @@ function normalizeStoredProvider(value: unknown): Provider | null {
     return null;
   }
   const rawApiKey = typeof v.apiKey === 'string' ? v.apiKey : '';
-  const secureApiKey = secureStorageAvailable()
-    ? readSecureRecordValue(PROVIDER_API_KEYS_SECRET, v.id)
-    : '';
+  // Per-record loading keeps healthy cached credentials readable even when an
+  // unrelated secret failed. Mutations still require a fully healthy store.
+  const secureApiKey = readSecureRecordValue(PROVIDER_API_KEYS_SECRET, v.id);
   return {
     id: v.id,
     kind: normalizeProviderKind(v.kind ?? v.adapter),
     name: typeof v.name === 'string' ? v.name : 'Claude',
-    apiKey: secureApiKey || rawApiKey,
+    apiKey: secureApiKey || (secureStorageAllowsInlineFallback(PROVIDER_API_KEYS_SECRET) ? rawApiKey : ''),
     baseUrl: typeof v.baseUrl === 'string' ? v.baseUrl : '',
     transport: normalizeProviderTransport(
       normalizeProviderKind(v.kind ?? v.adapter),
@@ -641,6 +656,9 @@ function saveProvidersForRemoteProfile(list: Provider[]): void {
 }
 
 function saveLocalProviders(list: Provider[]): void {
+  if (tauriAvailable() && (!secureStorageAvailable() || diskReadErrors.has(PROVIDERS_STORAGE))) {
+    throw new Error('渠道安全存储尚未加载成功，已阻止覆盖配置。请重试后再保存。');
+  }
   if (secureStorageAvailable()) {
     // Merge, never replace. Rebuilding the keychain record from `list` alone
     // wiped every key whose provider failed to hydrate an apiKey into memory
@@ -740,6 +758,7 @@ function syncGatewayProvidersFromProviders(list: Provider[]): void {
  * a freshly-synced name with a stale one, e.g. "ExampleAI" over "ExampleGemini").
  */
 export function syncGatewayFromProviders(): void {
+  if (tauriAvailable() && (!secureStorageAvailable() || !diskReady)) return;
   syncGatewayProvidersFromProviders(listProviders());
 }
 
@@ -1157,6 +1176,13 @@ export function updateProvider(
   // keys, so a cleared field would otherwise keep the stale token alive.
   if ('apiKey' in patch && secureStorageAvailable()) {
     setSecureRecordValue(PROVIDER_API_KEYS_SECRET, id, patch.apiKey ?? '');
+    // Clearing the authoritative key must clear the corresponding recovery
+    // mirror as well, without touching credentials of non-default channels.
+    setSecureRecordValue(
+      GATEWAY_CHANNEL_API_KEYS_SECRET,
+      gatewayChannelSecretKey(id, 'default'),
+      patch.apiKey ?? '',
+    );
   }
   list[idx] = { ...list[idx], ...patch };
   saveProviders(list);

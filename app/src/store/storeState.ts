@@ -379,7 +379,7 @@ export interface StoreState {
   ) => Promise<void>;
   sendPrompt: (
     text: string,
-    options?: { forceGameExperts?: boolean; gameExpertIds?: string[]; skillIds?: string[]; locale?: Locale; externalSession?: { workspaceId: string; sessionId: string; messages: Message[] } },
+    options?: { forceGameExperts?: boolean; gameExpertIds?: string[]; skillIds?: string[]; locale?: Locale; reviseMessageId?: string; scheduledTaskRun?: boolean; externalSession?: { workspaceId: string; sessionId: string; messages: Message[] } },
   ) => boolean;
   /** Explicit skill review never falls through to the normal chat gateway. */
   learnSkills: (kind: 'learn' | 'refine', text: string) => boolean;
@@ -541,6 +541,10 @@ export interface StoreState {
   deleteMessage: (messageId: string) => void;
   /** Edit a simple-chat user message that is still waiting in the local queue. */
   updateQueuedChatMessage: (messageId: string, text: string) => boolean;
+  /** Revise an already-sent input and answer again from that turn. */
+  reviseChatMessage: (messageId: string, text: string) => boolean;
+  /** Restore a saved input/reply version without invoking the model. */
+  selectChatRevision: (messageId: string, index: number) => boolean;
   /** Delete a simple-chat user message that is still waiting in the local queue. */
   deleteQueuedChatMessage: (messageId: string) => boolean;
   /** Open the inline editor for a queued message and pause its queue slot. */

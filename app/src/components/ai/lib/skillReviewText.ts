@@ -22,10 +22,15 @@ const chineseReasons = new Map<string, string>([
   ['content safety heuristic flagged execution or instruction/permission override', '内容检查发现命令执行或覆盖指令、权限的风险'],
   ['content may contain secrets or personal credentials; explicit review required', '内容可能含有密钥或个人凭据，需要明确审核'],
   ['No authentic reusable evidence or learning disabled.', '没有可信的可复用证据，或技能学习已关闭。'],
+  ['insufficient-evidence', '证据不足。'],
+  ['scheduler-capacity', '后台调度容量已满。'],
+  ['disabled-or-not-terminal', '技能学习已关闭或任务尚未正常完成。'],
 ]);
 
 export function localizeSkillReviewText(text: string, chinese: boolean): string {
   if (!chinese) return text;
+  const activities = text.match(/^Completed activities: (\d+) \/ (\d+)$/);
+  if (activities) return `已完成工具活动：${activities[1]} / ${activities[2]}`;
   const budget = text.match(/^(?:Error:\s*)?SKILL_REVIEW_BUDGET_(TOKENS|TIME|ROUNDS)$/)?.[1];
   if (budget === 'TOKENS') return '复盘输入或输出用量超出预算，未应用修改。原始证据已保留，可重新复盘。';
   if (budget === 'TIME') return '复盘超过配置的时间预算，未应用修改。原始证据已保留，可重新复盘。';

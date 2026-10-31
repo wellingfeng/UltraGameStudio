@@ -1145,9 +1145,10 @@ export class RunnerClient {
     return res.ok;
   }
 
-  async getJob(id: string): Promise<RemoteJob> {
+  async getJob(id: string, options?: { signal?: AbortSignal }): Promise<RemoteJob> {
     const res = await fetch(this.url(REMOTE_RUNNER_API_PATHS.job(id)), {
       headers: this.headers(),
+      signal: options?.signal,
     });
     const data = (await res.json()) as RemoteRunnerJobResponse | RemoteRunnerErrorResponse;
     if (!res.ok || !data.ok || !('job' in data)) {
@@ -1354,6 +1355,7 @@ export class RunnerClient {
       onStatus?: (status: RemoteJobStatus) => void;
       onResult?: (job: RemoteJob) => void;
       onError?: (err: Error) => void;
+      onClose?: () => void;
     },
   ): () => void {
     const controller = new AbortController();
@@ -1378,6 +1380,7 @@ export class RunnerClient {
           buffer = events.pop() ?? '';
           for (const chunk of events) dispatchRemoteRunnerSse(chunk, handlers);
         }
+        if (!controller.signal.aborted) handlers.onClose?.();
       } catch (err) {
         if (!controller.signal.aborted) {
           handlers.onError?.(err instanceof Error ? err : new Error(String(err)));

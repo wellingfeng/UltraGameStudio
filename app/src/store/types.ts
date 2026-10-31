@@ -45,6 +45,7 @@ export interface ScheduledTaskConfig {
   cronExpression?: string;
   timeZone?: string;
   promptLocale?: Locale;
+  maxHistoryRuns?: number;
   /** Absolute timestamp for a one-time task. */
   onceAt?: number;
   lastError?: string;
@@ -77,6 +78,15 @@ export interface Message {
   id: string;
   role: MessageRole;
   text: string;
+  scheduledTaskRun?: boolean;
+  /** Revision timestamp; creation time remains stable for stream ordering. */
+  editedAt?: number;
+  /** Edited resend: hide this earlier user input in the stream, retain model history. */
+  replacesMessageId?: string;
+  /** Inactive conversation tails, including the original user input. */
+  chatRevisions?: { messages: Message[]; savedAt: number }[];
+  /** Position of the active tail among the saved versions plus the active one. */
+  chatRevisionIndex?: number;
   /** Assistant route shown in the message header, e.g. "OpenRouter · glm-4.6". */
   routeLabel?: string;
   /** Thinking level selected when this turn started; default means no override. */

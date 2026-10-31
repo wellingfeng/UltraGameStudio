@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { createPortal } from 'react-dom';
 import { cn } from '@/lib/cn';
 import type { SelectOption } from '@/store/types';
 
@@ -45,6 +46,11 @@ export interface SelectProps {
   pinnedIds?: string[];
   /** 点击置顶按钮回调。 */
   onTogglePin?: (id: string) => void;
+  getSubOptions?: (id: string) => SelectOption[];
+  subValue?: string;
+  subTitle?: string;
+  onSubChange?: (id: string, subId: string) => void;
+  triggerSuffix?: string;
 }
 
 /** 弹层与视口边缘之间保留的安全间距（px）。 */
@@ -101,11 +107,19 @@ export default function Select({
   pinnable = false,
   pinnedIds,
   onTogglePin,
+  getSubOptions,
+  subValue,
+  subTitle,
+  onSubChange,
+  triggerSuffix,
 }: SelectProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const rootRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
+  const submenuRef = useRef<HTMLDivElement>(null);
+  const [submenu, setSubmenu] = useState<{ id: string; anchor: HTMLElement } | null>(null);
+  const [submenuPosition, setSubmenuPosition] = useState({ left: 0, top: 0, maxHeight: MENU_MAX_HEIGHT });
   const [menuPlacement, setMenuPlacement] =
     useState<MenuPlacement>(INITIAL_PLACEMENT);
 
@@ -205,7 +219,8 @@ export default function Select({
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
+      if (rootRef.current && !rootRef.current.contains(e.target as Node) &&
+          !submenuRef.current?.contains(e.target as Node)) {
         setOpen(false);
       }
     };
@@ -217,6 +232,7 @@ export default function Select({
   useEffect(() => {
     if (!open) {
       setQuery('');
+      setSubmenu(null);
       return;
     }
     setQuery('');
@@ -225,6 +241,31 @@ export default function Select({
     });
     return () => cancelAnimationFrame(id);
   }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open || !submenu) return;
+    const update = () => {
+      const rect = submenu.anchor.getBoundingClientRect();
+      const width = Math.min(260, window.innerWidth - MENU_VIEWPORT_MARGIN * 2);
+      const maxHeight = Math.min(MENU_MAX_HEIGHT, window.innerHeight - MENU_VIEWPORT_MARGIN * 2);
+      const height = Math.min(submenuRef.current?.offsetHeight || maxHeight, maxHeight);
+      const left = rect.left >= width + MENU_VIEWPORT_MARGIN
+        ? rect.left - width
+        : Math.min(rect.right, window.innerWidth - width - MENU_VIEWPORT_MARGIN);
+      setSubmenuPosition({
+        left: Math.max(MENU_VIEWPORT_MARGIN, left),
+        top: Math.max(MENU_VIEWPORT_MARGIN, Math.min(rect.bottom - height, window.innerHeight - height - MENU_VIEWPORT_MARGIN)),
+        maxHeight,
+      });
+    };
+    update();
+    window.addEventListener('resize', update);
+    window.addEventListener('scroll', update, true);
+    return () => {
+      window.removeEventListener('resize', update);
+      window.removeEventListener('scroll', update, true);
+    };
+  }, [open, submenu]);
 
   // Filter options by label / hint / group (case-insensitive).
   const filtered = useMemo(() => {
@@ -268,6 +309,11 @@ export default function Select({
             {selected.hint}
           </span>
         )}
+        {triggerSuffix && (
+          <span className="shrink-0 rounded bg-border-soft px-1 py-0.5 text-[10px] text-fg-faint">
+            {triggerSuffix}
+          </span>
+        )}
         <span className="shrink-0 text-[9px] text-fg-faint">▾</span>
       </button>
 
@@ -301,8 +347,13 @@ export default function Select({
                   e.preventDefault();
                   const first = filtered[0];
                   if (first) {
-                    onChange(first.id);
-                    setOpen(false);
+                    const anchor = rootRef.current?.querySelector<HTMLElement>('[role="option"]');
+                    if (anchor && getSubOptions?.(first.id).length && onSubChange) {
+                      setSubmenu({ id: first.id, anchor });
+                    } else {
+                      onChange(first.id);
+                      setOpen(false);
+                    }
                   }
                 } else if (e.key === 'Escape') {
                   e.preventDefault();
@@ -341,6 +392,7 @@ export default function Select({
                 // 折叠组内非首项：不渲染（组头只渲染一次，点击组头展开）。
                 if (groupCollapsed && !showGroupHeader) return null;
                 const isPinned = pinnedSet.has(opt.id);
+                const hasSubmenu = !!onSubChange && !!getSubOptions?.(opt.id).length;
                 return (
                   <Fragment key={opt.id}>
                     {showGroupHeader &&
@@ -394,9 +446,25 @@ export default function Select({
                           type="button"
                           role="option"
                           aria-selected={active}
-                          onClick={() => {
-                            onChange(opt.id);
-                            setOpen(false);
+                          aria-haspopup={hasSubmenu ? 'menu' : undefined}
+                          aria-expanded={hasSubmenu ? submenu?.id === opt.id : undefined}
+                          onMouseEnter={(event) => {
+                            if (hasSubmenu) setSubmenu({ id: opt.id, anchor: event.currentTarget });
+                            else setSubmenu(null);
+                          }}
+                          onClick={(event) => {
+                            if (hasSubmenu) setSubmenu({ id: opt.id, anchor: event.currentTarget });
+                            else {
+                              onChange(opt.id);
+                              setOpen(false);
+                            }
+                          }}
+                          onKeyDown={(event) => {
+                            if (hasSubmenu && event.key === 'ArrowRight') {
+                              event.preventDefault();
+                              setSubmenu({ id: opt.id, anchor: event.currentTarget });
+                              requestAnimationFrame(() => submenuRef.current?.querySelector<HTMLButtonElement>('button')?.focus());
+                            }
                           }}
                           className={cn(
                             'flex w-full items-center gap-2 whitespace-nowrap px-3 py-1.5 text-left text-xs transition-colors',
@@ -425,6 +493,12 @@ export default function Select({
                               {opt.hint}
                             </span>
                           )}
+                          {hasSubmenu && active && triggerSuffix && (
+                            <span className="shrink-0 rounded bg-border-soft px-1 text-[10px] text-fg-faint">
+                              {triggerSuffix}
+                            </span>
+                          )}
+                          {hasSubmenu && <span className="shrink-0 text-fg-faint">›</span>}
                           {pinnable && onTogglePin && (
                             <span
                               role="button"
@@ -471,6 +545,44 @@ export default function Select({
             )}
           </ul>
         </div>
+      )}
+      {open && !disabled && submenu && getSubOptions && onSubChange && createPortal(
+        <div
+          ref={submenuRef}
+          role="menu"
+          aria-label={subTitle}
+          className="fixed z-[1000] overflow-y-auto rounded-md border border-border bg-panel py-1 shadow-lg"
+          style={{ ...submenuPosition, width: Math.min(260, window.innerWidth - MENU_VIEWPORT_MARGIN * 2) }}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape' || event.key === 'ArrowLeft') {
+              event.preventDefault();
+              submenu.anchor.focus();
+              setSubmenu(null);
+            }
+          }}
+        >
+          {subTitle && <div className="px-3 pb-1 pt-1 text-[11px] text-fg-faint">{subTitle}</div>}
+          {getSubOptions(submenu.id).map((option) => (
+            <button
+              key={option.id}
+              type="button"
+              role="menuitemradio"
+              aria-checked={submenu.id === value && option.id === subValue}
+              onClick={() => {
+                onSubChange(submenu.id, option.id);
+                setOpen(false);
+              }}
+              className="flex w-full items-start gap-2 px-3 py-1.5 text-left text-xs text-fg-dim hover:bg-border-soft hover:text-fg"
+            >
+              <span className="min-w-0 flex-1">
+                <span className="block">{option.label}</span>
+                {option.hint && <span className="mt-0.5 block whitespace-normal text-[10px] text-fg-faint">{option.hint}</span>}
+              </span>
+              {submenu.id === value && option.id === subValue && <span className="text-accent">✓</span>}
+            </button>
+          ))}
+        </div>,
+        document.body,
       )}
     </div>
   );

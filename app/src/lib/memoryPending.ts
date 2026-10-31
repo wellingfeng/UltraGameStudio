@@ -1,202 +1,213 @@
-/**
- * CONTRACT: pending memory-write approval queue (mirrors Hermes' write_approval
- * staging).
- *
- * Background self-review (core/memoryReview.ts) and the manual history refresh
- * (lib/memoryRefresh.ts) propose writes WITHOUT the user watching the turn that
- * produced them. With `approvalRequired` on, those proposals land here — a
- * small JSON queue at `memories/pending.json` — instead of the live store. The
- * Memory settings panel lists them; approve → the op runs through the normal
- * applyMemoryBatch path (duplicate/safety/limit gates all still apply);
- * reject → dropped. Either way the entry leaves the queue.
- *
- * Foreground <<UGS_MEMORY>> writes NEVER queue: the user was present for the
- * turn that proposed them (same policy as Hermes, where mid-turn tool writes
- * apply directly and only autonomous review writes stage).
- *
- * Storage reuses the same `history_*` Tauri channel (atomic write + backup) as
- * the memory stores themselves, with a localStorage fallback in the browser.
- */
-
-import { tauriAvailable } from './tauri';
-import type { MemoryOp, MemoryTarget } from './memoryStore';
+/** Complete approval batches bound to their original exact target. Unknown reads fail closed. */
+import { normalizeMemoryRequests } from '@/core/memoryProtocol';
+import { applyMemoryBatch, readMemoryBase, type MemoryBase, type MemoryOp, type MemoryTarget } from './memoryStore';
+import { checkMemoryCancelled, compareExchangeMemoryJson, readMemoryJson, withMemoryLock } from './memoryTransactions';
+import { readPersistedSkillSourceSession } from './skills';
+import type { Message } from '@/store/types';
 
 const REL_PATH = 'memories/pending.json';
-const FALLBACK_PREFIX = 'ultragamestudio.memory.v1:';
-
 export type MemoryWriteSource = 'review' | 'refresh';
-
+export interface MemoryReviewSource {
+  hostId: string; namespaceId: string; workspaceId: string; sessionId: string;
+  turnId: string; sourceMessageId: string; runId: string; cwd?: string;
+}
 export interface PendingMemoryWrite {
   id: string;
   target: MemoryTarget;
+  /** Compatibility preview ONLY. Approval always executes operations in full. */
   op: MemoryOp;
+  operations: MemoryOp[];
   source: MemoryWriteSource;
   proposedAt: number;
+  workspaceId?: string;
+  reviewSource?: MemoryReviewSource;
+  sourceConfirmation?: MemorySourceConfirmation;
+  base?: MemoryBase;
+  status: 'awaiting_approval' | 'needs_source_confirmation' | 'needs_base_confirmation';
 }
-
-interface PendingFile {
-  version: 1;
-  writes: PendingMemoryWrite[];
+interface PendingFile { version: 2; writes: PendingMemoryWrite[]; raw: string | null }
+export interface PendingBatchContext {
+  signal?: AbortSignal;
+  reviewSource?: MemoryReviewSource;
+  bases?: Partial<Record<MemoryTarget, MemoryBase>>;
 }
-
-function makeId(): string {
-  // Monotonic-ish unique id without pulling crypto: timestamp + random tail.
-  return `pw_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+const makeId = () => `pw_${crypto.randomUUID()}`;
+export interface MemorySourceLocator { workspaceId: string; sessionId: string; sourceMessageId: string }
+export interface MemorySourceConfirmation extends MemorySourceLocator {
+  provenance: 'user_confirmed_rebinding'; legacyId: string; confirmedAt: number; message: Message;
+}
+export interface PendingMemoryConfirmationPreview {
+  queueRaw: string | null; batch: PendingMemoryWrite; base: MemoryBase;
+  source: MemorySourceLocator & { message: Message };
+}
+async function readConfirmationSource(locator: MemorySourceLocator): Promise<MemorySourceLocator & { message: Message }> {
+  const record = await readPersistedSkillSourceSession(locator.workspaceId, locator.sessionId);
+  const matches = record?.messages.filter((message) => message.id === locator.sourceMessageId) ?? [];
+  if (!record || record.workspaceId !== locator.workspaceId || (record.sessionId ?? record.id) !== locator.sessionId || record.deletedAt ||
+      matches.length !== 1 || matches[0].role !== 'user' || typeof matches[0].text !== 'string') throw new Error('Original user source is not persisted');
+  return { ...locator, message: structuredClone(matches[0]) };
+}
+/** A user rebinding is a new proposal, never proof of the missing legacy provenance. */
+export async function preparePendingMemoryConfirmation(id: string, locator: MemorySourceLocator): Promise<PendingMemoryConfirmationPreview> {
+  const selected = { workspaceId: locator.workspaceId, sessionId: locator.sessionId, sourceMessageId: locator.sourceMessageId };
+  const file = await readPending();
+  const batch = file.writes.find((entry) => entry.id === id);
+  if (!batch || batch.status === 'awaiting_approval') throw new Error('Legacy proposal is unavailable');
+  const knownWorkspace = batch.workspaceId ?? batch.reviewSource?.workspaceId;
+  if (knownWorkspace !== undefined && knownWorkspace !== selected.workspaceId) throw new Error('Original workspace mismatch');
+  const source = await readConfirmationSource(selected);
+  const base = await readMemoryBase(batch.target, batch.target === 'memory' ? selected.workspaceId : undefined);
+  return { queueRaw: file.raw, batch: structuredClone(batch), base, source };
+}
+export async function confirmPendingMemorySource(preview: PendingMemoryConfirmationPreview, explicitConfirmation: boolean): Promise<PendingMemoryWrite> {
+  const frozen = structuredClone(preview);
+  if (explicitConfirmation !== true) throw new Error('Explicit whole-batch/source/base confirmation required');
+  return withMemoryLock(REL_PATH, async () => {
+    const fresh = await preparePendingMemoryConfirmation(frozen.batch.id, frozen.source);
+    if (fresh.queueRaw !== frozen.queueRaw || JSON.stringify(fresh.batch) !== JSON.stringify(frozen.batch) ||
+        fresh.base.raw !== frozen.base.raw || JSON.stringify(fresh.source) !== JSON.stringify(frozen.source)) throw new Error('Memory confirmation CAS conflict: source, queue or base changed');
+    const rebuilt: PendingMemoryWrite = { ...fresh.batch, id: makeId(), proposedAt: Date.now(), status: 'awaiting_approval',
+      workspaceId: fresh.batch.target === 'memory' ? fresh.source.workspaceId : undefined, base: fresh.base,
+      sourceConfirmation: { ...fresh.source, provenance: 'user_confirmed_rebinding', legacyId: fresh.batch.id, confirmedAt: Date.now() } };
+    const file = await readPending();
+    if (file.raw !== fresh.queueRaw) throw new Error('Memory confirmation queue CAS conflict');
+    await writePending(file.writes.map((entry) => entry.id === fresh.batch.id ? rebuilt : entry), file.raw);
+    return rebuilt;
+  });
 }
 
 async function readPending(): Promise<PendingFile> {
-  let raw: string | null = null;
-  try {
-    if (tauriAvailable()) {
-      const { invoke } = await import('@tauri-apps/api/core');
-      raw = await invoke<string | null>('history_read_json', { relPath: REL_PATH });
-    } else if (typeof window !== 'undefined' && window.localStorage) {
-      raw = window.localStorage.getItem(FALLBACK_PREFIX + REL_PATH);
-    }
-  } catch {
-    raw = null;
+  const raw = await readMemoryJson(REL_PATH);
+  if (raw === null) return { version: 2, writes: [], raw };
+  const parsed = JSON.parse(raw);
+  if (!parsed || ![1, 2].includes(parsed.version) || !Array.isArray(parsed.writes)) {
+    throw new Error('Unknown pending JSON; refusing overwrite');
   }
-  if (!raw) return { version: 1, writes: [] };
-  try {
-    const parsed = JSON.parse(raw) as Partial<PendingFile>;
-    if (parsed && Array.isArray(parsed.writes)) {
-      return {
-        version: 1,
-        writes: parsed.writes.filter(
-          (w): w is PendingMemoryWrite =>
-            !!w &&
-            typeof w === 'object' &&
-            typeof w.id === 'string' &&
-            typeof w.proposedAt === 'number' &&
-            (w.target === 'user' || w.target === 'memory') &&
-            !!w.op &&
-            typeof w.op === 'object' &&
-            typeof w.op.action === 'string' &&
-            ['add', 'replace', 'remove'].includes(w.op.action),
-        ),
-      };
+  const seen = new Set<string>();
+  const writes = parsed.writes.map((value: PendingMemoryWrite): PendingMemoryWrite => {
+    if (!value || typeof value.id !== 'string' || !value.id || seen.has(value.id) ||
+        !Number.isFinite(value.proposedAt) || !['review', 'refresh'].includes(value.source)) {
+      throw new Error('Invalid pending identity; refusing partial queue');
     }
-  } catch {
-    /* fall through to empty */
-  }
-  return { version: 1, writes: [] };
+    seen.add(value.id);
+    if (value.workspaceId !== undefined && typeof value.workspaceId !== 'string') throw new Error('Invalid pending workspace identity');
+    const requests = normalizeMemoryRequests([{ target: value.target, operations: parsed.version === 1 ? [value.op] : value.operations }]);
+    if (!requests) throw new Error('Invalid pending batch; refusing partial queue');
+    const operations = requests[0].operations;
+    if (parsed.version === 1) return {
+      id: value.id, target: value.target, source: value.source, proposedAt: value.proposedAt,
+      op: operations[0], operations, ...(value.workspaceId !== undefined ? { workspaceId: value.workspaceId } : {}),
+      status: value.target === 'memory' ? 'needs_source_confirmation' : 'needs_base_confirmation',
+    };
+    if (!['awaiting_approval', 'needs_source_confirmation', 'needs_base_confirmation'].includes(value.status)) {
+      throw new Error('Invalid pending state');
+    }
+    if (value.status === 'awaiting_approval' && (!value.base || value.base.target !== value.target ||
+        (value.target === 'memory' && value.base.workspaceId !== value.workspaceId) ||
+        (value.base.raw !== null && typeof value.base.raw !== 'string') || !Array.isArray(value.base.entries))) {
+      throw new Error('Invalid pending exact base');
+    }
+    return { ...value, op: operations[0], operations };
+  });
+  return { version: 2, writes, raw };
 }
 
-async function writePending(writes: PendingMemoryWrite[]): Promise<void> {
-  const json = JSON.stringify({ version: 1, writes } satisfies PendingFile, null, 2);
-  if (tauriAvailable()) {
-    const { invoke } = await import('@tauri-apps/api/core');
-    await invoke<void>('history_write_json', { relPath: REL_PATH, json });
-    return;
-  }
-  if (typeof window !== 'undefined' && window.localStorage) {
-    try {
-      window.localStorage.setItem(FALLBACK_PREFIX + REL_PATH, json);
-    } catch {
-      /* non-fatal */
-    }
-  }
+async function writePending(writes: PendingMemoryWrite[], expectedRaw: string | null, signal?: AbortSignal): Promise<void> {
+  await compareExchangeMemoryJson(REL_PATH, expectedRaw, JSON.stringify({ version: 2, writes }, null, 2), signal);
 }
-
-/** Snapshot of the queue, oldest first. */
 export async function listPendingMemoryWrites(): Promise<PendingMemoryWrite[]> {
   return (await readPending()).writes.sort((a, b) => a.proposedAt - b.proposedAt);
 }
+export async function countPendingMemoryWrites(): Promise<number> { return (await readPending()).writes.length; }
 
-export async function countPendingMemoryWrites(): Promise<number> {
-  return (await readPending()).writes.length;
-}
-
-/**
- * Stage proposed writes. Dedupes against the queue itself: an identical op for
- * the same target/source already pending is not staged twice (repeated review
- * runs otherwise pile up copies of the same proposal while it awaits approval).
- * Returns how many were newly queued.
- */
+/** Validates the entire payload; user/project are explicitly separate atomic batches. */
 export async function queuePendingMemoryWrites(
   writes: { target: MemoryTarget; operations: MemoryOp[] }[],
   source: MemoryWriteSource,
   workspaceId?: string,
+  context?: PendingBatchContext,
 ): Promise<number> {
-  void workspaceId; // reserved for per-workspace scoping if stores ever split
-  const file = await readPending();
-  let added = 0;
-  for (const req of writes) {
-    for (const op of req.operations) {
-      const dup = file.writes.some(
-        (w) =>
-          w.target === req.target &&
-          w.source === source &&
-          w.op.action === op.action &&
-          (w.op.content ?? '') === (op.content ?? '') &&
-          (w.op.oldText ?? '') === (op.oldText ?? ''),
-      );
-      if (dup) continue;
-      file.writes.push({
-        id: makeId(),
-        target: req.target,
-        op,
-        source,
-        proposedAt: Date.now(),
-      });
-      added += 1;
+  const requests = normalizeMemoryRequests(writes);
+  if (!requests) throw new Error('Invalid memory proposal payload');
+  // Freeze caller-owned objects before the first await. Model output never supplies identity.
+  const signal = context?.signal;
+  const frozen: Pick<PendingBatchContext, 'reviewSource' | 'bases'> = context ? structuredClone({ reviewSource: context.reviewSource, bases: context.bases }) : {};
+  checkMemoryCancelled(signal);
+  if (frozen.reviewSource && frozen.reviewSource.workspaceId !== (workspaceId ?? '')) {
+    throw new Error('Memory source/workspace mismatch');
+  }
+  const batches: Omit<PendingMemoryWrite, 'id' | 'proposedAt'>[] = [];
+  for (const target of ['user', 'memory'] as const) {
+    const operations = requests.filter((req) => req.target === target).flatMap((req) => req.operations);
+    if (!operations.length) continue;
+    const ws = target === 'memory' ? workspaceId : undefined;
+    const base = frozen.bases?.[target] ?? await readMemoryBase(target, ws);
+    if (base.target !== target || (target === 'memory' && base.workspaceId !== ws)) throw new Error('Memory base/target mismatch');
+    batches.push({ target, operations, op: operations[0], source, workspaceId: ws,
+      reviewSource: frozen.reviewSource, base, status: 'awaiting_approval' });
+  }
+  const added = await withMemoryLock(REL_PATH, async () => {
+    checkMemoryCancelled(signal);
+    const file = await readPending();
+    checkMemoryCancelled(signal);
+    let count = 0;
+    for (const batch of batches) {
+      if (file.writes.some((w) => w.status === 'awaiting_approval' && w.target === batch.target &&
+          w.workspaceId === batch.workspaceId && w.source === source && w.base?.raw === batch.base?.raw &&
+          JSON.stringify(w.operations) === JSON.stringify(batch.operations))) continue;
+      file.writes.push({ ...batch, id: makeId(), proposedAt: Date.now() });
+      count += batch.operations.length;
     }
-  }
-  if (added) {
-    await writePending(file.writes);
-    // Auto pre-screen: the AI pass runs in the background so the user only
-    // ever sees what survived it. Debounced — a burst of queued writes from
-    // one review turn collapses into a single model call. Skipped in tests
-    // (fake-indexeddb/localStorage env has no gateway to call).
-    scheduleAutoTriage();
-  }
+    if (count) await writePending(file.writes, file.raw, signal);
+    return count;
+  });
+  if (added) scheduleAutoTriage();
   return added;
 }
 
 export interface PendingResolution {
-  /** Ids actually resolved (found in the queue). Unknown ids are ignored. */
   resolvedIds: string[];
+  outcomes: { id: string; status: 'applied' | 'skipped' | 'rejected' | 'conflicted' | 'failed' | 'needs_source_confirmation'; appliedCount: number; skippedCount: number; error?: string }[];
 }
 
-/**
- * Approve or reject pending writes by id. Approved ops apply through
- * `applyMemoryBatch` — the SAME gates (duplicate skip, safety scan, char
- * limit) run as for any other write, so approval can still legitimately
- * reject (e.g. an overflow with eviction off). Each approved op is removed
- * from the queue before the next applies, so a mid-batch failure doesn't
- * retry forever.
- */
+/** Current page workspace is ignored. Only confirmed whole batches may leave the queue. */
 export async function resolvePendingMemoryWrites(
-  ids: string[],
-  action: 'approve' | 'reject',
-  workspaceId?: string,
+  ids: string[], action: 'approve' | 'reject', _currentWorkspaceId?: string,
   opts?: { evictOnOverflow?: boolean; safetyScan?: 'reject' | 'skip' | 'off' },
 ): Promise<PendingResolution> {
-  const { applyMemoryOp } = await import('./memoryStore');
-  const file = await readPending();
-  const byId = new Map(file.writes.map((w) => [w.id, w]));
-  const resolved: PendingMemoryWrite[] = [];
-  for (const id of ids) {
-    const w = byId.get(id);
-    if (!w) continue;
-    resolved.push(w);
-    file.writes = file.writes.filter((x) => x.id !== id);
-  }
-  if (!resolved.length) return { resolvedIds: [] };
-  await writePending(file.writes);
-
-  if (action === 'approve') {
-    // Oldest first, sequential, each de-queued before the next applies.
-    for (const w of resolved.sort((a, b) => a.proposedAt - b.proposedAt)) {
-      await applyMemoryOp(
-        w.target,
-        w.op,
-        w.target === 'memory' ? workspaceId : undefined,
-        opts,
-      ).catch(() => undefined);
+  return withMemoryLock(REL_PATH, async () => {
+    const file = await readPending();
+    const result: PendingResolution = { resolvedIds: [], outcomes: [] };
+    for (const w of file.writes.filter((w) => ids.includes(w.id))) {
+      if (action === 'reject') {
+        result.resolvedIds.push(w.id);
+        result.outcomes.push({ id: w.id, status: 'rejected', appliedCount: 0, skippedCount: 0 });
+        continue;
+      }
+      if (w.status !== 'awaiting_approval' || !w.base) {
+        result.outcomes.push({ id: w.id, status: 'needs_source_confirmation', appliedCount: 0, skippedCount: 0,
+          error: 'Legacy proposal requires explicit source/base confirmation; current workspace is not a source' });
+        continue;
+      }
+      // No approval bypass for hard safety findings. No hidden destructive eviction.
+      try {
+        const applied = await applyMemoryBatch(w.target, w.operations, w.workspaceId,
+          { expectedRaw: w.base.raw, transactionId: w.id, reviewSource: w.reviewSource, sourceConfirmation: w.sourceConfirmation, evictOnOverflow: false, safetyScan: 'reject' });
+        const skippedCount = applied.skippedCount ?? applied.skipped?.length ?? 0;
+        const appliedCount = applied.success ? (applied.appliedCount ?? w.operations.length - skippedCount) : 0;
+        result.outcomes.push({ id: w.id, status: applied.success ? (appliedCount ? 'applied' : 'skipped') :
+          /conflict/i.test(applied.error ?? '') ? 'conflicted' : 'failed', appliedCount, skippedCount, error: applied.error });
+        if (applied.success) result.resolvedIds.push(w.id);
+      } catch (error) {
+        result.outcomes.push({ id: w.id, status: 'failed', appliedCount: 0, skippedCount: 0,
+          error: error instanceof Error ? error.message : String(error) });
+      }
     }
-  }
-  return { resolvedIds: resolved.map((w) => w.id) };
+    // All applied results have passed target readback before this queue CAS.
+    if (result.resolvedIds.length) await writePending(file.writes.filter((w) => !result.resolvedIds.includes(w.id)), file.raw);
+    void opts; // retained for callers; approval does not widen frozen policy
+    return result;
+  });
 }
 
 /**
@@ -204,16 +215,9 @@ export async function resolvePendingMemoryWrites(
  * Kept terse: the model sees many of these and only judges keep/drop.
  */
 export function formatPendingForTriage(w: PendingMemoryWrite): string {
-  const target = w.target === 'user' ? '用户画像' : '助手笔记';
-  const tier = w.op.importance?.trim();
-  const tierTag = tier ? `［重要度：${tier}］` : '';
-  const body =
-    w.op.action === 'remove'
-      ? `删除：${w.op.oldText ?? ''}`
-      : w.op.action === 'replace'
-        ? `改写「${w.op.oldText ?? ''}」为：${w.op.content ?? ''}`
-        : `新增：${w.op.content ?? ''}`;
-  return `[${w.id}] (${target}) ${tierTag}${body}`;
+  // JSON quoting prevents entry content masquerading as another proposal ID.
+  return JSON.stringify({ id: w.id, target: w.target, workspaceId: w.workspaceId ?? null,
+    source: w.reviewSource ?? null, status: w.status, operations: w.operations });
 }
 
 /** System prompt for the AI pre-screen pass over the pending queue. */
@@ -256,19 +260,19 @@ export function parseTriageVerdict(
   } catch {
     return null;
   }
-  if (!parsed || typeof parsed !== 'object') return null;
-  const drop = Array.isArray((parsed as { drop?: unknown }).drop)
-    ? ((parsed as { drop: unknown[] }).drop.filter((x): x is string => typeof x === 'string'))
-    : [];
-  const keep = Array.isArray((parsed as { keep?: unknown }).keep)
-    ? ((parsed as { keep: unknown[] }).keep.filter((x): x is string => typeof x === 'string'))
-    : [];
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const obj = parsed as Record<string, unknown>;
+  if (Object.keys(obj).some((key) => key !== 'drop' && key !== 'keep')) return null;
+  if (!Array.isArray(obj.drop) || !Array.isArray(obj.keep)) return null;
+  if ([...obj.drop, ...obj.keep].some((id) => typeof id !== 'string')) return null;
+  const drop = obj.drop as string[];
+  const keep = obj.keep as string[];
   const seen = new Set<string>();
   for (const id of [...drop, ...keep]) {
     if (!validIds.has(id) || seen.has(id)) return null; // unknown or duplicated id → distrust
     seen.add(id);
   }
-  return { drop, keep };
+  return seen.size === validIds.size ? { drop, keep } : null;
 }
 
 /**
@@ -282,25 +286,38 @@ export function parseTriageVerdict(
  */
 export async function triagePendingMemoryWrites(
   invokeModel: (system: string, userContent: string) => Promise<string>,
+  options: { signal?: AbortSignal } = {},
 ): Promise<{ total: number; dropped: number; kept: number; verdictOk: boolean }> {
-  const writes = (await readPending()).writes;
+  const signal = options.signal;
+  checkMemoryCancelled(signal);
+  const snapshot = await readPending();
+  const writes = snapshot.writes;
   if (!writes.length) return { total: 0, dropped: 0, kept: 0, verdictOk: true };
   const validIds = new Set(writes.map((w) => w.id));
 
   let verdict: { drop: string[]; keep: string[] } | null = null;
   try {
+    checkMemoryCancelled(signal);
     const out = await invokeModel(TRIAGE_SYSTEM, buildTriageUserPrompt(writes));
+    checkMemoryCancelled(signal);
     verdict = parseTriageVerdict(out, validIds);
   } catch {
+    checkMemoryCancelled(signal);
     verdict = null;
   }
   // Unparseable / incomplete verdict → drop nothing, keep everything.
   if (!verdict) {
     return { total: writes.length, dropped: 0, kept: writes.length, verdictOk: false };
   }
-  if (verdict.drop.length) {
-    await resolvePendingMemoryWrites(verdict.drop, 'reject');
-  }
+  const trusted = verdict;
+  const confirmed = await withMemoryLock(REL_PATH, async () => {
+    checkMemoryCancelled(signal);
+    const current = await readPending();
+    if (current.raw !== snapshot.raw) return false;
+    if (trusted.drop.length) await writePending(current.writes.filter((write) => !trusted.drop.includes(write.id)), current.raw, signal);
+    return true;
+  });
+  if (!confirmed) return { total: writes.length, dropped: 0, kept: writes.length, verdictOk: false };
   return { total: writes.length, dropped: verdict.drop.length, kept: verdict.keep.length, verdictOk: true };
 }
 

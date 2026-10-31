@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -11,6 +13,8 @@ import {
   type ReactNode,
 } from "react";
 import { FilePreviewTabs, MainFilePreview } from "@/components/ai/FilePreviewTabs";
+import UserMessageEditor from "@/components/ai/UserMessageEditor";
+import ChatRevisionControls from "@/components/ai/ChatRevisionControls";
 import { filePreviewScope, useFilePreviewTabs } from "@/store/filePreviewTabs";
 import { TitleBarContent } from "@/components/TitleBar";
 import SidebarToggleButton from "@/components/SidebarToggleButton";
@@ -167,6 +171,9 @@ import {
 import type { Message } from "@/store/types";
 import type { SkillReviewState } from "@/runtime/skills/types";
 import SkillLearningCard from "@/components/ai/SkillLearningCard";
+import MemoryReviewCard from "@/components/ai/MemoryReviewCard";
+import { getMemoryReviewStates, subscribeMemoryReview, memoryReviewIdentity, type MemoryReviewChatState } from "@/lib/memoryReviewEvents";
+import { loadMemoryReviewJournal } from "@/lib/memoryConfig";
 import { isSkillReviewVisible } from "@/components/ai/lib/skillReviewVisibility";
 import {
   buildSlashSuggestions,
@@ -317,7 +324,7 @@ import {
   parentDirectoryPath,
 } from "@/components/ai/lib/filePath";
 import { scanFileRefs } from "@/components/ai/lib/fileScan";
-import { orderDisplayMessages } from "@/components/ai/lib/orderDisplayMessages";
+import { hideReplacedUserMessages, orderDisplayMessages } from "@/components/ai/lib/orderDisplayMessages";
 import FileChip, {
   FileChipBudgetProvider,
   type OpenFileIntent,
@@ -347,6 +354,7 @@ import {
 } from "@/lib/generationSettingsStore";
 
 const DEFAULT_DOCK_HEIGHT = 208; // matches the former h-52
+const MemoryReviewSettingsModal = lazy(() => import('@/panels/SettingsModal'));
 const MIN_DOCK_HEIGHT = 120;
 /**
  * How many trailing messages render rich markdown eagerly on (re)mount. The rest
@@ -750,11 +758,13 @@ function MessageActionToolbar({
     openMenu?.messageId === messageId && openMenu.kind === "translate";
   return (
     <div className="relative mt-1 flex items-center gap-1">
-      <CopyButton
-        value={text}
-        title={t(locale, "dock.copyAnswer")}
-        className={messageActionButtonClass()}
-      />
+      {text && (
+        <CopyButton
+          value={text}
+          title={t(locale, "dock.copyAnswer")}
+          className={messageActionButtonClass()}
+        />
+      )}
       <button
         type="button"
         onClick={onBranch}
@@ -1909,6 +1919,49 @@ export default function AIDock({
   const chatTitle = useStore(activeChatTitle);
   const activeSessionId = useStore((s) => s.activeSessionId);
   const activeWorkspaceId = useStore((s) => s.activeWorkspaceId);
+  const [memoryReviews, setMemoryReviews] = useState<MemoryReviewChatState[]>([]);
+  const [memorySettingsOpen, setMemorySettingsOpen] = useState(false);
+  useEffect(() => {
+    let mounted = true;
+    const inScope = (state: MemoryReviewChatState) => state.source.hostId === 'local' && state.source.namespaceId === 'local'
+      && state.source.workspaceId === activeWorkspaceId && state.source.sessionId === activeSessionId;
+    const live = new Map(getMemoryReviewStates().filter(inScope).map(state => [memoryReviewIdentity(state), state]));
+    setMemoryReviews([...live.values()]);
+    const unsubscribe = subscribeMemoryReview(state => {
+      if (!mounted || !inScope(state)) return;
+      live.set(memoryReviewIdentity(state), state);
+      while (live.size > 100) live.delete(live.keys().next().value!);
+      setMemoryReviews(current => [...current.filter(entry => memoryReviewIdentity(entry) !== memoryReviewIdentity(state)), state].slice(-100));
+    });
+    // Uncached journal read is display-only: never resume/rebill persisted jobs.
+    void loadMemoryReviewJournal().then(({ value }) => {
+      if (!mounted) return;
+      const merged = new Map(value.jobs.filter(inScope).map(state => [memoryReviewIdentity(state),
+        state.phase === 'reading' ? { ...state, phase: 'unconfirmed' as const } : state as MemoryReviewChatState]));
+      for (const [key, state] of live) merged.set(key, state);
+      setMemoryReviews([...merged.values()].slice(-100));
+    }).catch(error => { if (mounted) console.warn('[memory] Review history unavailable', error); });
+    return () => { mounted = false; unsubscribe(); };
+  }, [activeWorkspaceId, activeSessionId]);
+  const memoryReviewsByAssistant = useMemo(() => {
+    const byAssistant = new Map<string, MemoryReviewChatState[]>();
+    for (const state of memoryReviews) {
+      if (state.source.workspaceId !== activeWorkspaceId || state.source.sessionId !== activeSessionId) continue;
+      const sources = messages.filter(message => message.id === state.source.sourceMessageId && message.role === 'user' && !message.localOnly);
+      if (sources.length !== 1 || sources[0].id !== state.source.turnId) continue;
+      const start = messages.indexOf(sources[0]);
+      let assistant = state.assistantMessageId ? messages.slice(start + 1).find(message =>
+        message.id === state.assistantMessageId && message.role === 'assistant' && !message.localOnly) : undefined;
+      for (const message of state.assistantMessageId ? [] : messages.slice(start + 1)) {
+        if (message.role === 'user' && !message.interjected && !message.localOnly) break;
+        if (message.role === 'assistant' && !message.localOnly) assistant = message;
+      }
+      if (!assistant || messages.filter(message => message.id === assistant.id).length !== 1) continue;
+      // Ambiguous persisted IDs cannot identify the original answer; never choose one.
+      byAssistant.set(assistant.id, [...(byAssistant.get(assistant.id) ?? []), state]);
+    }
+    return byAssistant;
+  }, [memoryReviews, messages, activeWorkspaceId, activeSessionId]);
   const renameWorkflowSession = useStore((s) => s.renameWorkflowSession);
   const deleteMessage = useStore((s) => s.deleteMessage);
   const queuedChatMessageIds = useStore((s) => s.queuedChatMessageIds);
@@ -1916,6 +1969,8 @@ export default function AIDock({
     (s) => s.steerableQueuedChatMessageIds,
   );
   const updateQueuedChatMessage = useStore((s) => s.updateQueuedChatMessage);
+  const reviseChatMessage = useStore((s) => s.reviseChatMessage);
+  const selectChatRevision = useStore((s) => s.selectChatRevision);
   const deleteQueuedChatMessage = useStore((s) => s.deleteQueuedChatMessage);
   const steerQueuedChatMessage = useStore(
     (s) => s.steerQueuedChatMessage,
@@ -2208,6 +2263,8 @@ export default function AIDock({
     null,
   );
   const [queuedEditDraft, setQueuedEditDraft] = useState("");
+  const [historyEdit, setHistoryEdit] = useState(false);
+  const [stickyPromptId, setStickyPromptId] = useState<string | null>(null);
   const [chatTitleSaving, setChatTitleSaving] = useState(false);
   // The organization chart is no longer a top tab beside the stream; it pops up
   // from a `$组织架构` trigger at the input bottom and collapses on outside click.
@@ -2393,9 +2450,10 @@ export default function AIDock({
   const normalizedSearchRef = useRef(normalizedSearch);
   normalizedSearchRef.current = normalizedSearch;
 
+  const presentationMessages = useMemo(() => hideReplacedUserMessages(messages), [messages]);
   const searchMatches = useMemo(
-    () => buildSearchMatches(messages, normalizedSearch),
-    [messages, normalizedSearch],
+    () => buildSearchMatches(presentationMessages, normalizedSearch),
+    [presentationMessages, normalizedSearch],
   );
   const activeSearchMatch = searchMatches[activeSearchMatchIndex] ?? null;
   const activeSearchMatchId = activeSearchMatch?.id ?? null;
@@ -2407,14 +2465,14 @@ export default function AIDock({
   );
   const topicMessageIds = useMemo(
     () =>
-      messages
+      presentationMessages
         .filter((message) => message.role === "user")
         .map((message) => message.id),
-    [messages],
+    [presentationMessages],
   );
   const timelineMarkers = useMemo(() => {
-    const topics = messages
-      .map((message, messageIndex) => ({ message, messageIndex }))
+    const topics = presentationMessages
+      .map((message) => ({ message, messageIndex: messages.indexOf(message) }))
       .filter(({ message }) => message.role === "user");
     return topics.map(({ message, messageIndex }, topicIndex) => ({
       id: message.id,
@@ -2423,7 +2481,7 @@ export default function AIDock({
       position: timelineMarkerTop(topicIndex, topics.length),
       messageIndex,
     }));
-  }, [messages]);
+  }, [messages, presentationMessages]);
   // Remote workspaces use the remote project's catalog (synced + cached); local
   // workspaces use the desktop backend scan. Either way buildSlashSuggestions
   // folds in the app-only static commands, so the only difference is whether the
@@ -2719,18 +2777,28 @@ export default function AIDock({
 
   useEffect(() => {
     if (!queuedEditMessageId) return;
+    if (historyEdit && messages.some((message) => message.id === queuedEditMessageId)) return;
     if (queuedChatMessageIds.includes(queuedEditMessageId)) return;
     setQueuedEditMessageId(null);
     setQueuedEditDraft("");
-  }, [queuedChatMessageIds, queuedEditMessageId]);
+  }, [queuedChatMessageIds, queuedEditMessageId, historyEdit, messages]);
+
+  useEffect(() => {
+    setQueuedEditMessageId(null);
+    setQueuedEditDraft("");
+    setHistoryEdit(false);
+    cancelQueuedChatMessageEdit();
+  }, [activeStreamScrollKey, cancelQueuedChatMessageEdit]);
 
   const beginQueuedMessageEdit = useCallback(
     (message: Message) => {
+      cancelQueuedChatMessageEdit();
+      setHistoryEdit(false);
       setQueuedEditMessageId(message.id);
       setQueuedEditDraft(message.text);
       beginQueuedChatMessageEdit(message.id);
     },
-    [beginQueuedChatMessageEdit],
+    [beginQueuedChatMessageEdit, cancelQueuedChatMessageEdit],
   );
 
   const cancelQueuedMessageEdit = useCallback(() => {
@@ -2742,13 +2810,20 @@ export default function AIDock({
   const commitQueuedMessageEdit = useCallback(
     (messageId: string) => {
       if (!queuedEditDraft.trim()) return;
-      if (updateQueuedChatMessage(messageId, queuedEditDraft)) {
+      if ((historyEdit ? reviseChatMessage : updateQueuedChatMessage)(messageId, queuedEditDraft)) {
         setQueuedEditMessageId(null);
         setQueuedEditDraft("");
       }
     },
-    [queuedEditDraft, updateQueuedChatMessage],
+    [queuedEditDraft, updateQueuedChatMessage, historyEdit, reviseChatMessage],
   );
+
+  const beginHistoryMessageEdit = useCallback((message: Message) => {
+    cancelQueuedChatMessageEdit();
+    setHistoryEdit(true);
+    setQueuedEditMessageId(message.id);
+    setQueuedEditDraft(message.text);
+  }, [cancelQueuedChatMessageEdit]);
 
   // One bottom "Channel" select owns the active runtime route. The default
   // group mirrors Settings -> Default Channels: each configured provider is a
@@ -3647,16 +3722,19 @@ export default function AIDock({
   // 它真正等价于哪一档（claude CLI 按模型目录的 `default_effort` 实测值），
   // 能判定就在该档位上打「模型默认档」标记，判不了就把原因写明（CLI 自定 /
   // 网关默认不推理 / 端点自定），避免用户对着「默认」猜。
-  const thinkingUi = useMemo<{
+  const getThinkingUi = useCallback((modelId: string): {
     options: SelectOption[];
     defaultHint: string;
-  }>(() => {
+  } => {
     const provider = selectedDefaultProvider?.provider;
     const model =
-      runSelection.modelOverride ??
-      (provider
-        ? providerDisplayModel(runSelection.modelClass, provider)
-        : runSelection.modelClass);
+      modelId === modelSelectValue
+        ? runSelection.modelOverride ?? (provider
+          ? providerDisplayModel(runSelection.modelClass, provider)
+          : runSelection.modelClass)
+        : modelId === "default" && provider
+          ? providerDisplayModel("default", provider)
+          : modelId;
     // 直连渠道用真实协议（anthropic / openai-compatible）解析档位，CLI 渠道才
     // 按适配器解析——这样选择器列出的档位与请求真正走的那条通道一致。
     const transport =
@@ -3707,23 +3785,28 @@ export default function AIDock({
     selectedDefaultProvider,
     runSelection.modelOverride,
     runSelection.modelClass,
+    modelSelectValue,
     thinkingLevelOverrides,
   ]);
+  const thinkingUi = getThinkingUi(modelSelectValue);
   // 换渠道/换模型后上一个档位可能不再合法，此时显示「默认」——与实际下发的一致。
   const thinkingValue =
     runSelection.thinkingLevel &&
     thinkingUi.options.some((option) => option.id === runSelection.thinkingLevel)
       ? runSelection.thinkingLevel
       : THINKING_LEVEL_DEFAULT_ID;
-  const handleThinkingChange = useCallback(
-    (id: string) => {
-      setSessionRunSelection({
-        ...runSelection,
-        thinkingLevel: id === THINKING_LEVEL_DEFAULT_ID ? undefined : id,
-      });
-    },
-    [runSelection, setSessionRunSelection],
-  );
+  const getModelThinkingOptions = useCallback((modelId: string): SelectOption[] => {
+    const ui = getThinkingUi(modelId);
+    if (!thinkingLevelsEnabled || ui.options.length === 0) return [];
+    return [
+      {
+        id: THINKING_LEVEL_DEFAULT_ID,
+        label: t(locale, "dock.thinkingDefault"),
+        hint: ui.defaultHint,
+      },
+      ...ui.options,
+    ];
+  }, [getThinkingUi, locale, thinkingLevelsEnabled]);
   const [keyModalChannel, setKeyModalChannel] = useState<FreeChannel | null>(
     null,
   );
@@ -3872,7 +3955,7 @@ export default function AIDock({
     ],
   );
   const onModelChange = useCallback(
-    (model: string) => {
+    (model: string, thinkingLevel?: string) => {
       const selectedModel = model.trim();
       if (!selectedModel) return;
       // Always overwrite modelOverride so a stale workflow.meta.gateway.defaults
@@ -3881,6 +3964,13 @@ export default function AIDock({
       // model) as the visible fallback.
       const modelOverride =
         selectedModel === "default" ? undefined : selectedModel;
+      const thinkingSelection = thinkingLevel === undefined ? {} : {
+        thinkingLevel: thinkingLevel === THINKING_LEVEL_DEFAULT_ID ? undefined : thinkingLevel,
+      };
+      if (thinkingLevel !== undefined && selectedModel === modelSelectValue) {
+        setSessionRunSelection({ ...runSelection, ...thinkingSelection });
+        return;
+      }
       if (selectedFreeChannel) {
         void ensureFreeProxy();
         if (selectedFreeChannel.id === FREE_CHANNEL_AUTO_ID) {
@@ -3893,12 +3983,14 @@ export default function AIDock({
           setSessionRunSelection({
             ...freeChannelSelection(selectedFreeChannel.id, autoModel),
             modelOverride: autoOverride,
+            ...thinkingSelection,
           });
           return;
         }
         setSessionRunSelection({
           ...freeChannelSelection(selectedFreeChannel.id, selectedModel),
           modelOverride,
+          ...thinkingSelection,
         });
         return;
       }
@@ -3907,6 +3999,7 @@ export default function AIDock({
         setSessionRunSelection({
           ...providerSelection(provider, selectedModel),
           modelOverride,
+          ...thinkingSelection,
         });
         return;
       }
@@ -3914,12 +4007,15 @@ export default function AIDock({
         ...systemDefaultGatewaySelection(selectedAdapter),
         modelClass: selectedModel === "default" ? "default" : selectedModel,
         modelOverride,
+        ...thinkingSelection,
       });
     },
     [
       selectedAdapter,
       selectedDefaultProvider,
       selectedFreeChannel,
+      modelSelectValue,
+      runSelection,
       setSessionRunSelection,
     ],
   );
@@ -4530,7 +4626,7 @@ export default function AIDock({
   // must rerender even when messages are unchanged. Store/history stay intact.
   const displayMessages = useMemo(() => {
     const visible = messages.filter((message) =>
-      !message.skillLearning || isSkillReviewVisible(message.skillLearning) || message.text.trim().length > 0,
+      !message.skillLearning || isSkillReviewVisible(message.skillLearning) || renderMessageText(message.text).trim().length > 0,
     );
     return orderDisplayMessages(
       visible.length === messages.length ? messages : visible,
@@ -5237,6 +5333,32 @@ export default function AIDock({
     );
   }, [topicMessageIds]);
 
+  const updateStickyPromptFromScroll = useCallback(() => {
+    const stream = streamRef.current;
+    if (!stream || !isChat) return;
+    const top = stream.getBoundingClientRect().top;
+    const passed = visibleMessages.filter((message) => message.role === "user" && !message.localOnly &&
+      !queuedChatMessageIdSet.has(message.id) &&
+      (messageRefs.current.get(message.id)?.getBoundingClientRect().top ?? top) < top - 1);
+    // A windowed list can start inside an answer. Its prompt is in the hidden prefix.
+    const preceding = hiddenMessageCount > 0
+      ? displayMessages.slice(0, hiddenMessageCount).findLast((message) => message.role === "user" && !message.localOnly)
+      : undefined;
+    const id = passed.at(-1)?.id ?? preceding?.id ?? null;
+    setStickyPromptId((current) => current === id ? current : id);
+  }, [isChat, visibleMessages, queuedChatMessageIdSet, hiddenMessageCount, displayMessages]);
+
+  const stickyPrompt = messages.find((message) => message.id === stickyPromptId);
+  const stickyEditing = !!stickyPrompt && historyEdit && queuedEditMessageId === stickyPrompt.id;
+  useLayoutEffect(() => { updateStickyPromptFromScroll(); }, [activeStreamScrollKey, updateStickyPromptFromScroll]);
+  useEffect(() => {
+    if (typeof ResizeObserver === "undefined" || !streamRef.current) return;
+    const observer = new ResizeObserver(updateStickyPromptFromScroll);
+    observer.observe(streamRef.current);
+    if (streamContentRef.current) observer.observe(streamContentRef.current);
+    return () => observer.disconnect();
+  }, [updateStickyPromptFromScroll]);
+
   // Track whether the user is parked at (or near) the bottom. Manual upward
   // scroll pins this session to the visible message anchor; bottom stays sticky
   // and follows new streamed content.
@@ -5264,13 +5386,15 @@ export default function AIDock({
         stickToBottomRef.current = atBottom;
       }
       updateActiveTopicFromScroll();
+      updateStickyPromptFromScroll();
       return;
     }
     // A real gesture overrides any write we had pending.
     marks.length = 0;
     rememberStreamScrollSnapshot();
     updateActiveTopicFromScroll();
-  }, [rememberStreamScrollSnapshot, updateActiveTopicFromScroll]);
+    updateStickyPromptFromScroll();
+  }, [rememberStreamScrollSnapshot, updateActiveTopicFromScroll, updateStickyPromptFromScroll]);
 
   useLayoutEffect(() => {
     updateActiveTopicFromScroll();
@@ -8430,6 +8554,19 @@ export default function AIDock({
           id="ugs-stream-surface"
           className={"relative min-h-0 " + (centerInput ? "" : "flex-1")}
         >
+          {isChat && stickyPrompt && !forceEagerCapture && !normalizedSearch && (
+            <div data-ugs-sticky-prompt={stickyPrompt.id}
+              className="absolute left-6 right-12 top-2 z-20 rounded-lg border border-accent/25 bg-panel/95 shadow-xl backdrop-blur"
+              style={{ right: `${Math.max(48, chatVisibleRightInset + 24)}px` }}>
+              {stickyEditing ? <UserMessageEditor value={queuedEditDraft} onChange={setQueuedEditDraft}
+                onCancel={cancelQueuedMessageEdit} onSave={() => commitQueuedMessageEdit(stickyPrompt.id)} onPaste={handleQueuedEditPaste} />
+                : <button type="button" aria-label="编辑当前输入" title="点击编辑，保存后重新发送" disabled={isReadOnly}
+                  onClick={() => beginHistoryMessageEdit(stickyPrompt)}
+                  className="block w-full min-w-0 truncate rounded-lg px-3 py-2 text-left text-xs text-fg-dim hover:text-fg disabled:opacity-40">
+                  {summarizeTimelineText(stickyPrompt.text)}
+                </button>}
+            </div>
+          )}
           {captureStatus && (
             <div
               className={
@@ -8451,7 +8588,7 @@ export default function AIDock({
             onScroll={handleStreamScroll}
             className={
               "ugs-ai-return-stream ugs-autohide-scroll min-h-0 overflow-y-auto px-6 py-4 " +
-              (isChat && timelineMarkers.length > 0 ? "pr-12 " : "") +
+              (isChat && messages.length > 0 ? "pr-28 " : "") +
               (centerInput ? "mx-auto w-full" : "h-full")
             }
             style={
@@ -8500,7 +8637,13 @@ export default function AIDock({
                     isChatUser && queuedChatMessageIdSet.has(m.id);
                   const editingQueuedMessage =
                     queuedUserMessage && queuedEditMessageId === m.id;
+                  const editingHistoryMessage = isChatUser && historyEdit && queuedEditMessageId === m.id && !stickyEditing;
                   const isSystem = m.role === "system";
+                  // Standalone review records are transcript scaffolding, not
+                  // another assistant answer. Keep history bytes and real answer
+                  // chrome intact; omit only the empty review row's chrome.
+                  const reviewOnly = !isUser && !isSystem && !!m.skillLearning &&
+                    !m.interaction && !m.runProgress && !renderMessageText(m.text).trim();
                   const isSearchHit = searchMatchMessageIds.has(m.id);
                   const isCurrentSearchHit =
                     activeSearchMatchMessageId === m.id;
@@ -8527,11 +8670,12 @@ export default function AIDock({
                   // turn keeps its own clock, not just the latest one. Falls
                   // back to createdAt/completedAt when the text prefix is gone.
                   const turnTiming =
-                    !isUser && !isSystem ? turnTimingFromMessage(m) : "";
+                    !isUser && !isSystem && !reviewOnly ? turnTimingFromMessage(m) : "";
                   const assistantActions =
                     isChat &&
                     !isUser &&
                     !isSystem &&
+                    !reviewOnly &&
                     !captureUtility &&
                     !m.interaction &&
                     !normalizedSearch;
@@ -8559,6 +8703,7 @@ export default function AIDock({
                     <li
                       key={m.id}
                       data-ugs-message-row="true"
+                      data-ugs-review-only={reviewOnly ? "true" : undefined}
                       data-ugs-capture-exclude={
                         captureUtility ? "true" : undefined
                       }
@@ -8576,7 +8721,7 @@ export default function AIDock({
                             : "")
                       }
                     >
-                      <div className="flex min-w-0 items-center gap-2">
+                      {!reviewOnly && <div className="flex min-w-0 items-center gap-2">
                         <span
                           title={roleLabel}
                           className={
@@ -8656,7 +8801,15 @@ export default function AIDock({
                             </button>
                           </>
                         )}
-                      </div>
+                        {isChatUser && !queuedUserMessage && !m.localOnly && !m.interaction && !normalizedSearch && (
+                          <>
+                            <ChatRevisionControls message={m} disabled={aiBusy} onSelect={selectChatRevision} />
+                            <button type="button" onClick={() => beginHistoryMessageEdit(m)} disabled={isReadOnly}
+                              title="编辑历史输入" aria-label="编辑历史输入"
+                              className="shrink-0 rounded text-fg-faint opacity-0 transition-opacity hover:text-accent group-hover/msg:opacity-100 focus-visible:opacity-100 disabled:opacity-40"><Pencil size={13} /></button>
+                          </>
+                        )}
+                      </div>}
                       {m.runProgress && (
                         <StudioRunCard
                           progress={m.runProgress}
@@ -8686,6 +8839,11 @@ export default function AIDock({
                             setInteractionDraft(m.id, draft)
                           }
                         />
+                      ) : editingHistoryMessage ? (
+                        <div className="ai-stream-user-bubble w-[min(100%,46rem)] max-w-[96%] rounded-md px-3 py-2.5">
+                          <UserMessageEditor value={queuedEditDraft} onChange={setQueuedEditDraft}
+                            onCancel={cancelQueuedMessageEdit} onSave={() => commitQueuedMessageEdit(m.id)} onPaste={handleQueuedEditPaste} />
+                        </div>
                       ) : editingQueuedMessage ? (
                         <div className="ai-stream-user-bubble flex w-[min(100%,46rem)] max-w-[96%] flex-col gap-2 rounded-md px-3 py-2.5 text-left">
                           <textarea
@@ -8760,7 +8918,7 @@ export default function AIDock({
                         // During search, inline <mark> highlights are applied via
                         // searchState without losing the rich rendering.
                         <div className="min-w-0 w-full">
-                          <LazyMessageContent
+                          {!reviewOnly && <LazyMessageContent
                             referenceSources={m.referenceSources ?? m.references}
                             collectReferences={m.role === 'assistant' && !m.localOnly}
                             text={renderMessageText(m.text)}
@@ -8777,13 +8935,14 @@ export default function AIDock({
                             scrollRootRef={streamRef}
                             cwd={workspaceCwd || undefined}
                             searchState={searchState}
-                          />
+                          />}
                           {m.skillLearning && (() => {
                             const state = m.skillLearning;
                             return <SkillLearningCard state={state} locale={locale}
                               onApprove={(id) => handleSkillReviewAction(m.id, state, "approve", id)}
                               onReject={(id) => handleSkillReviewAction(m.id, state, "reject", id)}
                               onRetry={state.resume ? () => retryPersistedSkillLearning(state) : undefined}
+                              onRetryState={state.resume ? retryPersistedSkillLearning : undefined}
                               onRollback={(id) => handleSkillReviewAction(m.id, state, "rollback", id)} />;
                           })()}
                           {!isSystem && !m.localOnly && !(aiBusy && m.id === lastAssistantId) && (() => {
@@ -8796,7 +8955,8 @@ export default function AIDock({
                           })()}
                         </div>
                       )}
-                      {assistantActions && actionText && (
+                      {memoryReviewsByAssistant.get(m.id)?.map(state => <MemoryReviewCard key={memoryReviewIdentity(state)} state={state} locale={locale} onOpenSettings={() => setMemorySettingsOpen(true)} />)}
+                      {assistantActions && (
                         <MessageActionToolbar
                           messageId={m.id}
                           text={actionText}
@@ -9880,30 +10040,15 @@ export default function AIDock({
                   className="min-w-0 max-w-[14rem]"
                   icon={!generationMode && loadingChannelModels ? "↻" : "◇"}
                   variant="ghost"
-                />
-              )}
-              {!generationMode &&
-                thinkingLevelsEnabled &&
-                thinkingUi.options.length > 0 && (
-                <Select
-                  title={t(locale, "dock.thinkingTitle")}
-                  options={[
-                    {
-                      id: THINKING_LEVEL_DEFAULT_ID,
-                      label: t(locale, "dock.thinkingDefault"),
-                      hint: thinkingUi.defaultHint,
-                    },
-                    ...thinkingUi.options,
-                  ]}
-                  value={thinkingValue}
-                  onChange={handleThinkingChange}
-                  disabled={isReadOnly}
-                  className="min-w-0 max-w-[9rem]"
-                  icon="◐"
-                  variant="ghost"
-                  // 触发按钮只显示档位名；每个档位的说明留在下拉里，
-                  // 否则长说明会把窄触发条撑爆。
-                  showSelectedHint={false}
+                  getSubOptions={!generationMode ? getModelThinkingOptions : undefined}
+                  subValue={!generationMode ? thinkingValue : undefined}
+                  subTitle={!generationMode ? t(locale, "dock.thinkingTitle") : undefined}
+                  onSubChange={!generationMode ? onModelChange : undefined}
+                  triggerSuffix={!generationMode && thinkingLevelsEnabled && thinkingUi.options.length > 0
+                    ? thinkingValue === THINKING_LEVEL_DEFAULT_ID
+                      ? t(locale, "dock.thinkingDefault")
+                      : thinkingUi.options.find((option) => option.id === thinkingValue)?.label
+                    : undefined}
                 />
               )}
               <button
@@ -10124,6 +10269,9 @@ export default function AIDock({
           </div>
         </div>
       )}
+      {memorySettingsOpen && <Suspense fallback={<p role="status">{locale === 'zh-CN' ? '正在打开设置…' : 'Opening settings…'}</p>}>
+        <MemoryReviewSettingsModal onClose={() => setMemorySettingsOpen(false)} />
+      </Suspense>}
       {localSetupChannel?.id === "ollama" && (
         <LocalModelSetupDialog
           locale={locale}

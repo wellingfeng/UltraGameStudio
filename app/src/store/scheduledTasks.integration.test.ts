@@ -99,4 +99,90 @@ describe('定时任务独立归属', () => {
     expect(useStore.getState().activeSessionId).toBe('current');
     expect(useStore.getState().composer.workspace).toBe('E:/original-execution');
   });
+
+  it('保存保留次数时清理旧记录，迟到的合并写入不能恢复它们', async () => {
+    const task = { ...taskFromTemplate(SCHEDULED_TASK_TEMPLATES[0], 'zh-CN'), maxHistoryRuns: 1 };
+    const messages = [
+      { id: 'old-user', role: 'user' as const, text: task.reminderText, scheduledTaskRun: true, createdAt: 1 },
+      { id: 'old-answer', role: 'assistant' as const, text: '旧周报', createdAt: 2 },
+      { id: 'new-user', role: 'user' as const, text: task.reminderText, scheduledTaskRun: true, createdAt: 3 },
+      { id: 'new-answer', role: 'assistant' as const, text: '新周报', createdAt: 4 },
+    ];
+    const record = await historyStore.createSession({ workspaceId: SCHEDULED_TASK_SCOPE, isWorkflow: false, messages, meta: { scheduledTask: { ...task, maxHistoryRuns: undefined } } });
+    useStore.setState({ historyReady: true, activeWorkspaceId: SCHEDULED_TASK_SCOPE, activeSessionId: record.id, messages, sessions: [], sessionTree: { [SCHEDULED_TASK_SCOPE]: [sessionFromRecord(record)] }, aiEditingSessions: [], chattingSessions: [], runningSessions: [], waitingInputSessions: [], jobSessions: [] });
+    await useStore.getState().setWorkflowScheduledTaskSession(record.id, SCHEDULED_TASK_SCOPE, task);
+    expect(useStore.getState().messages.map((message) => message.id)).toEqual(['new-user', 'new-answer']);
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.messages.map((message) => message.id)).toEqual(['new-user', 'new-answer']);
+    await historyStore.updateSession(SCHEDULED_TASK_SCOPE, record.id, { messages, mergeMessages: true });
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.messages.map((message) => message.id)).toEqual(['new-user', 'new-answer']);
+    await historyStore.updateSession(SCHEDULED_TASK_SCOPE, record.id, { messages });
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.messages.map((message) => message.id)).toEqual(['new-user', 'new-answer']);
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.meta?.scheduledTask?.maxHistoryRuns).toBe(1);
+  });
+
+  it('连续运行只保留最近一次，其他会话不受影响', async () => {
+    const task = { ...taskFromTemplate(SCHEDULED_TASK_TEMPLATES[0], 'zh-CN'), maxHistoryRuns: 1 };
+    const record = await historyStore.createSession({ workspaceId: SCHEDULED_TASK_SCOPE, isWorkflow: false, meta: { scheduledTask: task } });
+    const foreground = [{ id: 'foreground', role: 'user' as const, text: '当前会话', createdAt: 1 }];
+    useStore.setState({ historyReady: true, activeWorkspaceId: 'project', activeSessionId: 'current', workspaces: [], workflow: simpleBlueprint('当前会话'), composer: defaultComposer, messages: foreground, sessions: [], sessionTree: { [SCHEDULED_TASK_SCOPE]: [sessionFromRecord(record)] }, composerBySession: {}, aiEditingSessions: [], runningSessions: [], chattingSessions: [], waitingInputSessions: [], jobSessions: [] });
+    const key = { workspaceId: SCHEDULED_TASK_SCOPE, sessionId: record.id };
+    for (const answer of ['第一份周报', '第二份周报', '第三份周报']) {
+      gateway.complete.mockResolvedValue(answer);
+      await useStore.getState().runScheduledTaskSession(record.id, SCHEDULED_TASK_SCOPE, task);
+      await vi.waitFor(async () => {
+        const saved = await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id);
+        expect(sessionLiveStatus(key, useStore.getState())).toBeNull();
+        expect(saved?.messages.filter((message) => message.scheduledTaskRun)).toHaveLength(1);
+        expect(saved?.messages.filter((message) => message.role === 'assistant').map((message) => message.text).join()).toContain(answer);
+        expect(saved?.messages.filter((message) => message.role === 'assistant')).toHaveLength(1);
+      });
+    }
+    const snapshot = getAiEditViewSource(SCHEDULED_TASK_SCOPE, record.id);
+    expect(snapshot?.messages.filter((message) => message.scheduledTaskRun)).toHaveLength(1);
+    expect(snapshot?.messages.map((message) => message.text).join()).not.toContain('第一份周报');
+    expect(snapshot?.messages.map((message) => message.text).join()).not.toContain('第二份周报');
+    expect(useStore.getState().messages).toEqual(foreground);
+  });
+
+  it('运行中启用限制时保留旧记录，等当前运行结束再清理', async () => {
+    let finish!: (answer: string) => void;
+    gateway.complete.mockImplementation(() => new Promise<string>((resolve) => { finish = resolve; }));
+    const originalTask = taskFromTemplate(SCHEDULED_TASK_TEMPLATES[0], 'zh-CN');
+    const oldMessages = [
+      { id: 'old-user', role: 'user' as const, text: originalTask.reminderText, scheduledTaskRun: true, createdAt: 1 },
+      { id: 'old-answer', role: 'assistant' as const, text: '上一份周报', createdAt: 2 },
+    ];
+    const record = await historyStore.createSession({ workspaceId: SCHEDULED_TASK_SCOPE, isWorkflow: false, messages: oldMessages, meta: { scheduledTask: originalTask } });
+    useStore.setState({ historyReady: true, activeWorkspaceId: 'project', activeSessionId: 'current', workspaces: [], workflow: simpleBlueprint('当前会话'), composer: defaultComposer, messages: [], sessions: [], sessionTree: { [SCHEDULED_TASK_SCOPE]: [sessionFromRecord(record)] }, composerBySession: {}, aiEditingSessions: [], runningSessions: [], chattingSessions: [], waitingInputSessions: [], jobSessions: [] });
+    const key = { workspaceId: SCHEDULED_TASK_SCOPE, sessionId: record.id };
+    await useStore.getState().runScheduledTaskSession(record.id, SCHEDULED_TASK_SCOPE, originalTask);
+    await vi.waitFor(() => expect(finish).toBeTypeOf('function'));
+    await useStore.getState().setWorkflowScheduledTaskSession(record.id, SCHEDULED_TASK_SCOPE, { ...originalTask, maxHistoryRuns: 1 });
+    expect(sessionLiveStatus(key, useStore.getState())).not.toBeNull();
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.messages.map((message) => message.text).join()).toContain('上一份周报');
+    finish('最新周报');
+    await vi.waitFor(async () => {
+      const saved = await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id);
+      expect(sessionLiveStatus(key, useStore.getState())).toBeNull();
+      expect(saved?.messages.map((message) => message.text).join()).toContain('最新周报');
+      expect(saved?.messages.map((message) => message.text).join()).not.toContain('上一份周报');
+    });
+  });
+
+  it('后台任务结束后执行之前延期的清理', async () => {
+    const task = { ...taskFromTemplate(SCHEDULED_TASK_TEMPLATES[0], 'zh-CN'), maxHistoryRuns: 1 };
+    const messages = [
+      { id: 'old-user', role: 'user' as const, text: task.reminderText, scheduledTaskRun: true, createdAt: 1 },
+      { id: 'old-answer', role: 'assistant' as const, text: '上一份', createdAt: 2 },
+      { id: 'new-user', role: 'user' as const, text: task.reminderText, scheduledTaskRun: true, createdAt: 3 },
+      { id: 'new-answer', role: 'assistant' as const, text: '最新一份', createdAt: 4 },
+    ];
+    const record = await historyStore.createSession({ workspaceId: SCHEDULED_TASK_SCOPE, isWorkflow: false, messages, meta: { scheduledTask: task } });
+    const key = { workspaceId: SCHEDULED_TASK_SCOPE, sessionId: record.id };
+    useStore.setState({ historyReady: true, activeWorkspaceId: 'project', activeSessionId: 'current', sessions: [], sessionTree: { [SCHEDULED_TASK_SCOPE]: [sessionFromRecord(record)] }, aiEditingSessions: [], chattingSessions: [], runningSessions: [], waitingInputSessions: [], jobSessions: [key] });
+    await useStore.getState().setWorkflowScheduledTaskSession(record.id, SCHEDULED_TASK_SCOPE, task);
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.messages).toHaveLength(4);
+    useStore.getState().setBackgroundJobState([], {});
+    await vi.waitFor(async () => expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.messages.map((message) => message.id)).toEqual(['new-user', 'new-answer']));
+  });
 });

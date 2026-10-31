@@ -86,6 +86,46 @@ describe('FilePreviewDrawer', () => {
       .toBe(`http://asset.localhost/${encodeURIComponent(imagePath)}`);
   });
 
+  it('zooms Markdown content with Ctrl-wheel and opens its image without replacing the document', async () => {
+    vi.mocked(previewLocalFile).mockResolvedValue({
+      path: 'E:/docs/note.md', fileName: 'note.md', kind: 'text', mime: 'text/markdown',
+      sizeBytes: 25, truncated: false, text: '# 文档\n![示意图](figure.png)', base64: null,
+    });
+    const onClose = vi.fn();
+    await act(async () => root.render(createElement(FilePreviewDrawer, {
+      refData: { path: 'E:/docs/note.md', basename: 'note.md' }, onClose,
+    })));
+    const image = container.querySelector<HTMLImageElement>('.ai-generated-image')!;
+    const wheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100 });
+    await act(async () => image.dispatchEvent(wheel));
+    expect(wheel.defaultPrevented).toBe(true);
+    expect(container.querySelector('output[aria-label="预览缩放比例"]')?.textContent).toBe('122%');
+    await act(async () => image.click());
+    expect(container.querySelector('[role="dialog"][aria-label="图片查看"]')).not.toBeNull();
+    expect(vi.mocked(previewLocalFile)).toHaveBeenCalledTimes(1);
+    await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+    expect(container.querySelector('[role="dialog"][aria-label="图片查看"]')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('zooms code on Ctrl-wheel without blocking ordinary scrolling', async () => {
+    vi.mocked(previewLocalFile).mockResolvedValue({
+      path: 'E:/docs/main.ts', fileName: 'main.ts', kind: 'text', mime: 'text/plain',
+      sizeBytes: 10, truncated: false, text: 'const x=1;', base64: null,
+    });
+    await act(async () => root.render(createElement(FilePreviewDrawer, {
+      refData: { path: 'E:/docs/main.ts', basename: 'main.ts' }, onClose: vi.fn(),
+    })));
+    const scroll = container.querySelector('.ai-file-preview-diff__scroll')!;
+    const plain = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -100 });
+    await act(async () => scroll.dispatchEvent(plain));
+    expect(plain.defaultPrevented).toBe(false);
+    const wheel = new WheelEvent('wheel', { bubbles: true, cancelable: true, ctrlKey: true, deltaY: -100 });
+    await act(async () => scroll.dispatchEvent(wheel));
+    expect(wheel.defaultPrevented).toBe(true);
+    expect(container.querySelector('output[aria-label="预览缩放比例"]')?.textContent).toBe('122%');
+  });
+
   it('keeps system open and reveal available when an RDC preview fails', async () => {
     vi.mocked(previewLocalFile).mockRejectedValue(new Error('读取文件信息失败：系统找不到指定的文件。'));
     vi.mocked(openLocalPath).mockResolvedValue(true);
@@ -139,6 +179,42 @@ describe('FilePreviewDrawer', () => {
       container.querySelector('button[aria-label="关闭文件预览"]'),
     ).toBeNull();
     expect(container.querySelector('aside')).not.toBeNull();
+  });
+
+  it('keeps a scoped preview inside its host and offers one expand action', async () => {
+    vi.mocked(previewLocalFile).mockReturnValue(new Promise(() => {}));
+    const scope = document.createElement('main');
+    const onClose = vi.fn();
+
+    await act(async () => {
+      root.render(createElement(FilePreviewDrawer, {
+        refData: { path: 'report.docx', basename: 'report.docx' },
+        overlayContainerRef: { current: scope },
+        onClose,
+      }));
+    });
+
+    const overlay = scope.firstElementChild;
+    const aside = scope.querySelector<HTMLElement>('aside');
+    expect(overlay?.classList.contains('absolute')).toBe(true);
+    expect(overlay?.classList.contains('fixed')).toBe(false);
+    expect(aside?.style.width).not.toBe('');
+    expect(aside?.style.maxWidth).toBe('100%');
+    expect(scope.querySelector('button[aria-label="在主区域预览"]')).toBeNull();
+    expect(scope.querySelectorAll('button[aria-label="占满区域"]')).toHaveLength(1);
+
+    await act(async () => {
+      scope.querySelector<HTMLButtonElement>('button[aria-label="占满区域"]')?.click();
+    });
+    expect(aside?.classList.contains('left-0')).toBe(true);
+    expect(aside?.style.width).toBe('');
+
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(scope.querySelector('button[aria-label="占满区域"]')).not.toBeNull();
+    expect(aside?.style.width).not.toBe('');
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it('can expand the preview to the app window and restore drawer width', async () => {
@@ -492,6 +568,22 @@ describe('FilePreviewDrawer', () => {
     expect(previewLocalFile).not.toHaveBeenCalled();
   });
 
+  it('shows diff failures instead of silently displaying unmarked source', async () => {
+    vi.mocked(previewLocalFile).mockResolvedValue({
+      path: 'E:/Game/main.cpp', fileName: 'main.cpp', kind: 'text', mime: 'text/plain',
+      sizeBytes: 8, truncated: false, text: 'int x;\n', base64: null,
+    });
+    vi.mocked(workspaceFileDiff).mockRejectedValueOnce(new Error('P4 工作区映射检查失败'));
+    await act(async () => {
+      root.render(createElement(FilePreviewDrawer, {
+        refData: { path: 'main.cpp', basename: 'main.cpp' }, cwd: 'E:/Game',
+        diffEnabled: true, onClose: vi.fn(),
+      }));
+    });
+    expect(container.querySelector('[role="status"]')?.textContent)
+      .toContain('差异读取失败：P4 工作区映射检查失败');
+  });
+
   it('renders VCS diff marks for text previews', async () => {
     vi.mocked(previewLocalFile).mockResolvedValue({
       path: 'E:\\UltraGameStudio\\src\\main.ts',
@@ -547,6 +639,7 @@ describe('FilePreviewDrawer', () => {
       container.querySelector('[data-vcs-kind="replacedDeleted"]'),
     ).not.toBeNull();
     expect(container.querySelector('.ai-file-preview-diff__minimap')).not.toBeNull();
+    expect(container.textContent).toContain('相对版本库 · +1 / -1');
   });
 });
 

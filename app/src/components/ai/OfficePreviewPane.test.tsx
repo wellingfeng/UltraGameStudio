@@ -133,7 +133,9 @@ describe('OfficePreviewPane', () => {
       }));
     });
     const iframe = container.querySelector('iframe')!;
-    expect(iframe.getAttribute('sandbox')).toBe('');
+    expect(iframe.getAttribute('sandbox')).toBe('allow-scripts');
+    expect(iframe.srcdoc).toContain('Content-Security-Policy');
+    expect(iframe.srcdoc).toMatch(/script-src 'nonce-[0-9a-f]+'/);
     expect(iframe.srcdoc).toContain('--bg:#191919;');
     expect(iframe.srcdoc).toContain('--fg:#d4d4d4;');
     expect(iframe.srcdoc).toContain('color-scheme:dark;');

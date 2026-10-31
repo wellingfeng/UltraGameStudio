@@ -84,6 +84,8 @@ export default function ScheduledTaskDialog({
   );
   const [repeat, setRepeat] = useState(seed.repeat);
   const [remindOnRun, setRemindOnRun] = useState(seed.remindOnRun);
+  const [limitHistory, setLimitHistory] = useState(seed.maxHistoryRuns !== undefined);
+  const [historyRuns, setHistoryRuns] = useState(String(seed.maxHistoryRuns ?? 1));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const preview = useMemo(() => {
@@ -119,6 +121,7 @@ export default function ScheduledTaskDialog({
       catch { setError(scheduleText(locale, 'invalidCron')); return; }
     }
     if (kind === 'once' && (!Number.isFinite(new Date(onceDate).getTime()) || new Date(onceDate).getTime() <= Date.now())) { setError(scheduleText(locale, 'invalidDate')); return; }
+    if (limitHistory && (!Number.isSafeInteger(Number(historyRuns)) || Number(historyRuns) < 1)) { setError(scheduleText(locale, 'invalidHistoryRuns')); return; }
     if (enabled && !preview) { setError(scheduleText(locale, 'noNext')); return; }
 
     setSaving(true);
@@ -131,6 +134,7 @@ export default function ScheduledTaskDialog({
         onceAt: kind === 'once' ? new Date(onceDate).getTime() : undefined,
         timeZone: kind === 'once' ? systemTimeZone() : timeZone.trim(),
         promptLocale,
+        ...(limitHistory ? { maxHistoryRuns: Number(historyRuns) } : {}),
         enabled,
         reminderText: text,
         hour: clampInt(hour, 0, 23),
@@ -329,6 +333,20 @@ export default function ScheduledTaskDialog({
               className="h-4 w-4 accent-accent"
             />
           </label>
+
+          <div className="flex flex-col gap-2 rounded-md border border-border-soft px-3 py-2">
+            <label className="flex items-center justify-between gap-3">
+              <span className="text-sm text-fg">{scheduleText(locale, 'limitHistory')}</span>
+              <input type="checkbox" checked={limitHistory} onChange={(event) => { setLimitHistory(event.target.checked); setError(null); }} className="h-4 w-4 accent-accent" />
+            </label>
+            {limitHistory && <>
+              <label className="flex items-center justify-between gap-3 text-sm text-fg-dim">
+                {scheduleText(locale, 'historyRuns')}
+                <input type="number" min={1} step={1} value={historyRuns} onChange={(event) => { setHistoryRuns(event.target.value); setError(null); }} className="w-24 rounded-md border border-border bg-bg px-2 py-1 text-fg" />
+              </label>
+              <p className="text-xs text-fg-faint">{scheduleText(locale, 'historyHint')}</p>
+            </>}
+          </div>
 
           {error && <p className="text-sm text-status-error">{error}</p>}
         </div>

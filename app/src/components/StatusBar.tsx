@@ -24,6 +24,7 @@ import {
 import { useStore } from '@/store/useStore';
 import type { Message } from '@/store/types';
 import { t } from '@/lib/i18n';
+import TemporaryChatWindows from './temporaryChat/TemporaryChatWindows'; // Moon Add
 
 function contextUsageTextColor(tone: ContextUsageTone): string {
   if (tone === 'danger') return 'text-[var(--status-error)]';
@@ -426,6 +427,7 @@ export default function StatusBar() {
           <span className="tabular-nums">{usage.totals.calls}</span>
         </span>
       </div>
+      <TemporaryChatWindows /> {/* Moon Add */}
     </footer>
   );
 }

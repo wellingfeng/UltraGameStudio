@@ -9,12 +9,89 @@ import type { SkillEntry, SkillMutationResult, SkillReviewState } from '@/runtim
 import { historyStore } from '@/store/history/store';
 import type { GatewayRunOption } from '@/lib/modelGateway/types';
 import SkillLearningPanel from './SkillLearningPanel';
+import * as lifecycle from '@/lib/skillLifecycleDesktop';
+import * as storeModule from '@/store/useStore';
+import * as learningRuntime from '@/lib/skillLearningDesktop';
+import * as reviewGateway from '@/lib/modelGateway/skillReviewGateway';
+import type { SessionRecord } from '@/store/history/types';
+
+/** Real scheduler, store writes and fresh native reader; only IPC/model are doubled. */
+async function mountGeneratedRetrySource(kind: 'learn' | 'automatic' = 'learn') {
+  desktop.available = true;
+  const skills = await vi.importActual<typeof import('@/lib/skills')>('@/lib/skills');
+  host.create.mockImplementation(skills.createSkillHost);
+  host.readSource.mockImplementation(skills.readPersistedSkillSourceSession);
+  const origin = { hostId: 'local', workspaceId: 'generated-retry-workspace', sessionId: `generated-${crypto.randomUUID()}`,
+    turnId: 'generated-source-turn', runId: 'original-execution-run', cwd: 'E:/Original-Source' };
+  const relPath = `workspaces/${origin.workspaceId}/sessions/${origin.sessionId}.json`;
+  const bytes = new Map<string, string>();
+  const ipc = vi.fn(async (command: string, payload: Record<string, unknown> = {}) => {
+    if (command === 'history_read_json') return bytes.get(String(payload.relPath)) ?? null;
+    if (command === 'history_write_json') { bytes.set(String(payload.relPath), String(payload.json)); return; }
+    if (command === 'history_list_dir') return [];
+    if (command === 'skills_bind_run' || command === 'skills_revoke_run') return;
+    if (command === 'skills_request') {
+      const request = payload.request as { action: string };
+      if (request.action === 'list') return { revision: 'native-empty', entries: [] };
+      if (request.action === 'history') return { results: [] };
+    }
+    throw new Error(`Unexpected retry fixture IPC: ${command}`);
+  });
+  const previous = Object.getOwnPropertyDescriptor(window, '__TAURI_INTERNALS__');
+  Object.defineProperty(window, '__TAURI_INTERNALS__', { configurable: true, value: { invoke: ipc } });
+  nativeCleanup = () => {
+    if (previous) Object.defineProperty(window, '__TAURI_INTERNALS__', previous);
+    else Reflect.deleteProperty(window, '__TAURI_INTERNALS__');
+  };
+  const source: SessionRecord = { id: origin.sessionId, workspaceId: origin.workspaceId, title: 'Generated saved review',
+    isWorkflow: false, createdAt: 1, updatedAt: 1,
+    messages: [{ id: origin.turnId, role: 'user', text: '以后必须先读取真实来源再重试。', createdAt: 1,
+      skillContext: { origin, loadedSkills: [], catalogRevision: '' } }] };
+  bytes.set(relPath, JSON.stringify(source));
+  const config = { ...DEFAULT_SKILL_LEARNING_CONFIG, mode: 'approve-all' as const, activityThreshold: 1, cooldownMs: 0 };
+  saveSkillLearningConfig(config, origin.workspaceId);
+  const complete = vi.fn().mockRejectedValueOnce(new Error('Original completion failed')).mockRejectedValue(new Error('Retried completion failed'));
+  vi.spyOn(reviewGateway, 'createSkillReviewModelPort').mockReturnValue({ capability: 'completion-only', complete });
+  let writes = Promise.resolve();
+  const onState = (state: SkillReviewState) => { writes = writes.then(() => storeModule.persistSkillLearningStateForSource(origin, state)); };
+  const selection = { adapter: 'codex', modelClass: 'saved-review-model' };
+  if (kind === 'automatic') {
+    const turn = learningRuntime.beginSkillLearningTurn({ origin, prompt: source.messages[0].text, selection, config, onState });
+    await turn.finish({ finalAnswer: '已读取真实来源。', terminal: 'completed' });
+  } else {
+    await learningRuntime.requestExplicitSkillLearning({ origin, kind, text: source.messages[0].text, selection, config, onState });
+  }
+  await writes;
+  const savedRecord = JSON.parse(bytes.get(relPath)!) as SessionRecord;
+  const message = savedRecord.messages.find((item) => item.skillLearning)!;
+  const state = message.skillLearning!;
+  expect(state.status).toBe('failed');
+  expect(state.origin.runId).not.toBe(origin.runId);
+  expect(state.resume!.job.origin).toEqual(origin);
+  useStore.setState({ activeWorkspaceId: origin.workspaceId, activeSessionId: origin.sessionId, messages: savedRecord.messages });
+  await act(async () => { root.render(<SkillLearningPanel scope="workspace" workspaceId={origin.workspaceId} locale="en-US" />); });
+  return { origin, state, message, bytes, relPath, ipc, complete };
+}
+
+async function mountLocalSource(scope: 'global' | 'workspace' = 'workspace', entries: SkillEntry[] = [], extraState: Partial<SkillReviewState> = {}) {
+  desktop.available = true;
+  const origin = { hostId: 'local', workspaceId: 'idle-source-workspace', sessionId: 'idle-source-session', turnId: 'idle-source-turn', runId: 'idle-source-run', cwd: 'E:/Not-A-Namespace' };
+  const state: SkillReviewState = { status: 'failed', origin, mode: 'approve-all', error: 'Original review failed', ...extraState };
+  const record = { id: origin.sessionId, workspaceId: origin.workspaceId, title: 'Saved source', isWorkflow: false, createdAt: 1, updatedAt: 1,
+    messages: [{ id: `skill-learning:${origin.runId}`, role: 'assistant' as const, text: '', createdAt: 1, localOnly: true, skillLearning: state }] };
+  useStore.setState({ activeWorkspaceId: origin.workspaceId, activeSessionId: origin.sessionId });
+  vi.spyOn(historyStore, 'getSession').mockResolvedValue(record);
+  host.readSource.mockResolvedValue(record);
+  host.list.mockResolvedValue({ revision: 'idle-catalog', entries }); host.history.mockResolvedValue({ results: [] });
+  await act(async () => { root.render(<SkillLearningPanel scope={scope} workspaceId={scope === 'workspace' ? origin.workspaceId : undefined} locale="en-US" />); });
+  return { origin, state, record };
+}
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 const desktop = vi.hoisted(() => ({ available: false }));
 vi.mock('@/lib/tauri', async (importOriginal) => ({ ...await importOriginal<typeof import('@/lib/tauri')>(), tauriAvailable: () => desktop.available }));
-const host = vi.hoisted(() => ({ create: vi.fn(), list: vi.fn(), history: vi.fn(), setPolicy: vi.fn(), archive: vi.fn(), restore: vi.fn() }));
-vi.mock('@/lib/skills', () => ({ createSkillHost: host.create }));
+const host = vi.hoisted(() => ({ create: vi.fn(), readSource: vi.fn(), list: vi.fn(), history: vi.fn(), setPolicy: vi.fn(), archive: vi.fn(), restore: vi.fn() }));
+vi.mock('@/lib/skills', () => ({ createSkillHost: host.create, readPersistedSkillSourceSession: host.readSource }));
 const remote = vi.hoisted(() => ({ workspace: vi.fn(), client: vi.fn() }));
 vi.mock('@/lib/remoteWorkspace', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/lib/remoteWorkspace')>(), getRemoteWorkspace: remote.workspace,
@@ -25,6 +102,7 @@ vi.mock('@/lib/modelGateway/resolver', async (importOriginal) => ({ ...await imp
 vi.mock('@/lib/modelGateway/skillReviewGateway', async (importOriginal) => ({ ...await importOriginal<typeof import('@/lib/modelGateway/skillReviewGateway')>(), resolveSkillReviewGatewayRoute: gateway.safeRoute }));
 let container: HTMLDivElement;
 let root: Root;
+let nativeCleanup: (() => void) | undefined;
 const originalActions = {
   reviewSkillLearningAction: useStore.getState().reviewSkillLearningAction,
   updateSkillLearningState: useStore.getState().updateSkillLearningState,
@@ -32,7 +110,8 @@ const originalActions = {
 beforeEach(() => {
   desktop.available = false;
   window.localStorage.clear();
-  useStore.setState({ ...originalActions, locale: 'en-US', activeWorkspaceId: null, activeSessionId: null, workspaces: [], sessions: [], messages: [] } satisfies Partial<StoreState>);
+  useStore.setState({ ...originalActions, locale: 'en-US', activeWorkspaceId: null, activeSessionId: null, workspaces: [], sessions: [], messages: [], historyRootPath: null,
+    aiStreaming: false, aiEditingSessions: [], chattingSessions: [], runningSessions: [], jobSessions: [] } satisfies Partial<StoreState>);
   container = document.createElement('div'); document.body.appendChild(container); root = createRoot(container);
   vi.clearAllMocks();
   host.create.mockReturnValue({ list: host.list, history: host.history, setPolicy: host.setPolicy, archive: host.archive, restore: host.restore });
@@ -43,9 +122,255 @@ beforeEach(() => {
   vi.spyOn(historyStore, 'getWorkspace').mockResolvedValue(null);
   vi.spyOn(historyStore, 'listSessions').mockResolvedValue([]);
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); useStore.setState(originalActions); vi.restoreAllMocks(); });
+afterEach(async () => {
+  await act(async () => root.unmount()); container.remove(); useStore.setState(originalActions);
+  learningRuntime.cancelSkillLearning(); nativeCleanup?.(); nativeCleanup = undefined;
+  vi.restoreAllMocks(); vi.useRealTimers();
+});
+
+describe('SkillLearningPanel production lifecycle caller', () => {
+  it('uses the real two-minute hourly runner while all foreground owners defer checks and unknown packages never get archive advice', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-01-01T00:00:00Z'));
+    vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('visible');
+    useStore.setState({ historyRootPath: 'C:/Host-History/Profile-A', runningSessions: [{ workspaceId: 'unselected-workspace', sessionId: 'unselected-session' }] });
+    const entry: SkillEntry = { skillId: 'unknown-package', rootId: 'ugs-project', name: 'unknown-package', description: '', scope: 'project', source: 'UGS', relativePath: 'unknown-package', revision: 'v1', hash: 'hash', readOnly: false, autoEditable: true, contentLocked: false, pinned: false, state: 'active', files: ['SKILL.md'] };
+    saveSkillLearningConfig({ ...DEFAULT_SKILL_LEARNING_CONFIG, autoArchive: true, staleAfterDays: 1, archiveAfterDays: 2 }, 'idle-source-workspace');
+    await mountLocalSource('workspace', [entry]);
+    const keys = () => Object.keys(localStorage).filter(key => key.startsWith('ultragamestudio.skillLifecycleAdvice.v1.'));
+    await act(async () => { vi.advanceTimersByTime(120000); });
+    expect(keys()).toEqual([]);
+    await act(async () => { useStore.setState({ runningSessions: [] }); });
+    await act(async () => { vi.advanceTimersByTime(120000); });
+    expect(keys()).toHaveLength(1);
+    const first = JSON.parse(localStorage.getItem(keys()[0])!);
+    expect(container.textContent).toContain('First observation; aging starts now');
+    expect(container.textContent).toContain('No verified task adoption');
+    await act(async () => { vi.advanceTimersByTime(3599999); });
+    expect(JSON.parse(localStorage.getItem(keys()[0])!).checkedAt).toBe(first.checkedAt);
+    vi.setSystemTime(new Date('2026-04-01T00:00:00Z'));
+    await act(async () => { vi.advanceTimersByTime(1); });
+    expect(container.textContent).toContain('Idle hint; consider reviewing');
+    expect(container.textContent).not.toContain('Consider manual archiving (not executed)');
+    expect(host.list).toHaveBeenCalledOnce(); expect(host.archive).not.toHaveBeenCalled();
+  });
+  it('binds the existing idle runner to the native history namespace and exact workspace, never cwd', async () => {
+    useStore.setState({ historyRootPath: 'C:/Host-History/Profile-A' });
+    const start = vi.spyOn(lifecycle, 'startSkillLifecycleAdvisory');
+    const { origin } = await mountLocalSource();
+    expect(start).toHaveBeenCalledOnce();
+    expect(JSON.parse(start.mock.calls[0][0].scopeKey)).toEqual(['local', 'C:/Host-History/Profile-A', 'workspace', origin.workspaceId]);
+    expect(start.mock.calls[0][0].scopeKey).not.toContain(origin.cwd);
+  });
+
+  it.each(['aiEditingSessions', 'chattingSessions', 'runningSessions', 'jobSessions'] as const)('defers idle evaluation for an unselected foreground owner in %s', async (field) => {
+    useStore.setState({ historyRootPath: 'C:/Host-History/Profile-A', [field]: [{ workspaceId: 'other-workspace', sessionId: 'other-session' }] });
+    const start = vi.spyOn(lifecycle, 'startSkillLifecycleAdvisory');
+    await mountLocalSource();
+    const options = start.mock.calls[0][0];
+    expect(options.isForegroundBusy?.()).toBe(true);
+    await act(async () => { useStore.setState({ [field]: [] }); });
+    expect(options.isForegroundBusy?.()).toBe(false);
+  });
+
+  it.each(['global', 'workspace'] as const)('keeps %s catalog observations separate and unknown ownership protected', async (scope) => {
+    useStore.setState({ historyRootPath: 'C:/Host-History/Profile-A' });
+    const entry: SkillEntry = { skillId: 'project-skill', rootId: 'ugs-project', name: 'project-owned', description: '', scope: 'project', source: 'UGS background managed root is NOT provenance', relativePath: 'project-owned', revision: 'v1', hash: 'hash', readOnly: false, autoEditable: true, contentLocked: false, pinned: false, state: 'active', files: ['SKILL.md'] };
+    const start = vi.spyOn(lifecycle, 'startSkillLifecycleAdvisory');
+    const { origin } = await mountLocalSource(scope, [entry, { ...entry, skillId: 'global-skill', rootId: 'ugs-global', name: 'global-owned', scope: 'global' }]);
+    const options = start.mock.calls[0][0];
+    expect(JSON.parse(options.scopeKey)).toEqual(scope === 'workspace'
+      ? ['local', 'C:/Host-History/Profile-A', 'workspace', origin.workspaceId] : ['local', 'C:/Host-History/Profile-A', 'global']);
+    expect(options.getEntries().map(item => item.scope)).toEqual([scope === 'workspace' ? 'project' : 'global']);
+    expect(options.getProtection?.(entry)).toEqual({});
+    expect(container.textContent).toContain('Host creation and cron provenance unavailable');
+  });
+
+  it('rejects a local review carrying a remote saved locator rather than rewriting it to the active workspace', async () => {
+    await mountLocalSource('workspace', [], { sourceSession: { workspaceId: 'foreign-history', sessionId: 'idle-source-session', serverUrl: 'https://foreign.invalid' } });
+    expect(host.create).not.toHaveBeenCalled();
+    expect(container.querySelector('select[aria-label="Frozen task origin"]')).toBeNull();
+    expect(container.querySelector('button[aria-label="Retry review"]')).toBeNull();
+  });
+
+  it('does not start persistent evaluation without a native namespace even when the saved source has cwd', async () => {
+    const start = vi.spyOn(lifecycle, 'startSkillLifecycleAdvisory');
+    await mountLocalSource();
+    expect(start).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('Waiting for source scope; not evaluated.');
+  });
+});
+
+describe('SkillLearningPanel production retry caller', () => {
+  it.each(['learn', 'automatic'] as const)('retries an actual generated saved %s review with a different source run through the real controller and native readback', async (kind) => {
+    const { origin, state, bytes, relPath, complete, ipc } = await mountGeneratedRetrySource(kind);
+    const retry = vi.spyOn(storeModule, 'retryPersistedSkillLearning');
+    const resume = vi.spyOn(learningRuntime, 'resumeSkillLearningReview');
+    const upsert = vi.spyOn(historyStore, 'upsertMessage');
+    const button = container.querySelector<HTMLButtonElement>('button[aria-label="Retry review"]');
+    expect(button).not.toBeNull();
+    await act(async () => { button!.click(); });
+    expect(retry).toHaveBeenCalledExactlyOnceWith(state);
+    expect(resume).toHaveBeenCalledExactlyOnceWith(state, expect.any(Function));
+    expect(complete).toHaveBeenCalledTimes(2);
+    const actual = JSON.parse(bytes.get(relPath)!) as SessionRecord;
+    const retried = actual.messages.filter((item) => item.skillLearning?.error?.includes('Retried completion failed'));
+    expect(retried).toHaveLength(1);
+    expect(retried[0].skillLearning!.resume!.job.origin).toEqual(origin);
+    const { config: originalConfig, explicit: originalExplicit, ...originalSnapshot } = state.resume!.job;
+    const { config: retriedConfig, explicit: retriedExplicit, ...retriedSnapshot } = retried[0].skillLearning!.resume!.job;
+    expect(retriedSnapshot).toEqual(originalSnapshot);
+    expect(retried[0].skillLearning!.resume!.selection).toEqual(state.resume!.selection);
+    expect(retriedConfig).toEqual(originalConfig);
+    expect(retriedExplicit).toBe(true);
+    expect(originalExplicit).toBe(kind === 'learn' ? true : undefined);
+    const reviewOrigin = vi.mocked(reviewGateway.createSkillReviewModelPort).mock.calls.at(-1)![1]!;
+    expect(reviewOrigin.runId).not.toBe(origin.runId);
+    expect(reviewOrigin.runId).not.toBe(state.origin.runId);
+    expect(upsert.mock.calls.at(-1)![2].skillLearning).toEqual(retried[0].skillLearning);
+    expect(container.textContent).toContain('Retried completion failed');
+    expect(container.textContent).not.toContain('SKILL_HISTORY_SAVE_UNCONFIRMED');
+    expect(container.textContent).not.toContain('SKILL_RETRY_STATE_UNCONFIRMED');
+    expect(host.readSource.mock.calls.length).toBeGreaterThanOrEqual(2);
+    expect(host.readSource.mock.calls.every((args) => args[0] === origin.workspaceId && args[1] === origin.sessionId)).toBe(true);
+    expect(ipc.mock.calls.filter(([command]) => command === 'skills_bind_run').length).toBeGreaterThan(1);
+  });
+  it('rejects a native saved state changed after rendering even when its origin and resume are unchanged', async () => {
+    const { bytes, relPath, message, complete } = await mountGeneratedRetrySource();
+    const native = JSON.parse(bytes.get(relPath)!) as SessionRecord;
+    native.messages.find((item) => item.id === message.id)!.skillLearning!.error = 'Changed native diagnostic';
+    bytes.set(relPath, JSON.stringify(native));
+    const retry = vi.spyOn(storeModule, 'retryPersistedSkillLearning');
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Retry review"]')!.click(); });
+    expect(retry).not.toHaveBeenCalled();
+    expect(complete).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain('SKILL_REVIEW_MESSAGE_REQUIRED');
+  });
+  it('rejects native retry readback that differs from the exact state acknowledged by the real store writer', async () => {
+    const { bytes, relPath, ipc } = await mountGeneratedRetrySource();
+    const invoke = ipc.getMockImplementation()!;
+    ipc.mockImplementation(async (command, payload = {}) => {
+      if (command === 'history_write_json' && payload.relPath === relPath) {
+        const record = JSON.parse(String(payload.json)) as SessionRecord;
+        for (const message of record.messages) {
+          if (message.skillLearning?.error?.includes('Retried completion failed')) message.skillLearning.error = 'Tampered retry diagnostic';
+        }
+        bytes.set(relPath, JSON.stringify(record)); return;
+      }
+      return invoke(command, payload);
+    });
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Retry review"]')!.click(); });
+    expect(container.textContent).toContain('SKILL_HISTORY_SAVE_UNCONFIRMED');
+  });
+  it.each(['hostId', 'workspaceId', 'sessionId', 'turnId', 'cwd', 'runId'] as const)('rejects a generated saved review with tampered resume source %s', async (field) => {
+    const { bytes, relPath, message } = await mountGeneratedRetrySource();
+    const record = JSON.parse(bytes.get(relPath)!) as SessionRecord;
+    const state = record.messages.find((item) => item.id === message.id)!.skillLearning!;
+    state.resume!.job.origin[field] = field === 'runId' ? '' : 'foreign-source-location';
+    bytes.set(relPath, JSON.stringify(record));
+    vi.spyOn(historyStore, 'getSession').mockResolvedValue(record);
+    const retry = vi.spyOn(storeModule, 'retryPersistedSkillLearning');
+    await act(async () => { [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Refresh catalog and history')!.click(); });
+    expect(container.textContent).toContain('Original completion failed');
+    expect(container.querySelector('button[aria-label="Retry review"]')).toBeNull();
+    expect(retry).not.toHaveBeenCalled();
+  });
+  it('reports actual unchanged native bytes after the real retry writer updated only its optimistic cache', async () => {
+    const { bytes, relPath, ipc, origin, complete } = await mountGeneratedRetrySource();
+    const originalBytes = bytes.get(relPath)!;
+    const invoke = ipc.getMockImplementation()!;
+    ipc.mockImplementation(async (command, payload = {}) => {
+      if (command === 'history_write_json' && payload.relPath === relPath) return;
+      return invoke(command, payload);
+    });
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Retry review"]')!.click(); });
+    expect(complete).toHaveBeenCalledTimes(2);
+    expect((await historyStore.getSession(origin.workspaceId, origin.sessionId))!.messages.some(message => message.skillLearning?.error?.includes('Retried completion failed'))).toBe(true);
+    expect(bytes.get(relPath)).toBe(originalBytes);
+    expect(container.textContent).toContain('SKILL_RETRY_STATE_UNCONFIRMED');
+    expect(container.textContent).not.toContain('Lesson saved');
+  });
+  it('keeps a saved failure visible but exposes no retry when its resume job belongs to a different source turn', async () => {
+    const { origin, state } = await mountLocalSource();
+    state.resume = { job: { origin: { ...origin, turnId: 'foreign-turn', runId: 'foreign-run' }, userText: 'Saved source', finalAnswer: '', evidence: [], loadedSkills: [], config: { ...DEFAULT_SKILL_LEARNING_CONFIG } }, selection: { adapter: 'codex', modelClass: 'saved-model' } };
+    await act(async () => { [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Refresh catalog and history')!.click(); });
+    expect(container.textContent).toContain('Original review failed');
+    expect(container.querySelector('button[aria-label="Retry review"]')).toBeNull();
+  });
+  it('does not accept optimistic history cache as native retry readback', async () => {
+    const { origin, state, record } = await mountLocalSource();
+    state.resume = { job: { origin, userText: 'Saved source', finalAnswer: '', evidence: [], loadedSkills: [], config: { ...DEFAULT_SKILL_LEARNING_CONFIG } }, selection: { adapter: 'codex', modelClass: 'saved-model' } };
+    host.readSource.mockResolvedValue(structuredClone(record));
+    await act(async () => { [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Refresh catalog and history')!.click(); });
+    vi.spyOn(historyStore, 'upsertMessage').mockImplementation(async (_ws, _session, message) => { record.messages[0].skillLearning = message.skillLearning!; });
+    vi.spyOn(learningRuntime, 'resumeSkillLearningReview').mockImplementation(async (_saved, onState) => {
+      onState({ ...state, error: 'Optimistic cache only' });
+      return { status: 'failed', batchId: 'cache-only-retry', origin, lesson: '', operationsApplied: 0, changes: [], riskReasons: [] };
+    });
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Retry review"]')!.click(); });
+    expect(container.textContent).toContain('SKILL_RETRY_STATE_UNCONFIRMED');
+  });
+
+  it('reports acknowledged but unwritten retry state as unconfirmed instead of showing save success', async () => {
+    const { origin, state } = await mountLocalSource();
+    state.resume = { job: { origin, userText: 'Original source', finalAnswer: 'Original answer', evidence: [], loadedSkills: [], config: { ...DEFAULT_SKILL_LEARNING_CONFIG } }, selection: { adapter: 'codex', modelClass: 'saved-review-model' } };
+    await act(async () => { [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Refresh catalog and history')!.click(); });
+    vi.spyOn(historyStore, 'upsertMessage').mockResolvedValue(undefined);
+    vi.spyOn(learningRuntime, 'resumeSkillLearningReview').mockImplementation(async (_saved, onState) => {
+      onState({ ...state, error: 'New failed retry should have persisted' });
+      return { status: 'failed', batchId: 'unwritten-retry', origin, lesson: '', operationsApplied: 0, changes: [], riskReasons: [] };
+    });
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Retry review"]')!.click(); });
+    expect(container.textContent).toContain('SKILL_RETRY_STATE_UNCONFIRMED');
+    expect(container.textContent).toContain('Original review failed');
+    expect(container.textContent).not.toContain('Lesson saved');
+  });
+  it('runs the actual persisted retry controller with the saved resume and keeps a new failure diagnostic visible', async () => {
+    const retry = vi.spyOn(storeModule, 'retryPersistedSkillLearning');
+    const { origin, state, record } = await mountLocalSource();
+    state.resume = { job: { origin: { ...origin }, userText: 'Exact original source', finalAnswer: 'Original final answer', evidence: [], loadedSkills: [], config: { ...DEFAULT_SKILL_LEARNING_CONFIG } }, selection: { adapter: 'codex', modelClass: 'saved-review-model' } };
+    await act(async () => { [...container.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'Refresh catalog and history')!.click(); });
+    const frozen = structuredClone(state);
+    const next: SkillReviewState = { ...frozen, error: 'Retry HTTP unavailable' };
+    const resume = vi.spyOn(learningRuntime, 'resumeSkillLearningReview').mockImplementation(async (saved, onState) => {
+      onState(next);
+      return { status: 'failed', batchId: 'retry-failed', origin: saved.origin, lesson: '', operationsApplied: 0, changes: [], riskReasons: [], error: next.error };
+    });
+    const upsert = vi.spyOn(historyStore, 'upsertMessage').mockImplementation(async (workspaceId, sessionId, message) => {
+      if (workspaceId !== origin.workspaceId || sessionId !== origin.sessionId) throw new Error('Wrong retry source');
+      record.messages[0] = { ...record.messages[0], skillLearning: message.skillLearning! };
+    });
+    const button = container.querySelector<HTMLButtonElement>('button[aria-label="Retry review"]');
+    expect(button).not.toBeNull();
+    await act(async () => { button!.click(); });
+    expect(retry).toHaveBeenCalledExactlyOnceWith(frozen);
+    expect(resume).toHaveBeenCalledExactlyOnceWith(frozen, expect.any(Function));
+    expect(upsert).toHaveBeenCalledWith(origin.workspaceId, origin.sessionId, expect.objectContaining({ id: `skill-learning:${origin.runId}`, skillLearning: next }), true);
+    expect(container.textContent).toContain('Retry HTTP unavailable');
+    expect(container.textContent).not.toContain('Lesson saved');
+  });
+});
 
 describe('SkillLearningPanel scope persistence', () => {
+  it('keeps remote idle governance and saved-state retry unavailable without an authenticated tenant namespace or remote restart controller', async () => {
+    const origin = { hostId: REMOTE_SKILL_HOST_ID, workspaceId: 'remote-idle-project', sessionId: 'remote-idle-session', turnId: 'remote-idle-turn', runId: 'remote-idle-job' };
+    const state: SkillReviewState = { status: 'failed', origin, mode: 'approve-all', error: 'Remote HTTP unavailable', sourceSession: { workspaceId: 'remote-idle-bucket', sessionId: origin.sessionId, serverUrl: 'https://fixture.invalid' },
+      resume: { job: { origin, userText: 'Saved remote source', finalAnswer: 'Saved remote answer', evidence: [], loadedSkills: [], config: { ...DEFAULT_SKILL_LEARNING_CONFIG } }, selection: { adapter: 'codex', modelClass: 'saved-remote-model' } } };
+    const client = new ProtocolRunnerClient('https://fixture.invalid', 'isolated-test-transport');
+    remote.workspace.mockReturnValue({ id: 'remote-idle-config', projectId: origin.workspaceId }); remote.client.mockResolvedValue(client);
+    vi.spyOn(client, 'getProject').mockResolvedValue({ id: origin.workspaceId, userId: 'not-a-server-tenant-namespace', label: 'Idle', repoUrl: '', createdAt: 1, updatedAt: 1 });
+    vi.spyOn(client, 'getProjectSkillConfig').mockResolvedValue(DEFAULT_SKILL_LEARNING_CONFIG);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, options) => new Response(JSON.stringify({ ok: true, result: JSON.parse(String(options?.body)).action === 'list' ? { revision: 'empty', entries: [] } : { results: [] } }), { status: 200 }));
+    useStore.setState({ activeWorkspaceId: state.sourceSession!.workspaceId, activeSessionId: origin.sessionId, historyRootPath: 'C:/Local/Not-Remote-Namespace' });
+    vi.spyOn(historyStore, 'getSession').mockResolvedValue({ id: origin.sessionId, workspaceId: state.sourceSession!.workspaceId, title: 'Remote saved source', isWorkflow: false, createdAt: 1, updatedAt: 1, messages: [{ id: 'remote-idle-card', role: 'assistant', text: '', createdAt: 1, localOnly: true, skillLearning: state }] });
+    const start = vi.spyOn(lifecycle, 'startSkillLifecycleAdvisory');
+    const retry = vi.spyOn(storeModule, 'retryPersistedSkillLearning');
+    await act(async () => { root.render(<SkillLearningPanel remote scope="workspace" workspaceId={state.sourceSession!.workspaceId} workspacePath="remote://remote-idle-config" locale="en-US" />); });
+    expect(container.textContent).toContain('Remote HTTP unavailable');
+    expect(container.textContent).toContain('Remote idle evaluation unavailable: authenticated server/tenant namespace missing');
+    expect(container.textContent).toContain('Retry from a saved snapshot is unavailable on this remote host');
+    expect(container.querySelector('button[aria-label="Retry review"]')).toBeNull();
+    expect(start).not.toHaveBeenCalled(); expect(retry).not.toHaveBeenCalled(); expect(host.create).not.toHaveBeenCalled();
+  });
   it('loads and confirms remote server preferences without persisting a local or metadata override', async () => {
     const remoteConfig = { id: 'remote-config-a', label: 'Fixture remote', serverUrl: 'https://fixture.invalid', projectId: 'remote-project-a', adapter: 'codex' as const, useOwnModelKey: false, createdAt: 1, updatedAt: 1 };
     remote.workspace.mockReturnValue(remoteConfig);
@@ -205,6 +530,12 @@ describe('SkillLearningPanel scope persistence', () => {
     expect(container.querySelector<HTMLInputElement>('input[aria-label="Allow automatic editing remote-govern"]')?.checked).toBe(true);
     expect(container.querySelector('section[data-skill-id] [role="status"]')?.textContent).toBe('Active');
     expect(actual.files).toEqual(['SKILL.md', 'references/test.md']); expect(host.create).not.toHaveBeenCalled();
+    // A mutable endpoint must not retarget this already-bound controller.
+    Object.defineProperty(client, 'serverUrl', { value: 'https://changed.invalid' });
+    const dispatched = requests.length;
+    await act(async () => { container.querySelector<HTMLButtonElement>('button[aria-label="Archive skill remote-govern"]')!.click(); });
+    expect(requests).toHaveLength(dispatched);
+    expect(container.textContent).toContain('REMOTE_SKILL_SERVER_MISMATCH');
   });
 
   it('projects only model/channel identifiers, disables every CLI and permits only configured completion HTTP routes', async () => {

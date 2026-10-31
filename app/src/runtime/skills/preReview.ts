@@ -1,5 +1,5 @@
 import { redactSkillText } from './evidence';
-import type { SkillLearningJob, SkillModelRequest, SkillModelResult, SkillProposal } from './types';
+import type { SkillLearningJob, SkillModelRequest, SkillModelResult, SkillProposal, SkillMutationResult } from './types';
 
 export const SKILL_SIMILARITY_THRESHOLD = 0.95;
 export interface SkillCandidate {
@@ -9,9 +9,22 @@ export interface SkillCandidate {
   sources: string[];
   consecutive: number;
   submitted: boolean;
+  previousSubmission?: SkillCandidate['submission'];
+  reopenedTargetRevision?: string;
+  submission?: {
+    state: 'submitting' | 'staged' | 'applied' | 'rejected' | 'conflicted' | 'rolled_back' | 'needs_recovery';
+    batchId: string;
+    targetRevision: string;
+    rollbackId?: string;
+    targets?: Array<{ skillId: string; revision: string }>;
+  };
 }
 export interface SkillCandidateList {
   version: 1;
+  /** Missing only on legacy snapshots; writes treat it as revision zero. */
+  revision?: number;
+  /** Never evict and reinterpret old tasks; fail closed at the hard limit. */
+  seenSources?: string[];
   lastId?: string;
   candidates: SkillCandidate[];
 }
@@ -40,7 +53,9 @@ export async function observeSkillCandidate(
     context: JSON.stringify({ task: redactSkillText(job.userText, 512), evidence: relevant }) };
   // A retry/reload of a source task is not a second occurrence.
   const replay = list.candidates.find((candidate) => candidate.sources.includes(source));
-  if (replay) return { eligible: !replay.submitted && list.lastId === replay.id && replay.consecutive >= 2, consecutive: replay.consecutive };
+  const seenSources = new Set(list.seenSources ?? list.candidates.flatMap((candidate) => candidate.sources));
+  if (replay || seenSources.has(source)) return { eligible: false, consecutive: replay?.consecutive ?? 0 };
+  if (seenSources.size >= 4096) throw new Error('SKILL_CANDIDATE_REPLAY_CAPACITY');
   let matched: SkillCandidate | undefined;
   if (list.candidates.length) {
     const response = await complete({ system: SKILL_SIMILARITY_SYSTEM,
@@ -62,16 +77,81 @@ export async function observeSkillCandidate(
   }
   matched.consecutive = list.lastId === matched.id ? matched.consecutive + 1 : 1;
   matched.sources.push(source);
-  matched.sources = matched.sources.slice(-256);
+  // Global replay capacity bounds this list too; do not discard task identity.
   list.lastId = matched.id;
-  list.candidates = list.candidates.slice(-64);
+  seenSources.add(source);
+  list.seenSources = [...seenSources];
+  while (list.candidates.length > 64) {
+    const evict = list.candidates.findIndex((item) => item.id !== matched.id && !item.submitted && !item.submission);
+    if (evict < 0) throw new Error('SKILL_CANDIDATE_SUBMISSION_CAPACITY');
+    list.candidates.splice(evict, 1);
+  }
   await store.save(list);
   return { eligible: !matched.submitted && matched.consecutive >= 2, consecutive: matched.consecutive };
 }
 
-export async function markSkillCandidateSubmitted(job: SkillLearningJob, store: SkillCandidateStore): Promise<void> {
+export async function markSkillCandidateSubmitted(job: SkillLearningJob, store: SkillCandidateStore,
+  result?: SkillMutationResult, targetRevision = 'unknown', reservationId?: string): Promise<void> {
   const list = await store.load();
   const source = JSON.stringify([job.origin.sessionId, job.origin.turnId]);
   const candidate = list.candidates.find((item) => item.sources.includes(source));
-  if (candidate) { candidate.submitted = true; await store.save(list); }
+  if (candidate) {
+    if (reservationId && (candidate.submission?.state !== 'submitting' || candidate.submission.batchId !== reservationId)) {
+      throw new Error('SKILL_CANDIDATE_RESERVATION_CONFLICT');
+    }
+    candidate.submitted = true;
+    candidate.submission = { ...candidate.submission,
+      state: result?.status === 'awaiting_approval' ? 'staged' : result?.status === 'applied' ? 'applied' :
+        result?.status === 'rejected' ? 'rejected' : result?.status === 'conflicted' ? 'conflicted' : 'needs_recovery',
+      batchId: result?.batchId ?? `legacy-${job.origin.runId}`, targetRevision: result?.revision ?? targetRevision,
+      ...(result?.rollbackId ? { rollbackId: result.rollbackId } : {}) };
+    await store.save(list);
+  }
+}
+
+/** Durable claim before host.manage. A crash leaves a suppressed, recoverable claim. */
+export async function reserveSkillCandidateSubmission(job: SkillLearningJob, store: SkillCandidateStore,
+  targetRevision: string, targets: Array<{ skillId: string; revision: string }> = []): Promise<string> {
+  const list = await store.load();
+  const source = JSON.stringify([job.origin.sessionId, job.origin.turnId]);
+  const candidate = list.candidates.find((item) => item.sources.includes(source));
+  if (!candidate || candidate.submitted || candidate.submission || candidate.consecutive < 2 ||
+    list.lastId !== candidate.id || !targetRevision) throw new Error('SKILL_CANDIDATE_RESERVATION_CONFLICT');
+  const batchId = crypto.randomUUID();
+  candidate.submitted = true;
+  candidate.submission = { state: 'submitting', batchId, targetRevision, targets: structuredClone(targets) };
+  await store.save(list);
+  return batchId;
+}
+
+/** Host-confirmed control result only; no automatic transition retries. */
+export async function updateSkillCandidateSubmission(store: SkillCandidateStore, batchId: string,
+  outcome: { state: 'applied' | 'rejected' | 'conflicted' | 'rolled_back'; targetRevision: string; rollbackId?: string }): Promise<void> {
+  const list = await store.load();
+  const candidate = list.candidates.find((item) => item.submission?.batchId === batchId);
+  if (!candidate?.submission || !outcome.targetRevision) throw new Error('SKILL_CANDIDATE_UNKNOWN_SUBMISSION');
+  const allowed = candidate.submission.state === 'staged' ? ['applied', 'rejected', 'conflicted'] :
+    candidate.submission.state === 'applied' ? ['rolled_back'] : [];
+  if (!allowed.includes(outcome.state)) throw new Error('SKILL_CANDIDATE_INVALID_TRANSITION');
+  candidate.submission = { ...candidate.submission, ...outcome };
+  await store.save(list);
+}
+
+/** Explicit user policy; keeps every replay identity and requires two NEW tasks. */
+export async function reopenSkillCandidate(store: SkillCandidateStore, candidateId: string,
+  expectedBatchId: string, targetRevision: string): Promise<void> {
+  const list = await store.load();
+  const candidate = list.candidates.find((item) => item.id === candidateId);
+  if (!candidate?.submission || candidate.submission.batchId !== expectedBatchId || !targetRevision ||
+    !['rejected', 'rolled_back', 'applied', 'conflicted', 'needs_recovery'].includes(candidate.submission.state)) {
+    throw new Error('SKILL_CANDIDATE_INVALID_REOPEN');
+  }
+  // Retain the old submission as an audit record, but never auto-retry it.
+  candidate.previousSubmission = { ...candidate.submission };
+  candidate.reopenedTargetRevision = targetRevision;
+  candidate.submission = undefined;
+  candidate.submitted = false;
+  candidate.consecutive = 0;
+  if (list.lastId === candidate.id) list.lastId = undefined;
+  await store.save(list);
 }

@@ -14,6 +14,7 @@ const mocks = vi.hoisted(() => ({
   setActiveGatewaySelection: vi.fn(),
   isRemoteProfileActive: vi.fn(),
   flushRemoteProfileWrites: vi.fn(),
+  flushSecureStorage: vi.fn(),
 }));
 
 vi.mock('@/lib/apiConfig', () => ({
@@ -37,6 +38,12 @@ vi.mock('@/lib/settingsProfile', () => ({
 vi.mock('@/lib/tauri', () => ({
   importCcSwitchClaude: mocks.importCcSwitchClaude,
   isTauri: mocks.isTauri,
+}));
+
+// Provider/gateway writes are mocked here; explicitly model their native
+// durability handshake rather than invoking IPC that this fixture lacks.
+vi.mock('@/lib/secureStorage', () => ({
+  flushSecureStorage: mocks.flushSecureStorage,
 }));
 
 vi.mock('@/store/history/store', () => ({
@@ -76,6 +83,8 @@ beforeEach(() => {
   mocks.setActiveGatewaySelection.mockReset();
   mocks.isRemoteProfileActive.mockReset();
   mocks.flushRemoteProfileWrites.mockReset();
+  mocks.flushSecureStorage.mockReset();
+  mocks.flushSecureStorage.mockResolvedValue(undefined);
 
   vi.spyOn(console, 'info').mockImplementation(() => undefined);
   vi.spyOn(console, 'warn').mockImplementation(() => undefined);
@@ -127,6 +136,13 @@ beforeEach(() => {
 });
 
 describe('maybeRunCcSwitchAutoImportOnFirstRun', () => {
+  it('reports a native durability failure instead of claiming import success', async () => {
+    mocks.flushSecureStorage.mockRejectedValue(new Error('DUMMY_SECURE_WRITE_FAILED'));
+    const outcome = await importCcSwitchProviders();
+    expect(outcome.status).toBe('failed');
+    expect(outcome.reason).toContain('DUMMY_SECURE_WRITE_FAILED');
+  });
+
   it('imports cc-switch providers on first startup and records the one-shot marker', async () => {
     await maybeRunCcSwitchAutoImportOnFirstRun();
 

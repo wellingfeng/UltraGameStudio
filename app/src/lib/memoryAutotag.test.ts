@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { applyMemoryOp, loadMemory, setMemoryLimits } from './memoryStore';
+import { applyMemoryOp, loadMemory, setMemoryImportance, setMemoryLimits } from './memoryStore';
 import { DEFAULT_MEMORY_LIMITS } from './memoryStore';
 import { AUTOTAG_SYSTEM, autotagMemoryEntries } from './memoryAutotag';
 
@@ -22,6 +22,27 @@ beforeEach(() => {
 });
 
 describe('autotagMemoryEntries', () => {
+  it.each([
+    '{"tags":[{"n":1,"importance":"must"}]}',
+    '{"tags":[{"n":1,"importance":"must"},{"n":2,"importance":"minor","root":"C:/"}]}',
+    '{"tags":[{"n":1,"importance":"must"},{"n":1,"importance":"minor"}]}',
+  ])('rejects an incomplete or malformed tagging payload in full: %s', async (raw) => {
+    seedUserStore([{ text: 'first' }, { text: 'second' }]);
+    const result = await autotagMemoryEntries({ target: 'user', invokeModel: async () => raw });
+    expect(result.tagged).toBe(0);
+    expect((await loadMemory('user')).every((entry) => !entry.importance)).toBe(true);
+  });
+
+  it('does not overwrite a manual tier changed while the model was running', async () => {
+    seedUserStore([{ text: 'stable fact' }]);
+    const result = await autotagMemoryEntries({ target: 'user', invokeModel: async () => {
+      await setMemoryImportance('user', 'stable fact', 'must');
+      return '{"tags":[{"n":1,"importance":"minor"}]}';
+    } });
+    expect(result.tagged).toBe(0);
+    expect((await loadMemory('user'))[0].importance).toBe('must');
+  });
+
   it('tags untagged entries and leaves tagged ones alone', async () => {
     seedUserStore([
       { text: '用户偏好深色主题', importance: 'minor' },

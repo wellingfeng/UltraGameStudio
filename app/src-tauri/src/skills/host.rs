@@ -48,6 +48,9 @@ impl SkillDesktopHost {
     }
     pub fn bind(&self, request: SkillHostBindingRequest) -> Result<(), String> {
         persisted_origin(&self.background.global_root, &request.origin)?;
+        if matches!(request.actor, SkillHostActor::Background) {
+            persisted_review_source(&self.background.global_root, &request.origin)?;
+        }
         let (service, actor) = match request.actor {
             SkillHostActor::Background => (&self.background, SkillActor::Background),
             SkillHostActor::User => (&self.controls, SkillActor::User),
@@ -114,6 +117,39 @@ impl SkillDesktopHost {
     pub fn revoke(&self, origin: &SkillOrigin) -> Result<(), String> {
         self.background.revoke_run(origin)
     }
+
+    /// Candidate persistence grants no skill mutation authority. Re-read the
+    /// trusted workspace and unique user message before every candidate CAS.
+    pub fn candidate_request(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<serde_json::Value, String> {
+        let body = request
+            .as_object()
+            .ok_or("SKILL_CANDIDATE_INVALID_REQUEST")?;
+        if body
+            .keys()
+            .any(|key| !["action", "origin", "expectedRevision", "list"].contains(&key.as_str()))
+        {
+            return Err("SKILL_CANDIDATE_INVALID_REQUEST".into());
+        }
+        let origin: SkillOrigin = serde_json::from_value(
+            body.get("origin")
+                .cloned()
+                .ok_or("SKILL_CANDIDATE_ORIGIN_REQUIRED")?,
+        )
+        .map_err(|_| "SKILL_CANDIDATE_INVALID_ORIGIN")?;
+        persisted_review_source(&self.background.global_root, &origin)?;
+        // Project scopes share the exact Node host path and lock protocol.
+        // The unbound workspace uses only the app-owned history directory.
+        let workspace = origin.cwd.as_ref().map(PathBuf::from).unwrap_or_else(|| {
+            self.background
+                .global_root
+                .join("workspaces")
+                .join(&origin.workspace_id)
+        });
+        crate::skill_candidates::candidate_request(&workspace, &request)
+    }
 }
 
 fn history_json(path: &Path) -> Result<serde_json::Value, String> {
@@ -163,6 +199,44 @@ pub(super) fn persisted_native_source(global: &Path, source: &SkillOrigin) -> Re
         return Err("native source run must be the persisted main message".into());
     }
     Ok(())
+}
+
+/// A review may have its own run ID but never its own invented source turn.
+fn persisted_review_source(global: &Path, source: &SkillOrigin) -> Result<String, String> {
+    persisted_origin(global, source)?;
+    if [&source.turn_id, &source.run_id]
+        .iter()
+        .any(|id| id.is_empty() || id.len() > 256 || id.contains('\0'))
+    {
+        return Err("invalid review source identity".into());
+    }
+    let session = history_json(
+        &global
+            .join("workspaces")
+            .join(&source.workspace_id)
+            .join("sessions")
+            .join(format!("{}.json", source.session_id)),
+    )?;
+    let matches = session
+        .get("messages")
+        .and_then(|v| v.as_array())
+        .map(|messages| {
+            messages
+                .iter()
+                .filter(|message| {
+                    message.get("id").and_then(|v| v.as_str()) == Some(source.turn_id.as_str())
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if matches.len() != 1 || matches[0].get("role").and_then(|v| v.as_str()) != Some("user") {
+        return Err("review source message is not persisted".into());
+    }
+    matches[0]
+        .get("text")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| "review source content is not persisted".into())
 }
 
 fn persisted_origin(global: &Path, origin: &SkillOrigin) -> Result<(), String> {
@@ -263,10 +337,109 @@ mod tests {
         );
         f.write(
             "global/workspaces/workspace-a/sessions/session-a.json",
-            &serde_json::json!({"id":"session-a","workspaceId":"workspace-a","messages":[]})
-                .to_string(),
+            &serde_json::json!({"id":"session-a","workspaceId":"workspace-a","messages":[
+                {"id":o.turn_id,"role":"user","text":"Perform the captured task."}
+            ]})
+            .to_string(),
         );
     }
+    #[test]
+    fn background_binding_rejects_empty_source_session_before_authority() {
+        let f = Fixture::new("host-source-missing");
+        let o = origin(&f);
+        histories(&f, &o);
+        f.write(
+            "global/workspaces/workspace-a/sessions/session-a.json",
+            &serde_json::json!({
+                "id":"session-a","workspaceId":"workspace-a","messages":[]
+            })
+            .to_string(),
+        );
+        let host = SkillDesktopHost::new(f.global());
+        assert!(host
+            .bind(SkillHostBindingRequest {
+                origin: o.clone(),
+                mode: LearningMode::AutoSafe,
+                actor: SkillHostActor::Background,
+                evidence: vec![]
+            })
+            .is_err());
+        assert!(host.background.authority(&o).is_err());
+    }
+
+    #[test]
+    fn native_revoke_before_binding_confirms_tombstone_and_denies_late_binding() {
+        let f = Fixture::new("host-prebind-revoke");
+        let o = origin(&f);
+        let host = SkillDesktopHost::new(f.global());
+        // Cancellation must not depend on persistence/binding finishing first.
+        host.revoke(&o).expect("unbound revoke must install a native tombstone");
+        host.revoke(&o).unwrap();
+        assert!(host.background.authority(&o).is_err());
+        histories(&f, &o);
+        for mode in [LearningMode::AutoSafe, LearningMode::ApproveAll, LearningMode::Off] {
+            let error = host.bind(SkillHostBindingRequest {
+                origin: o.clone(), mode, actor: SkillHostActor::Background, evidence: vec![],
+            }).unwrap_err();
+            assert!(error.contains("revoked"), "late native bind must fail closed: {error}");
+        }
+        // Denial is exact-origin and cannot revoke or resurrect user controls.
+        let mut wrong = o.clone(); wrong.session_id = "foreign-session".into();
+        assert!(host.revoke(&wrong).is_err());
+        host.bind(SkillHostBindingRequest {
+            origin: o.clone(), mode: LearningMode::Off, actor: SkillHostActor::User, evidence: vec![],
+        }).unwrap();
+        assert!(!host.controls.authority(&o).unwrap().revoked);
+        let history = host.request(serde_json::from_value(serde_json::json!({
+            "action":"history", "origin":o, "mode":"off"
+        })).unwrap()).unwrap();
+        assert_eq!(history["results"], serde_json::json!([]));
+        assert!(!f.project().join(".ultragamestudio/skills").exists());
+    }
+
+    #[test]
+    fn candidate_store_rechecks_saved_source_before_storage_and_never_accepts_a_client_namespace() {
+        let f = Fixture::new("host-candidate-source");
+        let o = origin(&f);
+        let host = SkillDesktopHost::new(f.global());
+        let load = serde_json::json!({"action":"load", "origin":o});
+        assert!(host.candidate_request(load.clone()).is_err());
+        assert!(!f.global().join(".ugs-skill-candidates").exists());
+        histories(&f, &o);
+        assert_eq!(host.candidate_request(load.clone()).unwrap()["revision"], 0);
+        let mut forged = load;
+        forged["namespace"] = serde_json::json!("another-account");
+        assert!(host.candidate_request(forged).is_err());
+    }
+
+    #[test]
+    fn candidate_store_is_durable_across_host_recreation_and_rejects_stale_cas() {
+        let f = Fixture::new("host-candidate-cas");
+        let o = origin(&f);
+        histories(&f, &o);
+        let host = SkillDesktopHost::new(f.global());
+        let write = serde_json::json!({"action":"compare_and_swap", "origin":o,
+            "expectedRevision":0,"list":{"version":1,"revision":0,"candidates":[],"seenSources":["task-a"]}});
+        assert_eq!(
+            host.candidate_request(write.clone()).unwrap()["revision"],
+            1
+        );
+        let restarted = SkillDesktopHost::new(f.global());
+        let saved = restarted
+            .candidate_request(serde_json::json!({"action":"load", "origin":o}))
+            .unwrap();
+        assert_eq!(saved["seenSources"], serde_json::json!(["task-a"]));
+        assert_eq!(saved["revision"], 1);
+        assert!(restarted.candidate_request(write).is_err());
+        f.write(
+            "global/workspaces/workspace-a/sessions/session-a.json",
+            "{}",
+        );
+        assert!(restarted
+            .candidate_request(serde_json::json!({"action":"load", "origin":o}))
+            .is_err());
+    }
+
     #[test]
     fn privileged_binding_is_only_available_to_the_local_app_origin() {
         for app in [

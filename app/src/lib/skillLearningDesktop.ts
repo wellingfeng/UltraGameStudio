@@ -12,7 +12,8 @@ import { redactSkillText, SkillEvidenceCollector } from '@/runtime/skills/eviden
 import { createSkillControlHost, createSkillHost } from './skills';
 import { loadSkillLearningConfig, SKILL_LEARNING_CONFIG_CHANGED_EVENT } from './skillLearningConfig';
 import { SkillLearningQueue } from './skillLearningQueue';
-import { createSkillCandidateStore } from './skillCandidateStore';
+import { beginReviewForeground } from '@/runtime/memory/review';
+import { createSkillCandidateStore, syncSkillCandidateControlResult } from './skillCandidateStore';
 
 export interface SkillTurnContext {
   prompt: string;
@@ -42,7 +43,7 @@ interface ReviewSource {
   ready?: Promise<void>;
   resolve: (result: SkillMutationResult) => void;
 }
-const foregroundQueue = new SkillLearningQueue<SkillReviewReservation, SkillMutationResult>();
+const foregroundQueue = new SkillLearningQueue<SkillReviewReservation, SkillMutationResult>('skills:local');
 const scheduler = new SkillReviewScheduler();
 const reviewSources = new Map<string, ReviewSource>();
 const reservedSources = new Set<ReviewSource>();
@@ -191,6 +192,12 @@ export async function performSkillReviewAction(
   if (!sameOrigin(result.origin) || !saved || saved.status !== result.status || saved.operationsApplied !== result.operationsApplied) {
     throw new Error('SKILL_MUTATION_UNCONFIRMED');
   }
+  // Auxiliary dedup state must not turn a real confirmed commit into failure.
+  try {
+    await syncSkillCandidateControlResult(createSkillCandidateStore(origin), action, id, result);
+  } catch (error) {
+    return { ...result, error: [result.error, `SKILL_CANDIDATE_SYNC_FAILED: ${String(error)}`].filter(Boolean).join('; ') };
+  }
   return result;
 }
 
@@ -270,7 +277,7 @@ function drainReviews(): void {
     drainReviews();
   });
   // Observers may cancel immediately; install the pending entry first.
-  emit({ status: 'queued', origin: { ...reviewOrigin }, detail: '等待原会话前台任务结束；其他会话不影响本次复盘' });
+  emit({ status: 'queued', origin: { ...reviewOrigin }, detail: '等待所有前台任务结束并取得共享后台复盘名额' });
 }
 
 /** Resume only captured host evidence, using a fresh run and fresh target reads. */
@@ -306,6 +313,7 @@ export function beginSkillLearningTurn(options: BeginSkillLearningTurnOptions) {
   const host = options.host ?? ownedHost!;
   const model = options.model ?? optionalModel(options.selection, config, origin);
   const releaseForeground = foregroundQueue.foregroundStarted(sessionKey(origin));
+  const releaseSharedForeground = beginReviewForeground(sessionKey(origin));
   const collectors = new Map<string, SkillEvidenceCollector>();
   const verifiedCalls = new Set<string>();
   const userEvidence = new SkillEvidenceCollector(origin).collect([], options.prompt);
@@ -332,8 +340,12 @@ export function beginSkillLearningTurn(options: BeginSkillLearningTurnOptions) {
     window.addEventListener(SKILL_LEARNING_CONFIG_CHANGED_EVENT, onConfigChange);
     window.addEventListener('storage', onConfigChange);
   }
-  const closeForeground = (usage?: Promise<void>) => {
+  const endForeground = () => {
     releaseForeground();
+    releaseSharedForeground();
+  };
+  const closeForeground = (usage?: Promise<void>) => {
+    endForeground();
     if (typeof window !== 'undefined') {
       window.removeEventListener(SKILL_LEARNING_CONFIG_CHANGED_EVENT, onConfigChange);
       window.removeEventListener('storage', onConfigChange);
@@ -371,6 +383,8 @@ export function beginSkillLearningTurn(options: BeginSkillLearningTurnOptions) {
     origin,
     host,
     model,
+    // The task has ended; advisory file scans must not retain global priority.
+    endForeground,
     onLoaded(context: Pick<SkillTurnContext, 'loadedSkills' | 'catalogRevision'>): void {
       loadedSkills = structuredClone(context.loadedSkills.slice(0, 32));
       catalogRevision = context.catalogRevision;
@@ -430,6 +444,14 @@ export function beginSkillLearningTurn(options: BeginSkillLearningTurnOptions) {
     },
     finish(result: { finalAnswer: string; terminal: 'completed' | 'cancelled' | 'failed' }): Promise<SkillMutationResult> {
       if (finished) return finished;
+      let resolveFinished!: (result: SkillMutationResult) => void;
+      let rejectFinished!: (error: unknown) => void;
+      // Install the final public promise before any source/queue observer can
+      // re-enter finish or append evidence to this now-terminal turn.
+      finished = new Promise<SkillMutationResult>((resolve, reject) => {
+        resolveFinished = resolve;
+        rejectFinished = reject;
+      });
       finalAnswer = redactSkillText(result.finalAnswer);
       const terminal = options.signal?.aborted ? 'cancelled' : result.terminal;
       const job: SkillLearningJob = { origin, config: learningDisabled ? { ...config, enabled: false, mode: 'off' } : config,
@@ -441,21 +463,31 @@ export function beginSkillLearningTurn(options: BeginSkillLearningTurnOptions) {
         evidence: job.evidence.slice(-256) }));
       while (lastJobs.size > 32) lastJobs.delete(lastJobs.keys().next().value!);
       const decision = scheduler.observe(job, terminal);
+      let reviewResult: Promise<SkillMutationResult>;
       if (decision.eligible) {
-        finished = new Promise<SkillMutationResult>((resolve) => {
+        reviewResult = new Promise<SkillMutationResult>((resolve) => {
           replaceSource(origin, { origin, job, selection: { ...options.selection }, host: options.host,
             model: options.model, onState: options.onState, ready: options.ready, resolve });
         });
         drainReviews();
       } else {
         if (terminal !== 'completed' || learningDisabled || !config.enabled || config.mode === 'off') cancelSkillLearning(origin);
-        finished = Promise.resolve(emptyResult(origin, 'noop', decision.reason));
+        const skipped = emptyResult(origin, 'noop', decision.reason);
+        // A completed task below the threshold must explain non-admission, not
+        // pretend a reviewer ran or silently disappear from the source surface.
+        if (terminal === 'completed' && !learningDisabled && config.enabled && config.mode !== 'off') {
+          publish(options, { status: 'noop', origin, result: skipped,
+            admission: { status: 'not-admitted', reason: decision.reason,
+              completedActivities: decision.completedActivities, activityThreshold: config.activityThreshold },
+            detail: `Completed activities: ${decision.completedActivities} / ${config.activityThreshold}` });
+        }
+        reviewResult = Promise.resolve(skipped);
       }
       // Queued review starts only after every foreground owner exits.
-      finished = Promise.all([finished, closeForeground(terminal === 'completed' ? recordVerifiedUsage() : undefined)]).then(([actual]) => {
+      void Promise.all([reviewResult, closeForeground(terminal === 'completed' ? recordVerifiedUsage() : undefined)]).then(([actual]) => {
         options.signal?.removeEventListener('abort', onAbort);
-        return actual;
-      });
+        resolveFinished(actual);
+      }, rejectFinished);
       return finished;
     },
   };

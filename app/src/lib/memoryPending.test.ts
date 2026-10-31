@@ -26,7 +26,7 @@ beforeEach(async () => {
 });
 
 describe('memoryPending queue', () => {
-  it('queues one entry per op and lists them oldest-first', async () => {
+  it('queues one complete batch per target and lists it oldest-first', async () => {
     const added = await queuePendingMemoryWrites(
       [
         {
@@ -41,7 +41,8 @@ describe('memoryPending queue', () => {
     );
     expect(added).toBe(2);
     const list = await listPendingMemoryWrites();
-    expect(list).toHaveLength(2);
+    expect(list).toHaveLength(1);
+    expect(list[0].operations.map((op) => op.content)).toEqual(['第一条', '第二条']);
     expect(list[0].op.content).toBe('第一条');
     expect(list[0].source).toBe('review');
     expect(list[0].target).toBe('user');
@@ -92,20 +93,37 @@ describe('memoryPending queue', () => {
 });
 
 describe('memoryPending AI triage', () => {
+  it('retains the entire queue when the screened revision changes while the model runs', async () => {
+    await queuePendingMemoryWrites([{ target: 'user', operations: [{ action: 'add', content: 'first' }] }], 'review');
+    const [screened] = await listPendingMemoryWrites();
+    const verdict = await triagePendingMemoryWrites(async () => {
+      await queuePendingMemoryWrites([{ target: 'user', operations: [{ action: 'add', content: 'concurrent' }] }], 'review');
+      return JSON.stringify({ drop: [screened.id], keep: [] });
+    });
+    expect(verdict.verdictOk).toBe(false);
+    expect(verdict.dropped).toBe(0);
+    expect(await listPendingMemoryWrites()).toHaveLength(2);
+  });
+
+  it('screens every operation and the original workspace of each complete batch', async () => {
+    await queuePendingMemoryWrites([{ target: 'memory', operations: [
+      { action: 'remove', oldText: 'old project rule' }, { action: 'add', content: 'replacement project rule' },
+    ] }], 'review', 'original-A');
+    let observed = '';
+    await triagePendingMemoryWrites(async (_system, prompt) => {
+      observed = prompt;
+      const writes = await listPendingMemoryWrites();
+      return JSON.stringify({ drop: [], keep: writes.map((write) => write.id) });
+    });
+    expect(observed).toContain('old project rule');
+    expect(observed).toContain('replacement project rule');
+    expect(observed).toContain('original-A');
+  });
+
   it('rejects the ids the model drops, keeps the rest queued', async () => {
-    await queuePendingMemoryWrites(
-      [
-        {
-          target: 'user',
-          operations: [
-            { action: 'add', content: '用户偏好简短直接的回复' },
-            { action: 'add', content: '今天网络超时了一次' },
-            { action: 'add', content: '用户用 Unreal 做项目' },
-          ],
-        },
-      ],
-      'review',
-    );
+    for (const content of ['用户偏好简短直接的回复', '今天网络超时了一次', '用户用 Unreal 做项目']) {
+      await queuePendingMemoryWrites([{ target: 'user', operations: [{ action: 'add', content }] }], 'review');
+    }
     const queued = await listPendingMemoryWrites();
     const dropId = queued[1].id; // the transient network error
     const keepIds = [queued[0].id, queued[2].id];
@@ -120,10 +138,9 @@ describe('memoryPending AI triage', () => {
   });
 
   it('drops nothing when the verdict omits/duplicates ids or is unparseable', async () => {
-    await queuePendingMemoryWrites(
-      [{ target: 'user', operations: [{ action: 'add', content: '事实A' }, { action: 'add', content: '事实B' }] }],
-      'review',
-    );
+    for (const content of ['事实A', '事实B']) {
+      await queuePendingMemoryWrites([{ target: 'user', operations: [{ action: 'add', content }] }], 'review');
+    }
     const queued = await listPendingMemoryWrites();
     const [a, b] = queued.map((p) => p.id);
 
@@ -148,6 +165,16 @@ describe('memoryPending AI triage', () => {
 
     // nothing was dropped; both still queued
     expect(await listPendingMemoryWrites()).toHaveLength(2);
+  });
+
+  it.each([
+    '{"drop":["a"],"keep":[]}',
+    '{"drop":["a"],"keep":["b",3]}',
+    '{"drop":["a"],"keep":["b"],"root":"C:/"}',
+    '{"drop":["a","a"],"keep":["b"]}',
+    '{"drop":["a"],"keep":["a","b"]}',
+  ])('rejects incomplete or malformed exact-ID verdicts: %s', (raw) => {
+    expect(parseTriageVerdict(raw, new Set(['a', 'b']))).toBeNull();
   });
 
   it('parseTriageVerdict accepts a fenced json block', () => {

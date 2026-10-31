@@ -1,12 +1,15 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Check, Pencil, Plus, RefreshCw, Trash2, X } from 'lucide-react';
 
 import {
   applyMemoryOp,
-  backfillMemoryTimestamps,
+  loadMemory,
   getMemoryLimits,
   normalizeImportance,
   setMemoryImportance,
+  readMemoryTransactionHistory,
+  undoMemoryTransaction,
+  type MemoryTransactionView,
   type MemoryEntry,
   type MemoryImportance,
   type MemoryTarget,
@@ -20,13 +23,16 @@ import {
 import {
   DEFAULT_MEMORY_CONFIG,
   loadMemoryConfig,
+  loadMemoryReviewJournal,
   saveMemoryConfig,
   type MemoryConfig,
+  type MemoryReviewJournalJob,
 } from '@/lib/memoryConfig';
 import { SettingRow, StepperControl, SwitchControl } from '@/panels/settings/controls';
 import { t, type Locale, type TranslationKey } from '@/lib/i18n';
 import { cn } from '@/lib/cn';
 import { listGatewayRunOptions, selectionFromKey, selectionKey } from '@/lib/modelGateway/resolver';
+import MemoryLegacyConfirmation from './MemoryLegacyConfirmation';
 
 interface MemorySettingsProps {
   locale: Locale;
@@ -126,6 +132,7 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
   const [error, setError] = useState<string>('');
   const [pending, setPending] = useState<PendingMemoryWrite[]>([]);
   const [pendingDone, setPendingDone] = useState('');
+  const [pendingBusy, setPendingBusy] = useState(false);
   const [refreshDays, setRefreshDays] = useState(10);
   const [refreshing, setRefreshing] = useState<RefreshScope | null>(null);
   const [refreshMessage, setRefreshMessage] = useState<string>('');
@@ -137,6 +144,39 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
     }
   });
   const [reviewOptions, setReviewOptions] = useState<{ id: string; label: string }[]>([]);
+  const [journal, setJournal] = useState<MemoryReviewJournalJob[]>([]);
+  const [journalError, setJournalError] = useState('');
+  const [journalBusy, setJournalBusy] = useState(false);
+  const [transactions, setTransactions] = useState<MemoryTransactionView[]>([]);
+  const [undoPreview, setUndoPreview] = useState<MemoryTransactionView | null>(null);
+  const [undoBusy, setUndoBusy] = useState(false);
+  const knownScopes = useRef(new Set<string | undefined>());
+  const readTransactions = useCallback(async () => {
+    for (const scope of [wsId, ...pending.filter((entry) => entry.target === 'memory').map((entry) => entry.workspaceId), ...journal.map((entry) => entry.source.workspaceId)]) knownScopes.current.add(scope);
+    const views = await Promise.all([readMemoryTransactionHistory('user'), ...Array.from(knownScopes.current).map((scope) => readMemoryTransactionHistory('memory', scope))]);
+    setTransactions(views.flat());
+  }, [wsId, pending, journal]);
+  useEffect(() => { void readTransactions().catch((error) => setError(String(error))); }, [readTransactions]);
+  const undo = async () => {
+    if (!undoPreview || undoBusy) return;
+    setUndoBusy(true);
+    try {
+      const res = await undoMemoryTransaction(undoPreview.base.target, undoPreview.id, undoPreview.base.workspaceId, undoPreview.base.raw);
+      if (!res.success) setError(res.error ?? '撤销未确认');
+      else setUndoPreview(null);
+      await refresh();
+      await readTransactions();
+    } catch (error) { setError(String(error)); }
+    finally { setUndoBusy(false); }
+  };
+  const readJournal = useCallback(async () => {
+    setJournalBusy(true);
+    setJournalError('');
+    try { setJournal((await loadMemoryReviewJournal()).value.jobs); }
+    catch (error) { setJournalError(String(error)); }
+    finally { setJournalBusy(false); }
+  }, []);
+  useEffect(() => { void readJournal(); }, [readJournal]);
 
   useEffect(() => {
     try {
@@ -164,8 +204,8 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
   const refresh = useCallback(async () => {
     const limits = getMemoryLimits();
     const [u, m] = await Promise.all([
-      backfillMemoryTimestamps('user'),
-      backfillMemoryTimestamps('memory', wsId),
+      loadMemory('user'),
+      loadMemory('memory', wsId),
     ]);
     setUser({
       entries: u,
@@ -180,8 +220,8 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
   }, [wsId]);
 
   useEffect(() => {
-    void refresh();
-    void listPendingMemoryWrites().then(setPending).catch(() => setPending([]));
+    void refresh().catch((err) => setError(String(err)));
+    void listPendingMemoryWrites().then(setPending).catch((err) => setError(String(err)));
   }, [refresh]);
 
   const runOp = useCallback(
@@ -214,20 +254,25 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
 
   const resolvePending = useCallback(
     async (ids: string[], action: 'approve' | 'reject') => {
+      if (pendingBusy) return;
+      setPendingBusy(true);
       setError('');
       setPendingDone('');
       try {
-        const res = await resolvePendingMemoryWrites(ids, action, wsId, {
-          evictOnOverflow: config.evictOnOverflow,
-        });
-        setPendingDone(fmt(locale, 'settings.memory.pendingDone', { count: res.resolvedIds.length }));
+        const res = await resolvePendingMemoryWrites(ids, action);
+        const errors = res.outcomes.filter((outcome) => outcome.error).map((outcome) => outcome.error);
+        if (errors.length) setError(errors.join('；'));
+        if (res.resolvedIds.length) setPendingDone(fmt(locale, 'settings.memory.pendingDone', { count: res.resolvedIds.length }));
+        await refresh();
+        await readTransactions();
+        setPending(await listPendingMemoryWrites());
       } catch (err) {
         setError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setPendingBusy(false);
       }
-      await refresh();
-      void listPendingMemoryWrites().then(setPending).catch(() => setPending([]));
     },
-    [wsId, config.evictOnOverflow, locale, refresh],
+    [pendingBusy, locale, refresh, readTransactions],
   );
 
   const runRefresh = useCallback(
@@ -284,7 +329,7 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
   );
 
   return (
-    <div className="space-y-5">
+    <div className="min-w-0 space-y-5">
       <div className="space-y-1">
         <h3 className="text-sm font-semibold text-fg">{t(locale, 'settings.memory.title')}</h3>
         <p className="text-[11px] leading-relaxed text-fg-faint">
@@ -298,6 +343,32 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
         </p>
       )}
 
+      <section aria-label="记忆复盘诊断" className="min-w-0 space-y-2 rounded-lg border border-border p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h4 className="text-xs font-semibold text-fg">记忆复盘诊断 · {config.reviewEnabled && config.writeEnabled ? 'ON' : 'OFF'}</h4>
+          <button type="button" disabled={journalBusy} onClick={() => void readJournal()}
+            className="min-h-11 rounded border border-border px-3 text-xs text-fg-dim hover:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40">刷新诊断（只读）</button>
+        </div>
+        <p className="text-[11px] text-fg-faint">关闭复盘保留历史；刷新只读取持久记录，不重试模型或产生新调用。日志不是目标读回证明。</p>
+        {journalError && <p role="alert" className="break-all text-xs text-status-error">{journalError}</p>}
+        {!journal.length && !journalError && <p className="text-xs text-fg-faint">暂无持久复盘记录</p>}
+        <ul className="space-y-2">
+          {journal.map((job) => (
+            <li key={job.id} className="min-w-0 space-y-1 border-t border-border pt-2 text-xs">
+              <p className={job.phase === 'failed' ? 'text-status-error' : job.phase === 'applied' ? 'text-status-success' : job.phase === 'awaiting_approval' ? 'text-status-warning' : 'text-fg-dim'}>{job.phase} · 已应用 {job.appliedOps} · 待审批 {job.queuedOps}</p>
+              <p className="break-all text-fg-dim">原项目：{job.source.workspaceId || '未知'} · 原会话：{job.source.sessionId} · 来源消息：{job.source.sourceMessageId}</p>
+              <details className="text-fg-faint"><summary className="min-h-11 cursor-pointer py-3 focus-visible:outline focus-visible:outline-accent">完整来源与预算</summary>
+                <pre className="whitespace-pre-wrap break-all">{JSON.stringify(job.source, null, 2)}</pre>
+                <p>预算记录：未知（历史未记录，不以当前配置推断）</p>
+              </details>
+              <p className="text-fg-faint">调用：{job.usage?.calls ?? '未知'} · 输入 tokens：{job.usage?.inputTokens ?? '未知'} · 输出 tokens：{job.usage?.outputTokens ?? '未知'} · {job.usage ? job.usage.estimated ? '估算' : '供应商报告' : '用量未知'}</p>
+              {job.error && <p className="whitespace-pre-wrap break-all text-status-error">{job.error}</p>}
+              {job.recordingError && <p className="whitespace-pre-wrap break-all text-status-warning">审计记录失败：{job.recordingError}</p>}
+            </li>
+          ))}
+        </ul>
+      </section>
+
       {pending.length > 0 && (
         <div className="space-y-2 rounded-lg border border-status-warning/50 bg-status-warning/5 p-3">
           <div className="flex items-center justify-between gap-2">
@@ -310,6 +381,7 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
             <div className="flex items-center gap-1.5">
               <button
                 type="button"
+                disabled={pendingBusy || pending.some((batch) => batch.status !== 'awaiting_approval')}
                 className="rounded border border-border px-2 py-1 text-[11px] text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:opacity-40"
                 onClick={() =>
                   void resolvePending(
@@ -323,6 +395,7 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
               </button>
               <button
                 type="button"
+                disabled={pendingBusy}
                 className="rounded border border-border px-2 py-1 text-[11px] text-fg-dim transition-colors hover:border-status-error/60 hover:text-status-error disabled:opacity-40"
                 onClick={() =>
                   void resolvePending(
@@ -344,13 +417,19 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
                 className="flex items-start gap-2 rounded border border-border/60 bg-bg px-2 py-1.5"
               >
                 <div className="flex-1 space-y-0.5">
-                  <p className="whitespace-pre-wrap break-words text-xs leading-relaxed text-fg-dim">
-                    {p.op.action === 'remove'
-                      ? `− ${p.op.oldText ?? ''}`
-                      : `${p.op.action === 'replace' ? '~' : '+'} ${
-                          p.op.content ?? p.op.oldText ?? ''
-                        }`}
+                  <p className="break-all text-[10px] text-status-warning">
+                    {p.target === 'user' ? '用户画像（全局）' : `原项目：${p.workspaceId ?? '全局笔记'}`}
+                    {p.reviewSource && ` · 原会话：${p.reviewSource.sessionId} · 来源消息：${p.reviewSource.sourceMessageId}`}
+                    {p.status !== 'awaiting_approval' && ' · 旧提案需明确确认来源与版本；未保存'}
                   </p>
+                  {p.operations.map((op, index) => (
+                    <p key={index} className="whitespace-pre-wrap break-words text-xs leading-relaxed text-fg-dim">
+                      {op.action === 'remove' ? `− ${op.oldText ?? ''}` : op.action === 'replace'
+                        ? `− ${op.oldText ?? ''}\n+ ${op.content ?? ''}` : `+ ${op.content ?? ''}`}
+                    </p>
+                  ))}
+                  {p.status !== 'awaiting_approval' && <MemoryLegacyConfirmation id={p.id} onConfirmed={async () => { setPending(await listPendingMemoryWrites()); }} />}
+                  {p.sourceConfirmation && <p className="break-all text-[10px] text-status-warning">用户显式重绑定（旧来源未验证）：{p.sourceConfirmation.workspaceId} · {p.sourceConfirmation.sessionId} · {p.sourceConfirmation.sourceMessageId}</p>}
                   <p className="flex flex-wrap items-center gap-1.5 text-[10px] text-fg-faint">
                     <ImportanceBadge
                       locale={locale}
@@ -377,6 +456,7 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
                 <button
                   type="button"
                   title={t(locale, 'settings.memory.pendingApprove')}
+                  disabled={pendingBusy || p.status !== 'awaiting_approval'}
                   className="rounded p-1 text-status-success hover:bg-bg-soft"
                   onClick={() => void resolvePending([p.id], 'approve')}
                 >
@@ -385,6 +465,7 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
                 <button
                   type="button"
                   title={t(locale, 'settings.memory.pendingReject')}
+                  disabled={pendingBusy}
                   className="rounded p-1 text-fg-faint hover:bg-bg-soft hover:text-status-error"
                   onClick={() => void resolvePending([p.id], 'reject')}
                 >
@@ -395,6 +476,23 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
           </ul>
         </div>
       )}
+
+      <section aria-label="记忆事务与撤销" className="min-w-0 space-y-2 rounded-lg border border-border p-3 text-xs">
+        <h4 className="font-semibold text-fg">真实目标回执与 CAS 撤销</h4>
+        <p className="text-fg-faint">仅撤销未被后续编辑改变的单库提交；用户与项目不是全局原子事务。旧回执不伪造 before。</p>
+        <button type="button" onClick={() => void readTransactions().catch((error) => setError(String(error)))} className="min-h-11 rounded border border-border px-3 text-fg-dim focus-visible:outline focus-visible:outline-accent">刷新目标回执（只读）</button>
+        {transactions.map((transaction) => <div key={`${transaction.base.target}/${transaction.base.workspaceId}/${transaction.id}`} className="min-w-0 space-y-1 border-t border-border pt-2">
+          <p className="break-all text-fg-dim">{transaction.base.target === 'user' ? '用户画像（全局）' : `原项目：${transaction.base.workspaceId ?? '全局笔记'}`} · {transaction.id} · {transaction.undoReason ?? '目标读回已确认'}</p>
+          <details className="text-fg-faint"><summary className="min-h-11 cursor-pointer py-3 focus-visible:outline focus-visible:outline-accent">事务来源与审计</summary><pre className="whitespace-pre-wrap break-all">{JSON.stringify({ reviewSource: transaction.reviewSource ?? '未知；不推断来源', sourceConfirmation: transaction.sourceConfirmation, undoes: transaction.undoes }, null, 2)}</pre></details>
+          <button type="button" disabled={!transaction.canUndo || undoBusy} onClick={() => setUndoPreview(transaction)} className="min-h-11 rounded border border-border px-3 text-fg-dim hover:border-accent focus-visible:outline focus-visible:outline-accent disabled:opacity-40">预览撤销</button>
+        </div>)}
+        {undoPreview && <div role="group" aria-label="撤销完整预览" className="min-w-0 space-y-2 border-t border-border pt-2">
+          <p className="break-all text-fg">{undoPreview.base.target} · 原作用域：{undoPreview.base.workspaceId ?? '全局'} · {undoPreview.id}</p>
+          <pre className="whitespace-pre-wrap break-all text-fg-dim">{undoPreview.after?.map((entry) => `− ${entry.text}`).join('\n')}{'\n'}{undoPreview.before?.map((entry) => `+ ${entry.text}`).join('\n')}</pre>
+          <p className="text-fg-faint">确认撤销整个批次，并保留原提交与撤销来源审计；目标变动时 CAS 拒绝，不覆盖后续手改。</p>
+          <div className="flex flex-wrap gap-2"><button type="button" disabled={undoBusy} onClick={() => void undo()} className="min-h-11 rounded border border-status-warning px-3 text-status-warning focus-visible:outline focus-visible:outline-accent">确认 CAS 撤销</button><button type="button" disabled={undoBusy} onClick={() => setUndoPreview(null)} className="min-h-11 rounded border border-border px-3 text-fg-dim focus-visible:outline focus-visible:outline-accent">取消撤销</button></div>
+        </div>}
+      </section>
 
       <MemoryStoreSection
         locale={locale}

@@ -1,5 +1,6 @@
 import { isSupportedWorkspacePath } from '@/lib/cloudProjects';
 import { SCHEDULED_TASK_SCOPE, SCHEDULED_TASK_HISTORY_DIR } from '@/lib/scheduledTaskScope';
+import { retainScheduledTaskMessages } from '@/lib/scheduledTaskRetention';
 import { sessionHasContextCompression } from '@/lib/contextCompression';
 import type { IRGraph } from '@/core/ir';
 import { loadComposer } from '@/lib/composerStorage';
@@ -55,6 +56,7 @@ export interface HistoryStore {
     sessionId: string,
     patch: SessionPatch,
   ): Promise<SessionRecord>;
+  pruneScheduledTaskHistory(workspaceId: string, sessionId: string, protectedMessageIds?: () => ReadonlySet<string>): Promise<{ record: SessionRecord; removedIds: string[]; backupError?: unknown } | null>;
   deleteSession(
     workspaceId: string,
     sessionId: string,
@@ -88,6 +90,7 @@ const SESSION_SUMMARY_ACTIVITY_VERSION = 3;
 
 let writeQueue: Promise<unknown> = Promise.resolve();
 const sessionRecordCache = new Map<string, Map<string, SessionRecord>>();
+const scheduledTaskRemovedMessages = new Map<string, Set<string>>();
 const sessionPrewarmTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 function enqueue<T>(fn: () => Promise<T>): Promise<T> {
@@ -1167,8 +1170,12 @@ async function updateSessionInternal(
 
   const nextIsWorkflow =
     current.isWorkflow || patch.isWorkflow === true || !!patch.workflow;
-  const messages = patch.messages
-    ? patch.mergeMessages ? mergePersistedMessages(current.messages, patch.messages) : patch.messages
+  const removedIds = scheduledTaskRemovedMessages.get(JSON.stringify([workspaceId, sessionId]));
+  const incomingMessages = patch.messages && removedIds
+    ? patch.messages.filter((message) => !removedIds.has(message.id))
+    : patch.messages;
+  const messages = incomingMessages
+    ? patch.mergeMessages ? mergePersistedMessages(current.messages, incomingMessages) : incomingMessages
     : current.messages;
   const updatedAt = patch.preserveUpdatedAt
     ? current.updatedAt
@@ -1436,10 +1443,37 @@ export const historyStore: HistoryStore = {
     return enqueue(() => updateSessionInternal(workspaceId, sessionId, patch));
   },
 
+  pruneScheduledTaskHistory(workspaceId, sessionId, protectedMessageIds) {
+    return enqueue(async () => {
+      const record = await getSessionInternal(workspaceId, sessionId);
+      const task = record?.meta?.scheduledTask;
+      if (!record || !task || !Number.isSafeInteger(task.maxHistoryRuns) || !task.maxHistoryRuns || task.maxHistoryRuns < 1) return null;
+      const messages = retainScheduledTaskMessages(record.messages, task);
+      const retainedIds = new Set(messages.map((message) => message.id));
+      const removedIds = record.messages.filter((message) => !retainedIds.has(message.id)).map((message) => message.id);
+      const protectedIds = protectedMessageIds?.();
+      if (protectedIds && removedIds.some((id) => protectedIds.has(id))) return { record, removedIds: [] };
+      const updated = removedIds.length ? await updateSessionInternal(workspaceId, sessionId, { messages, preserveUpdatedAt: true }) : record;
+      if (removedIds.length) {
+        const key = JSON.stringify([workspaceId, sessionId]);
+        const tombstones = scheduledTaskRemovedMessages.get(key) ?? new Set<string>();
+        for (const id of removedIds) tombstones.add(id);
+        scheduledTaskRemovedMessages.set(key, tombstones);
+      }
+      try {
+        if (tauriAvailable()) await command<void>('history_delete_session_backups', { relPath: sessionPath(workspaceId, sessionId) });
+      } catch (backupError) {
+        return { record: updated, removedIds, backupError };
+      }
+      return { record: updated, removedIds };
+    });
+  },
+
   deleteSession(workspaceId, sessionId, soft = true) {
     return enqueue(async () => {
       await removePath(sessionPath(workspaceId, sessionId), soft);
       forgetSessionRecord(workspaceId, sessionId);
+      scheduledTaskRemovedMessages.delete(JSON.stringify([workspaceId, sessionId]));
       const current = await listSessionsInternal(workspaceId);
       await writeSessionIndexInternal(
         workspaceId,
@@ -1507,5 +1541,6 @@ export const historyStore: HistoryStore = {
 };
 
 export function __resetHistorySessionCacheForTests(): void {
+  scheduledTaskRemovedMessages.clear();
   clearSessionRecordCache();
 }

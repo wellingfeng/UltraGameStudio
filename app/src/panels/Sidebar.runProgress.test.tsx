@@ -2464,16 +2464,21 @@ describe('Sidebar session search', () => {
         button.textContent?.includes('Bulk Session'),
       );
 
+    const visibleBulkSessionTitles = () =>
+      Array.from(view.container.querySelectorAll('span'))
+        .map((span) => span.textContent ?? '')
+        .filter((text) => text.startsWith('Bulk Session'));
+
     try {
-      expect(view.container.textContent).toContain('Bulk Session 5');
-      expect(visibleBulkSessionButtons()).toHaveLength(5);
-      expect(view.container.textContent).not.toContain('Bulk Session 6');
-      expect(view.container.textContent).not.toContain('Bulk Session 25');
+      expect(visibleBulkSessionTitles()).toContain('Bulk Session 10');
+      expect(visibleBulkSessionButtons()).toHaveLength(10);
+      expect(visibleBulkSessionTitles()).not.toContain('Bulk Session 11');
+      expect(visibleBulkSessionTitles()).not.toContain('Bulk Session 25');
       expect(view.container.textContent).toContain('加载更多');
 
       await changeInputValue(historySearchInput(view.container), 'bulk');
 
-      expect(view.container.textContent).toContain('Bulk Session 25');
+      expect(visibleBulkSessionTitles()).toContain('Bulk Session 25');
       expect(view.container.textContent).not.toContain('加载更多');
 
       const clearButton = view.container.querySelector(
@@ -2482,9 +2487,9 @@ describe('Sidebar session search', () => {
       expect(clearButton).toBeInstanceOf(HTMLButtonElement);
       await clickButton(clearButton as HTMLButtonElement);
 
-      expect(visibleBulkSessionButtons()).toHaveLength(5);
-      expect(view.container.textContent).not.toContain('Bulk Session 6');
-      expect(view.container.textContent).not.toContain('Bulk Session 25');
+      expect(visibleBulkSessionButtons()).toHaveLength(10);
+      expect(visibleBulkSessionTitles()).not.toContain('Bulk Session 11');
+      expect(visibleBulkSessionTitles()).not.toContain('Bulk Session 25');
       expect(view.container.textContent).toContain('加载更多');
     } finally {
       await view.cleanup();
@@ -2550,9 +2555,9 @@ describe('Sidebar session search', () => {
     }
   });
 
-  it('loads workspace history in pages of five', async () => {
+  it('loads workspace history in pages of ten', async () => {
     resetSidebarStore();
-    const manySessions = Array.from({ length: 12 }, (_, index) => ({
+    const manySessions = Array.from({ length: 25 }, (_, index) => ({
       ...SESSION,
       id: `s_page_${index}`,
       title: `Paged Session ${index + 1}`,
@@ -2586,24 +2591,24 @@ describe('Sidebar session search', () => {
     };
 
     try {
-      expect(visiblePagedSessionButtons()).toHaveLength(5);
-      expect(visiblePagedSessionTitles()).toContain('Paged Session 5');
-      expect(visiblePagedSessionTitles()).not.toContain('Paged Session 6');
+      expect(visiblePagedSessionButtons()).toHaveLength(10);
+      expect(visiblePagedSessionTitles()).toContain('Paged Session 10');
+      expect(visiblePagedSessionTitles()).not.toContain('Paged Session 11');
       expect(view.container.textContent).not.toContain('收起');
 
       await clickButton(loadMoreButton());
 
-      expect(visiblePagedSessionButtons()).toHaveLength(10);
-      expect(visiblePagedSessionTitles()).toContain('Paged Session 10');
-      expect(visiblePagedSessionTitles()).not.toContain('Paged Session 11');
+      expect(visiblePagedSessionButtons()).toHaveLength(20);
+      expect(visiblePagedSessionTitles()).toContain('Paged Session 20');
+      expect(visiblePagedSessionTitles()).not.toContain('Paged Session 21');
       expect(view.container.textContent).toContain('收起');
       expect(view.container.textContent).toContain('加载更多');
 
       await clickButton(collapseButton());
 
-      expect(visiblePagedSessionButtons()).toHaveLength(5);
-      expect(visiblePagedSessionTitles()).toContain('Paged Session 5');
-      expect(visiblePagedSessionTitles()).not.toContain('Paged Session 6');
+      expect(visiblePagedSessionButtons()).toHaveLength(10);
+      expect(visiblePagedSessionTitles()).toContain('Paged Session 10');
+      expect(visiblePagedSessionTitles()).not.toContain('Paged Session 11');
       expect(view.container.textContent).not.toContain('收起');
       expect(view.container.textContent).toContain('加载更多');
     } finally {
@@ -2611,9 +2616,9 @@ describe('Sidebar session search', () => {
     }
   });
 
-  it('collapses flat fallback history in pages of five', async () => {
+  it('collapses flat fallback history in pages of ten', async () => {
     resetSidebarStore();
-    const manySessions = Array.from({ length: 12 }, (_, index) => ({
+    const manySessions = Array.from({ length: 25 }, (_, index) => ({
       ...SESSION,
       id: `s_flat_page_${index}`,
       title: `Flat Paged Session ${index + 1}`,
@@ -2650,21 +2655,21 @@ describe('Sidebar session search', () => {
     };
 
     try {
-      expect(visibleFlatSessionButtons()).toHaveLength(5);
-      expect(visibleFlatSessionTitles()).toContain('Flat Paged Session 5');
-      expect(visibleFlatSessionTitles()).not.toContain('Flat Paged Session 6');
-
-      await clickButton(loadMoreButton());
-
       expect(visibleFlatSessionButtons()).toHaveLength(10);
       expect(visibleFlatSessionTitles()).toContain('Flat Paged Session 10');
       expect(visibleFlatSessionTitles()).not.toContain('Flat Paged Session 11');
 
+      await clickButton(loadMoreButton());
+
+      expect(visibleFlatSessionButtons()).toHaveLength(20);
+      expect(visibleFlatSessionTitles()).toContain('Flat Paged Session 20');
+      expect(visibleFlatSessionTitles()).not.toContain('Flat Paged Session 21');
+
       await clickButton(collapseButton());
 
-      expect(visibleFlatSessionButtons()).toHaveLength(5);
-      expect(visibleFlatSessionTitles()).toContain('Flat Paged Session 5');
-      expect(visibleFlatSessionTitles()).not.toContain('Flat Paged Session 6');
+      expect(visibleFlatSessionButtons()).toHaveLength(10);
+      expect(visibleFlatSessionTitles()).toContain('Flat Paged Session 10');
+      expect(visibleFlatSessionTitles()).not.toContain('Flat Paged Session 11');
     } finally {
       await view.cleanup();
     }

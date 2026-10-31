@@ -35,11 +35,38 @@ const LEGACY_FREE_CHANNEL_KEYS_STORAGE = [
 ];
 
 const memorySecrets = new Map<string, string>();
+const secretReadErrors = new Map<string, unknown>();
+const storedSecretNames = new Set<string>();
 let initialized = false;
+let initializationPromise: Promise<void> | null = null;
+let readsCompleted = false;
+let initializationError: unknown = null;
 let secureReady = false;
 
 export function secureStorageAvailable(): boolean {
   return secureReady;
+}
+
+/** A failed/pending read is not an absent secret; callers must not hydrate it. */
+export function secureStorageReadFailed(secretName: string): boolean {
+  return isTauri() && (!readsCompleted || secretReadErrors.has(secretName));
+}
+
+/** Inline values are a first-migration source, never a deleted-entry fallback. */
+export function secureStorageAllowsInlineFallback(secretName: string): boolean {
+  return !isTauri() || (readsCompleted && !initializationPromise
+    && !secretReadErrors.has(secretName) && !storedSecretNames.has(secretName)
+    && !secretWriteChains.has(secretName) && !secretWriteErrors.has(secretName));
+}
+
+function assertSecretWritable(secretName: string, duringInitialization = false): void {
+  if (!isTauri()) return;
+  if (!readsCompleted || (initializationPromise && !duringInitialization)) {
+    throw new Error(`安全存储尚未完成初始化 (${secretName})`);
+  }
+  if (secretReadErrors.has(secretName)) {
+    throw new Error(`安全存储读取失败 (${secretName})，拒绝覆盖未读取的密钥`);
+  }
 }
 
 function hasWindow(): boolean {
@@ -127,6 +154,20 @@ function cacheSecret(secretName: string, value: string): void {
   else memorySecrets.delete(secretName);
 }
 
+function cacheLoadedSecret(secretName: string, loaded: Record<string, string>): void {
+  // Only an omitted native record is eligible for first-time inline migration.
+  // An existing record owns even its absent entries (including partial deletes).
+  // Native whole-record delete tombstones are own empty-string entries, so they
+  // remain authoritative too; genuinely never-stored records are omitted.
+  if (Object.prototype.hasOwnProperty.call(loaded, secretName)) {
+    storedSecretNames.add(secretName);
+  } else {
+    storedSecretNames.delete(secretName);
+  }
+  cacheSecret(secretName, loaded[secretName] ?? '');
+  secretReadErrors.delete(secretName);
+}
+
 const pendingSecretWrites = new Set<Promise<void>>();
 const secretWriteChains = new Map<string, Promise<void>>();
 const secretWriteErrors = new Map<string, unknown>();
@@ -147,6 +188,9 @@ function queueSecretPersistence(
       try {
         if (next) await secureSecretSet(secretName, next);
         else await secureSecretDelete(secretName);
+        // This session's successful writes/deletes establish native ownership
+        // just like an own record read during startup, including tombstones.
+        storedSecretNames.add(secretName);
         secretWriteErrors.delete(secretName);
       } catch (err) {
         secretWriteErrors.set(secretName, err);
@@ -180,24 +224,20 @@ async function persistSecretNow(
   secretName: string,
   value: string,
 ): Promise<void> {
+  assertSecretWritable(secretName, true);
   cacheSecret(secretName, value);
-  if (!secureStorageAvailable()) return;
+  if (!isTauri()) return;
   await queueSecretPersistence(secretName, value);
 }
 
 function persistSecretSoon(secretName: string, value: string): void {
+  assertSecretWritable(secretName);
   cacheSecret(secretName, value);
-  if (!secureStorageAvailable()) return;
+  if (!isTauri()) return;
   void queueSecretPersistence(secretName, value).catch(() => undefined);
 }
 
-/**
- * Await all in-flight OS keychain writes so callers can confirm secrets actually
- * reached durable storage before claiming success (or before the app exits).
- * Returns immediately when secure storage is unavailable.
- */
-export async function flushSecureStorage(): Promise<void> {
-  if (!secureStorageAvailable()) return;
+async function drainSecretWrites(): Promise<void> {
   while (pendingSecretWrites.size > 0) {
     await Promise.allSettled([...pendingSecretWrites]);
   }
@@ -211,6 +251,24 @@ export async function flushSecureStorage(): Promise<void> {
 }
 
 /**
+ * Await all in-flight OS keychain writes so callers can confirm secrets actually
+ * reached durable storage before claiming success (or before the app exits).
+ * A failed desktop read/initialization is an error, not a successful flush.
+ * Browser builds keep their memory-only behavior.
+ */
+export async function flushSecureStorage(): Promise<void> {
+  if (!isTauri()) return;
+  if (initializationPromise) await initializationPromise;
+  else if (!readsCompleted) await initializeSecureStorage();
+  await drainSecretWrites();
+  if (secretReadErrors.size > 0) {
+    assertSecretWritable(secretReadErrors.keys().next().value!);
+  }
+  if (initializationError) throw new Error('安全存储初始化失败，尚未完成安全迁移');
+  if (!readsCompleted) throw new Error('安全存储尚未完成初始化');
+}
+
+/**
  * Synchronous-write variant of {@link writeSecureRecord}: waits for the OS keychain
  * call to complete before returning. Use this when the caller must guarantee the
  * secret is durable before continuing (e.g., before closing a settings dialog).
@@ -219,9 +277,19 @@ export async function writeSecureRecordAwaited(
   secretName: string,
   record: Record<string, string>,
 ): Promise<void> {
+  if (isTauri()) {
+    if (initializationPromise) await initializationPromise;
+    else if (!readsCompleted) await initializeSecureStorage();
+  }
+  assertSecretWritable(secretName);
   const next = serializeRecord(record);
   const prev = memorySecrets.get(secretName) ?? "";
-  if (next === prev && !secretWriteErrors.has(secretName)) return;
+  if (next === prev && !secretWriteErrors.has(secretName)) {
+    // Matching optimistic memory does not prove the accepted native write is
+    // durable. Join its chain so a delayed failure reaches this awaited caller.
+    await secretWriteChains.get(secretName);
+    return;
+  }
   await persistSecretNow(secretName, next);
 }
 
@@ -237,6 +305,7 @@ export function writeSecureRecord(
   secretName: string,
   record: Record<string, string>,
 ): boolean {
+  assertSecretWritable(secretName);
   const next = serializeRecord(record);
   const prev = memorySecrets.get(secretName) ?? "";
   if (next === prev && !secretWriteErrors.has(secretName)) return false;
@@ -261,6 +330,7 @@ export function readSecureSecret(secretName: string): string {
 }
 
 export function writeSecureSecret(secretName: string, value: string): boolean {
+  assertSecretWritable(secretName);
   const next = value.trim();
   const prev = memorySecrets.get(secretName) ?? "";
   if (next === prev && !secretWriteErrors.has(secretName)) return false;
@@ -285,12 +355,13 @@ function genProviderId(): string {
   return `p_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-function stripProviderSecrets(providerKeys: Record<string, string>): {
+function stripProviderSecrets(providerKeys: Record<string, string>, migrateKeys: boolean): {
   value: string | null;
   changed: boolean;
 } {
   const raw = rawGet(PROVIDERS_STORAGE);
   if (raw === null) {
+    if (!migrateKeys) return { value: null, changed: false };
     const legacyKey = (rawGet(API_KEY_STORAGE) ?? "").trim();
     if (!legacyKey) return { value: null, changed: false };
     const id = genProviderId();
@@ -317,9 +388,9 @@ function stripProviderSecrets(providerKeys: Record<string, string>): {
       const id = typeof record.id === "string" ? record.id : "";
       const apiKey =
         typeof record.apiKey === "string" ? record.apiKey.trim() : "";
-      // The keychain is durable; a leftover quit mirror may be older than a
-      // successfully saved edit. Migrate missing keys only, never roll it back.
-      if (id && apiKey && !providerKeys[id]) providerKeys[id] = apiKey;
+      // Import only into a genuinely missing native logical record. An absent
+      // entry in an existing record may have been deleted after this quit mirror.
+      if (migrateKeys && id && apiKey && !providerKeys[id]) providerKeys[id] = apiKey;
       if ("apiKey" in record) {
         changed = true;
         const rest = { ...record };
@@ -334,7 +405,7 @@ function stripProviderSecrets(providerKeys: Record<string, string>): {
   }
 }
 
-function stripGatewaySecrets(gatewayKeys: Record<string, string>): {
+function stripGatewaySecrets(gatewayKeys: Record<string, string>, migrateKeys: boolean): {
   value: string | null;
   changed: boolean;
 } {
@@ -371,7 +442,7 @@ function stripGatewaySecrets(gatewayKeys: Record<string, string>): {
         typeof channelRecord.apiKey === "string"
           ? channelRecord.apiKey.trim()
           : "";
-      if (providerId && apiKey) {
+      if (migrateKeys && providerId && apiKey) {
         const key = gatewayChannelSecretKey(providerId, channelId);
         if (!gatewayKeys[key]) gatewayKeys[key] = apiKey;
       }
@@ -407,15 +478,31 @@ function collectFreeChannelKeys(): {
   return { record, keysToRemove };
 }
 
+async function persistVerifiedMigration(secretName: string, value: string): Promise<void> {
+  const previous = memorySecrets.get(secretName) ?? '';
+  try {
+    await persistSecretNow(secretName, value);
+    const readback = await secureSecretGetMany([secretName]);
+    if ((readback[secretName] ?? '') !== value) {
+      throw new Error(`安全存储迁移校验失败 (${secretName})`);
+    }
+  } catch (error) {
+    // A resolved write is not enough to discard the last recoverable fallback.
+    cacheSecret(secretName, previous);
+    secretReadErrors.set(secretName, error);
+    throw error;
+  }
+}
+
 async function migrateLocalStorageSecrets(): Promise<void> {
   const providerKeys = readSecureRecord(PROVIDER_API_KEYS_SECRET);
   const gatewayKeys = readSecureRecord(GATEWAY_CHANNEL_API_KEYS_SECRET);
   const freeChannelKeys = readSecureRecord(FREE_CHANNEL_API_KEYS_SECRET);
-  const providerStorage = stripProviderSecrets(providerKeys);
-  const gatewayStorage = stripGatewaySecrets(gatewayKeys);
+  const providerStorage = stripProviderSecrets(providerKeys, !storedSecretNames.has(PROVIDER_API_KEYS_SECRET));
+  const gatewayStorage = stripGatewaySecrets(gatewayKeys, !storedSecretNames.has(GATEWAY_CHANNEL_API_KEYS_SECRET));
   const freeKeys = collectFreeChannelKeys();
   for (const [id, value] of Object.entries(freeKeys.record)) {
-    if (value) freeChannelKeys[id] = value;
+    if (value && !storedSecretNames.has(FREE_CHANNEL_API_KEYS_SECRET)) freeChannelKeys[id] = value;
   }
   const proxyToken = (rawGet(FREE_PROXY_TOKEN_STORAGE) ?? "").trim();
 
@@ -427,17 +514,20 @@ async function migrateLocalStorageSecrets(): Promise<void> {
   // unrelated provider could truncate the whole record.
   const providerSerialized = serializeRecord(providerKeys);
   if (providerSerialized !== serializeRecord(readSecureRecord(PROVIDER_API_KEYS_SECRET))) {
-    await persistSecretNow(PROVIDER_API_KEYS_SECRET, providerSerialized);
+    await persistVerifiedMigration(PROVIDER_API_KEYS_SECRET, providerSerialized);
   }
   const gatewaySerialized = serializeRecord(gatewayKeys);
   if (gatewaySerialized !== serializeRecord(readSecureRecord(GATEWAY_CHANNEL_API_KEYS_SECRET))) {
-    await persistSecretNow(GATEWAY_CHANNEL_API_KEYS_SECRET, gatewaySerialized);
+    await persistVerifiedMigration(GATEWAY_CHANNEL_API_KEYS_SECRET, gatewaySerialized);
   }
   const freeChannelSerialized = serializeRecord(freeChannelKeys);
   if (freeChannelSerialized !== serializeRecord(readSecureRecord(FREE_CHANNEL_API_KEYS_SECRET))) {
-    await persistSecretNow(FREE_CHANNEL_API_KEYS_SECRET, freeChannelSerialized);
+    await persistVerifiedMigration(FREE_CHANNEL_API_KEYS_SECRET, freeChannelSerialized);
   }
-  if (proxyToken) await persistSecretNow(FREE_PROXY_TOKEN_SECRET, proxyToken);
+  if (proxyToken && !storedSecretNames.has(FREE_PROXY_TOKEN_SECRET)
+    && proxyToken !== readSecureSecret(FREE_PROXY_TOKEN_SECRET)) {
+    await persistVerifiedMigration(FREE_PROXY_TOKEN_SECRET, proxyToken);
+  }
 
   if (providerStorage.value !== null)
     rawSet(PROVIDERS_STORAGE, providerStorage.value);
@@ -449,22 +539,62 @@ async function migrateLocalStorageSecrets(): Promise<void> {
   rawRemove(FREE_PROXY_TOKEN_STORAGE);
 }
 
-export async function initializeSecureStorage(): Promise<void> {
-  if (initialized) return;
-  initialized = true;
-  if (!isTauri()) return;
+async function loadSecureStorage(): Promise<void> {
+  initializationError = null;
   try {
-    const loaded = await secureSecretGetMany(SECRET_NAMES);
-    for (const [key, value] of Object.entries(loaded)) cacheSecret(key, value);
-    secureReady = true;
+    // The initialization promise gates new public writes before this task starts.
+    // Drain accepted optimistic writes before taking a read/migration snapshot;
+    // a failed write must retain its cache/error rather than reload stale data.
+    if (pendingSecretWrites.size > 0 || secretWriteErrors.size > 0) {
+      await drainSecretWrites();
+    }
+    try {
+      const loaded = await secureSecretGetMany(SECRET_NAMES);
+      for (const name of SECRET_NAMES) {
+        cacheLoadedSecret(name, loaded);
+      }
+    } catch {
+      // One damaged record must not hide every other healthy secret.
+      await Promise.all(SECRET_NAMES.map(async (name) => {
+        try {
+          const loaded = await secureSecretGetMany([name]);
+          cacheLoadedSecret(name, loaded);
+        } catch (error) {
+          secretReadErrors.set(name, error);
+        }
+      }));
+    }
+    readsCompleted = true;
+    // Neither complete mirrors nor readback prove freshness of an unreadable
+    // primary. Without an atomic native precondition, recovery must be manual.
+    secureReady = secretReadErrors.size === 0;
+    if (!secureReady) return;
     await migrateLocalStorageSecrets();
+    initialized = true;
   } catch (err) {
     secureReady = false;
+    initializationError = err;
     console.warn(
       "[secureStorage] initialization failed; keeping localStorage fallback",
       err,
     );
   }
+}
+
+export function initializeSecureStorage(): Promise<void> {
+  if (initializationPromise) return initializationPromise;
+  if (initialized) return Promise.resolve();
+  if (!isTauri()) {
+    initialized = true;
+    return Promise.resolve();
+  }
+  // Install the gate synchronously, before native reads or migration can run.
+  const task = Promise.resolve().then(loadSecureStorage);
+  initializationPromise = task;
+  void task.finally(() => {
+    if (initializationPromise === task) initializationPromise = null;
+  });
+  return task;
 }
 
 /**
@@ -473,7 +603,9 @@ export async function initializeSecureStorage(): Promise<void> {
  *
  * 这是纯同步操作（localStorage.setItem），可在 beforeunload / 退出握手事件里
  * 安全调用。下次启动时 initializeSecureStorage 的迁移逻辑（migrateLocalStorageSecrets）
- * 会把 localStorage 里的明文 key 合并回 keychain 并剥离，因此平时不保留明文副本。
+ * 只会在原生逻辑记录从未存储（读取结果省略该记录）时导入明文 key，并经回读
+ * 校验后剥离。已有原生记录（包括删除标记及缺失的单项）始终优先，避免旧副本
+ * 回滚新值或复活已删除的 key；读取失败时保留恢复副本，不自动覆盖。
  */
 export function flushSecretsToLocalStorageFallback(): void {
   if (!hasWindow()) return;
@@ -565,10 +697,15 @@ export function flushSecretsToLocalStorageFallback(): void {
 
 export function resetSecureStorageForTests(): void {
   memorySecrets.clear();
+  secretReadErrors.clear();
+  storedSecretNames.clear();
   pendingSecretWrites.clear();
   secretWriteChains.clear();
   secretWriteErrors.clear();
   latestSecretWrites.clear();
   initialized = false;
+  initializationPromise = null;
+  readsCompleted = false;
+  initializationError = null;
   secureReady = false;
 }

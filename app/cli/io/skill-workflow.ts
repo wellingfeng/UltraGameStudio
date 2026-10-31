@@ -11,6 +11,10 @@ import { createNodeSkillHostPort, createNodeWorkspaceSkillRequest, type NodeSkil
 import { createNodeSkillReviewModelPort } from './skill-review-model';
 import { createCliSkillReviewModelPort } from './skill-review-capability';
 import { createNodeSkillCandidateStore } from './skill-candidate-store';
+import { checkSkillAdoption, readSkillAdoptionRule, type SkillAdoptionRule } from '../../src/runtime/skills/adoption';
+import { createHash } from 'node:crypto';
+import { lstat, readFile, realpath } from 'node:fs/promises';
+import { isAbsolute, relative, resolve, sep } from 'node:path';
 
 export interface NodeSkillWorkflowOptions {
   origin: SkillOrigin;
@@ -41,6 +45,29 @@ export function createNodeSkillWorkflow(options: NodeSkillWorkflowOptions) {
   const scheduler = new SkillReviewScheduler();
   const request = options.request ?? createNodeWorkspaceSkillRequest({ cwd: options.cwd, hostId: origin.hostId, workspaceId: origin.workspaceId });
   let loadedSkills: SkillLearningJob['loadedSkills'] = [];
+  const adoptionRules: SkillAdoptionRule[] = [];
+  const artifacts: Array<{ path: string; origin: SkillOrigin }> = [];
+  const adoptionHost = {
+    async inspectArtifact(path: string) {
+      const root = resolve(options.cwd); const target = resolve(root, path);
+      const rel = relative(root, target);
+      if (!rel || rel.startsWith('..') || isAbsolute(rel)) return null;
+      let current = root;
+      try {
+        if ((await lstat(root)).isSymbolicLink()) return null;
+        for (const segment of rel.split(sep)) {
+          current = resolve(current, segment);
+          if ((await lstat(current)).isSymbolicLink()) return null;
+        }
+        const actual = await realpath(target); const actualRoot = await realpath(root);
+        const actualRel = relative(actualRoot, actual);
+        const info = await lstat(actual);
+        if (actualRel.startsWith('..') || isAbsolute(actualRel) || !info.isFile() || info.size > 16 * 1024 * 1024) return null;
+        return { relativePath: actualRel.split(sep).join('/'), path: actual, isFile: true,
+          hash: createHash('sha256').update(await readFile(actual)).digest('hex') };
+      } catch (error) { if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null; throw error; }
+    },
+  };
   let context: Promise<LoadedSkillContext> | undefined;
   let finished: Promise<NodeSkillWorkflowOutcome> | undefined;
   const reviewModel = (): SkillReviewModelPort => {
@@ -69,6 +96,18 @@ export function createNodeSkillWorkflow(options: NodeSkillWorkflowOptions) {
         const loaded = await loadSkillContext({ host, origin, prompt: options.prompt, explicitSkillIds: options.explicitSkillIds,
           signal: options.signal, model });
         loadedSkills = loaded.loadedSkills;
+        // Parse only the exact complete content already delivered, no prose guessing.
+        const suffix = loaded.prompt.slice(options.prompt.length);
+        const marker = '\n\n<UGS_SKILL_CONTEXT>\n';
+        const end = suffix.lastIndexOf('\n</UGS_SKILL_CONTEXT>');
+        if (suffix.startsWith(marker) && end > marker.length) {
+          const contexts = JSON.parse(suffix.slice(marker.length, end)) as Array<{ skillId: string; revision: string; filePath: string; content: string }>;
+          for (const item of contexts) {
+            if (item.filePath !== 'SKILL.md' || !loadedSkills.some((skill) => skill.skillId === item.skillId && skill.revision === item.revision)) continue;
+            const rule = readSkillAdoptionRule(item.skillId, item.revision, item.content);
+            if (rule) adoptionRules.push(rule);
+          }
+        }
         return loaded;
       })();
       return context;
@@ -81,6 +120,14 @@ export function createNodeSkillWorkflow(options: NodeSkillWorkflowOptions) {
         collectors.set(event.runId, source);
       }
       source.collect([event]);
+      if (event.phase === 'end' && event.provenance === 'native-tool' && event.status === 'success' &&
+        ['write', 'write_file', 'edit', 'apply_patch'].includes(event.toolName.toLowerCase()) && event.args && typeof event.args === 'object') {
+        const args = event.args as Record<string, unknown>; const path = args.file_path ?? args.path;
+        if (typeof path === 'string') {
+          artifacts.push({ path, origin: { ...origin, runId: event.runId } });
+          if (artifacts.length > 64) artifacts.shift();
+        }
+      }
       if (isCliVerificationEvent(event)) verifiedCalls.add(JSON.stringify([event.runId, event.toolCallId]));
       if (event.phase === 'end' && event.provenance === 'native-tool' && event.status === 'success') reviewOrigin = { ...origin, runId: event.runId };
     },
@@ -96,6 +143,16 @@ export function createNodeSkillWorkflow(options: NodeSkillWorkflowOptions) {
     },
     finish(result: { finalAnswer: string; terminal: 'completed' | 'cancelled' | 'failed' }): Promise<NodeSkillWorkflowOutcome> {
       finished ??= (async (): Promise<NodeSkillWorkflowOutcome> => {
+        if (result.terminal === 'completed' && !options.signal?.aborted && adoptionRules.length) {
+          try {
+            const facts = await checkSkillAdoption({ origin, loadedSkills, rules: adoptionRules, artifacts, host: adoptionHost, signal: options.signal });
+            for (const fact of facts) {
+              if (options.signal?.aborted) break;
+              await request({ action: 'usage', origin, skillId: fact.skillId!, kind: 'used-with-evidence',
+                evidenceIds: [fact.evidenceId], evidence: [fact] });
+            }
+          } catch { /* Optional telemetry never grants write authority or fails the task. */ }
+        }
         if (!config.enabled || config.mode === 'off') return { status: 'disabled', origin, reason: 'Skill learning is disabled.' };
         let model: SkillReviewModelPort;
         try { model = reviewModel(); }

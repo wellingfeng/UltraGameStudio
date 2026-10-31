@@ -15,6 +15,9 @@ app/*.tsbuildinfo
 .claude/
 .ultragamestudio/
 memory/
+!app/src/runtime/memory/
+!app/src/runtime/memory/review.ts
+!app/src/runtime/memory/review.test.ts
 app/.gstack/
 app/src-tauri/.gstack/
 .ugs-run/

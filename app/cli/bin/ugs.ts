@@ -294,6 +294,21 @@ program
 //   return previous.concat([value]);
 // }
 
+program.command('tools <action> [query-or-tool-id]')
+  .description('查询当前会话工具目录：search / list / inspect / capabilities；会话内自动继承身份')
+  .option('--workspace <id-or-path>', '工作区 ID 或已登记路径')
+  .option('--session <id>', '会话 ID')
+  .option('--agent <id>', 'Agent ID')
+  .option('--provider <id>', '渠道账号 ID')
+  .option('--channel <id>', '渠道子账号 ID')
+  .option('--model <name>', '会话模型')
+  .option('--format <format>', 'json / text', 'json')
+  .option('--home <path>', 'UGS 数据根目录')
+  .option('--limit <count>', '搜索最多返回条目数（1–100）', '20')
+  .action((action: string, tool: string | undefined, opts: import('../commands/tools').ToolsOptions) => dispatch(async () => {
+    const { runTools } = await import('../commands/tools'); return runTools(action, tool, opts);
+  }));
+
 program.parseAsync(process.argv).catch((err) => {
   process.stderr.write(`ugs: ${err instanceof Error ? err.message : String(err)}\n`);
   process.exitCode = 1;

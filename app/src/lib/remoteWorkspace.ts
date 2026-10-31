@@ -38,8 +38,12 @@ import {
 } from '@/lib/secureStorage';
 import {
   RunnerClient as ProtocolRunnerClient,
+  REMOTE_RUNNER_API_PATHS,
   normalizeRemoteServerUrl,
+  remoteRunnerApiUrl,
 } from '@ugs/protocol';
+import type { SkillCandidateList } from '@/runtime/skills/preReview';
+import type { SkillOrigin } from '@/runtime/skills/types';
 import type {
   RemoteAdapter,
   RemoteEnvironmentInstallInput,
@@ -739,10 +743,29 @@ function clearRemoteSecrets(id: string): void {
 // ---------- Runner client SDK ----------
 
 export class RunnerClient extends ProtocolRunnerClient {
+  // The protocol SDK's header builder is private. Keep this ordinary bearer
+  // transport private too; no namespace, owner-control grant, or local store.
+  readonly #candidateHeaders: Record<string, string>;
   // 云端项目已退役：阻断所有旧调用路径，禁止向 Runner 发起请求。
   constructor(serverUrl: string, token: string) {
     assertCloudProjectsEnabled();
     super(serverUrl, token);
+    this.#candidateHeaders = { 'content-type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };
+  }
+  async skillCandidateRequest(
+    projectId: string,
+    request: { action: 'load' | 'compare_and_swap'; origin: SkillOrigin; list?: SkillCandidateList; expectedRevision?: number },
+    opts: { signal?: AbortSignal } = {},
+  ): Promise<SkillCandidateList> {
+    const res = await fetch(remoteRunnerApiUrl(this.serverUrl, `${REMOTE_RUNNER_API_PATHS.projectSkillService(projectId)}/candidates`), {
+      method: 'POST', headers: { ...this.#candidateHeaders }, body: JSON.stringify(request), signal: opts.signal,
+    });
+    const data = await res.json() as { ok?: boolean; result?: SkillCandidateList; error?: string };
+    if (!res.ok || data.ok !== true || !data.result) throw new Error(typeof data.error === 'string' ? data.error : `HTTP ${res.status}`);
+    if (data.result.version !== 1 || !Number.isSafeInteger(data.result.revision) || data.result.revision! < 0 || !Array.isArray(data.result.candidates)) {
+      throw new Error('SKILL_CANDIDATE_INVALID_RESPONSE');
+    }
+    return data.result;
   }
   /** Build a client straight from a saved workspace id. */
   static fromWorkspace(id: string): RunnerClient | null {

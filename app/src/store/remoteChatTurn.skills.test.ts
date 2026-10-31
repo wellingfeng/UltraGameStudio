@@ -6,7 +6,10 @@ import type { AiEditChannel } from './channelTypes';
 import { startRemoteChatTurn } from './remoteChatTurn';
 import type { StartRemoteChatTurnOptions } from './remoteChatTurn';
 import { DEFAULT_SKILL_LEARNING_CONFIG } from '@/lib/skillLearningConfig';
-import { createSkillCandidateStore } from '@/lib/skillCandidateStore';
+import { createRemoteSkillCandidateStore, type RemoteSkillCandidateClient } from '@/lib/remoteSkillLearning';
+import { RunnerClient } from '@ugs/protocol';
+import type { SkillCandidateList } from '@/runtime/skills/preReview';
+import { acquireReviewBackground } from '@/runtime/memory/review';
 
 // All network, connection and credential values in this file are fixtures.
 // The real chat entry point, RunnerClient and remote skill runtime are exercised.
@@ -94,12 +97,26 @@ function deferred<T>() {
   const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
   return { promise, resolve, reject };
 }
+function reviewSlotFree() {
+  const holder = acquireReviewBackground('eof-inspection');
+  holder?.release();
+  return !!holder;
+}
 function installServer() {
   const calls: Array<{ path: string; body?: Record<string, unknown>; headers: Headers }> = [];
   let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
   let job = structuredClone(createdJob);
   let snapshot: RemoteJob = { ...structuredClone(createdJob), status: 'done', result: { exitCode: 0 } };
   let contextError = false;
+  let candidates: SkillCandidateList = { version: 1, revision: 0, candidates: [] };
+  Object.assign(RunnerClient.prototype, { skillCandidateRequest: async (projectId: string, request: Parameters<RemoteSkillCandidateClient['skillCandidateRequest']>[1]) => {
+    calls.push({ path: `/projects/${projectId}/skill-service/candidates`, body: structuredClone(request) as unknown as Record<string, unknown>, headers: new Headers() });
+    if (request.action === 'compare_and_swap') {
+      if (request.expectedRevision !== candidates.revision) throw new Error('SKILL_CANDIDATE_CONFLICT');
+      candidates = { ...structuredClone(request.list!), revision: request.expectedRevision! + 1 };
+    }
+    return structuredClone(candidates);
+  } });
   const config = { ...DEFAULT_SKILL_LEARNING_CONFIG, activityThreshold: 1, cooldownMs: 0,
     reviewSelection: { adapter: 'codex', modelClass: 'fast', providerId: 'fixture-review-provider',
       channelId: 'fixture-http', model: 'fixture-selected-review-model' } };
@@ -146,7 +163,8 @@ function installServer() {
   vi.stubGlobal('fetch', fetchMock);
   return { calls, config, fetchMock, setJob(value: RemoteJob) { job = value; },
     async primeRepeatedCandidate() {
-      await createSkillCandidateStore(sourceOrigin).save({ version: 1, lastId: 'fixture-candidate', candidates: [{
+      await createRemoteSkillCandidateStore({ client: new RunnerClient(remoteFixture.workspace.serverUrl, 'fixture-auth'),
+        projectId: sourceOrigin.workspaceId, origin: sourceOrigin }).save({ version: 1, revision: 0, lastId: 'fixture-candidate', candidates: [{
         id: 'fixture-candidate', lesson: applied.lesson, context: 'Earlier verified remote task.',
         sources: [JSON.stringify(['fixture-prior-session', 'fixture-prior-turn'])], consecutive: 1, submitted: false,
       }] });
@@ -161,9 +179,89 @@ function installServer() {
 }
 
 beforeEach(() => { remoteFixture.filesUpdated.mockClear(); });
-afterEach(() => { vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+afterEach(() => { delete (RunnerClient.prototype as RunnerClient & Partial<RemoteSkillCandidateClient>).skillCandidateRequest; vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 describe('remote chat skill wiring (fixture HTTP)', () => {
+  it('reconciles a closed event stream against the exact terminal job and releases foreground without redispatch', async () => {
+    const server = installServer();
+    const { ch, options } = createTurn();
+    startRemoteChatTurn(options);
+    try {
+      await vi.waitFor(() => expect(server.calls.some((call) => call.path.endsWith('/stream'))).toBe(true));
+      expect(reviewSlotFree()).toBe(false);
+      server.close();
+      await vi.waitFor(() => expect(options.removeAiEditChannel).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(reviewSlotFree()).toBe(true));
+      expect(ch.messages.at(-1)?.text).toContain('远程任务完成');
+      expect(options.syncAndPersistSessionRunStatus).toHaveBeenCalledWith(
+        { workspaceId: 'fixture-local-bucket', sessionId: sourceOrigin.sessionId }, 'success');
+      expect(server.calls.filter(call => call.path === '/jobs')).toHaveLength(1);
+      expect(server.calls.filter(call => call.path.endsWith('/cancel'))).toHaveLength(0);
+    } finally { ch.abortController.abort(); server.close(); }
+  });
+
+  it('ends a closed stream with no terminal server result without retaining foreground or starting a review', async () => {
+    const server = installServer();
+    server.setSnapshot(structuredClone(createdJob));
+    const { ch, options, onSkillReviewState } = createTurn();
+    startRemoteChatTurn(options);
+    try {
+      await vi.waitFor(() => expect(server.calls.some((call) => call.path.endsWith('/stream'))).toBe(true));
+      server.close();
+      await vi.waitFor(() => expect(options.removeAiEditChannel).toHaveBeenCalledTimes(1));
+      await vi.waitFor(() => expect(reviewSlotFree()).toBe(true));
+      expect(options.syncAndPersistSessionRunStatus).toHaveBeenCalledWith(
+        { workspaceId: 'fixture-local-bucket', sessionId: sourceOrigin.sessionId }, 'error');
+      expect(onSkillReviewState).not.toHaveBeenCalled();
+      expect(server.calls.filter(call => call.path === '/jobs')).toHaveLength(1);
+      expect(server.calls.filter(call => call.path.endsWith('/cancel'))).toHaveLength(1);
+      expect(server.calls.some(call => call.path === '/v1/chat/completions' || call.body?.action === 'manage')).toBe(false);
+    } finally { ch.abortController.abort(); server.close(); }
+  });
+
+  it('does not read remote skills before exact source persistence resolves', async () => {
+    const server = installServer();
+    const ready = deferred<void>();
+    const { ch, options } = createTurn();
+    startRemoteChatTurn({ ...options, ready: ready.promise });
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(server.calls.filter((call) => call.path.endsWith('/skill-service'))).toEqual([]);
+      ready.resolve();
+      await vi.waitFor(() => expect(server.calls.some((call) => call.path === '/jobs')).toBe(true));
+    } finally { ready.resolve(); ch.abortController.abort(); server.close(); }
+  });
+
+  it('bounds closed-stream read-only reconciliation and ignores a late terminal snapshot', async () => {
+    const server = installServer();
+    const saved = deferred<RemoteJob>();
+    let lookupSignal: AbortSignal | undefined;
+    const lookup = vi.spyOn(RunnerClient.prototype, 'getJob').mockImplementation((_id, request) => {
+      lookupSignal = request?.signal;
+      return saved.promise;
+    });
+    const { ch, options } = createTurn();
+    startRemoteChatTurn(options);
+    try {
+      await vi.waitFor(() => expect(server.calls.some((call) => call.path.endsWith('/stream'))).toBe(true));
+      vi.useFakeTimers();
+      server.close();
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      expect(lookup).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(10_001);
+      expect(lookupSignal?.aborted).toBe(true);
+      expect(options.removeAiEditChannel).toHaveBeenCalledTimes(1);
+      expect(reviewSlotFree()).toBe(true);
+      const terminalText = ch.messages.at(-1)?.text;
+      expect(terminalText).toContain('读取任务终态超时');
+      saved.resolve({ ...structuredClone(createdJob), status: 'done', result: { exitCode: 0 } });
+      for (let i = 0; i < 100; i++) await Promise.resolve();
+      expect(ch.messages.at(-1)?.text).toBe(terminalText);
+      expect(options.removeAiEditChannel).toHaveBeenCalledTimes(1);
+      expect(server.calls.filter(call => call.path === '/jobs')).toHaveLength(1);
+    } finally { vi.useRealTimers(); ch.abortController.abort(); server.close(); }
+  });
+
   it('preloads only the new request and awaits persistence of the exact server origin before streaming', async () => {
     const server = installServer();
     const persisted = deferred<void>();
@@ -189,6 +287,7 @@ describe('remote chat skill wiring (fixture HTTP)', () => {
         expect(call.headers.get('x-ugs-skill-control')).toBeNull();
       }
       expect(onSkillContext).toHaveBeenCalledWith({ origin: sourceOrigin,
+        sourceSession: { workspaceId: 'fixture-local-bucket', sessionId: sourceOrigin.sessionId, serverUrl: 'https://remote-chat.fixture' },
         loadedSkills: [{ skillId: skillEntry.skillId, revision: skillEntry.revision, hash: skillEntry.hash, files: ['SKILL.md'] }],
         catalogRevision: 'fixture-catalog' });
       expect(server.calls.some((call) => call.path.endsWith('/stream'))).toBe(false);
@@ -216,7 +315,7 @@ describe('remote chat skill wiring (fixture HTTP)', () => {
         result: { exitCode: 0 }, messages: [{ at: 20, role: 'assistant' as const, kind: 'final' as const, text: 'Fixture task answer.' }] };
       server.emit('result', terminal);
       server.emit('result', terminal);
-      await vi.waitFor(() => expect(onSkillReviewState).toHaveBeenCalledWith(expect.objectContaining({ status: 'applied' })));
+      await vi.waitFor(() => expect(onSkillReviewState).toHaveBeenCalledWith(expect.objectContaining({ status: 'applied' })), { timeout: 4000 });
       expect(server.calls.filter((call) => call.path === `/jobs/${sourceOrigin.runId}`)).toHaveLength(1);
       expect(server.calls.filter((call) => call.path === '/v1/chat/completions')).toHaveLength(2);
       const manage = server.calls.find((call) => call.body?.action === 'manage')!;
@@ -249,7 +348,7 @@ describe('remote chat skill wiring (fixture HTTP)', () => {
     try {
       await vi.waitFor(() => expect(server.calls.some((call) => call.path.endsWith('/stream'))).toBe(true));
       server.emit('result', { ...structuredClone(createdJob), status: 'done', result: { exitCode: 0 } });
-      await vi.waitFor(() => expect(onSkillReviewState).toHaveBeenCalledWith(expect.objectContaining({ status: 'applied' })));
+      await vi.waitFor(() => expect(onSkillReviewState).toHaveBeenCalledWith(expect.objectContaining({ status: 'applied' })), { timeout: 4000 });
       const requests = server.calls.filter((call) => call.path === '/v1/chat/completions').map((call) => call.body!);
       expect(requests).toHaveLength(2);
       for (const request of requests) {
@@ -303,7 +402,8 @@ describe('remote chat skill wiring (fixture HTTP)', () => {
     const ready = { ready: sourceWrite.promise };
     startRemoteChatTurn({ ...options, ...ready });
     try {
-      await vi.waitFor(() => expect(server.calls.some((call) => call.path.endsWith('/skill-service'))).toBe(true));
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(server.calls.some((call) => call.path.endsWith('/skill-service'))).toBe(false);
       expect(server.calls.some((call) => call.path === '/jobs')).toBe(false);
       sourceWrite.resolve();
       await vi.waitFor(() => expect(server.calls.some((call) => call.path.endsWith('/stream'))).toBe(true));
@@ -391,7 +491,8 @@ describe('remote chat skill wiring (fixture HTTP)', () => {
       const submission = server.calls.find((call) => call.path === '/jobs')!.body!;
       expect(submission.prompt).not.toContain('<UGS_SKILL_CONTEXT>');
       expect(submission.skillSource).toEqual({ sessionId: sourceOrigin.sessionId, turnId: sourceOrigin.turnId });
-      expect(onSkillContext).toHaveBeenCalledWith({ origin: sourceOrigin, loadedSkills: [], catalogRevision: '' });
+      expect(onSkillContext).toHaveBeenCalledWith({ origin: sourceOrigin, loadedSkills: [], catalogRevision: '',
+        sourceSession: { workspaceId: 'fixture-local-bucket', sessionId: sourceOrigin.sessionId, serverUrl: 'https://remote-chat.fixture' } });
     } finally { ch.abortController.abort(); server.close(); }
   });
 

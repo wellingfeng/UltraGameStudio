@@ -2,6 +2,12 @@ import type { SkillLearningConfig } from '@/runtime/skills/types';
 
 export type { SkillLearningConfig } from '@/runtime/skills/types';
 
+/** Ordinary background reviews always stage proposals. Off/enabled are scheduling gates,
+ * not permission to bypass approval. config.mode remains the explicit-command preference. */
+export function getBackgroundSkillWriteMode(_config?: SkillLearningConfig): 'approve-all' {
+  return 'approve-all';
+}
+
 export const DEFAULT_SKILL_LEARNING_CONFIG: SkillLearningConfig = {
   enabled: true,
   mode: 'auto-safe',

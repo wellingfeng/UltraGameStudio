@@ -2,6 +2,10 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { simpleBlueprint } from '@/core/defaultBlueprint';
+import { createMemoryIpcFixture } from '@/test/nativePersistenceFixture';
+import { resetSnapshotCache } from '@/lib/memorySnapshots';
+import { renderFrozenMemorySnapshot } from '@/lib/memoryStore';
+import { compareExchangeMemoryJson, readMemoryJson } from '@/lib/memoryTransactions';
 import type { ResolvedGatewayRoute } from '@/lib/modelGateway/types';
 import Sidebar from '@/panels/Sidebar';
 import {
@@ -88,6 +92,7 @@ type CliInvocation = {
 const listeners = new Set<Listener>();
 const invocations: CliInvocation[] = [];
 const unexpectedCommands: string[] = [];
+let memoryIpc = createMemoryIpcFixture();
 let sidebarRoot: Root | undefined;
 let sidebarContainer: HTMLDivElement | undefined;
 
@@ -109,6 +114,8 @@ function localHistoryChildren(relPath: string): string[] {
 
 beforeEach(async () => {
   window.localStorage.clear();
+  resetSnapshotCache();
+  memoryIpc = createMemoryIpcFixture();
   __resetSimpleChatRuntimeForTests();
   aiEditSnapshots.clear();
   listeners.clear();
@@ -131,6 +138,9 @@ beforeEach(async () => {
   // user's desktop history, filesystem, credentials, or a real CLI process.
   ipc.invoke.mockImplementation(async (command: string, payload: Record<string, unknown> = {}) => {
     switch (command) {
+      case 'memory_read_json':
+      case 'memory_compare_exchange_json':
+        return memoryIpc.invoke(command, payload);
       case 'history_read_json':
         return window.localStorage.getItem(HISTORY_PREFIX + String(payload.relPath));
       case 'history_write_json':
@@ -168,6 +178,9 @@ beforeEach(async () => {
     }
   });
   vi.stubGlobal('isTauri', true);
+  // Concurrent dynamic imports can reach the SDK's real entry point too.
+  // Both routes dispatch to the exact same isolated persistence fixture.
+  vi.stubGlobal('__TAURI_INTERNALS__', { invoke: ipc.invoke });
   useStore.setState({
     ...useStore.getInitialState(),
     workflow: simpleBlueprint('CLI failure fixture'),
@@ -263,12 +276,48 @@ async function readPersistedSession(workspaceId: string, sessionId: string): Pro
 }
 
 describe('native CLI rejection through the real chat store', () => {
+  it('round-trips native memory bytes and rejects a stale exact CAS without changing its winner', async () => {
+    const path = 'memories/fixture-cas.json';
+    const first = JSON.stringify({ version: 1, entries: ['first'] });
+    const winner = JSON.stringify({ version: 1, entries: ['concurrent winner'] });
+    await compareExchangeMemoryJson(path, null, first);
+    expect(await readMemoryJson(path)).toBe(first);
+    expect(memoryIpc.bytes.get(path)).toBe(first);
+    memoryIpc.bytes.set(path, winner);
+    await expect(compareExchangeMemoryJson(path, first, JSON.stringify({ version: 1, entries: ['stale writer'] })))
+      .rejects.toThrow('Memory CAS conflict: exact base changed');
+    expect(await readMemoryJson(path)).toBe(winner);
+    expect(ipc.invoke.mock.calls.some(([command, payload]) => command === 'history_write_json' && String(payload?.relPath).startsWith('memories/'))).toBe(false);
+  });
+
+  it.each(['read', 'cas', 'acknowledged-but-unwritten'] as const)('propagates the actual native memory %s boundary failure without history fallback', async (stage) => {
+    const path = `memories/fixture-failure-${stage}.json`;
+    const failure = new Error(`deterministic memory ${stage} failure`);
+    const delegate = ipc.invoke.getMockImplementation()!;
+    ipc.invoke.mockImplementation(async (command: string, payload: Record<string, unknown> = {}) => {
+      if (payload.relPath === path && command === (stage === 'read' ? 'memory_read_json' : 'memory_compare_exchange_json')) {
+        if (stage === 'acknowledged-but-unwritten') return payload.json;
+        throw failure;
+      }
+      return delegate(command, payload);
+    });
+    const result = stage === 'read' ? readMemoryJson(path) : compareExchangeMemoryJson(path, null, '{"version":1}');
+    if (stage === 'acknowledged-but-unwritten') await expect(result).rejects.toThrow('Memory readback mismatch; target changed after commit');
+    else await expect(result).rejects.toBe(failure);
+    expect(memoryIpc.bytes.has(path)).toBe(false);
+    expect(ipc.invoke.mock.calls.some(([command, payload]) => command === 'history_write_json' && String(payload?.relPath).startsWith('memories/'))).toBe(false);
+  });
+
   it.each(CLI_FAILURE_CASES)('cleans up a pending CLI turn rejected by $reason', async ({ failure }) => {
     const { workspace, records: [source] } = await prepareSessions(['CLI failure fixture']);
     const key = { workspaceId: workspace.id, sessionId: source.id };
     expect(useStore.getState().sendPrompt('Trigger CLI transport failure.')).toBe(true);
     await vi.waitFor(() => expect(invocations).toHaveLength(1));
     const invocation = invocations[0];
+    const snapshots = [...memoryIpc.bytes].filter(([path]) => path.startsWith('memories/snapshots/'));
+    expect(snapshots).toHaveLength(1);
+    expect(JSON.parse(snapshots[0][1])).toMatchObject({ version: 1, workspaceId: workspace.id, freezeKey: source.id });
+    await expect(renderFrozenMemorySnapshot(workspace.id, source.id)).resolves.toEqual(expect.any(String));
     const [channel] = getAiEditChannelsForSession(workspace.id, source.id);
     expect(channel.cliRunIds).toEqual(new Set([invocation.runId]));
     expect(channel.liveSteer).toMatchObject({ runId: invocation.runId, accepting: true });
