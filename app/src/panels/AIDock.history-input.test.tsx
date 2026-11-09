@@ -54,6 +54,20 @@ it('pins only passed user inputs and switches to the preceding turn on upward sc
   } finally { await v.cleanup(); }
 });
 
+it('stops measuring older prompts once the latest passed prompt is found', async () => {
+  const v = await view();
+  try {
+    const rows = [...v.container.querySelectorAll<HTMLElement>('[data-ugs-message-row]')];
+    const first = vi.spyOn(rows[0], 'getBoundingClientRect');
+    const last = vi.spyOn(rows[2], 'getBoundingClientRect');
+    await v.scroll(500);
+    expect(v.container.querySelector('[data-ugs-sticky-prompt]')?.getAttribute('data-ugs-sticky-prompt')).toBe('u2');
+    // The topic navigator also measures each row once. The sticky-prompt
+    // calculation must not measure the older row again.
+    expect(first.mock.calls.length).toBeLessThan(last.mock.calls.length);
+  } finally { await v.cleanup(); }
+});
+
 it('does not require the user to open a tool catalogue from the chat composer', async () => {
   const v = await view();
   try {

@@ -25,12 +25,12 @@ function Demo() {
 }
 beforeEach(async () => {
   read.mockClear();
-  useFilePreviewTabs.setState({ tabs: [], activeByScope: {} });
+  useFilePreviewTabs.setState({ tabs: [], activeByScope: {}, browserTabs: [] });
   useStore.setState({ composer: { ...useStore.getState().composer, workspace: 'E:/Game' } });
   host = document.createElement('div'); document.body.append(host); root = createRoot(host);
   await act(async () => root.render(<Demo />));
 });
-afterEach(async () => { await act(async () => root.unmount()); host.remove(); useFilePreviewTabs.setState({ tabs: [], activeByScope: {} }); });
+afterEach(async () => { await act(async () => root.unmount()); host.remove(); useFilePreviewTabs.setState({ tabs: [], activeByScope: {}, browserTabs: [] }); });
 async function click(selector: string) { await act(async () => host.querySelector<HTMLButtonElement>(selector)!.click()); }
 
 it('uses diagonal arrows for the main preview action', () => {

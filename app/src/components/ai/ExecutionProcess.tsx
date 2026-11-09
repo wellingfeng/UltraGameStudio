@@ -7,6 +7,7 @@ import type { ExecutionSegment } from './executionSegments';
 import type { OpenFileFn } from './FileChip';
 import type { SearchHighlightState } from './lib/searchHighlight';
 import { useStore } from '@/store/useStore';
+import { skillActivity } from './lib/skillActivity';
 
 /** Group tool events into parents + their `parentId` children (one level). */
 function nestTools(events: ToolEvent[]): Array<{ event: ToolEvent; children: ToolEvent[] }> {
@@ -58,6 +59,10 @@ export default function ExecutionProcess({
     : [`${count} ${count === 1 ? 'step' : 'steps'}`, running ? `${running} running` : '', failed ? `${failed} failed` : ''].filter(Boolean).join(' · ');
   const tools = nestTools(events);
   const childrenById = new Map(tools.map(({ event, children }) => [event.id, children]));
+  const activities = [...new Map(events.flatMap((event) => {
+    const activity = skillActivity(event);
+    return activity ? [[`${activity.kind}:${activity.name}`, activity] as const] : [];
+  })).values()];
 
   return (
     <div className="ai-execution-process" data-open={expanded ? 'true' : 'false'} data-status={status}>
@@ -74,6 +79,13 @@ export default function ExecutionProcess({
         </span>
         <span className="ai-execution-process__summary text-fg-faint">{summary}</span>
       </button>
+      {activities.map((activity) => (
+        <div key={`${activity.kind}:${activity.name}`} data-ugs-skill-activity="true" className="px-2 py-0.5 text-xs text-fg-dim">
+          {locale === 'zh-CN'
+            ? `${activity.kind === 'used' ? '使用技能' : '读取技能'}：${activity.name}`
+            : `${activity.kind === 'used' ? 'Skill used' : 'Skill read'}: ${activity.name}`}
+        </div>
+      ))}
       <div id={bodyId} className="ai-execution-process__body">
         {segments.map((segment, index) => segment.type === 'reasoning' ? (
           <div key={`reasoning-${index}`} className="ai-execution-process__step" hidden={!expanded && segment.done}>

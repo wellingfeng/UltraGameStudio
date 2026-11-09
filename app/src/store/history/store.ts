@@ -1,5 +1,6 @@
 import { isSupportedWorkspacePath } from '@/lib/cloudProjects';
 import { SCHEDULED_TASK_SCOPE, SCHEDULED_TASK_HISTORY_DIR } from '@/lib/scheduledTaskScope';
+import { setStartUserInputs } from '@/core/startInputs';
 import { retainScheduledTaskMessages } from '@/lib/scheduledTaskRetention';
 import { sessionHasContextCompression } from '@/lib/contextCompression';
 import type { IRGraph } from '@/core/ir';
@@ -7,6 +8,12 @@ import { loadComposer } from '@/lib/composerStorage';
 import { UGS_STORAGE_KEY } from '@/lib/persist';
 import { tauriAvailable } from '@/lib/tauri';
 import type { Message } from '@/store/types';
+import { runMetaFromSnapshot, workflowWithRunSnapshot } from '../runSnapshot';
+import { PersistenceQueue } from './persistenceQueue';
+import { serializeHistory } from './serialization';
+import { sessionDelta } from './sessionDelta';
+import { estimateRetainedHistoryBytes } from './payloadBudget';
+import { hydrateSessionPayload, splitSessionPayload } from './chunkedSession';
 import {
   deriveWorkspaceId,
   isWorkspaceId,
@@ -20,6 +27,9 @@ import {
   UNASSIGNED_WORKSPACE_ID,
   type HistoryConfig,
   type SessionCreateInput,
+  type SessionOrigin,
+  type SessionFinalReconciliation,
+  type SessionConditionalWriteResult,
   type SessionPatch,
   type SessionRecord,
   type SessionSummary,
@@ -30,6 +40,8 @@ import {
 
 export interface HistoryStore {
   ready(): Promise<void>;
+  /** Drain accepted writes and propagate any unobserved durability failure. */
+  flush(): Promise<void>;
   rootPath(): Promise<string>;
 
   getConfig(): Promise<HistoryConfig>;
@@ -50,13 +62,26 @@ export interface HistoryStore {
     workspaceId: string,
     sessionId: string,
   ): Promise<SessionRecord | null>;
+  /** Restore a draft without hydrating the transcript or populating its cache. */
+  getSessionComposerDraft(workspaceId: string, sessionId: string): Promise<string | undefined>;
+  /** Backing identity read: missing is null; unknown/unreadable rejects. */
+  getSessionForGeneration(workspaceId: string, sessionId: string): Promise<SessionRecord | null>;
   createSession(input: SessionCreateInput): Promise<SessionRecord>;
   updateSession(
     workspaceId: string,
     sessionId: string,
     patch: SessionPatch,
   ): Promise<SessionRecord>;
+  /** null retires a deleted/replaced target; rejection retains the obligation. */
+  updateSessionIfGeneration(
+    workspaceId: string,
+    sessionId: string,
+    origin: SessionOrigin,
+    patch: SessionPatch,
+    reconciliation?: SessionFinalReconciliation,
+  ): Promise<SessionConditionalWriteResult | null>;
   pruneScheduledTaskHistory(workspaceId: string, sessionId: string, protectedMessageIds?: () => ReadonlySet<string>): Promise<{ record: SessionRecord; removedIds: string[]; backupError?: unknown } | null>;
+  clearScheduledTaskHistory(workspaceId: string, sessionId: string, extraMessageIds: string[]): Promise<{ record: SessionRecord; removedIds: string[]; backupError?: unknown }>;
   deleteSession(
     workspaceId: string,
     sessionId: string,
@@ -88,18 +113,36 @@ const SESSION_RECORD_CACHE_LIMIT = 5;
 const SESSION_RECORD_PREWARM_LIMIT = 5;
 const SESSION_SUMMARY_ACTIVITY_VERSION = 3;
 
-let writeQueue: Promise<unknown> = Promise.resolve();
+const writeQueue = new PersistenceQueue();
+// Session payload I/O is concurrent; all read/modify/write index transactions
+// still share one lane. Global maintenance waits for the session queue first.
+let metadataQueue: Promise<unknown> = Promise.resolve();
+function enqueueMetadata<T>(fn: () => Promise<T>): Promise<T> {
+  const run = metadataQueue.then(fn, fn);
+  metadataQueue = run.then(() => undefined, () => undefined);
+  return run;
+}
 const sessionRecordCache = new Map<string, Map<string, SessionRecord>>();
 const scheduledTaskRemovedMessages = new Map<string, Set<string>>();
 const sessionPrewarmTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
-function enqueue<T>(fn: () => Promise<T>): Promise<T> {
-  const run = writeQueue.then(fn, fn);
-  writeQueue = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  return run;
+/** Declare ALL payload retained by closures; undefined is not a cost bypass. */
+function enqueue<T>(fn: () => Promise<T>, retained: unknown, allowChunked = false): Promise<T> {
+  return writeQueue.enqueue(fn, retained, undefined, undefined, allowChunked);
+}
+
+function mergeCheckpoints(previous: SessionPatch, incoming: SessionPatch): SessionPatch | null {
+  if (!previous.streamCheckpoint || !incoming.streamCheckpoint ||
+      !!previous.mergeMessages !== !!incoming.mergeMessages ||
+      !!previous.preserveUpdatedAt !== !!incoming.preserveUpdatedAt) return null;
+  return {
+    ...previous, ...Object.fromEntries(Object.entries(incoming).filter(([, value]) => value !== undefined)),
+    ...(previous.isWorkflow || incoming.isWorkflow ? { isWorkflow: true } : {}),
+    ...(previous.messages && incoming.messages && incoming.mergeMessages
+      ? { messages: mergePersistedMessages(previous.messages, incoming.messages) } : {}),
+    ...(previous.meta || incoming.meta ? { meta: { ...previous.meta, ...incoming.meta } } : {}),
+    ...(previous.metadata || incoming.metadata ? { metadata: { ...previous.metadata, ...incoming.metadata } } : {}),
+  };
 }
 
 async function getInvoke() {
@@ -133,12 +176,8 @@ function localGet(key: string): string | null {
 }
 
 function localSet(key: string, value: string): void {
-  if (!hasLocalStorage()) return;
-  try {
-    window.localStorage.setItem(key, value);
-  } catch {
-    /* non-fatal */
-  }
+  if (!hasLocalStorage()) throw new Error('HISTORY_STORAGE_UNAVAILABLE');
+  window.localStorage.setItem(key, value);
 }
 
 function localRemovePath(relPath: string): void {
@@ -177,16 +216,58 @@ function localListDir(relPath: string): string[] {
   return [...out].sort();
 }
 
-async function readJson<T>(relPath: string): Promise<T | null> {
+async function readJson<T>(relPath: string, authoritative = false, skipLargeSession = false, draftOnly = false): Promise<T | null> {
+  const localRead = (): string | null => {
+    if (!authoritative) return localGet(FALLBACK_PREFIX + relPath);
+    if (!hasLocalStorage()) throw new Error('HISTORY_STORAGE_UNAVAILABLE');
+    return window.localStorage.getItem(FALLBACK_PREFIX + relPath);
+  };
   const raw = tauriAvailable()
     ? await command<string | null>('history_read_json', { relPath })
-    : localGet(FALLBACK_PREFIX + relPath);
-  if (!raw) return null;
+    : localRead();
+  if (authoritative ? raw === null : !raw) return null;
+  // The sidebar may prewarm recent sessions, but loading megabytes of legacy
+  // text (or every referenced chunk) must wait until the session is opened.
+  if (skipLargeSession && raw!.length > 256 * 1024) return null;
+  let value: T;
   try {
-    return JSON.parse(raw) as T;
-  } catch {
+    value = JSON.parse(raw!) as T;
+    if (authoritative && value === null) throw new Error('HISTORY_SESSION_INVALID');
+  } catch (error) {
+    if (authoritative) throw error;
     return null;
   }
+  const session = /^(?:workspaces\/[^/]+\/sessions|scheduled-tasks\/sessions)\/[^/]+\.json$/.test(relPath) && !relPath.endsWith('/index.json');
+  if (skipLargeSession && session && value && typeof value === 'object' && (value as Record<string, unknown>).__ugsHistoryChunkVersion === 1) return null;
+  if (!session) return value;
+  const hydrate = <U,>(input: U) => hydrateSessionPayload(input, relPath, (path) => readJson(path, true), undefined,
+    tauriAvailable() ? async (paths) => {
+      const chunks = await command<(string | null)[]>('history_read_chunks', { relPaths: paths });
+      if (!Array.isArray(chunks)) throw new Error('HISTORY_CHUNK_CORRUPT');
+      return chunks.map((chunk) => chunk === null ? null : JSON.parse(chunk));
+    } : undefined);
+  if (draftOnly && value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const meta = record.meta && typeof record.meta === 'object' ? record.meta as Record<string, unknown> : {};
+    const selected = await hydrate({
+      ...(record.__ugsHistoryChunkVersion === 1 ? { __ugsHistoryChunkVersion: 1 } : {}),
+      draft: meta.composerDraft,
+    });
+    return { meta: { composerDraft: selected.draft } } as T;
+  }
+  return hydrate(value);
+}
+
+/** Only a missing backing object is null; unreadable/malformed is unknown. */
+async function readSessionForGeneration(workspaceId: string, sessionId: string): Promise<SessionRecord | null> {
+  const record = await readJson<SessionRecord>(sessionPath(workspaceId, sessionId), true);
+  if (record === null) return null;
+  if (!record || typeof record !== 'object' || Array.isArray(record) ||
+      typeof record.id !== 'string' || typeof record.workspaceId !== 'string' ||
+      !Number.isFinite(record.createdAt) || !Array.isArray(record.messages)) {
+    throw new Error('HISTORY_SESSION_INVALID');
+  }
+  return record;
 }
 
 // `JSON.stringify` faithfully serializes lone (unpaired) UTF-16 surrogates as
@@ -195,23 +276,14 @@ async function readJson<T>(relPath: string): Promise<T | null> {
 // them, but the Rust backend's serde validator rejects the escape with
 // "unexpected end of hex escape", which aborts the whole history load. Replace
 // any unpaired surrogate with U+FFFD so every payload round-trips cleanly.
-function sanitizeLoneSurrogates(json: string): string {
-  return json.replace(
-    /\\u(d[89ab][0-9a-f]{2})(\\ud[c-f][0-9a-f]{2})?|\\ud[c-f][0-9a-f]{2}/gi,
-    (match, _high, lowPair) =>
-      // A matched high+low pair (lowPair present) is valid — keep it. A lone
-      // high (no lowPair) or a lone low (other branch) becomes U+FFFD.
-      lowPair ? match : '\\ufffd',
-  );
-}
-
-async function writeJson(relPath: string, value: unknown): Promise<void> {
-  const json = sanitizeLoneSurrogates(JSON.stringify(value, null, 2));
-  if (tauriAvailable()) {
-    await command<void>('history_write_json', { relPath, json });
-    return;
-  }
-  localSet(FALLBACK_PREFIX + relPath, json);
+async function writeJson(relPath: string, value: unknown, streamCheckpoint = false): Promise<void> {
+  await serializeHistory(value, { relPath, onSerialized: async (json) => {
+    if (tauriAvailable()) {
+      await command<void>('history_write_json', { relPath, json, streamCheckpoint });
+      return;
+    }
+    localSet(FALLBACK_PREFIX + relPath, json);
+  } });
 }
 
 async function removePath(relPath: string, soft = true): Promise<void> {
@@ -336,7 +408,7 @@ async function prewarmRecentSessionRecords(
   for (const summary of sessions.slice(0, SESSION_RECORD_PREWARM_LIMIT)) {
     if (cachedSessionRecord(workspaceId, summary.id)) continue;
     const record = await readJson<SessionRecord>(
-      sessionPath(workspaceId, summary.id),
+      sessionPath(workspaceId, summary.id), false, true,
     );
     if (record) rememberSessionRecord(record);
   }
@@ -355,7 +427,7 @@ function scheduleRecentSessionPrewarm(
     setTimeout(async () => {
       sessionPrewarmTimers.delete(workspaceId);
       try {
-        await prewarmRecentSessionRecords(workspaceId, recent);
+        await enqueue(() => prewarmRecentSessionRecords(workspaceId, recent), { workspaceId, recent });
       } catch {
         /* non-fatal */
       }
@@ -950,15 +1022,11 @@ async function mergeWorkspaceGroupInternal(
   };
 
   await writeJson(workspaceMetaPath(group.canonicalId), mergedRecord);
-  await Promise.all(
-    sessionItems
-      .filter((item): item is SessionMergeItem & { record: SessionRecord } =>
-        item.record != null,
-      )
-      .map((item) =>
-        writeJson(sessionPath(group.canonicalId, item.record.id), item.record),
-      ),
-  );
+  // Large records share the same serialization budget. Migrate one at a time
+  // so multiple independently chunked sessions cannot exhaust it together.
+  for (const item of sessionItems) {
+    if (item.record) await writeSessionPayload(sessionPath(group.canonicalId, item.record.id), item.record);
+  }
   await writeSessionIndexInternal(group.canonicalId, sessions);
 
   await Promise.all(
@@ -1119,10 +1187,44 @@ async function getSessionInternal(
   return record ? rememberSessionRecord(record) : null;
 }
 
+async function writeSessionPayload(
+  path: string,
+  record: SessionRecord,
+  streamCheckpoint = false,
+  previous?: SessionRecord,
+): Promise<void> {
+  const value = streamCheckpoint && previous && tauriAvailable() ? sessionDelta(previous, record) : record;
+  const persist = async (payload: unknown, checkpoint: boolean, inlineTail: boolean) => {
+    try {
+      await writeJson(path, payload, checkpoint);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      if (!tauriAvailable() || !['HISTORY_PAYLOAD_TOO_LARGE', 'HISTORY_JSON_TOO_LARGE', 'HISTORY_SERIALIZATION_BYTES_FULL'].includes(reason) ||
+        estimateRetainedHistoryBytes(payload, Number.MAX_SAFE_INTEGER) < 512 * 1024) throw error;
+      const chunked = await splitSessionPayload(payload, path, (chunkPath) => readJson(chunkPath, true), (chunkPath, chunk) => writeJson(chunkPath, chunk), inlineTail);
+      await writeJson(path, chunked, checkpoint);
+    }
+  };
+  try {
+    await persist(value, streamCheckpoint, streamCheckpoint && value !== record);
+  } catch (error) {
+    // Rotate a full journal by atomically publishing the complete latest state.
+    // The old base and durable journal remain valid if replacement fails.
+    if (!streamCheckpoint || !tauriAvailable() || (error instanceof Error ? error.message : String(error)) !== 'HISTORY_JOURNAL_FULL') throw error;
+    await persist(record, true, false);
+  }
+}
+
 async function writeSessionInternal(
   record: SessionRecord,
+  streamCheckpoint = false,
+  previous?: SessionRecord,
+  terminalStatusOnly = false,
 ): Promise<SessionRecord> {
-  await writeJson(sessionPath(record.workspaceId, record.id), record);
+  await writeSessionPayload(sessionPath(record.workspaceId, record.id), record, streamCheckpoint || terminalStatusOnly, previous);
+  rememberSessionRecord(record);
+  if (streamCheckpoint) return record;
+  return enqueueMetadata(async () => {
   const current = await listSessionsInternal(record.workspaceId);
   const next = [
     sessionSummary(record),
@@ -1136,6 +1238,7 @@ async function writeSessionInternal(
     next.length,
   );
   return rememberSessionRecord(record);
+  });
 }
 
 async function createSessionInternal(
@@ -1146,6 +1249,7 @@ async function createSessionInternal(
   const title = input.title ?? titleFromMessages(messages);
   const record: SessionRecord = {
     id: input.id ?? randomId(),
+    generation: crypto.randomUUID(),
     workspaceId: input.workspaceId,
     title,
     isWorkflow: input.isWorkflow,
@@ -1154,6 +1258,7 @@ async function createSessionInternal(
     messages,
     ...(input.isWorkflow && input.workflow ? { workflow: input.workflow } : {}),
     ...(input.meta ? { meta: input.meta } : {}),
+    ...(input.metadata ? { metadata: input.metadata } : {}),
   };
   return writeSessionInternal(record);
 }
@@ -1166,6 +1271,11 @@ async function updateSessionInternal(
   const current = await getSessionInternal(workspaceId, sessionId);
   if (!current) {
     throw new Error(`Session not found: ${workspaceId}/${sessionId}`);
+  }
+
+  if (patch.terminalStatusOnly && (patch.messages !== undefined || patch.workflow !== undefined ||
+      patch.title !== undefined || patch.isWorkflow !== undefined || patch.metadata !== undefined || patch.streamCheckpoint)) {
+    throw new Error('HISTORY_TERMINAL_STATUS_PATCH_INVALID');
   }
 
   const nextIsWorkflow =
@@ -1192,9 +1302,10 @@ async function updateSessionInternal(
       ? { workflow: patch.workflow ?? current.workflow }
       : { workflow: undefined }),
     ...(patch.meta ? { meta: { ...(current.meta ?? {}), ...patch.meta } } : {}),
+    ...(patch.metadata ? { metadata: { ...current.metadata, ...patch.metadata } } : {}),
   };
 
-  return writeSessionInternal(next);
+  return writeSessionInternal(next, patch.streamCheckpoint === true, current, patch.terminalStatusOnly === true);
 }
 
 /** Only upsertMessage advances host-owned learning metadata on an existing id. */
@@ -1205,7 +1316,10 @@ function mergePersistedMessages(current: Message[], updates: Message[]): Message
     const index = merged.findIndex((message) => message.id === update.id);
     if (index >= 0) {
       const saved = merged[index];
-      const newer = (saved.completedAt ?? saved.createdAt) > (update.completedAt ?? update.createdAt) ? saved : update;
+      const freshness = (message: Message) => Math.max(message.editedAt ?? 0, message.streamUpdatedAt ?? 0, message.completedAt ?? message.createdAt);
+      const newer = freshness(saved) > freshness(update) ? saved : update;
+      // Preserve immutable old messages so a full UI snapshot sends only deltas.
+      if (newer === saved) { anchor = index; continue; }
       merged[index] = { ...saved, ...newer,
         ...(saved.skillLearning ? { skillLearning: saved.skillLearning, localOnly: true } : {}),
         ...(saved.skillContext && !newer.skillContext ? { skillContext: saved.skillContext } : {}),
@@ -1313,6 +1427,7 @@ async function migrateScheduledTasksInternal(): Promise<void> {
 }
 
 export const historyStore: HistoryStore = {
+  flush() { return writeQueue.flush(); },
   async ready() {
     clearSessionRecordCache();
     await enqueue(async () => {
@@ -1343,7 +1458,7 @@ export const historyStore: HistoryStore = {
           console.error(`[history] maintenance step "${label}" failed`, err);
         }
       }
-    });
+    }, null);
   },
 
   async rootPath() {
@@ -1354,31 +1469,32 @@ export const historyStore: HistoryStore = {
   },
 
   getConfig() {
-    return getConfigInternal();
+    return enqueue(getConfigInternal, null);
   },
 
   patchConfig(patch) {
-    return enqueue(async () => {
+    // Navigation state shares its own lane, not a barrier across all sessions.
+    return writeQueue.enqueue(async () => {
       const config = await getConfigInternal();
       const next = { ...config, ...patch, schemaVersion: HISTORY_SCHEMA_VERSION };
       await writeConfigInternal(next);
       return next;
-    });
+    }, patch, JSON.stringify(['config']));
   },
 
   listWorkspaces() {
     // 仅隐藏已退役云端记录；内部索引仍保留，避免后续写入丢失旧历史。
-    return listWorkspacesInternal().then((workspaces) =>
+    return enqueue(listWorkspacesInternal, null).then((workspaces) =>
       workspaces.filter((workspace) => isSupportedWorkspacePath(workspace.path)),
     );
   },
 
   getWorkspace(id) {
-    return getWorkspaceInternal(id);
+    return enqueue(() => getWorkspaceInternal(id), id);
   },
 
   resolveWorkspaceByPath(path) {
-    return enqueue(() => resolveWorkspaceInternal({ path }));
+    return enqueue(() => resolveWorkspaceInternal({ path }), path);
   },
 
   renameWorkspace(id, name) {
@@ -1390,7 +1506,7 @@ export const historyStore: HistoryStore = {
         name: name.trim() || workspace.name,
         updatedAt: now(),
       });
-    });
+    }, { id, name });
   },
 
   patchWorkspaceMetadata(id, patch) {
@@ -1404,7 +1520,7 @@ export const historyStore: HistoryStore = {
           ...(patch ?? {}),
         },
       });
-    });
+    }, { id, patch });
   },
 
   deleteWorkspace(id, soft = true) {
@@ -1421,26 +1537,106 @@ export const historyStore: HistoryStore = {
           lastActiveSessionId: undefined,
         });
       }
-    });
+    }, id);
   },
 
   listSessions(workspaceId) {
-    return listSessionsInternal(workspaceId).then((sessions) => {
+    return enqueue(() => listSessionsInternal(workspaceId), workspaceId).then((sessions) => {
       scheduleRecentSessionPrewarm(workspaceId, sessions);
       return sessions;
     });
   },
 
   getSession(workspaceId, sessionId) {
-    return getSessionInternal(workspaceId, sessionId);
+    // Preserve read-after-write ordering for this session without blocking on
+    // unrelated streaming checkpoints or cold loads.
+    return writeQueue.enqueue(() => getSessionInternal(workspaceId, sessionId),
+      { workspaceId, sessionId }, JSON.stringify([workspaceId, sessionId]));
+  },
+
+  getSessionComposerDraft(workspaceId, sessionId) {
+    return writeQueue.enqueue(async () => {
+      const record = cachedSessionRecord(workspaceId, sessionId)
+        ?? await readJson<SessionRecord>(sessionPath(workspaceId, sessionId), false, false, true);
+      return typeof record?.meta?.composerDraft === 'string' ? record.meta.composerDraft : undefined;
+    }, { workspaceId, sessionId }, JSON.stringify([workspaceId, sessionId]));
+  },
+
+  getSessionForGeneration(workspaceId, sessionId) {
+    return writeQueue.enqueue(async () => {
+      const record = await readSessionForGeneration(workspaceId, sessionId);
+      return record && !record.deletedAt && record.id === sessionId && record.workspaceId === workspaceId ? record : null;
+    }, { workspaceId, sessionId }, JSON.stringify([workspaceId, sessionId]));
   },
 
   createSession(input) {
-    return enqueue(() => createSessionInternal(input));
+    return enqueue(() => createSessionInternal(input), input, true);
   },
 
   updateSession(workspaceId, sessionId, patch) {
-    return enqueue(() => updateSessionInternal(workspaceId, sessionId, patch));
+    return writeQueue.enqueue((next) => updateSessionInternal(workspaceId, sessionId, next),
+      patch, JSON.stringify([workspaceId, sessionId]), patch.streamCheckpoint ? mergeCheckpoints : undefined, true);
+  },
+
+  updateSessionIfGeneration(workspaceId, sessionId, origin, patch, reconciliation) {
+    // Every captured inert value is byte-admitted. No opaque payload callback,
+    // no coalescing through a generation check, and no unbounded tombstone map.
+    const payload = { workspaceId, sessionId,
+      origin: { generation: origin.generation, createdAt: origin.createdAt, sourceFingerprint: origin.sourceFingerprint },
+      patch, reconciliation };
+    return writeQueue.enqueue(async (request) => {
+      // Maintenance may move/remove records behind a hydrated cache. The
+      // persisted incarnation, not an LRU entry, is the authority for CAS.
+      const current = await readSessionForGeneration(request.workspaceId, request.sessionId);
+      if (!current || current.deletedAt || current.workspaceId !== request.workspaceId || current.id !== request.sessionId ||
+          current.generation !== request.origin.generation || current.createdAt !== request.origin.createdAt ||
+          current.sourceFingerprint !== request.origin.sourceFingerprint) return null;
+      rememberSessionRecord(current);
+      let nextPatch = request.patch;
+      if (request.reconciliation) {
+        const initial = new Map(request.reconciliation.originMessages.map((message) => [message.id, message]));
+        const liveIds = new Set(current.messages.map((message) => message.id));
+        const messages = request.patch.messages?.filter((message) => !initial.has(message.id) ||
+          liveIds.has(message.id) && JSON.stringify(initial.get(message.id)) !== JSON.stringify(message));
+        const snapshot = request.reconciliation.snapshot;
+        nextPatch = { ...request.patch, messages };
+        if (snapshot) {
+          const newerRun = (current.workflow?.meta.run?.updatedAt ?? 0) > (snapshot.updatedAt ?? 0);
+          const { workflow, meta, ...other } = request.patch;
+          nextPatch = { ...other, messages, ...(!newerRun ? {
+            ...(current.workflow || workflow ? { workflow: workflowWithRunSnapshot(current.workflow ?? workflow!, snapshot) } : {}),
+            meta: { ...meta, ...runMetaFromSnapshot(snapshot) },
+          } : {}) };
+        }
+      }
+      const record = await updateSessionInternal(request.workspaceId, request.sessionId, nextPatch);
+      return { record, messages: nextPatch.messages ?? [] };
+    }, payload, JSON.stringify([workspaceId, sessionId]), undefined, true);
+  },
+
+  clearScheduledTaskHistory(workspaceId, sessionId, extraMessageIds) {
+    return enqueue(async () => {
+      const record = await getSessionInternal(workspaceId, sessionId);
+      if (!record?.meta?.scheduledTask) throw new Error('Scheduled task not found');
+      const removedIds = [...new Set([...record.messages.map((message) => message.id), ...extraMessageIds])];
+      const updated = await updateSessionInternal(workspaceId, sessionId, {
+        messages: [], preserveUpdatedAt: true,
+        ...(record.workflow?.meta?.simple === true ? { workflow: setStartUserInputs(record.workflow, []) } : {}),
+        meta: { contextCompressed: false, unreadCompletion: false },
+      });
+      if (removedIds.length) {
+        const key = JSON.stringify([workspaceId, sessionId]);
+        const tombstones = scheduledTaskRemovedMessages.get(key) ?? new Set<string>();
+        for (const id of removedIds) tombstones.add(id);
+        scheduledTaskRemovedMessages.set(key, tombstones);
+      }
+      try {
+        if (tauriAvailable()) await command<void>('history_delete_session_backups', { relPath: sessionPath(workspaceId, sessionId) });
+      } catch (backupError) {
+        return { record: updated, removedIds, backupError };
+      }
+      return { record: updated, removedIds };
+    }, { workspaceId, sessionId, extraMessageIds }, true);
   },
 
   pruneScheduledTaskHistory(workspaceId, sessionId, protectedMessageIds) {
@@ -1466,7 +1662,7 @@ export const historyStore: HistoryStore = {
         return { record: updated, removedIds, backupError };
       }
       return { record: updated, removedIds };
-    });
+    }, { workspaceId, sessionId });
   },
 
   deleteSession(workspaceId, sessionId, soft = true) {
@@ -1492,11 +1688,11 @@ export const historyStore: HistoryStore = {
           updatedAt: now(),
         });
       }
-    });
+    }, { workspaceId, sessionId });
   },
 
   appendMessage(workspaceId, sessionId, msg) {
-    return enqueue(() => appendMessageInternal(workspaceId, sessionId, msg));
+    return enqueue(() => appendMessageInternal(workspaceId, sessionId, msg), msg, true);
   },
 
   upsertMessage(workspaceId, sessionId, msg, preserveUpdatedAt = false) {
@@ -1521,7 +1717,7 @@ export const historyStore: HistoryStore = {
           ? titleFromMessages(messages, current.title)
           : current.title,
       });
-    });
+    }, msg, true);
   },
 
   setSessionWorkflow(workspaceId, sessionId, ir) {
@@ -1536,6 +1732,7 @@ export const historyStore: HistoryStore = {
               : 'claude-code',
         },
       }),
+      ir,
     ).then(() => undefined);
   },
 };

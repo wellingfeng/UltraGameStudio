@@ -108,6 +108,16 @@ type MockStoreState = {
 };
 
 let mockState: MockStoreState;
+const conversationMocks = vi.hoisted(() => ({
+  read: vi.fn(),
+  copy: vi.fn(),
+  export: vi.fn(),
+}));
+
+vi.mock('@/lib/conversationActions', () => ({
+  copyConversationText: conversationMocks.copy,
+  exportConversationText: conversationMocks.export,
+}));
 
 vi.mock('@/store/useStore', () => {
   const useStore = Object.assign(
@@ -146,6 +156,7 @@ vi.mock('@/store/useStore', () => {
     isWorkflowReadOnly: (state: Pick<MockStoreState, 'mode'>) =>
       state.mode === 'running',
     sessionLiveStatus,
+    getSessionConversationMessages: conversationMocks.read,
     useStore,
     workflowDeleteProtectionReason: (
       session: Pick<MockSession, 'id'>,
@@ -537,11 +548,67 @@ async function pressInputKey(
 }
 
 afterEach(() => {
+  conversationMocks.read.mockReset();
+  conversationMocks.copy.mockReset();
+  conversationMocks.export.mockReset();
   vi.mocked(openWorkspaceDirectory).mockReset();
   vi.mocked(openWorkspaceDirectory).mockResolvedValue(true);
   window.localStorage.clear();
   document.body.innerHTML = '';
   resetSidebarStore();
+});
+
+describe('会话右键复制和导出', () => {
+  const messages = [
+    { id: 'u', role: 'user', text: '目标问题', createdAt: 1 },
+    { id: 'a', role: 'assistant', text: '目标回答', createdAt: 2 },
+    { id: 'local', role: 'system', text: '本地提示', createdAt: 3, localOnly: true },
+  ];
+
+  it('复制右键会话的内容，不切换当前会话', async () => {
+    resetSidebarStore();
+    mockState.activeSessionId = 'another-session';
+    conversationMocks.read.mockResolvedValue(messages);
+    conversationMocks.copy.mockResolvedValue(undefined);
+    const view = await renderSidebar();
+    try {
+      await openSessionContextMenu(sessionButton(view.container, SESSION.title));
+      await clickButton(sessionButton(view.container, '复制会话'));
+      expect(conversationMocks.read).toHaveBeenCalledWith(WORKSPACE.id, SESSION.id);
+      expect(conversationMocks.copy).toHaveBeenCalledWith('## 用户\n\n目标问题\n\n---\n\n## 助手\n\n目标回答');
+      expect(mockState.selectSession).not.toHaveBeenCalled();
+      expect(view.container.textContent).toContain('已复制会话');
+      expect(view.container.textContent).toContain('拷贝会话位置');
+    } finally { await view.cleanup(); }
+  });
+
+  it('导出右键会话内容并使用对应标题，取消保存不显示成功', async () => {
+    resetSidebarStore();
+    mockState.activeSessionId = 'another-session';
+    conversationMocks.read.mockResolvedValue(messages);
+    conversationMocks.export.mockResolvedValue(false);
+    const view = await renderSidebar();
+    try {
+      await openSessionContextMenu(sessionButton(view.container, SESSION.title));
+      await clickButton(sessionButton(view.container, '导出会话'));
+      expect(conversationMocks.read).toHaveBeenCalledWith(WORKSPACE.id, SESSION.id);
+      expect(conversationMocks.export).toHaveBeenCalledWith('## 用户\n\n目标问题\n\n---\n\n## 助手\n\n目标回答', SESSION.title);
+      expect(mockState.selectSession).not.toHaveBeenCalled();
+      expect(view.container.textContent).not.toContain('会话已导出');
+    } finally { await view.cleanup(); }
+  });
+
+  it('空会话提示错误，不操作剪贴板', async () => {
+    resetSidebarStore();
+    conversationMocks.read.mockResolvedValue([{ ...messages[2] }]);
+    const view = await renderSidebar();
+    try {
+      await openSessionContextMenu(sessionButton(view.container, SESSION.title));
+      await clickButton(sessionButton(view.container, '复制会话'));
+      expect(view.container.textContent).toContain('当前会话为空');
+      expect(conversationMocks.copy).not.toHaveBeenCalled();
+    } finally { await view.cleanup(); }
+  });
 });
 
 describe('Sidebar workflow rename', () => {

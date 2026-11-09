@@ -19,13 +19,12 @@ import {
   Image as ImageIcon,
   Loader2,
   Maximize2,
-  MessageSquarePlus,
   Minimize2,
   Video,
   X,
 } from 'lucide-react';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { requestTemporaryChat } from '@/components/temporaryChat/TemporaryChatWindows';
+import PreviewFloatingTools from '@/components/floatingTools/PreviewFloatingTools';
 import { fileSource, registerVisibleSource } from '@/components/temporaryChat/context';
 import {
   openLocalPath,
@@ -484,8 +483,8 @@ function MarkdownFilePreview({ file, cwd, previewFile }: { file: LocalFilePrevie
       </div>
     </div>
     {image && <div role="dialog" aria-label="图片查看" className="absolute inset-0 z-10 flex flex-col bg-bg">
-      <div className="flex justify-end border-b border-border-soft px-3 py-1.5"><button type="button" onClick={() => setImage(null)} className="rounded px-2 py-1 text-xs text-fg-dim hover:bg-panel-2">关闭</button></div>
-      <ImagePreviewPane src={image.src} alt={image.alt} />
+      <div className="flex justify-end border-b border-border-soft px-3 py-1.5" onClick={(event) => { if (event.target === event.currentTarget) setImage(null); }}><button type="button" onClick={() => setImage(null)} className="rounded px-2 py-1 text-xs text-fg-dim hover:bg-panel-2">关闭</button></div>
+      <ImagePreviewPane src={image.src} alt={image.alt} onDismiss={() => setImage(null)} />
     </div>}
   </div>;
 }
@@ -500,6 +499,7 @@ export default function FilePreviewDrawer({
   variant = 'overlay',
   overlayContainerRef,
   active = true,
+  onOpenChat,
   onClose,
 }: {
   refData: FileRef | null;
@@ -511,6 +511,7 @@ export default function FilePreviewDrawer({
   variant?: FilePreviewDrawerVariant;
   overlayContainerRef?: RefObject<HTMLElement>;
   active?: boolean;
+  onOpenChat?: () => void;
   onClose: () => void;
 }) {
   const drawerId = useId();
@@ -694,13 +695,6 @@ export default function FilePreviewDrawer({
               {path || customContent?.meta}
             </div>
           </div>
-          {refData && !customContent && !directImageSource && active && (
-            <button type="button" title="针对当前文件随手聊" aria-label="针对当前文件随手聊"
-              onClick={() => requestTemporaryChat(fileSource(refData, cwd))}
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg">
-              <MessageSquarePlus size={14} />
-            </button>
-          )}
           {!main && !overlayContainerRef && refData && !customContent && (
             <button
               type="button"
@@ -777,6 +771,10 @@ export default function FilePreviewDrawer({
             <X size={15} />
           </button>
         </header>
+        {refData && !customContent && !directImageSource && active && (
+          <PreviewFloatingTools label="针对当前文件随手聊" source={() => fileSource(refData, cwd)} onOpen={main ? onOpenChat : undefined}
+            className="ugs-file-preview-floating-tools" />
+        )}
 
         {customContent && (
           <div className="flex min-h-0 flex-1 flex-col overflow-hidden bg-bg">
@@ -954,7 +952,7 @@ export default function FilePreviewDrawer({
 
   if (embedded) {
     return (
-      <div ref={embeddedPanelRef} className="flex min-h-0 min-w-0 flex-1 flex-col bg-panel">
+      <div ref={embeddedPanelRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-panel">
         {panelContent}
       </div>
     );

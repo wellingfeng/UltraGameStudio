@@ -99,6 +99,7 @@ export async function installQuitFlushHandler(): Promise<void> {
           import('@/lib/downloadRegistry').then(({ flushAssetIndex }) => flushAssetIndex()).catch(error => {
             console.error('[asset-index] 退出前资产索引写入失败', error);
           }),
+          import('@/components/temporaryChat/sessions').then(({ flushTemporaryChatSessions }) => flushTemporaryChatSessions()),
           flushSecureStorage(),
           flushGenerationSettings().catch(() => {
             /* disk write failed — localStorage mirror above still applies */
@@ -127,10 +128,14 @@ export async function installQuitFlushHandler(): Promise<void> {
               /* draft flush failed — best-effort only */
             }),
           ]);
+          // Flush the producers before the history barrier. Waiting for only
+          // already-admitted writes misses their debounce/publication timers.
+          const { flushChatPersistenceForQuit } = await import('@/store/useStore');
+          await flushChatPersistenceForQuit();
           const { invoke } = await import("@tauri-apps/api/core");
           await invoke("ugs_quit_flush_done");
         } catch (error) {
-          console.error("[quitFlush] secret persistence failed; quit cancelled", error);
+          console.error("[quitFlush] persistence failed; quit cancelled", error);
           try {
             const { invoke } = await import("@tauri-apps/api/core");
             await invoke("ugs_quit_cancel");
@@ -138,7 +143,7 @@ export async function installQuitFlushHandler(): Promise<void> {
             console.warn("[quitFlush] failed to notify host about quit cancellation", cancelError);
           }
           if (hasWindow()) {
-            window.alert("渠道密钥尚未保存成功，已取消退出。请重新保存密钥后再退出。");
+            window.alert(`退出前数据保存失败，已取消退出：${error instanceof Error ? error.message : String(error)}`);
           }
         }
       })();

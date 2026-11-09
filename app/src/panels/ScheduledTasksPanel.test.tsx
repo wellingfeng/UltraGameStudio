@@ -77,6 +77,34 @@ describe('定时任务页面', () => {
     expect(useStore.getState().activeSessionId).toBe('current');
     expect(close).not.toHaveBeenCalled();
   });
+  it('确认后清空当前任务会话，保留任务配置和其他任务', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    await render();
+    const before = await historyStore.getSession(SCHEDULED_TASK_SCOPE, 'weekly');
+    await click('清空会话');
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('无法撤销'));
+    expect(container.querySelector('main')?.textContent).toContain('尚无运行记录');
+    expect(container.querySelector('main')?.textContent).not.toContain('周报汇总真实历史结果');
+    const after = await historyStore.getSession(SCHEDULED_TASK_SCOPE, 'weekly');
+    expect(after?.messages).toEqual([]);
+    expect(after?.meta?.scheduledTask).toEqual(before?.meta?.scheduledTask);
+    expect(useStore.getState().sessionTree[SCHEDULED_TASK_SCOPE][0].messageCount).toBe(0);
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, 'morning'))?.messages).toHaveLength(1);
+    expect(useStore.getState().activeSessionId).toBe('current');
+  });
+
+  it('取消清空时保留记录，运行中禁止清空', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    await render();
+    await click('清空会话');
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, 'weekly'))?.messages).toHaveLength(1);
+    await act(async () => useStore.setState({ chattingSessions: [{ workspaceId: SCHEDULED_TASK_SCOPE, sessionId: 'weekly' }] }));
+    const clearButton = [...container.querySelectorAll('button')].find((button) => button.textContent?.trim() === '清空会话');
+    expect(clearButton?.disabled).toBe(true);
+    expect(clearButton?.title).toContain('任务正在运行');
+    useStore.setState({ chattingSessions: [] });
+  });
+
   it('立即运行留在任务页面，结果不跳回普通会话', async () => {
     const close = await render();
     const run = vi.spyOn(useStore.getState(), 'runScheduledTaskSession').mockResolvedValue();

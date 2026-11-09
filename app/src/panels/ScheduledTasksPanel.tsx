@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type RefObject } from 'react';
-import { AlarmClock, ArrowLeft, Pause, Pencil, Play, Plus, Rocket, Search, Zap } from 'lucide-react';
-import { createScheduledTaskSession, sessionLiveStatus, useStore } from '@/store/useStore';
+import { AlarmClock, ArrowLeft, Pause, Pencil, Play, Plus, Rocket, Search, Trash2, Zap } from 'lucide-react';
+import { clearScheduledTaskSession, createScheduledTaskSession, sessionLiveStatus, useStore } from '@/store/useStore';
 import { collectScheduledSessions, type ScheduledSession } from '@/lib/scheduledTaskSessions';
 import { isRtlLocale, type Locale } from '@/lib/i18n';
 import { scheduleText } from '@/lib/scheduledTaskI18n';
@@ -91,12 +91,14 @@ export default function ScheduledTasksPanel({ locale, onClose }: { locale: Local
   const [draft, setDraft] = useState<{ task: ScheduledTaskConfig; target?: ScheduledSession } | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [resultsRevision, setResultsRevision] = useState(0);
   const [now, setNow] = useState(() => new Date());
   const tasks = useMemo(() => collectScheduledSessions(sessions, sessionTree, activeWorkspaceId), [sessions, sessionTree, activeWorkspaceId]);
   const search = query.trim().toLocaleLowerCase(locale);
   const shown = tasks.filter(({ session, scheduledTask }) => `${scheduledTask.name ?? session.title} ${scheduledTask.reminderText}`.toLocaleLowerCase(locale).includes(search));
   const templates = SCHEDULED_TASK_TEMPLATES.filter((template) => templateName(template, locale).toLocaleLowerCase(locale).includes(search));
   const selected = shown.find((entry) => entryKey(entry) === selectedKey) ?? shown[0];
+  const selectedLive = useStore((s) => selected ? sessionLiveStatus({ workspaceId: selected.workspaceId, sessionId: selected.session.id }, s) : null);
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 30000);
@@ -116,7 +118,7 @@ export default function ScheduledTasksPanel({ locale, onClose }: { locale: Local
     setPending(id);
     setError(null);
     try { await callback(); }
-    catch (reason) { setError(`${scheduleText(locale, 'failed')}：${String(reason)}`); }
+    catch (reason) { setError(`${scheduleText(locale, 'actionFailed')}：${String(reason)}`); }
     finally { setPending(null); }
   };
   const save = async (task: ScheduledTaskConfig) => {
@@ -143,6 +145,11 @@ export default function ScheduledTasksPanel({ locale, onClose }: { locale: Local
       return;
     }
     await useStore.getState().setWorkflowScheduledTaskSession(session.id, workspaceId, { ...scheduledTask, enabled: !scheduledTask.enabled, updatedAt: Date.now() });
+  };
+  const clear = async ({ session, workspaceId }: ScheduledSession) => {
+    if (!workspaceId) throw new Error(scheduleText(locale, 'actionFailed'));
+    try { await clearScheduledTaskSession(workspaceId, session.id); }
+    finally { setResultsRevision((revision) => revision + 1); }
   };
   const dateLabel = (timestamp: number | Date, timeZone?: string) => new Date(timestamp).toLocaleString(locale, { timeZone, dateStyle: 'medium', timeStyle: 'short' });
 
@@ -195,6 +202,7 @@ export default function ScheduledTasksPanel({ locale, onClose }: { locale: Local
                       <span className="scheduled-task-status">{scheduleText(locale, task.enabled ? 'enabled' : 'paused')}</span>
                     </div>
                     <div className="scheduled-task-actions">
+                      <button type="button" disabled={pending !== null || Boolean(selectedLive)} title={scheduleText(locale, selectedLive ? 'busy' : 'clear')} onClick={() => { if (window.confirm(scheduleText(locale, 'clearConfirm'))) void action(key, () => clear(entry)); }} className="scheduled-task-text-button"><Trash2 size={14} />{scheduleText(locale, 'clear')}</button>
                       <button type="button" disabled={pending !== null} aria-label={scheduleText(locale, 'edit')} title={scheduleText(locale, 'edit')} onClick={() => setDraft({ task, target: entry })} className="scheduled-task-icon-button"><Pencil size={14} /></button>
                       <button type="button" disabled={pending !== null} onClick={() => void action(key, () => toggle(entry))} className="scheduled-task-text-button">{task.enabled ? <Pause size={13} /> : <Play size={13} />}{scheduleText(locale, task.enabled ? 'pause' : 'resume')}</button>
                       <button type="button" disabled={pending !== null} onClick={() => void action(key, () => run(entry))} className="scheduled-task-primary"><Zap size={13} />{scheduleText(locale, 'run')}</button>
@@ -209,7 +217,7 @@ export default function ScheduledTasksPanel({ locale, onClose }: { locale: Local
                   <h3 className="scheduled-task-label">{scheduleText(locale, 'prompt')}</h3>
                   <p className="scheduled-task-prompt">{task.reminderText}</p>
                   {task.lastError && <p className="mb-3 break-words text-xs text-status-error">{task.lastError}</p>}
-                  <TaskResults key={key} entry={entry} locale={locale} previewContainerRef={previewContainerRef} />
+                  <TaskResults key={`${key}/${resultsRevision}`} entry={entry} locale={locale} previewContainerRef={previewContainerRef} />
                 </article>;
               })}
             </div>}

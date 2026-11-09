@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -22,6 +22,10 @@ mod floating_browser;
 mod history;
 mod kimi_log;
 mod message_platforms;
+mod native_background;
+mod native_assets;
+mod native_notifications;
+mod performance;
 mod memory_transactions;
 mod skill_candidates;
 mod proxy_http;
@@ -32,6 +36,7 @@ mod system_file_preview;
 mod temporary_chat;
 mod tools;
 use tools::mcp::{ProbeResult as ProjectMcpProbeResult, ServerConfig as ProjectMcpProbeServerConfig};
+use native_background::PipeWriter;
 
 /// Windows CreateProcess flag: don't allocate a console window for the child.
 /// Without this, spawning the `claude` console binary pops up a black terminal
@@ -120,8 +125,10 @@ fn focus_main_window(app: AppHandle) {
 
 /// 前端完成退出前冲刷（密钥兜底落盘 + keychain flush）后调用，放行退出。
 #[tauri::command]
-fn ugs_quit_flush_done(app: AppHandle) {
+async fn ugs_quit_flush_done(app: AppHandle) -> Result<(), String> {
+    message_platforms::shutdown().await?;
     app.exit(0);
+    Ok(())
 }
 
 /// 前端决定本次不退出（例如仍有会话在运行，用户点了「取消」）。
@@ -132,7 +139,7 @@ fn ugs_quit_cancel(app: AppHandle) {
 }
 
 #[tauri::command]
-fn notify_session_complete(
+async fn notify_session_complete(
     app: AppHandle,
     title: String,
     body: String,
@@ -144,22 +151,24 @@ fn notify_session_complete(
         workspace_id,
         session_id,
     };
-    show_session_completion_notification(
+    native_notifications::executor()?.submit(std::time::Duration::from_secs(5), move || show_session_completion_notification(
         app,
         title,
         body,
         payload,
         SessionNotificationKind::from_arg(kind),
-    )
+    )).await
 }
 
 #[tauri::command]
-fn dismiss_session_waiting_input_notification(
+async fn dismiss_session_waiting_input_notification(
     app: AppHandle,
     workspace_id: Option<String>,
     session_id: Option<String>,
 ) -> Result<bool, String> {
-    dismiss_waiting_input_notification(app, workspace_id, session_id)
+    native_notifications::executor()?.submit(std::time::Duration::from_secs(5), move ||
+        dismiss_waiting_input_notification(app, workspace_id, session_id)
+    ).await
 }
 
 #[tauri::command]
@@ -438,22 +447,8 @@ fn new_spawn_command(program: &str) -> Command {
     cmd
 }
 
+#[cfg(not(windows))]
 fn terminate_process_tree(pid: u32) -> bool {
-    #[cfg(windows)]
-    {
-        let mut cmd = Command::new("taskkill");
-        hide_console(&mut cmd);
-        return cmd
-            .arg("/PID")
-            .arg(pid.to_string())
-            .arg("/T")
-            .arg("/F")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-    }
     #[cfg(not(windows))]
     {
         let group_pid = format!("-{pid}");
@@ -481,10 +476,51 @@ fn terminate_process_tree(pid: u32) -> bool {
 
 /// Terminate a spawned CLI and its wrapper descendants where the OS supports it.
 fn terminate_child_tree(child: &mut Child) {
-    if !terminate_process_tree(child.id()) {
+    #[cfg(windows)] {
+        // Operate only on the Child's original process object. AI tree cleanup
+        // is performed through its owned job before this root/reap fallback.
         let _ = child.kill();
     }
-    let _ = child.wait();
+    #[cfg(not(windows))]
+    if !terminate_process_tree(child.id()) { let _ = child.kill(); }
+    if let Err(error) = native_background::wait_child_until(child, std::time::Instant::now() + std::time::Duration::from_secs(1)) {
+        log::warn!("native child cleanup deadline: {error}");
+    }
+}
+
+fn command_status_bounded(mut command: Command, timeout: std::time::Duration) -> Result<std::process::ExitStatus, String> {
+    let mut child = command.spawn().map_err(|e| e.to_string())?;
+    let result = native_background::wait_child_until(&mut child, std::time::Instant::now() + timeout);
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = native_background::wait_child_until(&mut child, std::time::Instant::now() + std::time::Duration::from_millis(200));
+    }
+    result
+}
+
+fn cli_startup_step<T>(child: &mut Child, run_id: &str, step: impl FnOnce() -> Result<T, String>) -> Result<T, String> {
+    step().map_err(|error| {
+        terminate_ai_cli_tree(child, run_id);
+        unregister_ai_cli(run_id);
+        error
+    })
+}
+
+fn process_is_alive(pid: u32) -> bool {
+    #[cfg(windows)] unsafe {
+        use windows_sys::Win32::System::Threading::{OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE};
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_INVALID_PARAMETER, WAIT_TIMEOUT};
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE, 0, pid);
+        if handle.is_null() { return GetLastError() != ERROR_INVALID_PARAMETER; }
+        let alive = WaitForSingleObject(handle, 0) == WAIT_TIMEOUT;
+        CloseHandle(handle);
+        alive
+    }
+    #[cfg(not(windows))] {
+        let mut command = Command::new("kill");
+        command.args(["-0", &pid.to_string()]).stdout(Stdio::null()).stderr(Stdio::null());
+        command_status_bounded(command, std::time::Duration::from_secs(1)).map(|s| s.success()).unwrap_or(true)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -641,17 +677,11 @@ fn kill_job_processes(job: isize) {
             if pid == 0 {
                 continue;
             }
-            // Kill each process directly. This catches orphans whose parent
-            // already exited — they are still in the job's PID list.
-            let mut cmd = Command::new("taskkill");
-            hide_console(&mut cmd);
-            let _ = cmd
-                .arg("/PID")
-                .arg(pid.to_string())
-                .arg("/F")
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let _ = pid;
+        }
+        // Kernel termination covers ALL inherited orphans without subprocess waits.
+        if windows_sys::Win32::System::JobObjects::TerminateJobObject(job as *mut _, 1) == 0 {
+            log::warn!("native job termination failed; kill-on-close remains active");
         }
     }
 }
@@ -695,6 +725,25 @@ fn terminate_ai_cli_tree(child: &mut Child, run_id: &str) {
     terminate_child_tree(child);
 }
 
+#[cfg(windows)]
+fn active_ai_cli_processes() -> &'static Mutex<HashMap<String, Arc<std::os::windows::io::OwnedHandle>>> {
+    static ACTIVE: OnceLock<Mutex<HashMap<String, Arc<std::os::windows::io::OwnedHandle>>>> = OnceLock::new();
+    ACTIVE.get_or_init(Default::default)
+}
+#[cfg(windows)]
+fn capture_ai_cli_process(run_id: &str) -> Option<Arc<std::os::windows::io::OwnedHandle>> {
+    active_ai_cli_processes().lock().ok().and_then(|active| active.get(run_id).cloned())
+}
+fn register_owned_ai_cli(run_id: &str, child: &Child) -> Result<(), String> {
+    #[cfg(windows)] {
+        use std::os::windows::io::AsHandle;
+        let handle = child.as_handle().try_clone_to_owned().map_err(|_| "无法固定 CLI 进程身份。")?;
+        active_ai_cli_processes().lock().map_err(|_| "CLI 进程身份锁失败。")?.insert(run_id.into(), Arc::new(handle));
+    }
+    register_ai_cli(run_id, child.id());
+    Ok(())
+}
+
 fn active_ai_cli_pids() -> &'static Mutex<HashMap<String, u32>> {
     static ACTIVE: OnceLock<Mutex<HashMap<String, u32>>> = OnceLock::new();
     ACTIVE.get_or_init(|| Mutex::new(HashMap::new()))
@@ -702,7 +751,7 @@ fn active_ai_cli_pids() -> &'static Mutex<HashMap<String, u32>> {
 
 #[derive(Clone)]
 struct ActiveCodexSteer {
-    stdin: Arc<Mutex<ChildStdin>>,
+    stdin: Arc<PipeWriter>,
     thread_id: Arc<Mutex<Option<String>>>,
     turn_id: Arc<Mutex<Option<String>>>,
     pending: Arc<Mutex<HashMap<String, mpsc::Sender<Result<(), String>>>>>,
@@ -710,7 +759,7 @@ struct ActiveCodexSteer {
 
 #[derive(Clone)]
 struct ActiveClaudeSteer {
-    stdin: Arc<Mutex<Option<ChildStdin>>>,
+    stdin: Arc<PipeWriter>,
 }
 
 /// Live handle for steering an in-flight zcode app-server turn. The steer
@@ -722,7 +771,7 @@ struct ActiveClaudeSteer {
 /// `session/send` ack/error back to the waiting `steer_ai_cli` call.
 #[derive(Clone)]
 struct ActiveZcodeSteer {
-    stdin: Arc<Mutex<ChildStdin>>,
+    stdin: Arc<PipeWriter>,
     session_id: Arc<Mutex<Option<String>>>,
     pending: Arc<Mutex<HashMap<String, mpsc::Sender<Result<(), String>>>>>,
 }
@@ -775,6 +824,38 @@ fn cancelled_ai_cli_ids() -> &'static Mutex<HashSet<String>> {
     CANCELLED.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+const MAX_ACCEPTED_AI_CLI_RUNS: usize = 64;
+fn accepted_ai_cli_ids() -> &'static Mutex<HashMap<String, usize>> {
+    static ACCEPTED: OnceLock<Mutex<HashMap<String, usize>>> = OnceLock::new();
+    ACCEPTED.get_or_init(Default::default)
+}
+struct AiCliCancelOwner(String);
+impl AiCliCancelOwner {
+    fn accept(run_id: &str) -> Result<Self, String> {
+        if run_id.is_empty() || run_id.len() > 256 { return Err("CLI 任务 ID 无效。".into()); }
+        let mut accepted = accepted_ai_cli_ids().lock().map_err(|_| "CLI 生命周期锁失败。")?;
+        if accepted.contains_key(run_id) { return Err("CLI 任务 ID 已在运行。".into()); }
+        if accepted.len() >= MAX_ACCEPTED_AI_CLI_RUNS { return Err("CLI 后台任务繁忙，请稍后重试。".into()); }
+        accepted.insert(run_id.into(), 1);
+        Ok(Self(run_id.into()))
+    }
+}
+impl Drop for AiCliCancelOwner {
+    fn drop(&mut self) {
+        // Worker and queued cleanup share the reservation. An async timeout
+        // cannot permit ID reuse while cleanup still looks up its resources.
+        let mut accepted = accepted_ai_cli_ids().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(owners) = accepted.get_mut(&self.0) {
+            if *owners > 1 {
+                *owners -= 1;
+                return;
+            }
+        }
+        accepted.remove(&self.0);
+        cancelled_ai_cli_ids().lock().unwrap_or_else(|e| e.into_inner()).remove(&self.0);
+    }
+}
+
 fn register_ai_cli(run_id: &str, pid: u32) {
     if let Ok(mut active) = active_ai_cli_pids().lock() {
         active.insert(run_id.to_string(), pid);
@@ -804,16 +885,29 @@ fn visible_progress_elapsed(run_id: &str) -> std::time::Duration {
 }
 
 fn mark_ai_cli_cancelled(run_id: &str) -> Option<u32> {
+    mark_ai_cli_cancelled_inner(run_id, false).0
+}
+
+fn mark_ai_cli_cancelled_inner(run_id: &str, pin_cleanup: bool) -> (Option<u32>, Option<AiCliCancelOwner>) {
+    let Ok(mut accepted) = accepted_ai_cli_ids().lock() else { return (None, None); };
     let pid = active_ai_cli_pids()
         .lock()
         .ok()
         .and_then(|active| active.get(run_id).copied());
-    if pid.is_some() {
+    // PID-only registrations support existing fixture/legacy callers; unknown
+    // IDs never acquire intent storage. Production requests own acceptance.
+    if accepted.contains_key(run_id) || pid.is_some() {
         if let Ok(mut cancelled) = cancelled_ai_cli_ids().lock() {
             cancelled.insert(run_id.to_string());
         }
     }
-    pid
+    let owner = if pin_cleanup {
+        accepted.get_mut(run_id).map(|owners| {
+            *owners += 1;
+            AiCliCancelOwner(run_id.into())
+        })
+    } else { None };
+    (pid, owner)
 }
 
 fn take_ai_cli_cancelled(run_id: &str) -> bool {
@@ -833,10 +927,13 @@ fn unregister_ai_cli(run_id: &str) {
     if let Ok(mut active) = active_ai_cli_pids().lock() {
         active.remove(run_id);
     }
+    #[cfg(windows)]
+    if let Ok(mut active) = active_ai_cli_processes().lock() { active.remove(run_id); }
     if let Ok(mut visible) = active_ai_cli_visible_progress().lock() {
         visible.remove(run_id);
     }
     unregister_ai_cli_steer(run_id);
+    cancelled_ai_cli_ids().lock().unwrap_or_else(|e| e.into_inner()).remove(run_id);
 }
 
 const FREE_CHANNEL_ENV_MAPPINGS: &[(&str, &[&str])] = &[
@@ -911,6 +1008,17 @@ struct LocalModelRuntimeStatus {
 struct RemoteModelListResult {
     models: Vec<String>,
     url: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CodexCatalogModel {
+    id: String,
+    description: String,
+    reasoning_efforts: Vec<String>,
+    reasoning_effort_descriptions: HashMap<String, String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_id: Option<String>,
 }
 
 #[derive(serde::Serialize)]
@@ -2562,7 +2670,7 @@ fn skill_desktop_host() -> Result<&'static Arc<skills::SkillDesktopHost>, String
         .map_err(Clone::clone)
 }
 
-fn require_skill_app(window: &tauri::WebviewWindow) -> Result<(), String> {
+fn require_skill_app(window: &tauri::Webview) -> Result<(), String> {
     let url = window.url().map_err(|_| "cannot verify skills IPC caller")?;
     let origin = match url.port() {
         Some(port) => format!("{}://{}:{port}", url.scheme(), url.host_str().unwrap_or_default()),
@@ -2574,7 +2682,7 @@ fn require_skill_app(window: &tauri::WebviewWindow) -> Result<(), String> {
 /// App orchestration supplies the frozen config/evidence before invoking the
 /// model-facing request. Never expose this binding command as a model tool.
 #[tauri::command]
-async fn skills_bind_run(window: tauri::WebviewWindow, request: skills::SkillHostBindingRequest) -> Result<serde_json::Value, String> {
+async fn skills_bind_run(window: tauri::Webview, request: skills::SkillHostBindingRequest) -> Result<serde_json::Value, String> {
     require_skill_app(&window)?;
     let host = Arc::clone(skill_desktop_host()?);
     tauri::async_runtime::spawn_blocking(move || {
@@ -2589,7 +2697,7 @@ async fn skills_bind_run(window: tauri::WebviewWindow, request: skills::SkillHos
 }
 
 #[tauri::command]
-async fn skills_revoke_run(window: tauri::WebviewWindow, origin: skills::SkillOrigin) -> Result<(), String> {
+async fn skills_revoke_run(window: tauri::Webview, origin: skills::SkillOrigin) -> Result<(), String> {
     require_skill_app(&window)?;
     let host = Arc::clone(skill_desktop_host()?);
     tauri::async_runtime::spawn_blocking(move || host.revoke(&origin))
@@ -2597,7 +2705,7 @@ async fn skills_revoke_run(window: tauri::WebviewWindow, origin: skills::SkillOr
 }
 
 #[tauri::command]
-async fn skills_request(app: AppHandle, window: tauri::WebviewWindow, request: skills::SkillServiceRequest) -> Result<serde_json::Value, String> {
+async fn skills_request(app: AppHandle, window: tauri::Webview, request: skills::SkillServiceRequest) -> Result<serde_json::Value, String> {
     require_skill_app(&window)?;
     let host = Arc::clone(skill_desktop_host()?);
     tauri::async_runtime::spawn_blocking(move || host.request_with_update(request, |origin,catalog| {
@@ -2607,7 +2715,7 @@ async fn skills_request(app: AppHandle, window: tauri::WebviewWindow, request: s
 }
 
 #[tauri::command]
-async fn skill_candidates_request(window: tauri::WebviewWindow, request: serde_json::Value) -> Result<serde_json::Value, String> {
+async fn skill_candidates_request(window: tauri::Webview, request: serde_json::Value) -> Result<serde_json::Value, String> {
     require_skill_app(&window)?;
     let host = Arc::clone(skill_desktop_host()?);
     tauri::async_runtime::spawn_blocking(move || host.candidate_request(request))
@@ -3651,6 +3759,28 @@ fn codex_provider_credential_override() -> Option<String> {
     codex_provider_for_credential_override(&text)
 }
 
+/// Keep a handoff on its explicitly selected channel even when Codex's own
+/// config selects a different named provider. Ordinary turns retain their
+/// existing configuration behavior.
+fn codex_handoff_base_override(
+    handoff_turn: bool,
+    provider: Option<&str>,
+    base_url: Option<&str>,
+) -> Result<Option<String>, String> {
+    let Some(base_url) = base_url.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if !handoff_turn {
+        return Ok(None);
+    }
+    let provider = provider.ok_or("Codex 的具名渠道配置无效，无法安全使用交接渠道。")?;
+    Ok(Some(format!(
+        "model_providers.{}.base_url={}",
+        codex_config_key_segment(provider),
+        toml_literal_string(base_url)
+    )))
+}
+
 /// Codex 原生 MCP 配置写入 `~/.codex/config.toml` 的 `[mcp_servers.<name>]`。
 fn merge_codex_mcp_servers(
     servers: &serde_json::Map<String, serde_json::Value>,
@@ -4234,9 +4364,7 @@ fn validate_shell_path_blocking(path: String) -> Result<String, String> {
 
 #[tauri::command]
 async fn validate_shell_path(path: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || validate_shell_path_blocking(path))
-        .await
-        .map_err(|e| format!("Shell 路径校验任务失败: {e}"))?
+    native_background::run_bounded(native_background::file_lane(), std::time::Duration::from_secs(8), move || validate_shell_path_blocking(path)).await
 }
 
 fn open_external_blocking(url: String) -> Result<(), String> {
@@ -4268,9 +4396,7 @@ fn open_external_blocking(url: String) -> Result<(), String> {
 
 #[tauri::command]
 async fn open_external(url: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || open_external_blocking(url))
-        .await
-        .map_err(|e| format!("打开外部链接任务失败: {e}"))?
+    native_background::run_bounded(native_background::control_lane(), std::time::Duration::from_secs(8), move || open_external_blocking(url)).await
 }
 
 fn open_workspace_directory_blocking(path: String) -> Result<(), String> {
@@ -8919,14 +9045,15 @@ fn strip_normalized_prefix(path: &str, prefix: &str, case_insensitive: bool) -> 
 }
 
 fn local_status_path_from_root(root: &Path, path: &str) -> Option<String> {
-    let normalized = normalize_p4_mapping_path(path);
-    let root_text = normalize_p4_mapping_path(&root.to_string_lossy());
+    // P4 reports ordinary paths, while canonicalize() uses verbatim paths on Windows.
+    let normalized = normalize_p4_mapping_path(&display_preview_path(Path::new(path)));
+    let root_text = normalize_p4_mapping_path(&display_preview_path(root));
     if let Some(relative) = strip_normalized_prefix(&normalized, &root_text, cfg!(windows)) {
         return Some(normalize_vcs_status_path(&relative));
     }
 
     if let Ok(canonical_root) = std::fs::canonicalize(root) {
-        let canonical_root_text = normalize_p4_mapping_path(&canonical_root.to_string_lossy());
+        let canonical_root_text = normalize_p4_mapping_path(&display_preview_path(&canonical_root));
         if let Some(relative) =
             strip_normalized_prefix(&normalized, &canonical_root_text, cfg!(windows))
         {
@@ -12255,19 +12382,18 @@ fn preview_local_file_blocking(
 /// Open the file's directory in the asset protocol scope so `convertFileSrc`
 /// URLs resolve. Without this the protocol returns 403 for anything outside the
 /// app's own resources. Covers video, image, PDF, Office and HTML previews.
-fn allow_preview_stream(app: &AppHandle, preview: &LocalFilePreview) {
+fn allow_preview_stream(app: &AppHandle, preview: &LocalFilePreview) -> Result<(), String> {
     let Some(stream) = preview.stream_path.as_deref() else {
-        return;
+        return Ok(());
     };
-    let stream = std::path::Path::new(stream);
-    let absolute = std::fs::canonicalize(stream).unwrap_or_else(|_| stream.to_path_buf());
-    if let Some(parent) = absolute.parent() {
-        // HTML commonly keeps styles, scripts and images in child directories.
-        // Scope those resources to this document's directory; other previews
-        // still authorize only their immediate directory.
-        let recursive = preview.mime.as_deref() == Some("text/html");
-        let _ = app.asset_protocol_scope().allow_directory(parent, recursive);
-    }
+    allow_asset_directory(app, Path::new(stream), preview.mime.as_deref() == Some("text/html"))
+}
+
+fn allow_asset_directory(app: &AppHandle, target: &Path, recursive: bool) -> Result<(), String> {
+    static SCOPES: OnceLock<native_assets::AssetScopes> = OnceLock::new();
+    SCOPES.get_or_init(Default::default).ensure(target, recursive, |parent, recursive| {
+        app.asset_protocol_scope().allow_directory(parent, recursive).map_err(|e| format!("本地资源授权失败: {e}"))
+    })
 }
 
 #[tauri::command]
@@ -12276,26 +12402,20 @@ async fn preview_local_file(
     path: String,
     cwd: Option<String>,
 ) -> Result<LocalFilePreview, String> {
-    let preview =
-        tauri::async_runtime::spawn_blocking(move || preview_local_file_blocking(path, cwd))
-            .await
-            .map_err(|e| format!("文件预览任务失败: {e}"))??;
-
-    allow_preview_stream(&app, &preview);
-    Ok(preview)
+    native_background::run_bounded(native_background::file_lane(), std::time::Duration::from_secs(30), move || {
+        let preview = preview_local_file_blocking(path, cwd)?;
+        allow_preview_stream(&app, &preview)?;
+        Ok(preview)
+    }).await
 }
 
 /// 把本地文件所在目录加入 asset protocol scope，使 `convertFileSrc(path)`
 /// 生成的 URL 能加载。聊天 / md 预览里内嵌的本地图片先调它，否则 403。
 #[tauri::command]
-fn ensure_local_asset_scope(app: AppHandle, path: String) -> Result<(), String> {
-    let target = std::path::Path::new(&path);
-    let absolute = std::fs::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
-    let Some(parent) = absolute.parent() else {
-        return Err("路径没有父目录".to_string());
-    };
-    let _ = app.asset_protocol_scope().allow_directory(parent, false);
-    Ok(())
+async fn ensure_local_asset_scope(app: AppHandle, path: String) -> Result<(), String> {
+    native_background::run_bounded(native_background::file_lane(), std::time::Duration::from_secs(10), move || {
+        allow_asset_directory(&app, Path::new(&path), false)
+    }).await
 }
 
 /// Paged read of a PPTX/XLSX: only the leading slides/sheets are parsed, so a
@@ -12681,6 +12801,57 @@ fn write_unique_model_asset(
     }
 
     Err("创建模型文件失败：文件名冲突。".to_string())
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionHandoffPaths {
+    snapshot_path: String,
+    summary_path: String,
+}
+
+fn save_session_handoff_snapshot_blocking(
+    cwd: String,
+    snapshot: String,
+) -> Result<SessionHandoffPaths, String> {
+    let root = Path::new(cwd.trim());
+    if !root.is_absolute() || !root.is_dir() {
+        return Err("会话工作区不存在或不是绝对路径。".to_string());
+    }
+    if snapshot.trim().is_empty() {
+        return Err("会话记录为空。".to_string());
+    }
+    let dir = root.join(".ultragamestudio").join("temp").join("session-handoff");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("创建交接目录失败：{e}"))?;
+    let summary_dir = root.join(".ultragamestudio").join("docs").join("dev");
+    for attempt in 0..128 {
+        let stem = format!("session-handoff-{}-{attempt}", now_ms());
+        let snapshot_path = dir.join(format!("{stem}.json"));
+        let summary_path = summary_dir.join(format!("{stem}.md"));
+        if summary_path.exists() {
+            continue;
+        }
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&snapshot_path) {
+            Ok(mut file) => {
+                file.write_all(snapshot.as_bytes()).map_err(|e| format!("写入会话记录失败：{e}"))?;
+                std::fs::create_dir_all(&summary_dir).map_err(|e| format!("创建交接文档目录失败：{e}"))?;
+                return Ok(SessionHandoffPaths {
+                    snapshot_path: snapshot_path.to_string_lossy().to_string(),
+                    summary_path: summary_path.to_string_lossy().to_string(),
+                });
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(format!("保存会话记录失败：{err}")),
+        }
+    }
+    Err("保存会话记录失败：文件名冲突。".to_string())
+}
+
+#[tauri::command]
+async fn save_session_handoff_snapshot(cwd: String, snapshot: String) -> Result<SessionHandoffPaths, String> {
+    tauri::async_runtime::spawn_blocking(move || save_session_handoff_snapshot_blocking(cwd, snapshot))
+        .await
+        .map_err(|e| format!("保存会话记录任务失败：{e}"))?
 }
 
 fn save_clipboard_image_blocking(
@@ -13759,6 +13930,129 @@ fn list_remote_models_blocking(
     })
 }
 
+fn list_codex_models_blocking(cli_command: Option<String>, shell: Option<ShellSpec>) -> Result<Vec<CodexCatalogModel>, String> {
+    let binary = cli_command.as_deref().map(cli_runtime::normalize_cli_command_override).transpose()?
+        .unwrap_or_else(|| "codex".to_string());
+    let binary = cli_runtime::resolve_launch_binary(&binary).unwrap_or(binary);
+    let mut command = build_launch_command(&binary, &["app-server".into(), "--stdio".into()], &shell);
+    command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    let mut child = command.spawn().map_err(|err| format!("无法读取 Codex 模型目录：{err}"))?;
+    let result = (|| -> Result<Vec<CodexCatalogModel>, String> {
+        let mut stdin = child.stdin.take().ok_or("Codex 模型目录输入不可用")?;
+        let stdout = child.stdout.take().ok_or("Codex 模型目录输出不可用")?;
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                match line {
+                    Ok(line) => { if tx.send(line).is_err() { break; } }
+                    Err(_) => break,
+                }
+            }
+        });
+        let mut send = |message: serde_json::Value| -> Result<(), String> {
+            writeln!(stdin, "{message}").and_then(|_| stdin.flush())
+                .map_err(|err| format!("Codex 模型目录请求失败：{err}"))
+        };
+        send(serde_json::json!({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "UltraGameStudio", "version": env!("CARGO_PKG_VERSION")}}}))?;
+        send(serde_json::json!({"method": "initialized", "params": {}}))?;
+        let mut cursor: Option<String> = None;
+        let mut models = Vec::new();
+        loop {
+            send(serde_json::json!({"id": 2, "method": "model/list", "params": {"limit": 100, "cursor": cursor}}))?;
+            let response = loop {
+                let line = rx.recv_timeout(std::time::Duration::from_secs(30))
+                    .map_err(|_| "读取 Codex 模型目录失败或超时。".to_string())?;
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+                if value.get("id").and_then(|id| id.as_i64()) == Some(2) { break value; }
+            };
+            if let Some(error) = response.get("error") { return Err(format!("Codex 模型目录请求失败：{error}")); }
+            let result = response.get("result").ok_or("Codex 模型目录响应为空")?;
+            let data = result.get("data").and_then(|value| value.as_array()).ok_or("Codex 模型目录格式无效")?;
+            for item in data {
+                if item.get("hidden").and_then(|value| value.as_bool()) == Some(true) { continue; }
+                let Some(id) = item.get("model").or_else(|| item.get("id")).and_then(|value| value.as_str()) else { continue };
+                let reasoning_efforts = item.get("supportedReasoningEfforts").and_then(|value| value.as_array())
+                    .map(|items| items.iter().filter_map(|value| value.get("reasoningEffort").and_then(|value| value.as_str()).map(str::to_owned)).collect())
+                    .unwrap_or_default();
+                let reasoning_effort_descriptions = item.get("supportedReasoningEfforts").and_then(|value| value.as_array())
+                    .map(|items| items.iter().filter_map(|value| Some((
+                        value.get("reasoningEffort")?.as_str()?.to_string(),
+                        value.get("description")?.as_str()?.to_string(),
+                    ))).collect())
+                    .unwrap_or_default();
+                models.push(CodexCatalogModel { id: id.to_string(), description: item.get("description").and_then(|value| value.as_str()).unwrap_or("").to_string(), reasoning_efforts, reasoning_effort_descriptions, provider_id: None });
+            }
+            let next = result.get("nextCursor").and_then(|value| value.as_str()).filter(|value| !value.is_empty()).map(str::to_owned);
+            if next.is_none() || next == cursor { break; }
+            cursor = next;
+        }
+        if models.is_empty() { return Err("Codex 模型目录为空。".to_string()); }
+        Ok(models)
+    })();
+    terminate_child_tree(&mut child);
+    result
+}
+
+#[tauri::command]
+async fn list_codex_models(cli_command: Option<String>, shell: Option<ShellSpec>) -> Result<Vec<CodexCatalogModel>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_codex_models_blocking(cli_command, shell))
+        .await.map_err(|err| format!("读取 Codex 模型目录失败：{err}"))?
+}
+
+fn list_zcode_models_blocking(cli_command: Option<String>, cwd: String) -> Result<Vec<CodexCatalogModel>, String> {
+    let binary = cli_command.as_deref().map(cli_runtime::normalize_cli_command_override).transpose()?
+        .unwrap_or_else(|| "zcode".to_string());
+    let binary = cli_runtime::resolve_launch_binary(&binary).unwrap_or(binary);
+    let entry = cli_runtime::resolve_zcode_runtime_entry(&binary).ok_or("无法找到 ZCode 模型目录接口。")?;
+    if !Path::new(&cwd).is_dir() { return Err("读取 ZCode 模型目录需要有效工作区。".to_string()); }
+    let mut child = new_spawn_command("node").arg(entry).arg("app-server").current_dir(&cwd)
+        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
+        .map_err(|err| format!("无法读取 ZCode 模型目录：{err}"))?;
+    let result = (|| -> Result<Vec<CodexCatalogModel>, String> {
+        let mut stdin = child.stdin.take().ok_or("ZCode 模型目录输入不可用")?;
+        let stdout = child.stdout.take().ok_or("ZCode 模型目录输出不可用")?;
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(stdout).lines() {
+                match line { Ok(line) => { if tx.send(line).is_err() { break; } }, Err(_) => break }
+            }
+        });
+        let request = serde_json::json!({"id": "ugs-catalog", "method": "session/create", "params": {
+            "workspace": {"workspacePath": cwd, "workspaceKey": cwd}, "mode": "build", "persistence": "deferred"
+        }});
+        writeln!(stdin, "{request}").and_then(|_| stdin.flush()).map_err(|err| err.to_string())?;
+        loop {
+            let line = rx.recv_timeout(std::time::Duration::from_secs(30)).map_err(|_| "读取 ZCode 模型目录失败或超时。".to_string())?;
+            let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else { continue };
+            if value.get("method").is_some() && value.get("id").is_some() {
+                let reply = serde_json::json!({"id": value["id"], "error": {"code": -32601, "message": "No interactive client"}});
+                writeln!(stdin, "{reply}").and_then(|_| stdin.flush()).map_err(|err| err.to_string())?;
+                continue;
+            }
+            if value.get("id").and_then(|value| value.as_str()) != Some("ugs-catalog") { continue; }
+            if let Some(error) = value.get("error") { return Err(format!("ZCode 模型目录请求失败：{error}")); }
+            let data = value.pointer("/result/settings/model/available").and_then(|value| value.as_array()).ok_or("ZCode 模型目录格式无效")?;
+            let models = data.iter().filter_map(|item| {
+                let id = item.pointer("/ref/modelId")?.as_str()?;
+                let provider_id = item.pointer("/ref/providerId").and_then(|value| value.as_str()).map(str::to_owned);
+                let reasoning_efforts = item.pointer("/reasoning/levels").and_then(|value| value.as_array())
+                    .map(|levels| levels.iter().filter_map(|level| level.get("value").and_then(|value| value.as_str()).map(str::to_owned)).collect())
+                    .unwrap_or_default();
+                Some(CodexCatalogModel { id: id.to_string(), description: String::new(), reasoning_efforts, reasoning_effort_descriptions: HashMap::new(), provider_id })
+            }).collect::<Vec<_>>();
+            return if models.is_empty() { Err("ZCode 模型目录为空。".to_string()) } else { Ok(models) };
+        }
+    })();
+    terminate_child_tree(&mut child);
+    result
+}
+
+#[tauri::command]
+async fn list_zcode_models(cli_command: Option<String>, cwd: String) -> Result<Vec<CodexCatalogModel>, String> {
+    tauri::async_runtime::spawn_blocking(move || list_zcode_models_blocking(cli_command, cwd))
+        .await.map_err(|err| format!("读取 ZCode 模型目录失败：{err}"))?
+}
+
 #[tauri::command]
 async fn list_remote_models(
     urls: Vec<String>,
@@ -14072,7 +14366,7 @@ async fn setup_comfyui(model: Option<String>, skip_model: Option<bool>) -> Resul
 
 #[tauri::command]
 async fn scan_model_clis() -> cli_runtime::CliScanResult {
-    tauri::async_runtime::spawn_blocking(cli_runtime::scan_model_clis)
+    native_background::run_bounded(native_background::probe_lane(), std::time::Duration::from_secs(30), || Ok(cli_runtime::scan_model_clis()))
         .await
         .unwrap_or_else(|e| cli_runtime::CliScanResult {
             scanned_at_ms: 0,
@@ -14084,9 +14378,7 @@ async fn scan_model_clis() -> cli_runtime::CliScanResult {
 
 #[tauri::command]
 async fn validate_cli_path(path: String) -> Result<cli_runtime::CliPathValidation, String> {
-    tauri::async_runtime::spawn_blocking(move || cli_runtime::validate_cli_path(&path))
-        .await
-        .map_err(|e| format!("CLI 路径校验任务失败: {e}"))?
+    native_background::run_bounded(native_background::probe_lane(), std::time::Duration::from_secs(8), move || cli_runtime::validate_cli_path(&path)).await
 }
 
 // ---------------------------------------------------------------------------
@@ -14569,17 +14861,13 @@ fn cli_update_command(spec: &CliUpdateSpec, exe: Option<&str>) -> Result<Command
 }
 
 #[tauri::command]
-async fn check_cli_updates() -> Vec<CliVersionStatus> {
-    tauri::async_runtime::spawn_blocking(check_cli_updates_blocking)
-        .await
-        .unwrap_or_default()
+async fn check_cli_updates() -> Result<Vec<CliVersionStatus>, String> {
+    native_background::run_bounded(native_background::probe_lane(), std::time::Duration::from_secs(30), || Ok(check_cli_updates_blocking())).await
 }
 
 #[tauri::command]
 async fn update_cli(adapter: String) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || run_cli_update_blocking(&adapter))
-        .await
-        .map_err(|e| format!("更新任务启动失败: {e}"))?
+    native_background::run_bounded(native_background::update_lane(), std::time::Duration::from_secs(360), move || run_cli_update_blocking(&adapter)).await
 }
 
 /// Manual "clean up now" sweep triggered from the Settings UI (设置 > 通用).
@@ -14853,7 +15141,9 @@ async fn run_studio(
             "/studio 动态多智能体编排已默认关闭。请直接使用普通聊天/编程模型处理任务。".to_string(),
         );
     }
+    let cancel_owner = AiCliCancelOwner::accept(&run_id)?;
     tauri::async_runtime::spawn_blocking(move || -> Result<StudioRunResult, String> {
+        let _cancel_owner = cancel_owner;
         let task = task.trim().to_string();
         if task.is_empty() {
             return Err("请提供任务：/studio <任务>".to_string());
@@ -14961,7 +15251,11 @@ async fn run_studio(
         if let Some(job) = assign_child_to_kill_on_close_job(&child) {
             register_ai_cli_job(&run_id, job);
         }
-        register_ai_cli(&run_id, child.id());
+        if let Err(error) = register_owned_ai_cli(&run_id, &child) {
+            terminate_ai_cli_tree(&mut child, &run_id);
+            unregister_ai_cli(&run_id);
+            return Err(error);
+        }
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
@@ -15736,6 +16030,19 @@ fn write_gemini_project_mcp_settings(cwd: Option<&str>) -> Result<Option<TempFil
     Ok(Some(TempFileGuard::new(path)))
 }
 
+fn write_gemini_handoff_settings(cwd: Option<&str>, model: &str, level: &str, include_mcp: bool) -> Result<TempFileGuard, String> {
+    let mut settings = if include_mcp { gemini_project_mcp_settings_json(cwd) } else { None }
+        .unwrap_or_else(|| serde_json::json!({}));
+    settings["modelConfigs"] = serde_json::json!({"customOverrides": [{
+        "match": {"model": model},
+        "modelConfig": {"generateContentConfig": {"thinkingConfig": {"thinkingLevel": level.to_ascii_uppercase()}}}
+    }]});
+    let path = temp_output_path_for_cwd(cwd, "ultragamestudio-gemini-handoff", "json");
+    let bytes = serde_json::to_vec(&settings).map_err(|err| format!("生成 Gemini 交接配置失败：{err}"))?;
+    std::fs::write(&path, bytes).map_err(|err| format!("写入 Gemini 交接配置失败：{err}"))?;
+    Ok(TempFileGuard::new(path))
+}
+
 fn toml_literal_string(value: &str) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
@@ -15830,9 +16137,9 @@ fn append_codex_project_mcp_config_args(args: &mut Vec<String>, cwd: Option<&str
 }
 
 static CLAUDE_BARE_SUPPORT_CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-static CLAUDE_STREAM_INPUT_SUPPORT_CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+static CLAUDE_STREAM_INPUT_SUPPORT_CACHE: OnceLock<native_background::ProbeCache> = OnceLock::new();
 static CLAUDE_EFFORT_SUPPORT_CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
-static CODEX_APP_SERVER_SUPPORT_CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+static CODEX_APP_SERVER_SUPPORT_CACHE: OnceLock<native_background::ProbeCache> = OnceLock::new();
 
 fn claude_help_supports_bare(help_text: &str) -> bool {
     help_text.contains("--bare")
@@ -17005,44 +17312,25 @@ struct CodexLiteParams {
 
 fn codex_cli_supports_app_server(binary: &str, shell: &Option<ShellSpec>) -> bool {
     let key = format!("{}\0{}", binary, shell_spec_cache_key(shell));
-    let cache = CODEX_APP_SERVER_SUPPORT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(cache) = cache.lock() {
-        if let Some(supported) = cache.get(&key) {
-            return *supported;
-        }
-    }
-
+    CODEX_APP_SERVER_SUPPORT_CACHE.get_or_init(Default::default).get_or_probe(key, || {
     let help_args = vec!["app-server".to_string(), "--help".to_string()];
     let help_cmd = build_launch_command(binary, &help_args, shell);
     let help_text = command_text_output_with_timeout(help_cmd, std::time::Duration::from_secs(5))
         .unwrap_or_default();
-    let supported = help_text.contains("app server") && help_text.contains("--stdio");
-    if let Ok(mut cache) = cache.lock() {
-        cache.insert(key, supported);
-    }
-    supported
+    help_text.contains("app server") && help_text.contains("--stdio")
+    })
 }
 
 fn claude_cli_supports_stream_input(binary: &str, shell: &Option<ShellSpec>) -> bool {
     let key = format!("{}\0{}", binary, shell_spec_cache_key(shell));
-    let cache = CLAUDE_STREAM_INPUT_SUPPORT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Ok(cache) = cache.lock() {
-        if let Some(supported) = cache.get(&key) {
-            return *supported;
-        }
-    }
-
+    CLAUDE_STREAM_INPUT_SUPPORT_CACHE.get_or_init(Default::default).get_or_probe(key, || {
     let help_args = vec!["--help".to_string()];
     let mut help_cmd = build_launch_command(binary, &help_args, shell);
     help_cmd.env("DISABLE_AUTOUPDATER", "1");
     let help_text = command_text_output_with_timeout(help_cmd, std::time::Duration::from_secs(5))
         .unwrap_or_default();
-    let supported = claude_help_supports_stream_input(&help_text);
-
-    if let Ok(mut cache) = cache.lock() {
-        cache.insert(key, supported);
-    }
-    supported
+    claude_help_supports_stream_input(&help_text)
+    })
 }
 
 /// Kill-switch for the Codex App Server transport — the only channel that can
@@ -17411,7 +17699,7 @@ fn codex_tool_args(item: &CodexLiteItem) -> Option<serde_json::Value> {
 
 fn codex_tool_patch(item: &CodexLiteItem, fallback_id: String) -> Option<serde_json::Value> {
     let item_type = item.item_type.as_deref().unwrap_or("");
-    if item_type.is_empty() || matches!(item_type, "agent_message" | "agentMessage") {
+    if item_type.is_empty() || matches!(item_type, "agent_message" | "agentMessage" | "user_message" | "userMessage") {
         return None;
     }
     let result_raw = item
@@ -17594,29 +17882,73 @@ fn remove_codex_sidecar(path: &Option<PathBuf>) {
 
 /// The UI currently exposes Claude model tiers (`haiku` / `sonnet` / `opus`).
 /// Passing those through to Codex would fail, so only forward explicit non-
-#[tauri::command]
-fn cancel_ai_cli(run_id: String) -> Result<(), String> {
-    skills::native_launch::cancel_native_cli(&run_id);
+#[tauri::command(rename = "cancel_ai_cli")]
+async fn cancel_ai_cli_async(run_id: String) -> Result<(), String> {
+    if run_id.is_empty() || run_id.len() > 256 { return Err("取消任务 ID 无效。".into()); }
+    let (pid, cancel_owner) = mark_ai_cli_cancelled_inner(&run_id, true);
+    let native_cancel = skills::native_launch::capture_native_cli_cancellation(&run_id);
+    #[cfg(windows)]
+    let process = capture_ai_cli_process(&run_id);
+    #[cfg(windows)]
+    let had_job = active_ai_cli_jobs().lock().map_err(|_| "CLI job 锁失败。")?.contains_key(&run_id);
+    if pid.is_none() && cancel_owner.is_none() && native_cancel.is_none() { return Ok(()); }
+    native_background::run_bounded(native_background::control_lane(), std::time::Duration::from_secs(6), move || {
+    let _cancel_owner = cancel_owner;
+    #[cfg(test)]
+    skills::native_launch::test_checkpoint(&run_id, "before-cancel-cleanup");
+    if let Some(native_cancel) = native_cancel { native_cancel.cancel(); }
     // Kill all processes in the job (including orphaned grandchildren)
     // BEFORE the taskkill /T fallback, so orphans that `taskkill /T`
     // can't see are still reaped.
-    if let Some(job) = take_ai_cli_job(&run_id) {
-        kill_job_processes(job);
-        close_job_handle(job);
+    if _cancel_owner.is_some() || pid.is_some() {
+        if let Some(job) = take_ai_cli_job(&run_id) {
+            kill_job_processes(job);
+            close_job_handle(job);
+        }
     }
-    if let Some(pid) = mark_ai_cli_cancelled(&run_id) {
-        let _ = terminate_process_tree(pid);
+    #[cfg(windows)]
+    if let Some(process) = process {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Threading::{TerminateProcess, WaitForSingleObject};
+        use windows_sys::Win32::Foundation::WAIT_OBJECT_0;
+        unsafe {
+            if WaitForSingleObject(process.as_raw_handle() as _, 0) != WAIT_OBJECT_0 {
+                // Job termination may already be in progress: TerminateProcess
+                // can then fail even though this exact object becomes signalled.
+                let _ = TerminateProcess(process.as_raw_handle() as _, 1);
+                if WaitForSingleObject(process.as_raw_handle() as _, 1000) != WAIT_OBJECT_0 {
+                    return Err("取消意图已发布，但原进程未确认退出。".into());
+                }
+            }
+        }
+        if !had_job { return Err("原进程已退出，但未分配 job，不能确认完整进程树清理。".into()); }
+    } else if pid.is_some() {
+        return Err("取消意图已发布，但缺少原进程身份，拒绝按数字 PID 终止。".into());
+    }
+    #[cfg(not(windows))]
+    if let Some(pid) = pid {
+        if !terminate_process_tree(pid) && process_is_alive(pid) {
+            return Err("取消意图已发布，但进程树清理失败或超时。".into());
+        }
     }
     Ok(())
+    }).await
+}
+
+// Existing native-launch fixture callers are synchronous; the IPC is async.
+#[cfg(test)]
+fn cancel_ai_cli(run_id: String) -> Result<(), String> {
+    tauri::async_runtime::block_on(cancel_ai_cli_async(run_id))
 }
 
 #[tauri::command]
-fn ai_cli_steer_supported(
+async fn ai_cli_steer_supported(
     adapter: String,
     cli_command: Option<String>,
     permission: Option<String>,
     shell: Option<ShellSpec>,
 ) -> Result<bool, String> {
+    native_background::run_bounded(native_background::probe_lane(), std::time::Duration::from_secs(8), move || {
     let binary = match cli_command
         .as_deref()
         .map(cli_runtime::normalize_cli_command_override)
@@ -17641,21 +17973,20 @@ fn ai_cli_steer_supported(
     // only transports with a real in-turn channel; everything else is `None`.
     let channel = ai_cli_steer_channel(&protocol, &binary, permission.as_deref(), &shell);
     Ok(channel != AiCliSteerChannel::None)
+    }).await
 }
 
 fn write_codex_app_server_message(
-    stdin: &Arc<Mutex<ChildStdin>>,
+    stdin: &Arc<PipeWriter>,
     message: &serde_json::Value,
 ) -> Result<(), String> {
-    let mut stdin = stdin
-        .lock()
-        .map_err(|_| "Codex App Server stdin 锁已损坏。".to_string())?;
-    serde_json::to_writer(&mut *stdin, message)
-        .map_err(|e| format!("编码 Codex App Server 请求失败: {e}"))?;
-    stdin
-        .write_all(b"\n")
-        .and_then(|_| stdin.flush())
-        .map_err(|e| format!("写入 Codex App Server 失败: {e}"))
+    write_protocol_message(stdin, message)
+}
+
+fn write_protocol_message(stdin: &Arc<PipeWriter>, message: &serde_json::Value) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec(message).map_err(|e| format!("编码管道请求失败: {e}"))?;
+    bytes.push(b'\n');
+    stdin.write_bytes(bytes, std::time::Instant::now() + std::time::Duration::from_secs(2))
 }
 
 fn set_codex_startup_error(error: &Arc<Mutex<Option<String>>>, message: String) {
@@ -17669,18 +18000,10 @@ fn set_codex_startup_error(error: &Arc<Mutex<Option<String>>>, message: String) 
 /// Write one newline-delimited JSON-RPC 2.0 message to the zcode app-server
 /// (the bundled `vendor/zcode.cjs` runtime's `app-server` stdio protocol).
 fn write_zcode_protocol_message(
-    stdin: &Arc<Mutex<ChildStdin>>,
+    stdin: &Arc<PipeWriter>,
     message: &serde_json::Value,
 ) -> Result<(), String> {
-    let mut stdin = stdin
-        .lock()
-        .map_err(|_| "ZCode app-server stdin 锁已损坏。".to_string())?;
-    serde_json::to_writer(&mut *stdin, message)
-        .map_err(|e| format!("编码 ZCode app-server 请求失败: {e}"))?;
-    stdin
-        .write_all(b"\n")
-        .and_then(|_| stdin.flush())
-        .map_err(|e| format!("写入 ZCode app-server 失败: {e}"))
+    write_protocol_message(stdin, message)
 }
 
 /// Poll the reader-thread-populated session id / startup error until one is
@@ -17742,22 +18065,11 @@ fn wait_for_codex_start_id(
 }
 
 fn write_claude_stream_message(
-    stdin: &Arc<Mutex<Option<ChildStdin>>>,
+    stdin: &Arc<PipeWriter>,
     text: &str,
 ) -> Result<(), String> {
-    let mut guard = stdin
-        .lock()
-        .map_err(|_| "Claude streaming stdin 锁已损坏。".to_string())?;
-    let stdin = guard
-        .as_mut()
-        .ok_or_else(|| "Claude turn 已结束。".to_string())?;
     let message = claude_stream_input_message(text);
-    serde_json::to_writer(&mut *stdin, &message)
-        .map_err(|e| format!("编码 Claude streaming input 失败: {e}"))?;
-    stdin
-        .write_all(b"\n")
-        .and_then(|_| stdin.flush())
-        .map_err(|e| format!("写入 Claude streaming input 失败: {e}"))
+    write_protocol_message(stdin, &message)
 }
 
 fn claude_stream_input_message(text: &str) -> serde_json::Value {
@@ -17769,14 +18081,18 @@ fn claude_stream_input_message(text: &str) -> serde_json::Value {
     })
 }
 
-fn close_claude_stream_input(stdin: &Arc<Mutex<Option<ChildStdin>>>) {
-    if let Ok(mut guard) = stdin.lock() {
-        guard.take();
-    }
+fn close_claude_stream_input(stdin: &Arc<PipeWriter>) {
+    stdin.close();
 }
 
 #[tauri::command]
-fn steer_ai_cli(run_id: String, text: String) -> Result<bool, String> {
+async fn steer_ai_cli(run_id: String, text: String) -> Result<bool, String> {
+    native_background::run_bounded(native_background::control_lane(), std::time::Duration::from_secs(10), move || {
+        steer_ai_cli_blocking(run_id, text)
+    }).await
+}
+
+fn steer_ai_cli_blocking(run_id: String, text: String) -> Result<bool, String> {
     let text = text.trim();
     if text.is_empty() {
         return Ok(false);
@@ -18088,7 +18404,7 @@ async fn ai_cli(
     language_directive: Option<String>,
     shell: Option<ShellSpec>,
     app: tauri::AppHandle,
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
 ) -> Result<AiCliResult, String> {
     let native_skill = match skill_tools {
         Some(request) if request.enabled && request.mode != skills::LearningMode::Off => {
@@ -18133,13 +18449,18 @@ async fn ai_cli_runtime(
     shell: Option<ShellSpec>,
     app: tauri::AppHandle,
 ) -> Result<AiCliResult, String> {
+    let cancel_owner = AiCliCancelOwner::accept(&run_id)?;
+    #[cfg(test)]
+    skills::native_launch::test_checkpoint(&run_id, "after-accept-before-native-register");
     // Keep the request owner alive through worker teardown, including no-PID launch errors.
     let native_owner = native_skill.as_ref()
         .filter(|(_, request)| request.enabled && request.mode != skills::LearningMode::Off
             && cli_runtime::adapter_protocol(&adapter) == "claude")
         .map(|_| skills::native_launch::NativeSkillCliOwner::register(&run_id))
         .transpose()?;
+    let stream_slot = Arc::new(native_background::stream_lane().try_acquire_owned().map_err(|_| "CLI 后台任务繁忙，请稍后重试。")?);
     tauri::async_runtime::spawn_blocking(move || -> Result<AiCliResult, String> {
+        let _cancel_owner = cancel_owner;
         let mut env_vars = normalize_spawn_env(env_vars);
         // Resolve the shipped CLI here: the agent's cwd need not be the UGS repository.
         if let Some(env) = env_vars.as_mut().filter(|env| env.contains_key("UGS_TOOL_CATALOG_SCOPE")) {
@@ -18315,6 +18636,8 @@ async fn ai_cli_runtime(
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_owned);
+        let handoff_turn = env_vars.as_ref()
+            .and_then(|vars| env_value(vars, "UGS_HANDOFF_TURN")) == Some("1");
         // 完整思考计划（前端 `thinkingLevels` 解析好的族判定结果）。dsh 侧用它
         // 在第三方 pi-ai 路由上声明 `reasoningEfforts`/`compat`，让「非官方端点」
         // 也有真实可用的档位，而不是像以前那样整体隐藏或静默丢弃。
@@ -18413,7 +18736,13 @@ async fn ai_cli_runtime(
             // turn always runs without an interactive trust prompt.
             args.push("--skip-trust".into());
 
-            if mcp_enabled() {
+            if handoff_turn && model.as_deref().is_some_and(|value| !value.trim().is_empty()) && thinking_level.is_some() {
+                let settings = write_gemini_handoff_settings(
+                    cwd.as_deref(), model.as_deref().unwrap_or_default(), thinking_level.as_deref().unwrap_or_default(), mcp_enabled(),
+                )?;
+                gemini_system_settings_path = Some(settings.path().to_string_lossy().to_string());
+                temp_files.push(settings);
+            } else if mcp_enabled() {
                 if let Some(project_mcp_file) =
                     write_gemini_project_mcp_settings(cwd.as_deref())?
                 {
@@ -18733,6 +19062,11 @@ async fn ai_cli_runtime(
                 args.push("--model".into());
                 args.push(m.to_string());
             }
+            if handoff_turn {
+                if let Some(level) = thinking_level.as_deref() {
+                    args.extend(["--reasoning-effort".into(), level.to_string()]);
+                }
+            }
 
             match permission.as_deref().unwrap_or("full") {
                 "readonly" => {
@@ -18763,7 +19097,14 @@ async fn ai_cli_runtime(
             // env vars — so when the channel carried a key/base url/model (via
             // ZCODE_* env) merge them in BEFORE spawning, otherwise a keyless
             // config fails the whole turn with the opaque `Turn execution failed`.
-            ensure_zcode_user_config(env_vars.as_ref())?;
+            let zcode_config_env = if handoff_turn {
+                env_vars.as_ref().map(|vars| {
+                    let mut vars = vars.clone();
+                    vars.remove("ZCODE_MODEL");
+                    vars
+                })
+            } else { env_vars.clone() };
+            ensure_zcode_user_config(zcode_config_env.as_ref())?;
             let mut task = String::new();
             if inject_extra_workspace_note {
                 task.push_str(&extra_workspace_note);
@@ -18802,6 +19143,15 @@ async fn ai_cli_runtime(
                 args.push("--prompt".into());
                 args.push(task);
                 args.push("--json".into());
+                if handoff_turn {
+                    if let Some(selected) = model.as_deref().filter(|value| !value.trim().is_empty()) {
+                        let selected = if selected.contains('/') { selected.to_string() } else { format!("zai/{selected}") };
+                        args.extend(["--model".into(), selected]);
+                    }
+                    if let Some(level) = thinking_level.as_deref() {
+                        args.extend(["--effort".into(), level.to_string()]);
+                    }
+                }
                 match permission.as_deref().unwrap_or("full") {
                     "readonly" => {
                         args.push("--mode".into());
@@ -18993,6 +19343,20 @@ async fn ai_cli_runtime(
         // `-c model_providers.<provider>.env_key=…` and exports the channel key
         // under that variable — endpoint and `wire_api` stay as configured.
         let codex_respects_own_config = is_codex && codex_uses_named_model_provider();
+        let codex_provider = if codex_respects_own_config {
+            codex_provider_credential_override()
+        } else {
+            None
+        };
+        if codex_respects_own_config {
+            let selected_base = env_vars.as_ref().and_then(|env| env_value(env, "OPENAI_BASE_URL"));
+            if let Some(override_arg) = codex_handoff_base_override(
+                handoff_turn, codex_provider.as_deref(), selected_base,
+            )? {
+                args.push("-c".into());
+                args.push(override_arg);
+            }
+        }
         let codex_channel_key = if codex_respects_own_config {
             env_vars
                 .as_ref()
@@ -19002,10 +19366,11 @@ async fn ai_cli_runtime(
             None
         };
         if codex_channel_key.is_some() {
-            if let Some(provider) = codex_provider_credential_override() {
+            if let Some(provider) = codex_provider.as_deref() {
                 args.push("-c".into());
                 args.push(format!(
-                    "model_providers.{provider}.env_key=\"{CODEX_CHANNEL_KEY_ENV}\""
+                    "model_providers.{}.env_key=\"{CODEX_CHANNEL_KEY_ENV}\"",
+                    codex_config_key_segment(provider)
                 ));
             }
         }
@@ -19119,7 +19484,11 @@ async fn ai_cli_runtime(
                 format!("无法启动 CLI \"{binary}\"：请确认它已安装并在 PATH 中。({e})")
             })?;
         // Publish PID immediately; an external cancel cannot miss capability-probe/startup work.
-        register_ai_cli(&run_id, child.id());
+        if let Err(error) = register_owned_ai_cli(&run_id, &child) {
+            terminate_ai_cli_tree(&mut child, &run_id);
+            unregister_ai_cli(&run_id);
+            return Err(error);
+        }
         // Windows: pin the CLI into a KILL_ON_JOB_CLOSE job so any bash/grep/
         // find/rg it spawns are reaped by the kernel even if UGS crashes or the
         // normal `terminate_child_tree` path is skipped. No-op elsewhere.
@@ -19169,14 +19538,12 @@ async fn ai_cli_runtime(
         let codex_turn_started_at = Arc::new(Mutex::new(None::<std::time::Instant>));
         let codex_pending = Arc::new(Mutex::new(HashMap::new()));
         let codex_stdin = if codex_app_server {
-            stdin_pipe.take().map(|stdin| Arc::new(Mutex::new(stdin)))
+            cli_startup_step(&mut child, &run_id, || stdin_pipe.take().map(PipeWriter::new).transpose())?
         } else {
             None
         };
         let claude_stdin = if claude_stream_input {
-            stdin_pipe
-                .take()
-                .map(|stdin| Arc::new(Mutex::new(Some(stdin))))
+            cli_startup_step(&mut child, &run_id, || stdin_pipe.take().map(PipeWriter::new).transpose())?
         } else {
             None
         };
@@ -19187,7 +19554,7 @@ async fn ai_cli_runtime(
         let zcode_startup_error = Arc::new(Mutex::new(None::<String>));
         let zcode_pending = Arc::new(Mutex::new(HashMap::new()));
         let zcode_stdin = if zcode_app_server {
-            stdin_pipe.take().map(|stdin| Arc::new(Mutex::new(stdin)))
+            cli_startup_step(&mut child, &run_id, || stdin_pipe.take().map(PipeWriter::new).transpose())?
         } else {
             None
         };
@@ -19233,10 +19600,14 @@ async fn ai_cli_runtime(
         let writer_zcode_session_id = Arc::clone(&zcode_session_id);
         let writer_zcode_startup_error = Arc::clone(&zcode_startup_error);
         let writer_zcode_task = zcode_task.clone();
+        let writer_zcode_model = if handoff_turn && is_zcode { model.clone() } else { None };
+        let writer_zcode_effort = if handoff_turn && is_zcode { thinking_level.clone() } else { None };
         let writer_resume = resume;
         let writer_resume_session_id = session_id.clone();
+        let stdin_slot = stream_slot.clone();
         let stdin_handle = if codex_app_server {
             std::thread::spawn(move || {
+                let _slot = stdin_slot;
                 let Some(stdin) = writer_stdin else {
                     return;
                 };
@@ -19360,6 +19731,7 @@ async fn ai_cli_runtime(
             })
         } else if claude_stream_input {
             std::thread::spawn(move || {
+                let _slot = stdin_slot;
                 if let Some(stdin) = writer_claude_stdin {
                     let _ = write_claude_stream_message(&stdin, &prompt);
                 }
@@ -19371,8 +19743,10 @@ async fn ai_cli_runtime(
             // NDJSON responses/notifications and populates `zcode_session_id`.
             std::thread::spawn(move || {
                 let Some(stdin) = writer_zcode_stdin else {
+                    drop(stdin_slot);
                     return;
                 };
+                let _slot = stdin_slot;
                 let cwd_path = writer_cwd
                     .as_deref()
                     .map(str::trim)
@@ -19399,10 +19773,20 @@ async fn ai_cli_runtime(
                         "params": { "sessionId": resume_sid.unwrap() }
                     })
                 } else {
+                    let mut params = serde_json::json!({ "workspace": workspace, "mode": mode });
+                    if let Some(selected) = writer_zcode_model.as_deref().filter(|value| !value.trim().is_empty()) {
+                        let (provider, id) = selected.split_once('/').unwrap_or(("zai", selected));
+                        let mut model = serde_json::json!({ "providerId": provider, "modelId": id });
+                        if let Some(level) = writer_zcode_effort.as_deref() {
+                            model["options"] = serde_json::json!({ "reasoningLevel": level });
+                        }
+                        params["model"] = model;
+                    }
+                    if let Some(level) = writer_zcode_effort.as_deref() { params["thoughtLevel"] = serde_json::json!(level); }
                     serde_json::json!({
                         "method": "session/create",
                         "id": "ugs-zcode-session",
-                        "params": { "workspace": workspace, "mode": mode }
+                        "params": params
                     })
                 };
                 if let Err(error) = write_zcode_protocol_message(&stdin, &session_msg) {
@@ -19469,9 +19853,11 @@ async fn ai_cli_runtime(
             // this fd.
             std::thread::spawn(move || {
                 drop(stdin_pipe);
+                drop(stdin_slot);
             })
         } else {
             std::thread::spawn(move || {
+                let _slot = stdin_slot;
                 if let Some(mut stdin) = stdin_pipe {
                     let _ = stdin.write_all(prompt.as_bytes());
                 }
@@ -19569,7 +19955,9 @@ async fn ai_cli_runtime(
             let received_tracer = Arc::clone(&received_content);
             let active_tracer = Arc::clone(&dsh_tracer_active);
             let cancel_tracer = Arc::clone(&dsh_tracer_cancel);
+            let tracer_slot = stream_slot.clone();
             Some(std::thread::spawn(move || {
+                let _slot = tracer_slot;
                 dsh_log::run_tracer(dsh_log::DshTracerConfig {
                     app: app_tracer,
                     run_id: run_tracer_id,
@@ -19601,7 +19989,9 @@ async fn ai_cli_runtime(
             let received_tracer = Arc::clone(&received_content);
             let active_tracer = Arc::clone(&kimi_tracer_active);
             let cancel_tracer = Arc::clone(&kimi_tracer_cancel);
+            let tracer_slot = stream_slot.clone();
             Some(std::thread::spawn(move || {
+                let _slot = tracer_slot;
                 kimi_log::run_tracer(kimi_log::KimiTracerConfig {
                     app: app_tracer,
                     run_id: run_tracer_id,
@@ -19620,7 +20010,9 @@ async fn ai_cli_runtime(
         let partial_streaming = partial_enabled();
         let stdout_read_error = Arc::new(Mutex::new(None::<String>));
         let stdout_read_error_reader = Arc::clone(&stdout_read_error);
+        let stdout_slot = stream_slot.clone();
         let out_handle = spawn_ai_cli_stdout_reader(Arc::clone(&stdout_read_error), move || -> String {
+            let _slot = stdout_slot;
             let mut result = String::new();
             let mut acc = String::new();
             // Token-level partial deltas (`stream_event` content_block_delta) are
@@ -20144,7 +20536,7 @@ async fn ai_cli_runtime(
                                     .params
                                     .as_ref()
                                     .and_then(|params| params.token_usage.as_ref())
-                                    .and_then(|usage| usage.get("last"))
+                                    .and_then(|usage| usage.get("total").or_else(|| usage.get("last")))
                                 {
                                     if let Ok(mut current) = codex_usage_reader.lock() {
                                         *current = Some(usage.clone());
@@ -20570,7 +20962,9 @@ async fn ai_cli_runtime(
 
         let mut err_pipe = child.stderr.take();
         let stderr_activity = Arc::clone(&last_activity);
+        let stderr_slot = stream_slot.clone();
         let err_handle = std::thread::spawn(move || {
+            let _slot = stderr_slot;
             let mut buf = Vec::new();
             if let Some(p) = err_pipe.as_mut() {
                 let mut chunk = [0_u8; 4096];
@@ -20623,6 +21017,11 @@ async fn ai_cli_runtime(
         let stdout_exit_grace = std::time::Duration::from_millis(500);
         let mut stdout_exited_at: Option<std::time::Instant> = None;
         let wait_result = loop {
+            if cancelled_ai_cli_ids().lock().map(|ids| ids.contains(&run_id)).unwrap_or(false) {
+                skills::native_launch::cancel_native_cli(&run_id);
+                terminate_ai_cli_tree(&mut child, &run_id);
+                break Err(format!("CLI \"{binary}\" 已由用户中断。"));
+            }
             let watchdog_activity = if is_codex {
                 &last_meaningful_activity
             } else {
@@ -20812,12 +21211,19 @@ async fn ai_cli_runtime(
             }
         };
 
-        let _ = stdin_handle.join();
+        // Reap inherited orphans before draining their inherited pipe handles.
+        if let Some(job) = take_ai_cli_job(&run_id) { kill_job_processes(job); close_job_handle(job); }
+        if let Some(stdin) = codex_stdin.as_ref().or(claude_stdin.as_ref()).or(zcode_stdin.as_ref()) { stdin.close(); }
+        let drain_deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        let mut drain_error = native_background::join_until(stdin_handle, drain_deadline).err();
         #[cfg(test)]
         skills::native_launch::test_checkpoint(&run_id, "before-worker-drain");
         // Every transport drains its authentic parser and stderr before returning.
         // Codex terminal status/sidecar readiness are outcomes, not a reader teardown shortcut.
-        let streamed_output = out_handle.join().unwrap_or_default();
+        let streamed_output = match native_background::join_until(out_handle, drain_deadline) {
+            Ok(output) => output,
+            Err(error) => { drain_error.get_or_insert(error); String::new() }
+        };
         // A pipe read error may race a clean process exit. Received tool/text
         // content is not terminal evidence; do not turn the read failure into
         // a successful turn just because the launcher exited with code zero.
@@ -20833,12 +21239,12 @@ async fn ai_cli_runtime(
         // progress (closing tool cards, trailing answer text) reaches the UI.
         if let Some(tracer) = dsh_tracer_handle {
             dsh_tracer_cancel.store(true, Ordering::Relaxed);
-            let _ = tracer.join();
+            if let Err(error) = native_background::join_until(tracer, drain_deadline) { drain_error.get_or_insert(error); }
         }
         // Stop the kimi wire.jsonl tracer and drain its last batch.
         if let Some(tracer) = kimi_tracer_handle {
             kimi_tracer_cancel.store(true, Ordering::Relaxed);
-            let _ = tracer.join();
+            if let Err(error) = native_background::join_until(tracer, drain_deadline) { drain_error.get_or_insert(error); }
         }
         let output = if let Some(path) = codex_last_message_path.as_ref() {
             let final_message = codex_sidecar_output(path).unwrap_or_default();
@@ -20851,10 +21257,14 @@ async fn ai_cli_runtime(
         } else {
             streamed_output
         };
-        let stderr_bytes = err_handle.join().unwrap_or_default();
+        let stderr_bytes = match native_background::join_until(err_handle, drain_deadline) {
+            Ok(output) => output,
+            Err(error) => { drain_error.get_or_insert(error); Vec::new() }
+        };
         let stderr = String::from_utf8_lossy(&stderr_bytes);
         let cancelled = take_ai_cli_cancelled(&run_id);
         unregister_ai_cli(&run_id);
+        if let Some(error) = drain_error { return Err(append_cli_error_context(error, &output, &stderr)); }
 
         if cancelled {
             return Err(append_cli_error_context(
@@ -21042,6 +21452,166 @@ mod tests {
         }
     }
     use super::*;
+
+    #[test]
+    fn native_cancel_unknown_ids_do_not_accumulate() {
+        let before = cancelled_ai_cli_ids().lock().unwrap().len();
+        for index in 0..1024 { mark_ai_cli_cancelled(&format!("fixture-unknown-cancel-{index}")); }
+        let after = cancelled_ai_cli_ids().lock().unwrap().len();
+        // Clean fixture entries even on RED.
+        for index in 0..1024 { take_ai_cli_cancelled(&format!("fixture-unknown-cancel-{index}")); }
+        assert_eq!(after, before, "unknown cancellations have no lifecycle consumer");
+    }
+
+    #[test]
+    fn native_cancel_unregister_consumes_failed_or_completed_run() {
+        let id = "fixture-cancel-failed-or-completed";
+        let _owner = AiCliCancelOwner::accept(id).unwrap();
+        mark_ai_cli_cancelled(id);
+        unregister_ai_cli(id);
+        assert!(!take_ai_cli_cancelled(id), "failed/completed IDs must not cancel a later reuse");
+    }
+
+    #[test]
+    fn native_cancel_intent_is_visible_before_pid_registration() {
+        let id = "responsiveness-cancel-before-pid";
+        let _owner = AiCliCancelOwner::accept(id).unwrap();
+        assert_eq!(mark_ai_cli_cancelled(id), None);
+        assert!(take_ai_cli_cancelled(id), "startup cancellation must not wait for a PID or process cleanup");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_cancel_captured_os_identity_survives_original_child_drop() {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::System::Threading::WaitForSingleObject;
+        use windows_sys::Win32::Foundation::{WAIT_OBJECT_0, WAIT_TIMEOUT};
+        let id = "fixture-owned-os-identity";
+        let mut old = new_spawn_command("node").args(["-e", "setInterval(()=>{},1000)"])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        register_owned_ai_cli(id, &old).unwrap();
+        let captured = capture_ai_cli_process(id);
+        old.kill().unwrap(); old.wait().unwrap();
+        unregister_ai_cli(id); drop(old);
+        let mut other = new_spawn_command("node").args(["-e", "setInterval(()=>{},1000)"])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let other_live = other.try_wait().unwrap().is_none();
+        let old_exited = captured.as_ref().is_some_and(|handle| unsafe {
+            WaitForSingleObject(handle.as_raw_handle() as _, 0) == WAIT_OBJECT_0
+        });
+        let other_handle_live = unsafe { WaitForSingleObject(other.as_raw_handle() as _, 0) == WAIT_TIMEOUT };
+        other.kill().unwrap(); other.wait().unwrap();
+        assert!(old_exited && other_live && other_handle_live,
+            "cancellation must own the original OS object after Child drop, distinct from another live owned fixture");
+    }
+
+    #[test]
+    fn native_cancel_accepted_total_is_bounded_and_released() {
+        let before = accepted_ai_cli_ids().lock().unwrap().len();
+        let owners: Vec<_> = (before..MAX_ACCEPTED_AI_CLI_RUNS)
+            .map(|index| AiCliCancelOwner::accept(&format!("fixture-cap-{index}")).unwrap()).collect();
+        assert!(AiCliCancelOwner::accept("fixture-cap-overflow").is_err());
+        drop(owners);
+        assert_eq!(accepted_ai_cli_ids().lock().unwrap().len(), before);
+    }
+
+    #[test]
+    fn native_cancel_delayed_cleanup_blocks_reused_id_until_real_worker_exit() {
+        let id = "fixture-delayed-cancel-cleanup-reuse";
+        let original = AiCliCancelOwner::accept(id).unwrap();
+        let original_native = skills::native_launch::NativeSkillCliOwner::register(id).unwrap();
+        let (arrived, release) = skills::native_launch::checkpoint(id, "before-cancel-cleanup");
+        let cancel = tauri::async_runtime::spawn(cancel_ai_cli_async(id.into()));
+        arrived.recv_timeout(std::time::Duration::from_secs(3)).unwrap();
+        drop(original_native);
+        drop(original);
+        let reuse = AiCliCancelOwner::accept(id);
+        let reuse_was_blocked = reuse.is_err();
+        let reused_native = reuse.as_ref().ok()
+            .map(|_| skills::native_launch::NativeSkillCliOwner::register(id).unwrap());
+        release.send(()).unwrap();
+        tauri::async_runtime::block_on(cancel).unwrap().unwrap();
+        let reused_native_untouched = reused_native.as_ref()
+            .map_or(true, |owner| owner.check_active().is_ok());
+        drop(reused_native);
+        drop(reuse);
+        assert!(reuse_was_blocked && reused_native_untouched,
+            "queued cancellation must not look up a replacement job/native owner by the old run ID");
+        let _next = AiCliCancelOwner::accept(id).unwrap();
+        assert!(!take_ai_cli_cancelled(id));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn native_cancel_real_spawn_failure_cleans_intent_and_reused_id() {
+        let id = "fixture-cancel-then-real-spawn-failure";
+        let root = PathBuf::from(std::env::var("UGS_MEMORY_TEST_ROOT").unwrap()).join("missing-cli");
+        std::fs::create_dir_all(&root).unwrap();
+        let binary = root.join("non-pe-fixture.exe");
+        std::fs::write(&binary, b"offline fixture, not a Windows executable").unwrap();
+        let before = cancelled_ai_cli_ids().lock().unwrap().len();
+        let mut context = tauri::generate_context!();
+        context.config_mut().app.windows.clear();
+        let app = tauri::Builder::default().any_thread().build(context).unwrap();
+        let (arrived, release) = skills::native_launch::checkpoint(id, "before-spawn");
+        let run = tauri::async_runtime::spawn(ai_cli_runtime(
+            "fixture".into(), "fixture-json".into(), Some(binary.to_string_lossy().into_owned()),
+            None, Some(root.to_string_lossy().into_owned()), None, Some("readonly".into()),
+            None, Some(1), Some(1), id.into(), None, None, None, None, None, app.handle().clone(),
+        ));
+        let reached_spawn = arrived.recv_timeout(std::time::Duration::from_secs(3)).is_ok();
+        if reached_spawn {
+            mark_ai_cli_cancelled(id);
+            release.send(()).unwrap();
+        }
+        let result = tauri::async_runtime::block_on(run).unwrap();
+        let error = result.err().unwrap();
+        assert!(reached_spawn && error.contains("无法启动 CLI"), "fixture must execute the real spawn-error path: {error}");
+        assert!(!accepted_ai_cli_ids().lock().unwrap().contains_key(id));
+        assert_eq!(cancelled_ai_cli_ids().lock().unwrap().len(), before);
+        let _reuse = AiCliCancelOwner::accept(id).unwrap();
+        assert!(!take_ai_cli_cancelled(id), "new acceptance must not inherit failed run cancellation");
+    }
+
+    #[test]
+    fn native_startup_failure_reaps_real_child_and_unregisters() {
+        let run = "responsiveness-failed-startup";
+        let mut child = new_spawn_command("C:/Program Files/nodejs/node.exe")
+            .args(["-e", "setTimeout(()=>{},5000)"])
+            .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        register_ai_cli(run, child.id());
+        let result = cli_startup_step::<()>(&mut child, run, || Err("fixture pipe admission failed".into()));
+        let reaped = child.try_wait().unwrap().is_some();
+        let unregistered = !active_ai_cli_pids().lock().unwrap().contains_key(run);
+        if !reaped { terminate_ai_cli_tree(&mut child, run); }
+        unregister_ai_cli(run);
+        assert_eq!(result.unwrap_err(), "fixture pipe admission failed");
+        assert!(reaped && unregistered, "failed pipe startup must not orphan a child or its run registration");
+    }
+
+    #[test]
+    fn codex_user_message_is_not_a_tool_event() {
+        for kind in ["userMessage", "user_message"] {
+            let event: CodexLiteEvent = serde_json::from_value(serde_json::json!({
+                "method": "item/completed", "params": { "item": { "type": kind, "id": "user-1" } }
+            })).unwrap();
+            assert!(event.completed_item().and_then(|item| codex_tool_patch(item, "fallback".into())).is_none());
+        }
+    }
+
+    #[test]
+    fn session_handoff_snapshot_keeps_full_content_and_unique_paths() {
+        let root = preview_fixture_dir("session-handoff");
+        let cwd = root.to_string_lossy().to_string();
+        let first = save_session_handoff_snapshot_blocking(cwd.clone(), "完整会话".to_string()).unwrap();
+        let second = save_session_handoff_snapshot_blocking(cwd, "第二次".to_string()).unwrap();
+        assert_eq!(std::fs::read_to_string(&first.snapshot_path).unwrap(), "完整会话");
+        assert_ne!(first.snapshot_path, second.snapshot_path);
+        assert_ne!(first.summary_path, second.summary_path);
+        assert!(Path::new(&first.summary_path).parent().unwrap().is_dir());
+        assert!(save_session_handoff_snapshot_blocking("relative".to_string(), "x".to_string()).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn skills_owned_slash_scans_both_roots_and_refreshes_same_id_details() {
@@ -22861,6 +23431,25 @@ requires_openai_auth = true\n";
     }
 
     #[test]
+    fn codex_handoff_keeps_selected_endpoint_with_named_provider() {
+        assert_eq!(
+            codex_handoff_base_override(true, Some("custom"), Some("https://selected.example/v1"))
+                .unwrap().as_deref(),
+            Some("model_providers.custom.base_url=\"https://selected.example/v1\"")
+        );
+        assert_eq!(
+            codex_handoff_base_override(false, Some("custom"), Some("https://selected.example/v1"))
+                .unwrap(),
+            None
+        );
+        assert_eq!(codex_handoff_base_override(true, None, None).unwrap(), None);
+        assert!(codex_handoff_base_override(true, None, Some("https://selected.example/v1")).is_err());
+        let quoted = codex_handoff_base_override(true, Some("custom.name"), Some("https://selected.example/a\"b"))
+            .unwrap().unwrap();
+        assert_eq!(quoted, "model_providers.\"custom.name\".base_url=\"https://selected.example/a\\\"b\"");
+    }
+
+    #[test]
     fn native_tool_codex_preserves_command_identity_and_explicit_exit() {
         let event: CodexLiteEvent = serde_json::from_value(serde_json::json!({
             "type": "item.completed",
@@ -22896,7 +23485,7 @@ requires_openai_auth = true\n";
     }
 
     #[cfg(windows)]
-    fn stdio_fixture_binary() -> &'static std::path::PathBuf {
+    pub(super) fn stdio_fixture_binary() -> &'static std::path::PathBuf {
         static BINARY: OnceLock<std::path::PathBuf> = OnceLock::new();
         BINARY.get_or_init(|| {
             let dir = preview_fixture_dir("cli-transport-binary");
@@ -24052,6 +24641,33 @@ requires_openai_auth = true\n";
         );
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn p4_status_paths_match_windows_canonical_workspace_roots() {
+        let root = Path::new(r"\\?\E:\Depot\Client\Project");
+        let mappings = parse_p4_where_mappings(
+            root,
+            "//depot/... //client/... E:\\Depot\\Client\\...\n",
+        );
+        let files = parse_p4_workspace_changes(
+            root,
+            "//depot/Project/Source/Main.cpp#1 - add change 123 (text)\n",
+            &mappings,
+        );
+        assert_eq!(files[0].path, "Source/Main.cpp");
+        assert_eq!(files[0].status, "added");
+        assert_eq!(
+            local_status_path_from_root(root, r"\\?\E:\Depot\Client\Project\Source\Main.cpp"),
+            Some("Source/Main.cpp".to_string())
+        );
+
+        let unc_root = Path::new(r"\\?\UNC\server\share\project");
+        assert_eq!(
+            local_status_path_from_root(unc_root, r"\\server\share\project\Source\Main.cpp"),
+            Some("Source/Main.cpp".to_string())
+        );
+    }
+
     #[test]
     fn parse_p4_where_mappings_trims_current_directory_suffixes() {
         let root = Path::new("E:/Depot/Client/Project");
@@ -24555,6 +25171,7 @@ pub fn run() {
             }
 
             start_slash_catalog_scan(app.handle().clone());
+            performance::start(app.handle().clone());
             init_vcs_scan_service(app.handle().clone());
             cache_cleanup::spawn_startup_cache_cleanup();
             autosave::spawn_autosave_service();
@@ -24587,7 +25204,11 @@ pub fn run() {
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     TRAY_MENU_SHOW_ID => show_main_window(app),
                     TRAY_MENU_GITHUB_ID => {
-                        let _ = open_external(GITHUB_REPOSITORY_URL.to_string());
+                        tauri::async_runtime::spawn(async {
+                            if let Err(error) = open_external(GITHUB_REPOSITORY_URL.to_string()).await {
+                                log::warn!("tray open-external failed: {error}");
+                            }
+                        });
                     }
                     TRAY_MENU_QUIT_ID => {
                         // 先给前端一次同步落盘兜底的机会（见 BEFORE_QUIT_EVENT），
@@ -24598,7 +25219,12 @@ pub fn run() {
                                 show_main_window(app);
                             }
                         } else {
-                            app.exit(0);
+                            let app = app.clone();
+                            tauri::async_runtime::spawn(async move {
+                                if let Err(error) = ugs_quit_flush_done(app).await {
+                                    log::warn!("native exit cleanup failed: {error}");
+                                }
+                            });
                         }
                     }
                     _ => {}
@@ -24617,6 +25243,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            performance::report_ui_performance,
             message_platforms::message_platform_load,
             message_platforms::message_platform_save,
             message_platforms::message_platform_request,
@@ -24633,7 +25260,7 @@ pub fn run() {
             // run_workflow,
             run_studio,
             ai_cli,
-            cancel_ai_cli,
+            cancel_ai_cli_async,
             ai_cli_steer_supported,
             steer_ai_cli,
             slash_catalog,
@@ -24659,6 +25286,8 @@ pub fn run() {
             local_model_status,
             local_model_list,
             list_remote_models,
+            list_codex_models,
+            list_zcode_models,
             generate_cloudflare_image,
             setup_local_model,
             setup_comfyui,
@@ -24700,6 +25329,7 @@ pub fn run() {
             knowledge_base_scan_files,
             save_clipboard_image,
             save_session_capture,
+            save_session_handoff_snapshot,
             fetch_capture_image_data_url,
             fetch_model_asset_data_url,
             read_model_asset_data_url,
@@ -24711,6 +25341,7 @@ pub fn run() {
             ugs_job_wrapper_path,
             history::history_root,
             history::history_read_json,
+            history::history_read_chunks,
             history::memory_read_json,
             history::memory_compare_exchange_json,
             history::history_write_json,
@@ -24731,6 +25362,7 @@ pub fn run() {
             temporary_chat::temporary_chat_window_close,
             floating_browser::floating_browser_open,
             floating_browser::floating_browser_bounds,
+            floating_browser::floating_browser_visibility,
             floating_browser::floating_browser_action,
             floating_browser::floating_browser_current_url,
             floating_browser::floating_browser_page_context,
@@ -24744,6 +25376,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_, event| {
-            if matches!(event, tauri::RunEvent::Exit) { message_platforms::shutdown(); }
+            if matches!(event, tauri::RunEvent::Exit) {
+                // Last-resort cleanup is nonblocking; kill-on-close jobs also
+                // cover forced process termination. Normal quit awaits above.
+                tauri::async_runtime::spawn(async {
+                    if let Err(error) = message_platforms::shutdown().await { log::warn!("exit cleanup failed: {error}"); }
+                });
+            }
         });
 }

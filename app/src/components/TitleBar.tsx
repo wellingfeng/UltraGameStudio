@@ -5,6 +5,7 @@ import { Layers, Minus, Square, Copy, X } from 'lucide-react';
 import { tauriAvailable } from '@/lib/tauri';
 import type { Locale } from '@/lib/i18n';
 import SidebarToggleButton from './SidebarToggleButton';
+import ModelRankings from './ModelRankings';
 import './TitleBar.css';
 import { useMainSurface } from './MainSurface';
 
@@ -89,6 +90,7 @@ export function TitleBarLayout({ children, sidebarOpen, onToggleSidebar, locale 
         </div>
         <div ref={setTarget} className="ugs-titlebar-content" data-tauri-drag-region />
         {error && <span className="ugs-titlebar-error" role="alert">{error}</span>}
+        <ModelRankings locale={locale} />
         {desktop && !nativeMac && (
           <div className="ugs-titlebar-controls" aria-label="窗口控制">
             <button type="button" aria-label="最小化" title="最小化" onClick={() => run(() => getCurrentWindow().minimize())}>

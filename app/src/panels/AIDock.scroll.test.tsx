@@ -578,6 +578,11 @@ describe('AIDock stream scroll state', () => {
   });
 
   it('mounts only the latest message window when opening a long history', async () => {
+    // Background idle growth (80ms timers) expands the window past the
+    // initial 5 rows; freeze timers so the open-time assertions stay
+    // deterministic. The progressive fill itself is covered by the
+    // "fills the initial message window in background batches" test below.
+    vi.useFakeTimers();
     resetChatSession('s_long', longChatMessages('long', 220));
     const view = await renderChatDock();
 
@@ -611,6 +616,7 @@ describe('AIDock stream scroll state', () => {
       expect(stream.textContent).not.toContain('other message 0');
     } finally {
       await view.cleanup();
+      vi.useRealTimers();
     }
   });
 

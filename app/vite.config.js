@@ -2,12 +2,27 @@ import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import { fileURLToPath, URL } from 'node:url';
 import { readFileSync } from 'node:fs';
+import { devMarkdownWorkers } from './scripts/devMarkdownWorkers.mjs';
 var pkg = JSON.parse(readFileSync(fileURLToPath(new URL('./package.json', import.meta.url)), 'utf8'));
 export default defineConfig({
     // Relative base so the built assets load correctly inside the Tauri webview.
     base: './',
     define: { __APP_VERSION__: JSON.stringify(pkg.version) },
-    plugins: [react()],
+    plugins: [react(), devMarkdownWorkers()],
+    worker: {
+        plugins: function () { return [{
+                name: 'ugs-worker-non-dom-markdown',
+                enforce: 'pre',
+                resolveId: function (source) {
+                    // Select public non-DOM exports only for worker bundles; the entity
+                    // decoder and KaTeX HTML-to-HAST adapter otherwise touch DOM globals.
+                    // The normal page retains Vite's browser decoder and export conditions.
+                    if (source === 'decode-named-character-reference' || source === 'hast-util-from-html-isomorphic') {
+                        return fileURLToPath(import.meta.resolve(source));
+                    }
+                },
+            }]; },
+    },
     build: {
         rollupOptions: {
             input: {

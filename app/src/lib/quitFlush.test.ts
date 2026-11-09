@@ -6,6 +6,7 @@ const mocks = vi.hoisted(() => ({
   flushSecureStorage: vi.fn(async () => undefined),
   flushSecretsToLocalStorageFallback: vi.fn(),
   flushComposerDraftPersist: vi.fn(async () => undefined),
+  flushChatPersistenceForQuit: vi.fn(async () => undefined),
   invoke: vi.fn(async () => undefined),
   isTauri: vi.fn(() => true),
   listen: vi.fn(async (event: string, handler: () => void) => {
@@ -32,6 +33,9 @@ vi.mock('@/lib/tauri', () => ({
 vi.mock('@/store/composerDraftPersistence', () => ({
   flushComposerDraftPersist: mocks.flushComposerDraftPersist,
 }));
+vi.mock('@/store/useStore', () => ({
+  flushChatPersistenceForQuit: mocks.flushChatPersistenceForQuit,
+}));
 vi.mock('@tauri-apps/api/event', () => ({
   listen: mocks.listen,
 }));
@@ -55,6 +59,7 @@ describe('installQuitFlushHandler', () => {
     mocks.isTauri.mockReturnValue(true);
     mocks.listen.mockResolvedValue(() => undefined);
     mocks.flushSecureStorage.mockResolvedValue(undefined);
+    mocks.flushChatPersistenceForQuit.mockResolvedValue(undefined);
   });
 
   it('flushes secrets before allowing tray quit', async () => {

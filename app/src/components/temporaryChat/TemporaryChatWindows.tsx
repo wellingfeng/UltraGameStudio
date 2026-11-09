@@ -5,10 +5,10 @@ import { ChevronUp, Minus, X } from 'lucide-react';
 import { invoke } from '@tauri-apps/api/core';
 import { emitTo, listen, type UnlistenFn } from '@tauri-apps/api/event';
 import { tauriAvailable } from '@/lib/tauri';
-import { temporaryChatDocument, TEMPORARY_CHAT_PERMISSIONS, TEMPORARY_CHAT_SANDBOX } from './document';
 import './temporaryChat.css';
 import { TemporaryChat, handleChatAction } from './chat';
-import { currentSource, type ContextSource } from './context';
+import { currentSource, observeCurrentSource, type ContextSource } from './context';
+import TemporaryChatFrame from './TemporaryChatFrame';
 
 type ChatWindow = { id: number; x: number; y: number; minimized: boolean; layer: number; source?: ContextSource };
 type NativeAction = { id: string; action: unknown };
@@ -20,7 +20,7 @@ export function requestTemporaryChat(source?: ContextSource): void {
 }
 
 function clampPosition(x: number, y: number, width: number, height: number) {
-  const browser = document.querySelector<HTMLElement>('[data-ugs-browser-panel]');
+  const browser = document.querySelector<HTMLElement>('[data-ugs-browser-panel]:not([data-expanded="true"]):not([hidden])');
   const rightEdge = browser ? browser.getBoundingClientRect().left : window.innerWidth;
   return {
     x: Math.max(8, Math.min(x, rightEdge - width - 8)),
@@ -35,20 +35,7 @@ function ChatPanel({ chat, update, close, focus }: {
   focus: () => void;
 }) {
   const panel = useRef<HTMLElement>(null);
-  const frame = useRef<HTMLIFrameElement>(null);
   const drag = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
-  const [document] = useState(temporaryChatDocument);
-
-  useEffect(() => {
-    const controller = new TemporaryChat(state => frame.current?.contentWindow?.postMessage({ scope: 'ugs-temporary-chat', type: 'state', state }, '*'), undefined, chat.source);
-    const receive = (event: MessageEvent) => {
-      if (event.source !== frame.current?.contentWindow) return;
-      handleChatAction(controller, event.data);
-    };
-    window.addEventListener('message', receive);
-    void controller.refresh();
-    return () => { window.removeEventListener('message', receive); controller.dispose(); };
-  }, []);
 
   useEffect(() => {
     const keepVisible = () => {
@@ -104,9 +91,7 @@ function ChatPanel({ chat, update, close, focus }: {
       </button>
       <button type="button" aria-label={`关闭临时聊天 ${chat.id}`} onClick={close}><X size={15} /></button>
     </div>
-    <iframe ref={frame} title={`临时聊天 ${chat.id} 内容`} srcDoc={document}
-      sandbox={TEMPORARY_CHAT_SANDBOX} allow={TEMPORARY_CHAT_PERMISSIONS} referrerPolicy="no-referrer"
-      hidden={chat.minimized} />
+    <TemporaryChatFrame source={chat.source} title={`临时聊天 ${chat.id} 内容`} hidden={chat.minimized} followSource />
   </section>;
 }
 
@@ -122,11 +107,11 @@ export default function TemporaryChatWindows() {
     const id = ++sequence.current;
     if (tauriAvailable()) {
       const nativeId = crypto.randomUUID();
-      const selectedSource = source ?? currentSource();
       void (async () => {
         let controller: TemporaryChat | undefined;
         try {
           await listenersReady.current;
+          const selectedSource = source ?? await currentSource();
           if (!mounted.current) return;
           controller = new TemporaryChat(state => {
             void emitTo(`temporary-chat-${nativeId}`, 'ugs:temporary-chat-state', state).catch(() => {});
@@ -149,10 +134,14 @@ export default function TemporaryChatWindows() {
     const width = Math.min(360, window.innerWidth - 16);
     const height = Math.min(420, window.innerHeight - 52);
     const offset = ((id - 1) % 8) * 26;
-    const browser = document.querySelector<HTMLElement>('[data-ugs-browser-panel]');
+    const browser = document.querySelector<HTMLElement>('[data-ugs-browser-panel]:not([data-expanded="true"]):not([hidden])');
     const rightEdge = browser ? browser.getBoundingClientRect().left : window.innerWidth;
     const position = clampPosition(rightEdge - width - 18 - offset, window.innerHeight - height - 42 - offset, width, height);
-    setWindows((current) => [...current, { id, ...position, minimized: false, layer: ++layer.current, source: source ?? currentSource() }]);
+    const addWindow = (selectedSource?: ContextSource) => {
+      if (mounted.current) setWindows((current) => [...current, { id, ...position, minimized: false, layer: ++layer.current, source: selectedSource }]);
+    };
+    if (source) addWindow(source);
+    else void currentSource().then(addWindow);
   };
   const update = (id: number, patch: Partial<ChatWindow>) => setWindows((current) => current.map((item) => item.id === id ? { ...item, ...patch } : item));
 
@@ -185,10 +174,14 @@ export default function TemporaryChatWindows() {
     }
     const onOpen = (event: Event) => open((event as CustomEvent<ContextSource>).detail);
     window.addEventListener(OPEN_TEMPORARY_CHAT_EVENT, onOpen);
+    const stopObserving = tauriAvailable() ? observeCurrentSource(source => {
+      controllers.current.forEach(controller => controller.setSource(source));
+    }) : undefined;
     return () => {
       disposed = true;
       mounted.current = false;
       window.removeEventListener(OPEN_TEMPORARY_CHAT_EVENT, onOpen);
+      stopObserving?.();
       unlisteners.forEach(stop => stop());
       controllers.current.forEach((controller, id) => {
         controller.dispose();

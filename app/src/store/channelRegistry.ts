@@ -18,6 +18,20 @@ export const activeRuns = new Map<string, RunChannel>();
 export const activeAiEdits = new Map<string, AiEditChannel>();
 export const aiEditSnapshots = new Map<string, AiEditChannel>();
 
+export const AI_EDIT_COMPLETED_SNAPSHOT_LIMIT = 32;
+
+/** Live channels and not-yet-durable finals are never evicted. */
+export function pruneAiEditSnapshots(isDurable: (snapshot: AiEditChannel) => boolean): void {
+  const completed = [...aiEditSnapshots.values()].filter((snapshot) => !activeAiEdits.has(snapshot.key));
+  let excess = completed.length - AI_EDIT_COMPLETED_SNAPSHOT_LIMIT;
+  for (const snapshot of completed) {
+    if (excess <= 0) break;
+    if (!isDurable(snapshot)) continue;
+    aiEditSnapshots.delete(snapshot.key);
+    excess -= 1;
+  }
+}
+
 export function getRunChannel(
   workspaceId: string | null,
   sessionId: string | null,

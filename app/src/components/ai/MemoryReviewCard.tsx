@@ -30,6 +30,9 @@ const gateDetails: Record<string, [string, string]> = {
   foreground_failed: ['前台任务未成功完成；未启动后台复盘。', 'Foreground did not complete successfully; background review not started.'],
 };
 export default function MemoryReviewCard({ state, locale = 'zh-CN', onOpenSettings }: MemoryReviewCardProps) {
+  // Background work and resultless reviews remain available in diagnostics, not chat.
+  if (['queued', 'admitting', 'reading', 'unconfirmed', 'disabled', 'skipped'].includes(state.phase)
+      || (state.appliedOps <= 0 && state.queuedOps <= 0)) return null;
   const zh = locale === 'zh-CN';
   const unconfirmed = state.phase === 'applied' && state.appliedOps <= 0;
   const [labelZh, labelEn, tone] = phases[state.phase];

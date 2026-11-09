@@ -38,6 +38,12 @@ impl NativeSkillCliOwner {
         if id.is_empty() || id.len() > 256 || id.contains('\0') {
             return Err("SKILL_NATIVE_REQUEST_ID_INVALID".into());
         }
+        // Acceptance and registry binding share the intent publication lock.
+        // A cancellation before registration is inherited, never consumed here.
+        let _accepted = crate::accepted_ai_cli_ids().lock()
+            .map_err(|_| "SKILL_NATIVE_OWNER_UNAVAILABLE")?;
+        let cancelled = crate::cancelled_ai_cli_ids().lock()
+            .map_err(|_| "SKILL_NATIVE_OWNER_UNAVAILABLE")?.contains(id);
         let mut registry = active_native_cli()
             .lock()
             .map_err(|_| "SKILL_NATIVE_OWNER_UNAVAILABLE")?;
@@ -45,7 +51,7 @@ impl NativeSkillCliOwner {
             return Err("SKILL_NATIVE_REQUEST_ALREADY_ACTIVE_OR_LIMIT".into());
         }
         let active = Arc::new(ActiveNativeCli {
-            cancelled: AtomicBool::new(false),
+            cancelled: AtomicBool::new(cancelled),
             scope: Mutex::new(None),
         });
         registry.insert(id.to_owned(), Arc::clone(&active));
@@ -91,13 +97,24 @@ impl Drop for NativeSkillCliOwner {
 }
 /// Revoke the dispatcher and delete temporary config before the parent kills any child.
 pub(crate) fn cancel_native_cli(request_id: &str) {
-    let active = active_native_cli()
+    if let Some(cancellation) = capture_native_cli_cancellation(request_id) {
+        cancellation.cancel();
+    }
+}
+
+pub(crate) struct NativeCliCancellation(Arc<ActiveNativeCli>);
+impl NativeCliCancellation {
+    pub(crate) fn cancel(self) {
+        self.0.cancel();
+    }
+}
+
+pub(crate) fn capture_native_cli_cancellation(request_id: &str) -> Option<NativeCliCancellation> {
+    active_native_cli()
         .lock()
         .ok()
-        .and_then(|registry| registry.get(request_id).cloned());
-    if let Some(active) = active {
-        active.cancel();
-    }
+        .and_then(|registry| registry.get(request_id).cloned())
+        .map(NativeCliCancellation)
 }
 
 pub(crate) struct NativeSkillCliScope {
@@ -300,24 +317,25 @@ pub(crate) fn test_checkpoint(request_id: &str, stage: &str) {
 }
 
 #[cfg(test)]
+pub(crate) fn checkpoint(
+    request_id: &str,
+    stage: &str,
+) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    test_checkpoints()
+        .lock()
+        .unwrap()
+        .insert((request_id.into(), stage.into()), (ready_tx, release_rx));
+    (ready_rx, release_tx)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::skills::native_cli::tests::{persisted, request, source};
     use crate::skills::test_support::{skill, Fixture};
     use serde_json::json;
-
-    fn checkpoint(
-        request_id: &str,
-        stage: &str,
-    ) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        test_checkpoints()
-            .lock()
-            .unwrap()
-            .insert((request_id.into(), stage.into()), (ready_tx, release_rx));
-        (ready_rx, release_tx)
-    }
 
     #[cfg(windows)]
     fn native_stdio_binary() -> &'static PathBuf {
@@ -892,6 +910,39 @@ mod tests {
             .lock()
             .unwrap()
             .contains_key(&request_id));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn production_cancellation_after_accept_before_register_creates_no_authority() {
+        let f = Fixture::new("production-cancel-accept-register");
+        let source = source(&f);
+        persisted(&f, &source);
+        let host = Arc::new(SkillDesktopHost::new(f.global()));
+        let app = headless_app();
+        let request_id = format!("cancel-accept-register-{}", crate::now_ms());
+        let (ready, release) = checkpoint(&request_id, "after-accept-before-native-register");
+        let worker_source = source.clone();
+        let worker_id = request_id.clone();
+        let handle = app.handle().clone();
+        let worker_host = Arc::clone(&host);
+        let worker = std::thread::spawn(move || {
+            tauri::async_runtime::block_on(crate::ai_cli_runtime(
+                "offline fixture task".into(), "claude-code".into(),
+                Some(native_stdio_binary().to_string_lossy().into_owned()), None,
+                worker_source.cwd.clone(), None, Some("readonly".into()), None,
+                Some(0), Some(30), worker_id,
+                Some((worker_host, request(&worker_source))), None, None, None, None, handle,
+            ))
+        });
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        crate::cancel_ai_cli(request_id.clone()).unwrap();
+        release.send(()).unwrap();
+        let result = worker.join().unwrap();
+        let no_scope = host.background.grants.lock().unwrap().is_empty();
+        assert!(result.is_err() && no_scope && !f.project().join("native-transport-started").exists(),
+            "successful accepted cancellation must prevent both scope creation and child spawn");
+        assert!(!active_native_cli().lock().unwrap().contains_key(&request_id));
     }
 
     #[cfg(windows)]

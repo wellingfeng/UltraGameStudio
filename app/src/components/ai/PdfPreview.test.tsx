@@ -43,6 +43,17 @@ describe('PDF preview zoom', () => {
     expect(container.querySelector('output[aria-label="预览缩放比例"]')?.textContent).toBe('147%');
     await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="查看 PDF 图片"]')!.click());
     expect(container.querySelector('[role="dialog"][aria-label="PDF 图片查看"]')).not.toBeNull();
+    const viewport = container.querySelector<HTMLDivElement>('.ai-image-preview-viewport')!;
+    viewport.setPointerCapture = vi.fn();
+    viewport.hasPointerCapture = vi.fn(() => true);
+    viewport.releasePointerCapture = vi.fn();
+    for (const type of ['pointerdown', 'pointerup']) {
+      const event = new MouseEvent(type, { bubbles: true, button: 0, clientX: 20, clientY: 20 });
+      Object.defineProperty(event, 'pointerId', { value: 1 });
+      await act(async () => viewport.dispatchEvent(event));
+    }
+    expect(container.querySelector('[role="dialog"][aria-label="PDF 图片查看"]')).toBeNull();
+    await act(async () => container.querySelector<HTMLButtonElement>('[aria-label="查看 PDF 图片"]')!.click());
     await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
     expect(container.querySelector('[role="dialog"][aria-label="PDF 图片查看"]')).toBeNull();
   });

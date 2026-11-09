@@ -24,14 +24,14 @@ async function render(sessionKey = 'first') {
   await act(async () => root.render(<MainSurfaceProvider sessionKey={sessionKey}><TitleBarLayout><Navigation /><main><WorkspaceMainSurface /></main></TitleBarLayout></MainSurfaceProvider>));
 }
 describe.each(['message-platforms', 'scheduled-tasks', 'artifacts'] as const)('主信息流 %s 导航', (surface) => {
-  const navigationIndex = surface === 'message-platforms' ? 0 : surface === 'scheduled-tasks' ? 1 : 2;
+  const navigationLabel = surface === 'message-platforms' ? '消息平台' : surface === 'scheduled-tasks' ? '定时任务' : '产出物';
   const panelSelector = `[data-ugs-${surface}]`;
   it('在主区域切换平台设置，隐藏聊天标题，返回时保留原草稿节点', async () => {
     container = undefined as unknown as HTMLDivElement;
     await render();
     const draft = container.querySelector('textarea')!;
     draft.value = '继续编辑的草稿';
-    await act(async () => container.querySelectorAll<HTMLButtonElement>('button')[navigationIndex].click());
+    await act(async () => Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === navigationLabel)!.click());
     expect(container.querySelector(`main ${panelSelector}`)).not.toBeNull();
     expect(container.querySelector('[data-ugs-chat-surface]')?.hasAttribute('hidden')).toBe(true);
     expect(container.querySelector('.ugs-titlebar-content')?.textContent).not.toContain('原会话标题');
@@ -44,7 +44,7 @@ describe.each(['message-platforms', 'scheduled-tasks', 'artifacts'] as const)('�
   it('切换会话时自动回到聊天', async () => {
     container = undefined as unknown as HTMLDivElement;
     await render();
-    await act(async () => container.querySelectorAll<HTMLButtonElement>('button')[navigationIndex].click());
+    await act(async () => Array.from(container.querySelectorAll<HTMLButtonElement>('button')).find((button) => button.textContent === navigationLabel)!.click());
     await render('second');
     expect(container.querySelector(panelSelector)).toBeNull();
     expect(container.querySelector('[data-ugs-chat-surface]')?.hasAttribute('hidden')).toBe(false);

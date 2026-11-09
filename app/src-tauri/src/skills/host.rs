@@ -162,6 +162,74 @@ fn history_json(path: &Path) -> Result<serde_json::Value, String> {
     serde_json::from_slice(&bytes)
         .map_err(|_| "invalid persisted workspace/session identity".into())
 }
+// Read the committed base plus its journal. Chunked sessions keep identity
+// metadata inline; only the requested source message needs to be hydrated.
+fn history_session(global: &Path, source: &SkillOrigin, message_id: Option<&str>) -> Result<serde_json::Value, String> {
+    let rel = format!("workspaces/{}/sessions/{}.json", source.workspace_id, source.session_id);
+    let path = global.join(&rel);
+    super::validation::safe_chain(&path)?;
+    let mut journal = path.as_os_str().to_os_string();
+    journal.push(".journal");
+    super::validation::safe_chain(Path::new(&journal))?;
+    let bytes = std::fs::metadata(&path).map_err(|_| "origin has no persisted workspace/session")?.len();
+    if bytes > 32 * 1024 * 1024 { return Err("history identity record exceeds limit".into()); }
+    let raw = crate::history::history_read_at(global, &rel)?.ok_or("origin has no persisted workspace/session")?;
+    if raw.len() > 32 * 1024 * 1024 { return Err("history identity record exceeds limit".into()); }
+    let mut record: serde_json::Value = serde_json::from_str(&raw).map_err(|_| "invalid persisted workspace/session identity")?;
+    if record["__ugsHistoryChunkVersion"] == 1 {
+        if let Some(id) = message_id {
+            let messages = record.get_mut("messages").and_then(serde_json::Value::as_array_mut).ok_or("invalid persisted messages")?;
+            for message in messages.iter_mut().filter(|message| message.get("id").and_then(serde_json::Value::as_str) == Some(id)) {
+                hydrate_source(message, &path, 0)?;
+            }
+        }
+    }
+    Ok(record)
+}
+
+fn hydrate_source(value: &mut serde_json::Value, session_path: &Path, depth: usize) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    if depth > 64 { return Err("HISTORY_CHUNK_REFERENCE_INVALID".into()); }
+    if value.get("__ugsHistoryText").and_then(serde_json::Value::as_u64) == Some(1) {
+        let object = value.as_object().ok_or("HISTORY_CHUNK_REFERENCE_INVALID")?;
+        if object.len() != 3 && !(object.len() == 4 && object.get("tail").and_then(serde_json::Value::as_str).is_some()) {
+            return Err("HISTORY_CHUNK_REFERENCE_INVALID".into());
+        }
+        let units = object.get("units").and_then(serde_json::Value::as_u64).ok_or("HISTORY_CHUNK_REFERENCE_INVALID")?;
+        let chunks = object.get("chunks").and_then(serde_json::Value::as_array).ok_or("HISTORY_CHUNK_REFERENCE_INVALID")?;
+        let mut directory = session_path.as_os_str().to_os_string();
+        directory.push(".chunks");
+        let directory = PathBuf::from(directory);
+        let mut text = String::new();
+        let mut actual_units = 0u64;
+        for chunk in chunks {
+            let hash = chunk.as_str().filter(|hash| hash.len() == 64 && hash.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))).ok_or("HISTORY_CHUNK_REFERENCE_INVALID")?;
+            let path = directory.join(format!("{hash}.json"));
+            super::validation::safe_chain(&path)?;
+            let json = crate::history::read_chunk_file(&path, hash)?.ok_or("HISTORY_CHUNK_CORRUPT")?;
+            let payload: serde_json::Value = serde_json::from_str(&json).map_err(|_| "HISTORY_CHUNK_CORRUPT")?;
+            let part = payload.get("text").and_then(serde_json::Value::as_str).ok_or("HISTORY_CHUNK_CORRUPT")?;
+            let count = part.encode_utf16().count() as u64;
+            if count > 128 * 1024 || hex::encode(Sha256::digest(part.as_bytes())) != hash { return Err("HISTORY_CHUNK_CORRUPT".into()); }
+            actual_units = actual_units.checked_add(count).ok_or("HISTORY_CHUNK_CORRUPT")?;
+            if actual_units > units { return Err("HISTORY_CHUNK_CORRUPT".into()); }
+            text.push_str(part);
+        }
+        if let Some(tail) = object.get("tail").and_then(serde_json::Value::as_str) {
+            let count = tail.encode_utf16().count() as u64;
+            if count >= 128 * 1024 { return Err("HISTORY_CHUNK_CORRUPT".into()); }
+            actual_units = actual_units.checked_add(count).ok_or("HISTORY_CHUNK_CORRUPT")?;
+            text.push_str(tail);
+        }
+        if actual_units != units { return Err("HISTORY_CHUNK_CORRUPT".into()); }
+        *value = serde_json::Value::String(text);
+    } else if let Some(array) = value.as_array_mut() {
+        for item in array { hydrate_source(item, session_path, depth + 1)?; }
+    } else if let Some(object) = value.as_object_mut() {
+        for item in object.values_mut() { hydrate_source(item, session_path, depth + 1)?; }
+    }
+    Ok(())
+}
 /// Native foreground grants require the exact persisted source message, not
 /// merely a session-shaped optimistic id. The loopback client never calls this.
 pub(super) fn persisted_native_source(global: &Path, source: &SkillOrigin) -> Result<(), String> {
@@ -172,13 +240,7 @@ pub(super) fn persisted_native_source(global: &Path, source: &SkillOrigin) -> Re
     {
         return Err("invalid native source identity".into());
     }
-    let session = history_json(
-        &global
-            .join("workspaces")
-            .join(&source.workspace_id)
-            .join("sessions")
-            .join(format!("{}.json", source.session_id)),
-    )?;
+    let session = history_session(global, source, Some(&source.turn_id))?;
     let message = session
         .get("messages")
         .and_then(|v| v.as_array())
@@ -210,13 +272,7 @@ fn persisted_review_source(global: &Path, source: &SkillOrigin) -> Result<String
     {
         return Err("invalid review source identity".into());
     }
-    let session = history_json(
-        &global
-            .join("workspaces")
-            .join(&source.workspace_id)
-            .join("sessions")
-            .join(format!("{}.json", source.session_id)),
-    )?;
+    let session = history_session(global, source, Some(&source.turn_id))?;
     let matches = session
         .get("messages")
         .and_then(|v| v.as_array())
@@ -297,11 +353,7 @@ fn persisted_origin(global: &Path, origin: &SkillOrigin) -> Result<(), String> {
             return Err("origin cwd does not belong to persisted workspace".into());
         }
     }
-    let session = history_json(
-        &workspace
-            .join("sessions")
-            .join(format!("{}.json", origin.session_id)),
-    )?;
+    let session = history_session(global, origin, None)?;
     if session
         .get("sessionId")
         .or_else(|| session.get("id"))
@@ -343,6 +395,65 @@ mod tests {
             .to_string(),
         );
     }
+    #[test]
+    fn source_check_reads_real_large_session_fixture_when_supplied() {
+        let Ok(global) = std::env::var("UGS_LARGE_SESSION_FIXTURE") else { return; };
+        let o = SkillOrigin {
+            host_id: "local".into(), workspace_id: "fixture".into(), session_id: "a".into(),
+            turn_id: "large-replay-source".into(), run_id: "large-replay-source".into(),
+            cwd: Some(std::env::current_dir().unwrap().to_string_lossy().into_owned()),
+        };
+        assert_eq!(persisted_review_source(Path::new(&global), &o).unwrap(), "来源校验测试");
+        persisted_native_source(Path::new(&global), &o).unwrap();
+        use sha2::{Digest, Sha256};
+        let mut record = history_session(Path::new(&global), &o, None).unwrap();
+        let session_path = Path::new(&global).join("workspaces/fixture/sessions/a.json");
+        let text = &mut record["messages"][1]["text"];
+        hydrate_source(text, &session_path, 0).unwrap();
+        let expected = std::fs::read_to_string(Path::new(&global).join("expected.sha256")).unwrap();
+        assert_eq!(hex::encode(Sha256::digest(text.as_str().unwrap().as_bytes())), expected.trim());
+    }
+
+    #[test]
+    fn source_checks_replay_committed_journal() {
+        let f = Fixture::new("host-source-journal");
+        let mut o = origin(&f);
+        o.turn_id = "new-source".into();
+        o.run_id = o.turn_id.clone();
+        histories(&f, &origin(&f));
+        let delta = serde_json::json!({"__ugsJournal":1,"fields":{},"deleted":[],"messages":{
+            "upserts":[{"id":o.turn_id,"role":"user","text":"journal source"}],"order":["turn-a","new-source"]
+        }});
+        crate::history::history_write_at(&f.global(), "workspaces/workspace-a/sessions/session-a.json", &delta.to_string(), true).unwrap();
+        assert_eq!(persisted_review_source(&f.global(), &o).unwrap(), "journal source");
+        persisted_native_source(&f.global(), &o).unwrap();
+    }
+
+    #[test]
+    fn chunked_source_is_verified_without_reading_unrelated_messages() {
+        use sha2::{Digest, Sha256};
+        let f = Fixture::new("host-chunked-source");
+        let mut o = origin(&f);
+        o.run_id = o.turn_id.clone();
+        histories(&f, &o);
+        let text = "完整来源🌍";
+        let hash = hex::encode(Sha256::digest(text.as_bytes()));
+        let chunk = format!("global/workspaces/workspace-a/sessions/session-a.json.chunks/{hash}.json");
+        f.write(&chunk, &serde_json::json!({"text":text}).to_string());
+        f.write("global/workspaces/workspace-a/sessions/session-a.json", &serde_json::json!({
+            "id":"session-a", "workspaceId":"workspace-a", "__ugsHistoryChunkVersion":1,
+            "messages":[
+                {"id":"other", "role":"assistant", "text":{"__ugsHistoryText":1,"chunks":["0".repeat(64)],"units":1}},
+                {"id":o.turn_id, "role":"user", "text":{"__ugsHistoryText":1,"chunks":[hash],"units":text.encode_utf16().count()}}
+            ]
+        }).to_string());
+        assert_eq!(persisted_review_source(&f.global(), &o).unwrap(), text);
+        persisted_native_source(&f.global(), &o).unwrap();
+        f.write(&chunk, &serde_json::json!({"text":"tampered"}).to_string());
+        assert!(persisted_review_source(&f.global(), &o).unwrap_err().contains("HISTORY_CHUNK_CORRUPT"));
+        assert!(persisted_native_source(&f.global(), &o).is_err());
+    }
+
     #[test]
     fn background_binding_rejects_empty_source_session_before_authority() {
         let f = Fixture::new("host-source-missing");

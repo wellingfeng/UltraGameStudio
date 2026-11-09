@@ -35,6 +35,37 @@ describe('document preview interactions', () => {
     dom.window.close();
   });
 
+  it('closes an HTML image on an empty-space click while preserving image clicks and drags', () => {
+    const dom = new JSDOM(withPreviewInteractions('<html><head></head><body><img src="data:image/png;base64,AA=="></body></html>'), { runScripts: 'dangerously' });
+    const { window } = dom;
+    let shadow: ShadowRoot | undefined;
+    const attachShadow = window.Element.prototype.attachShadow;
+    window.Element.prototype.attachShadow = function (options) { shadow = attachShadow.call(this, options); return shadow; };
+    const image = window.document.querySelector('img')!;
+    Object.defineProperty(image, 'currentSrc', { value: image.src });
+    image.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+    const view = shadow!.querySelector<HTMLDivElement>('.view')!;
+    const enlarged = shadow!.querySelector('img')!;
+    view.setPointerCapture = () => {};
+    const pointer = (target: Element, type: string, x: number, y: number) => {
+      const event = new window.MouseEvent(type, { bubbles: true, button: 0, clientX: x, clientY: y });
+      Object.defineProperty(event, 'pointerId', { value: 1 });
+      target.dispatchEvent(event);
+    };
+    pointer(enlarged, 'pointerdown', 50, 50);
+    pointer(view, 'pointerup', 50, 50);
+    expect(window.document.documentElement.lastElementChild?.tagName).toBe('DIV');
+    pointer(view, 'pointerdown', 10, 10);
+    pointer(view, 'pointermove', 30, 30);
+    pointer(view, 'pointermove', 10, 10);
+    pointer(view, 'pointerup', 10, 10);
+    expect(window.document.documentElement.lastElementChild?.tagName).toBe('DIV');
+    pointer(view, 'pointerdown', 10, 10);
+    pointer(view, 'pointerup', 10, 10);
+    expect(window.document.documentElement.lastElementChild?.tagName).toBe('BODY');
+    dom.window.close();
+  });
+
   it('bounds zoom and converts PDF image coordinates to visible rectangles', () => {
     expect(zoomFromWheel(1, -10000)).toBe(4);
     expect(zoomFromWheel(1, 10000)).toBe(0.25);

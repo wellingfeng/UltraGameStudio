@@ -1,12 +1,15 @@
 import {
   encodeToolPatch,
   extractToolSentinels,
+  hasToolSentinel,
   mergeToolPatches,
+  TOOL_CLOSE,
   type ToolEvent,
 } from '@/components/ai/lib/toolEvent';
 import { extractSessionFiles, type SessionFileEntry } from './sessionFiles';
 import type { Message } from '@/store/types';
 import type { WorkspaceChanges, WorkspaceChangeFileStatus } from './tauri';
+import { createBoundedTextCache } from '@/components/ai/lib/boundedTextCache';
 
 export interface TurnFileChange {
   path: string;
@@ -160,23 +163,49 @@ function nativeDetails(event: ToolEvent, paths: string[]): TurnFileChange[] {
 }
 
 /** Prefer confirmed native writes. A fresh per-turn snapshot is the fallback. */
+const singleRevisionCache = createBoundedTextCache<TurnFileChanges | undefined>(128, 1_000_000);
+const confirmedRevisionCache = createBoundedTextCache<Array<{ id: string; files: TurnFileChange[] }>>(128, 1_000_000);
+
+function confirmedMessageChanges(message: Message) {
+  const closedAt = message.text.lastIndexOf(TOOL_CLOSE);
+  const end = closedAt < 0 ? 0 : closedAt + TOOL_CLOSE.length;
+  // Prose cannot revise confirmed native writes. An unfinished patch may,
+  // so retain the original decoder path whenever a tool starts in the tail.
+  const revision = hasToolSentinel(message.text.slice(end)) ? message.text : message.text.slice(0, end);
+  return confirmedRevisionCache.get(revision, () =>
+    mergeToolPatches(extractToolSentinels(revision).patches)
+      .filter((event) => event.status === 'done')
+      .map((event) => {
+        const paths = extractSessionFiles([{ ...message, fileChanges: undefined,
+          text: encodeToolPatch(event) }]).filter((entry) => entry.action === 'edited').map((entry) => entry.path);
+        return { id: event.id, files: nativeDetails(event, paths) };
+      }), (value) => JSON.stringify(value).length);
+}
+
 export function collectTurnFileChanges(
   messages: Message[],
   snapshot?: WorkspaceChanges | null,
   rootPath?: string,
 ): TurnFileChanges | undefined {
+  if (messages.length === 1 && !snapshot && messages[0].role === 'assistant' && !messages[0].localOnly) {
+    return singleRevisionCache.get(`${rootPath ?? ''}\0${messages[0].text}`,
+      () => deriveTurnFileChanges(messages, snapshot, rootPath),
+      (value) => value ? JSON.stringify(value).length : 0);
+  }
+  return deriveTurnFileChanges(messages, snapshot, rootPath);
+}
+
+function deriveTurnFileChanges(
+  messages: Message[], snapshot?: WorkspaceChanges | null, rootPath?: string,
+): TurnFileChanges | undefined {
   const byPath = new Map<string, TurnFileChange>();
   const seenEvents = new Set<string>();
   for (const message of messages) {
     if (message.role !== 'assistant' || message.localOnly) continue;
-    for (const event of mergeToolPatches(extractToolSentinels(message.text).patches)) {
-      if (event.status !== 'done') continue;
+    for (const event of confirmedMessageChanges(message)) {
       if (seenEvents.has(event.id)) continue;
       seenEvents.add(event.id);
-      const paths = extractSessionFiles([{ ...message, fileChanges: undefined,
-        text: encodeToolPatch(event) }]).filter((entry) => entry.action === 'edited')
-        .map((entry) => entry.path);
-      for (const file of nativeDetails(event, paths)) {
+      for (const file of event.files) {
         const key = pathKey(file.path, rootPath);
         const old = byPath.get(key);
         byPath.set(key, old ? {

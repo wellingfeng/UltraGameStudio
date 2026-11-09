@@ -1,11 +1,13 @@
 import {
   memo,
   useEffect,
+  useMemo,
   useRef,
   useState,
   type RefObject,
 } from 'react';
 import MessageContent from './MessageContent';
+import { cleanMessageText, renderMessageText } from './lib/messageText';
 import type { OpenFileFn } from './FileChip';
 import {
   highlightSearchMarks,
@@ -41,6 +43,7 @@ import {
 function LazyMessageContentImpl({
   text,
   fallback,
+  rawText = false,
   streaming = false,
   showActions = false,
   onOpenFile,
@@ -53,7 +56,9 @@ function LazyMessageContentImpl({
 }: {
   text: string;
   /** Plain-text stand-in shown until the rich renderer is mounted. */
-  fallback: string;
+  fallback?: string;
+  /** Strip route/timing and protocol fallback inside this memo boundary. */
+  rawText?: boolean;
   streaming?: boolean;
   showActions?: boolean;
   onOpenFile?: OpenFileFn;
@@ -70,6 +75,8 @@ function LazyMessageContentImpl({
   if (searchState) searchState.hitCounter.current = 0;
 
   const [rich, setRich] = useState(eager);
+  const body = useMemo(() => rawText ? renderMessageText(text) : text, [rawText, text]);
+  const plain = useMemo(() => fallback ?? (rawText ? cleanMessageText(text) : text), [fallback, rawText, text]);
   const holderRef = useRef<HTMLDivElement>(null);
 
   // Promote to the rich renderer if this message becomes eager later (e.g. it
@@ -102,7 +109,7 @@ function LazyMessageContentImpl({
   if (rich || eager) {
     return (
       <MessageContent
-        text={text}
+        text={body}
         streaming={streaming}
         showActions={showActions}
         onOpenFile={onOpenFile}
@@ -120,8 +127,8 @@ function LazyMessageContentImpl({
       className="ai-stream-text whitespace-pre-wrap break-words text-sm leading-relaxed"
     >
       {searchState
-        ? highlightSearchMarks(fallback, searchState, "fb")
-        : fallback}
+        ? highlightSearchMarks(plain, searchState, "fb")
+        : plain}
     </div>
   );
 }

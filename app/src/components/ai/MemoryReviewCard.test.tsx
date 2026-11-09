@@ -11,16 +11,10 @@ async function view(state: Partial<MemoryReviewChatState>, onOpenSettings = vi.f
   return { container, cleanup: async () => { await act(async () => root.unmount()); container.remove(); } };
 }
 it.each([
-  ['queued', '记忆复盘排队中', 'info', false, 0, 0],
-  ['admitting', '记忆复盘准入中', 'info', false, 0, 0],
-  ['reading', '正在复盘记忆', 'running', true, 0, 0],
-  ['disabled', '记忆复盘已关闭', 'neutral', false, 0, 0],
-  ['skipped', '本轮未复盘记忆', 'neutral', false, 0, 0],
-  ['failed', '记忆复盘失败', 'error', false, 0, 0],
-  ['cancelled', '记忆复盘已取消', 'interrupted', false, 0, 0],
-  ['noop', '无需更新记忆', 'neutral', false, 0, 0],
   ['awaiting_approval', '记忆提案待审批', 'warning', false, 0, 2],
   ['applied', '记忆已保存', 'success', false, 1, 0],
+  ['failed', '记忆复盘失败', 'error', false, 1, 0],
+  ['cancelled', '记忆复盘已取消', 'interrupted', false, 0, 1],
 ] as const)('presents real %s state with text and semantic activity', async (phase, label, tone, active, appliedOps, queuedOps) => {
   const v = await view({ phase, appliedOps, queuedOps });
   try {
@@ -31,13 +25,18 @@ it.each([
     expect(v.container.textContent).not.toMatch(/已学会|已经采用|能力提升/);
   } finally { await v.cleanup(); }
 });
-it('does not turn an applied phase without applied operations into saved memory', async () => {
-  const v = await view({ phase: 'applied', appliedOps: 0 });
-  try {
-    expect(v.container.querySelector('[role="status"]')?.textContent).toBe('记忆保存未确认');
-    expect(v.container.querySelector('article')?.dataset.tone).toBe('warning');
-  } finally { await v.cleanup(); }
-});
+it.each(['queued', 'admitting', 'reading', 'unconfirmed', 'disabled', 'skipped', 'failed', 'cancelled', 'noop', 'awaiting_approval', 'applied'] as const)(
+  'hides %s when it has no review information', async phase => {
+    const v = await view({ phase, appliedOps: 0, queuedOps: 0 });
+    try { expect(v.container.querySelector('article')).toBeNull(); }
+    finally { await v.cleanup(); }
+  });
+it.each(['queued', 'admitting', 'reading', 'unconfirmed', 'disabled', 'skipped'] as const)(
+  'keeps %s in the background even if it carries counts', async phase => {
+    const v = await view({ phase, appliedOps: 1 });
+    try { expect(v.container.querySelector('article')).toBeNull(); }
+    finally { await v.cleanup(); }
+  });
 it('guides pending approval to settings without approving or claiming it was saved', async () => {
   const open = vi.fn();
   const v = await view({ phase: 'awaiting_approval', queuedOps: 2 }, open);

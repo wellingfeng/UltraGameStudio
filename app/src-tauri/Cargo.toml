@@ -1,6 +1,6 @@
 [package]
 name = "app"
-version = "0.5.21"
+version = "0.5.22"
 description = "UltraGameStudio - AI coding studio for game development"
 authors = ["UltraGameStudio"]
 license = ""
@@ -29,6 +29,7 @@ base64 = "0.22"
 getrandom = "0.2"
 keyring = "2"
 log = "0.4"
+tokio = { version = "1", features = ["sync", "time", "rt-multi-thread"] }
 tauri = { version = "2.11.2", features = ["tray-icon", "protocol-asset", "unstable"] }
 tauri-plugin-log = "2"
 tauri-plugin-dialog = "2"
@@ -46,16 +47,21 @@ serde_yaml = "=0.9.34"
 toml = "0.8"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp", "ico"] }
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_Security", "Win32_Security_Cryptography", "Win32_UI_Shell", "Win32_System_Com"] }
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_Registry", "Win32_Security", "Win32_Security_Cryptography", "Win32_UI_Shell", "Win32_System_Com"] }
 tauri-plugin-notification = "2.3.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tauri-winrt-notification = "0.7.2"
 webview2-com = "0.38.2"
-windows = { version = "0.61.3", features = ["Data_Xml_Dom", "Foundation", "Foundation_Collections", "UI_Notifications", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_System_Com"] }
+windows = { version = "0.61.3", features = ["Data_Xml_Dom", "Foundation", "Foundation_Collections", "UI_Notifications", "Win32_UI_Shell", "Win32_Graphics_Gdi", "Win32_System_Com", "Win32_System_WinRT"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mac-notification-sys = "0.6.13"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# PR #1215: Windows PeekMessageW must run before keyboard/IME state locks.
+# This upstream revision is still labelled 0.35.3; version alone is not proof.
+[patch.crates-io]
+tao = { git = "https://github.com/tauri-apps/tao", rev = "c704261c519c58cfdd0bc2d58ba24e06a0b71c92" }

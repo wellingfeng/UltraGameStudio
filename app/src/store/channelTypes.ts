@@ -83,7 +83,7 @@ export interface AiEditChannel {
   background?: boolean;
   /** Message ids created by this chat turn; used to merge concurrent replies. */
   ownedMessageIds?: Set<string>;
-  /** Current reply bubble; intermediate persistence may already set completedAt. */
+  /** Current reply bubble; checkpoints must not mark it complete. */
   activeAssistantMessageId?: string;
   /**
    * Active CLI run with native steering. The explicit lightning action can steer a

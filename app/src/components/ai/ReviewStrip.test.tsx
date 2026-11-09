@@ -25,13 +25,14 @@ const skill: SkillReviewState = { status: 'noop', origin, detail: 'Exact host di
 };
 
 it('renders memory as a single disclosure strip rather than a diagnostic card', async () => {
-  await act(async () => { root.render(<MemoryReviewCard state={memory} />); });
+  const failed: MemoryReviewChatState = { ...memory, phase: 'failed', appliedOps: 1 };
+  await act(async () => { root.render(<MemoryReviewCard state={failed} />); });
   const article = container.querySelector('article')!;
   expect(article.classList.contains('ugs-review-strip')).toBe(true);
   expect(article.className).not.toMatch(/\bbg-panel\b|\bborder\b|\bp-3\b|\bpx-3\b/);
   const disclosure = article.querySelector<HTMLDetailsElement>('details[data-ugs-review-diagnostics]')!;
   expect(disclosure.open).toBe(false);
-  expect(disclosure.querySelector('summary [role="status"]')?.textContent).toBe('正在复盘记忆');
+  expect(disclosure.querySelector('summary [role="status"]')?.textContent).toBe('记忆复盘失败');
   expect(disclosure.querySelector('summary [data-ugs-review-glyph]')).not.toBeNull();
   expect(disclosure.querySelector('summary')?.textContent).not.toContain('复盘诊断');
   expect(disclosure.querySelector('[data-ugs-review-body]')?.textContent).toContain(memory.detail);

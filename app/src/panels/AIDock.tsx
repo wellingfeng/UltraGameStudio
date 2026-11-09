@@ -18,6 +18,7 @@ import ChatRevisionControls from "@/components/ai/ChatRevisionControls";
 import { filePreviewScope, useFilePreviewTabs } from "@/store/filePreviewTabs";
 import { TitleBarContent } from "@/components/TitleBar";
 import SidebarToggleButton from "@/components/SidebarToggleButton";
+import BrowserOpenButton from "@/components/floatingTools/BrowserOpenButton";
 import {
   ArrowDownToLine,
   ArrowUp,
@@ -31,6 +32,7 @@ import {
   Copy,
   Eye,
   File,
+  FileOutput,
   Folder,
   GitBranch,
   Hash,
@@ -55,6 +57,7 @@ import ComposerOptions from "@/components/ComposerOptions";
 import EditedFilesCard from "@/components/ai/EditedFilesCard";
 import SessionChangesSummary from "@/components/ai/SessionChangesSummary";
 import ChatTaskProgress from "@/components/ai/ChatTaskProgress";
+import ChatJobHistory from "@/components/ai/ChatJobHistory";
 import { collectChatTaskProgress } from "@/lib/chatTasks";
 import { MessageArtifacts } from "@/components/ai/GeneratedArtifactsCard";
 import { collectSessionFileChanges, collectTurnFileChanges } from "@/lib/turnFileChanges";
@@ -260,7 +263,6 @@ import LazyMessageContent from "@/components/ai/LazyMessageContent";
 import CopyButton from "@/components/ai/CopyButton";
 import {
   answerActionText,
-  cleanMessageText,
   renderMessageText,
   routeLabelFromText,
   turnTimingFromMessage,
@@ -295,6 +297,7 @@ import {
   previousUserText,
   serializeConversation,
 } from "@/panels/aidock/search";
+import { copyConversationText, exportConversationText } from "@/lib/conversationActions";
 import {
   expandSlashRequest,
   filterSlashSuggestions,
@@ -723,7 +726,7 @@ function MessageActionMenuPanel({ children }: { children: ReactNode }) {
 
 function MessageActionToolbar({
   messageId,
-  text,
+  sourceText,
   locale,
   openMenu,
   modelOptions,
@@ -735,10 +738,12 @@ function MessageActionToolbar({
   onRegenerateWithModel,
   onTranslate,
   onBranch,
+  onHandoff,
+  handoffDisabled,
   onDelete,
 }: {
   messageId: string;
-  text: string;
+  sourceText: string;
   locale: Locale;
   openMenu: MessageActionMenu;
   modelOptions: SelectOption[];
@@ -750,8 +755,11 @@ function MessageActionToolbar({
   onRegenerateWithModel: (model: string) => void;
   onTranslate: (target: Locale) => void;
   onBranch: () => void;
+  onHandoff: () => void;
+  handoffDisabled: boolean;
   onDelete: () => void;
 }) {
+  const text = useMemo(() => answerActionText(sourceText), [messageId, sourceText]);
   const modelMenuOpen =
     openMenu?.messageId === messageId && openMenu.kind === "model";
   const translateMenuOpen =
@@ -773,6 +781,16 @@ function MessageActionToolbar({
         className={messageActionButtonClass()}
       >
         <GitBranch size={14} />
+      </button>
+      <button
+        type="button"
+        onClick={onHandoff}
+        disabled={handoffDisabled}
+        title={t(locale, handoffDisabled ? "dock.handoffBusy" : "dock.handoffContinue")}
+        aria-label={t(locale, "dock.handoffContinue")}
+        className={messageActionButtonClass()}
+      >
+        <FileOutput size={14} />
       </button>
       <button
         type="button"
@@ -1882,6 +1900,10 @@ export default function AIDock({
 } = {}) {
   const isChat = layout === "chat";
   const messages = useStore((s) => s.messages);
+  // Assistant deltas do not revise user-topic metadata. Shallow identity keeps
+  // timeline summaries stable while the live answer's text grows.
+  const userMessages = useStore((s) => s.messages.filter((message) => message.role === 'user'), shallow);
+  const presentationTopics = useMemo(() => hideReplacedUserMessages(userMessages), [userMessages]);
   const sendPrompt = useStore((s) => s.sendPrompt);
   const learnSkills = useStore((s) => s.learnSkills);
   const reviewSkillLearningAction = useStore((s) => s.reviewSkillLearningAction);
@@ -1982,6 +2004,7 @@ export default function AIDock({
     (s) => s.cancelQueuedChatMessageEdit,
   );
   const branchSessionFromMessage = useStore((s) => s.branchSessionFromMessage);
+  const continueSessionWithHandoff = useStore((s) => s.continueSessionWithHandoff);
   const runSelection = useStore(
     (s) => workflowDefaultGatewaySelection(s.workflow),
     shallow,
@@ -2059,6 +2082,18 @@ export default function AIDock({
         session.sessionId === (s.activeSessionId ?? null),
     ),
   );
+  const activeBackgroundJob = useStore((s) =>
+    s.jobSessions.some((session) =>
+      session.workspaceId === (s.activeWorkspaceId ?? null) &&
+      session.sessionId === (s.activeSessionId ?? null),
+    ),
+  );
+  const activeWaitingInput = useStore((s) =>
+    s.waitingInputSessions.some((session) =>
+      session.workspaceId === (s.activeWorkspaceId ?? null) &&
+      session.sessionId === (s.activeSessionId ?? null),
+    ),
+  );
   const simpleChatMode = useStore((s) => s.workflow.meta?.simple === true);
   const activeSessionIsWorkflow = useStore((s) => {
     // A workflow is a workflow (not simple chat) if:
@@ -2113,6 +2148,8 @@ export default function AIDock({
     kind: "busy" | "done" | "error";
     text: string;
   } | null>(null);
+  const [handoffBusy, setHandoffBusy] = useState(false);
+  const handoffInFlightRef = useRef(false);
   const [forceEagerCapture, setForceEagerCapture] = useState(false);
   const captureInFlightRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -2465,23 +2502,17 @@ export default function AIDock({
   );
   const topicMessageIds = useMemo(
     () =>
-      presentationMessages
-        .filter((message) => message.role === "user")
-        .map((message) => message.id),
-    [presentationMessages],
+      presentationTopics.map((message) => message.id),
+    [presentationTopics],
   );
   const timelineMarkers = useMemo(() => {
-    const topics = presentationMessages
-      .map((message) => ({ message, messageIndex: messages.indexOf(message) }))
-      .filter(({ message }) => message.role === "user");
-    return topics.map(({ message, messageIndex }, topicIndex) => ({
+    return presentationTopics.map((message, topicIndex) => ({
       id: message.id,
       label: summarizeTimelineText(message.text),
       number: topicIndex + 1,
-      position: timelineMarkerTop(topicIndex, topics.length),
-      messageIndex,
+      position: timelineMarkerTop(topicIndex, presentationTopics.length),
     }));
-  }, [messages, presentationMessages]);
+  }, [presentationTopics]);
   // Remote workspaces use the remote project's catalog (synced + cached); local
   // workspaces use the desktop backend scan. Either way buildSlashSuggestions
   // folds in the app-only static commands, so the only difference is whether the
@@ -4619,29 +4650,31 @@ export default function AIDock({
     }
     return ids;
   }, [messages]);
-  const renderFullMessageList =
-    forceEagerCapture || normalizedSearch.length > 0;
+  const renderFullMessageList = forceEagerCapture;
   // Display-only ordering: chronological replies, interjections above their
   // target reply, and pending prompts at the tail in FIFO order. Queue changes
   // must rerender even when messages are unchanged. Store/history stay intact.
   const displayMessages = useMemo(() => {
-    const visible = messages.filter((message) =>
-      !message.skillLearning || isSkillReviewVisible(message.skillLearning) || renderMessageText(message.text).trim().length > 0,
-    );
+    const visible = messages.filter((message) => {
+      if (isChat && message.role === "assistant" && !message.skillLearning && !message.interaction && !message.runProgress &&
+          message.text.startsWith("技能来源不可用：") &&
+          /^技能来源不可用：[^\r\n]*$/u.test(message.text.trim())) return false;
+      return !message.skillLearning || isSkillReviewVisible(message.skillLearning) || renderMessageText(message.text).trim().length > 0;
+    });
     return orderDisplayMessages(
       visible.length === messages.length ? messages : visible,
       queuedChatMessageIds,
     );
-  }, [messages, queuedChatMessageIds]);
+  }, [messages, queuedChatMessageIds, isChat]);
   const taskProgress = useMemo(() => collectChatTaskProgress(messages.filter(
     (message) => !queuedChatMessageIds.includes(message.id),
   )), [messages, queuedChatMessageIds]);
   const jobDetails = useStore((s) => s.jobDetails);
-  const currentJobs = useMemo(() => jobDetails.filter((job) =>
+  const sessionJobs = useMemo(() => jobDetails.filter((job) =>
     job.manifest.workspaceId === (activeWorkspaceId ?? null)
     && job.manifest.sessionId === (activeSessionId ?? null)
-    && job.manifest.startedAt >= taskProgress.startedAt,
-  ), [jobDetails, activeWorkspaceId, activeSessionId, taskProgress.startedAt]);
+  ), [jobDetails, activeWorkspaceId, activeSessionId]);
+  const currentJobs = useMemo(() => sessionJobs.filter((job) => job.manifest.startedAt >= taskProgress.startedAt), [sessionJobs, taskProgress.startedAt]);
   const scrollSnapshotForWindow =
     streamScrollSnapshotsRef.current.get(activeStreamScrollKey);
   const anchorMessageIndex = scrollSnapshotForWindow?.anchorMessageId
@@ -4668,18 +4701,24 @@ export default function AIDock({
   );
   const visibleMessageCount = renderFullMessageList
     ? displayMessages.length
-    : effectiveMessageWindowSize;
-  const hiddenMessageCount = Math.max(
+    : normalizedSearch ? Math.min(BACKGROUND_MESSAGE_WINDOW_TARGET, displayMessages.length) : effectiveMessageWindowSize;
+  const searchMessageIndex = normalizedSearch && activeSearchMatchMessageId
+    ? displayMessages.findIndex((message) => message.id === activeSearchMatchMessageId) : -1;
+  const hiddenMessageCount = searchMessageIndex >= 0 && !renderFullMessageList
+    ? Math.max(0, Math.min(displayMessages.length - visibleMessageCount,
+      searchMessageIndex - Math.floor(visibleMessageCount / 2))) : Math.max(
     0,
     displayMessages.length - visibleMessageCount,
   );
   const visibleMessages = useMemo(
     () =>
       hiddenMessageCount > 0
-        ? displayMessages.slice(hiddenMessageCount)
+        ? displayMessages.slice(hiddenMessageCount, hiddenMessageCount + visibleMessageCount)
+        : normalizedSearch && !renderFullMessageList ? displayMessages.slice(0, visibleMessageCount)
         : displayMessages,
-    [hiddenMessageCount, displayMessages],
+    [hiddenMessageCount, visibleMessageCount, normalizedSearch, renderFullMessageList, displayMessages],
   );
+  const visibleMessageIds = useMemo(() => new Set(visibleMessages.map((message) => message.id)), [visibleMessages]);
   const queuedChatMessageIdSet = useMemo(
     () => new Set(queuedChatMessageIds),
     [queuedChatMessageIds],
@@ -4691,7 +4730,7 @@ export default function AIDock({
   const aiBusy = mode === "running" || activeAiEditing || activeChatting;
 
   useLayoutEffect(() => {
-    if (renderFullMessageList) return;
+    if (renderFullMessageList || normalizedSearch) return;
     setMessageWindow((current) =>
       current.key === activeStreamScrollKey &&
       current.size === effectiveMessageWindowSize
@@ -4702,6 +4741,7 @@ export default function AIDock({
     activeStreamScrollKey,
     effectiveMessageWindowSize,
     renderFullMessageList,
+    normalizedSearch,
   ]);
 
   const [height, setHeight] = useState<number>(
@@ -5164,7 +5204,7 @@ export default function AIDock({
   );
 
   useEffect(() => {
-    if (renderFullMessageList) return undefined;
+    if (renderFullMessageList || normalizedSearch) return undefined;
     const targetSize = Math.min(messages.length, BACKGROUND_MESSAGE_WINDOW_TARGET);
     if (effectiveMessageWindowSize >= targetSize) return undefined;
     return scheduleIdleMessageWindow(() => {
@@ -5337,14 +5377,14 @@ export default function AIDock({
     const stream = streamRef.current;
     if (!stream || !isChat) return;
     const top = stream.getBoundingClientRect().top;
-    const passed = visibleMessages.filter((message) => message.role === "user" && !message.localOnly &&
+    const passed = visibleMessages.findLast((message) => message.role === "user" && !message.localOnly &&
       !queuedChatMessageIdSet.has(message.id) &&
       (messageRefs.current.get(message.id)?.getBoundingClientRect().top ?? top) < top - 1);
     // A windowed list can start inside an answer. Its prompt is in the hidden prefix.
     const preceding = hiddenMessageCount > 0
       ? displayMessages.slice(0, hiddenMessageCount).findLast((message) => message.role === "user" && !message.localOnly)
       : undefined;
-    const id = passed.at(-1)?.id ?? preceding?.id ?? null;
+    const id = passed?.id ?? preceding?.id ?? null;
     setStickyPromptId((current) => current === id ? current : id);
   }, [isChat, visibleMessages, queuedChatMessageIdSet, hiddenMessageCount, displayMessages]);
 
@@ -7973,21 +8013,7 @@ export default function AIDock({
     }
     const text = serializeConversation(messages);
     try {
-      if (navigator.clipboard?.writeText) {
-        await navigator.clipboard.writeText(text);
-      } else {
-        const ta = document.createElement("textarea");
-        ta.value = text;
-        ta.style.position = "fixed";
-        ta.style.opacity = "0";
-        document.body.appendChild(ta);
-        try {
-          ta.select();
-          document.execCommand("copy");
-        } finally {
-          if (ta.parentNode) ta.parentNode.removeChild(ta);
-        }
-      }
+      await copyConversationText(text);
       setCaptureStatus({
         kind: "done",
         text: t(locale, "dock.conversationCopied"),
@@ -8005,32 +8031,8 @@ export default function AIDock({
       return;
     }
     const text = serializeConversation(messages);
-    const safeTitle = (chatTitle || t(locale, "dock.newSession"))
-      .replace(/[\\/:*?"<>|]/g, "_")
-      .slice(0, 60);
-    const filename = `${safeTitle || "conversation"}.md`;
     try {
-      if (tauriAvailable()) {
-        const { save } = await import("@tauri-apps/plugin-dialog");
-        const picked = await save({
-          defaultPath: filename,
-          filters: [{ name: "Markdown", extensions: ["md"] }],
-        });
-        if (!picked) return;
-        const target = typeof picked === "string" ? picked : String(picked);
-        const { writeTextFile } = await import("@tauri-apps/plugin-fs");
-        await writeTextFile(target, text);
-      } else {
-        const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-        a.remove();
-        URL.revokeObjectURL(url);
-      }
+      if (!await exportConversationText(text, chatTitle || t(locale, "dock.newSession"))) return;
       setCaptureStatus({
         kind: "done",
         text: t(locale, "dock.conversationExported"),
@@ -8043,6 +8045,22 @@ export default function AIDock({
       });
     }
   }, [messages, locale, chatTitle]);
+  const handleSessionHandoff = useCallback(async () => {
+    if (handoffInFlightRef.current) return;
+    handoffInFlightRef.current = true;
+    setHandoffBusy(true);
+    setCaptureStatus({ kind: "busy", text: t(locale, "dock.handoffPreparing") });
+    try {
+      const result = await continueSessionWithHandoff();
+      setCaptureStatus({ kind: "done", text: `${t(locale, "dock.handoffStarted")}${result.thinkingLevel ? "" : ` ${t(locale, "dock.handoffThinkingUnavailable")}`}` });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      setCaptureStatus({ kind: "error", text: `${t(locale, "dock.handoffFailed")}: ${message}` });
+    } finally {
+      handoffInFlightRef.current = false;
+      setHandoffBusy(false);
+    }
+  }, [continueSessionWithHandoff, locale]);
   const headerActionButtonClass =
     "ugs-control flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-transparent px-2.5 text-[13px] text-fg-dim transition-colors hover:bg-border-soft hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40";
   const openTeamDetailsFromMain = useCallback((nodeId: string) => {
@@ -8128,7 +8146,7 @@ export default function AIDock({
             marker.id === activeTopicMessageId ||
             marker.id === assetJumpHighlightId ||
             marker.id === pendingTimelineJumpId;
-          const hidden = marker.messageIndex < hiddenMessageCount;
+          const hidden = !visibleMessageIds.has(marker.id);
           const ariaLabel = t(locale, "dock.timelineMarker")
             .replace("{index}", String(marker.number))
             .replace("{summary}", marker.label);
@@ -8462,6 +8480,7 @@ export default function AIDock({
               </span>
             )}
             <div className={"ml-auto flex shrink-0 items-center gap-1" + (isChat ? " ugs-chat-header-actions" : "")}>
+              {isChat && <BrowserOpenButton scope={previewScope} />}
               {conversationActions}
               {searchToggleButton}
               {isChat && (
@@ -8679,9 +8698,7 @@ export default function AIDock({
                     !captureUtility &&
                     !m.interaction &&
                     !normalizedSearch;
-                  const actionText = assistantActions
-                    ? answerActionText(m.text)
-                    : "";
+
                   const canRegenerate =
                     assistantActions &&
                     !aiBusy &&
@@ -8921,8 +8938,8 @@ export default function AIDock({
                           {!reviewOnly && <LazyMessageContent
                             referenceSources={m.referenceSources ?? m.references}
                             collectReferences={m.role === 'assistant' && !m.localOnly}
-                            text={renderMessageText(m.text)}
-                            fallback={cleanMessageText(m.text)}
+                            text={m.text}
+                            rawText
                             streaming={aiBusy && m.id === lastAssistantId}
                             showActions={!isSystem}
                             onOpenFile={onOpenFile}
@@ -8959,12 +8976,13 @@ export default function AIDock({
                       {assistantActions && (
                         <MessageActionToolbar
                           messageId={m.id}
-                          text={actionText}
+                          sourceText={m.text}
                           locale={locale}
                           openMenu={messageActionMenu}
                           modelOptions={modelOptionsForMode}
                           modelValue={modelValueForMode}
                           canRegenerate={canRegenerate}
+                          handoffDisabled={aiBusy || activeBackgroundJob || activeWaitingInput || handoffBusy}
                           usage={m.usage}
                           onToggleMenu={(kind) =>
                             setMessageActionMenu((current) =>
@@ -8985,6 +9003,7 @@ export default function AIDock({
                             setMessageActionMenu(null);
                             branchSessionFromMessage(m.id);
                           }}
+                          onHandoff={() => void handleSessionHandoff()}
                           onDelete={() => {
                             setMessageActionMenu(null);
                             deleteMessage(m.id);
@@ -9338,6 +9357,9 @@ export default function AIDock({
         {isChat && <ChatTaskProgress key={`${activeWorkspaceId}:${activeSessionId}:${taskProgress.startedAt}`}
           progress={taskProgress} jobs={currentJobs} active={activeAiEditing || activeChatting}
           locale={locale} cwd={workspaceCwd} onOpenFile={onOpenFile} />}
+
+        {isChat && <ChatJobHistory key={`${activeWorkspaceId}:${activeSessionId}`}
+          jobs={sessionJobs} locale={locale} cwd={workspaceCwd} onOpenFile={onOpenFile} />}
 
         {isChat && <SessionChangesSummary key={activeSessionId}
           changes={sessionFileChanges} locale={locale} onOpenSessionFiles={requestProjectRightPanelSessionFiles} />}

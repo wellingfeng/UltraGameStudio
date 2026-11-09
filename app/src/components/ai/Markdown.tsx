@@ -20,16 +20,9 @@ import remarkBreaks from 'remark-breaks';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import 'katex/dist/katex.min.css';
-import { repairMarkdown, repairFences } from './lib/repairMarkdown';
-import { normalizeMath } from './lib/normalizeMath';
-import { protectWindowsPaths } from './lib/protectWindowsPaths';
-import { promoteStructureBreaks } from './lib/promoteStructureBreaks';
-import { convertInlineHtml } from './lib/htmlInline';
-import {
-  convertDetailsHtml,
-  detectDetails,
-  detectDetailsTitle,
-} from './lib/htmlDetails';
+import { deriveRendererMarkdown, rendererMarkdownSource, rehypeRendererSections } from './lib/rendererMarkdown';
+import { useRendererMarkdown } from './lib/useRendererMarkdown';
+import { detectDetails, detectDetailsTitle } from './lib/htmlDetails';
 import { scanFileRefs } from './lib/fileScan';
 import { displayFileRefPath, parseFileRef } from './lib/filePath';
 import { parseToolLine } from './lib/toolLine';
@@ -50,7 +43,7 @@ import {
 } from './FileChip';
 import type { FileActionItem } from './FileActionsMenu';
 import { useFileActionsMenu } from './useFileActionsMenu';
-import { claimFileChipSlot, useFileChipBudget } from './lib/fileChipBudget';
+import { claimFileChipSlot, useFileChipBudget, type FileChipSlot } from './lib/fileChipBudget';
 import { isModelUrl } from './lib/modelLink';
 import { createImagePreviewRef } from './lib/imagePreview';
 import {
@@ -62,6 +55,7 @@ import { useStore } from '@/store/useStore';
 import { t } from '@/lib/i18n';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { ensureLocalAssetScope } from '@/lib/tauri';
+import { createMarkdownChunks } from './lib/markdownChunks';
 
 const imageMenuIconClass = 'shrink-0 text-fg-faint';
 
@@ -209,41 +203,7 @@ function markdownUrlTransform(url: string, key: string): string | null | undefin
  * 并消费掉 `---` 本身。CSS 借此给每个逻辑段落一个浅色块背景，替代细分割线，
  * 让段落边界一眼可辨。没有 `---` 时（单段回答）保持原样，不额外加背景。
  */
-function rehypeGroupSections() {
-  return (tree: { children: unknown[] }) => {
-    const children = tree.children as Array<{
-      type?: string;
-      tagName?: string;
-    }>;
-    const hasBreak = children.some(
-      (n) => n && n.type === 'element' && n.tagName === 'hr',
-    );
-    if (!hasBreak) return;
-
-    const groups: unknown[] = [];
-    let current: unknown[] = [];
-    const flush = () => {
-      if (current.length) {
-        groups.push({
-          type: 'element',
-          tagName: 'section',
-          properties: { className: ['ai-para-group'] },
-          children: current,
-        });
-        current = [];
-      }
-    };
-    for (const node of children) {
-      if (node && node.type === 'element' && node.tagName === 'hr') {
-        flush();
-      } else {
-        current.push(node);
-      }
-    }
-    flush();
-    tree.children = groups;
-  };
-}
+const rehypeGroupSections = rehypeRendererSections;
 
 /**
  * Renders one answer chunk of markdown with GFM (tables, strikethrough, task
@@ -261,7 +221,7 @@ function rehypeGroupSections() {
  * copy) so a half-typed token doesn't flip the whole subtree to a code block.
  * Memoized on (text, streaming) so backlog bubbles never re-parse.
  */
-function MarkdownImpl({
+function MarkdownBlockImpl({
   text,
   citations = false,
   streaming = false,
@@ -276,36 +236,31 @@ function MarkdownImpl({
   cwd?: string;
   searchState?: SearchHighlightState | null;
 }) {
-  const normalized = useMemo(
-    () =>
-      // promoteStructureBreaks runs AFTER the HTML converters: those rewrites
-      // (e.g. <details> -> `> [!details]` blockquote) need to see the model's
-      // original line continuity, and their output is already block-structured
-      // so the promote pass then treats it correctly (quote-after-quote is a
-      // continuation, not a new block).
-      protectWindowsPaths(
-        promoteStructureBreaks(convertDetailsHtml(convertInlineHtml(normalizeMath(text)))),
-      ),
-    [text],
-  );
-  // An unbalanced ``` fence must be closed even on the final render: otherwise
-  // the open fence swallows the rest of the message into one code block, which
-  // `rehype-highlight` then paints as a garbled multicolor wall. While
-  // streaming we additionally repair dangling inline backticks so a half-typed
-  // token doesn't briefly flip the subtree to a code span.
+  const revision = useRendererMarkdown(text, streaming);
+  // Parse the initial/replacement long revision once too: provider/search replay
+  // must never make ReactMarkdown reparse that retained source on every delta.
+  const derived = useMemo(() => revision.result ??
+    (revision.streaming && revision.text.length > 4096 ? deriveRendererMarkdown(revision.text, true) : undefined),
+    [revision.result, revision.text, revision.streaming]);
   const src = useMemo(
-    () => (streaming ? repairMarkdown(normalized) : repairFences(normalized)),
-    [normalized, streaming],
+    () => derived?.source ?? rendererMarkdownSource(revision.text, revision.streaming),
+        [revision.text, revision.streaming, derived],
   );
   const defaultModelAnimations = useMemo(
     () => extractDefaultModelAnimations(src),
     [src],
   );
   const rehypePlugins = useMemo<PluggableList>(
-    () => [rehypeGroupSections, rehypeKatex],
-    [],
+    () => derived ? [() => () => derived.tree] : [rehypeGroupSections, rehypeKatex],
+    [derived],
   );
   const fileChipBudget = useFileChipBudget();
+  // A worker ACK rerenders this block without rerendering the provider. Replay
+  // already claimed ordinals rather than charging the same budget a second time.
+  const chipClaims = useRef({ budget: fileChipBudget, slots: [] as FileChipSlot[], cursor: 0 });
+  if (chipClaims.current.budget !== fileChipBudget)
+    chipClaims.current = { budget: fileChipBudget, slots: [], cursor: 0 };
+  chipClaims.current.cursor = 0;
   const referenceContext = useMessageReferences();
   const references = citations ? referenceContext : null;
 
@@ -339,7 +294,10 @@ function MarkdownImpl({
   const renderFileRef = (refData: ReturnType<typeof scanFileRefs>[number], key: number) => {
     const { onOpenFile, cwd, fileChipBudget } = ctxRef.current;
     if (typeof refData === 'string') return { node: refData, hidden: false };
-    const slot = claimFileChipSlot(fileChipBudget);
+    const claims = chipClaims.current;
+    const ordinal = claims.cursor++;
+    const slot = claims.slots[ordinal] ?? claimFileChipSlot(fileChipBudget);
+    claims.slots[ordinal] = slot;
     if (slot === 'notice') {
       return { node: <FileChipLimitNotice key={key} />, hidden: false };
     }
@@ -612,18 +570,35 @@ function MarkdownImpl({
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  return (
-    <div className="ai-markdown ai-stream-markdown">
+  const budgetSensitive = useMemo(() => scanFileRefs(src).some((part) => typeof part !== 'string'), [src]);
+  // Bare file chips claim their slots in paragraph overrides. Those blocks must
+  // replay claims when the message budget resets; ordinary prose/code keeps
+  // its parsed element without paying for the sealed prefix again.
+  const rendered = useMemo(() => (
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
         rehypePlugins={rehypePlugins}
         components={components}
         urlTransform={markdownUrlTransform}
       >
-        {src}
+        {derived ? '' : src}
       </ReactMarkdown>
-    </div>
-  );
+  ), [src, rehypePlugins, components, onOpenFile, cwd, searchState, references,
+    budgetSensitive ? fileChipBudget : fileChipBudget?.expanded]);
+  return <>{rendered}{revision.delayed && <span role="status" className="ai-markdown-delayed">Markdown 预览暂时停留在上次版本；生成结束或取消时会完整显示。</span>}</>;
+}
+
+const MarkdownBlock = memo(MarkdownBlockImpl);
+
+function MarkdownImpl(props: Parameters<typeof MarkdownBlockImpl>[0]) {
+  const chunks = useRef<ReturnType<typeof createMarkdownChunks>>();
+  if (!chunks.current) chunks.current = createMarkdownChunks();
+  // Search uses one traversal/counter; no chunk-local memo may skip its hits.
+  const parts = chunks.current(props.text, !!props.streaming && !props.searchState);
+  return <div className="ai-markdown ai-stream-markdown">
+    {parts.map((part) => <MarkdownBlock key={part.key} {...props} text={part.text}
+      streaming={props.searchState ? !!props.streaming : part.live} />)}
+  </div>;
 }
 
 const Markdown = memo(MarkdownImpl);

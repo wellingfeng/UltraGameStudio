@@ -6,7 +6,7 @@
  * until persistence code migrates from the legacy field names.
  */
 
-import type { IRGraph, IRRunStatus } from '@/core/ir';
+import type { IRGraph, IRRunSnapshot, IRRunStatus } from '@/core/ir';
 import type { RuntimeAdapterId } from '@/lib/adapters';
 import type {
   CanvasViewport,
@@ -243,6 +243,8 @@ export type WorkspaceSummary = Pick<
 };
 
 export interface SessionRecord {
+  /** Persisted incarnation token; legacy records without one remain readable. */
+  generation?: string;
   id: string;
   workspaceId: string;
   /** Display title - default = first user message[0..36], else '新会话'. */
@@ -419,6 +421,22 @@ export interface SessionCreateInput {
   metadata?: HistoryMetadata;
 }
 
+/** Small immutable identity, never a cached record reference or timestamp alone. */
+export type SessionOrigin = Pick<SessionRecord, 'generation' | 'createdAt' | 'sourceFingerprint'>;
+
+/** Inert payload reconciled against the current record inside its write lane. */
+export interface SessionFinalReconciliation {
+  originMessages: Message[];
+  /** Message-only producers must not publish run metadata. */
+  snapshot?: IRRunSnapshot;
+}
+
+export interface SessionConditionalWriteResult {
+  record: SessionRecord;
+  /** Exact message revisions selected in the atomic transaction. */
+  messages: Message[];
+}
+
 export interface SessionPatch {
   title?: string;
   isWorkflow?: boolean;
@@ -431,6 +449,10 @@ export interface SessionPatch {
   messages?: Message[];
   /** Merge an asynchronous chat snapshot inside the history write queue. */
   mergeMessages?: boolean;
+  /** Periodic stream checkpoint; do not rotate normal history backups or indexes. */
+  streamCheckpoint?: boolean;
+  /** Persist a terminal status as a journal delta and update the session index. */
+  terminalStatusOnly?: boolean;
 }
 
 export interface WorkspaceUpsertInput {

@@ -80,7 +80,7 @@ const FRAME_INTERACTIONS = String.raw`(() => {
     const host = document.createElement('div');
     host.style.cssText = 'all:initial!important;position:fixed!important;inset:0!important;z-index:2147483647!important;display:block!important;zoom:' + (1 / zoom) + '!important';
     const shadow = host.attachShadow({ mode: 'closed' });
-    shadow.innerHTML = '<style>:host{font:13px system-ui,sans-serif}.backdrop{position:fixed;inset:0;background:rgba(0,0,0,.92);display:flex;flex-direction:column;color:white}.bar{display:flex;align-items:center;gap:12px;padding:10px 14px;background:#20242a}.bar span{flex:1}.bar button{border:0;background:#3b424c;color:white;border-radius:4px;padding:5px 11px;cursor:pointer}.view{flex:1;min-height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;cursor:grab;touch-action:none}.view.dragging{cursor:grabbing}img{display:block;max-width:calc(100% - 32px);max-height:calc(100% - 32px);object-fit:contain;user-select:none;pointer-events:none}</style><div class="backdrop"><div class="bar"><span>滚轮缩放 · 拖动查看 · Esc 关闭</span><button type="button" aria-label="关闭图片查看">关闭</button></div><div class="view"><img alt="放大查看"></div></div>';
+    shadow.innerHTML = '<style>:host{font:13px system-ui,sans-serif}.backdrop{position:fixed;inset:0;background:rgba(0,0,0,.92);display:flex;flex-direction:column;color:white}.bar{display:flex;align-items:center;gap:12px;padding:10px 14px;background:#20242a}.bar span{flex:1}.bar button{border:0;background:#3b424c;color:white;border-radius:4px;padding:5px 11px;cursor:pointer}.view{flex:1;min-height:0;overflow:hidden;display:flex;align-items:center;justify-content:center;cursor:grab;touch-action:none}.view.dragging{cursor:grabbing}img{display:block;max-width:calc(100% - 32px);max-height:calc(100% - 32px);object-fit:contain;user-select:none}</style><div class="backdrop"><div class="bar"><span>滚轮缩放 · 拖动查看 · 点击空白或 Esc 关闭</span><button type="button" aria-label="关闭图片查看">关闭</button></div><div class="view"><img alt="放大查看"></div></div>';
     const view = shadow.querySelector('.view');
     const enlarged = shadow.querySelector('img');
     enlarged.src = image.currentSrc;
@@ -90,6 +90,7 @@ const FRAME_INTERACTIONS = String.raw`(() => {
     const close = () => { host.remove(); lightbox = null; document.removeEventListener('keydown', onKey, true); };
     const onKey = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopImmediatePropagation(); close(); } };
     shadow.querySelector('button').addEventListener('click', close);
+    shadow.querySelector('.bar').addEventListener('click', e => { if (!e.target.closest('button')) close(); });
     view.addEventListener('wheel', e => {
       e.preventDefault(); e.stopPropagation();
       const bounds = view.getBoundingClientRect();
@@ -98,10 +99,11 @@ const FRAME_INTERACTIONS = String.raw`(() => {
       const next = Math.max(.1, Math.min(16, scale * Math.exp(-delta * .002)));
       const ratio = next / scale; x = px - (px - x) * ratio; y = py - (py - y) * ratio; scale = next; paint();
     }, { passive: false });
-    view.addEventListener('pointerdown', e => { if (e.button !== 0) return; e.preventDefault(); view.setPointerCapture(e.pointerId); drag = { id: e.pointerId, x: e.clientX, y: e.clientY }; view.classList.add('dragging'); });
-    view.addEventListener('pointermove', e => { if (!drag || drag.id !== e.pointerId) return; x += e.clientX - drag.x; y += e.clientY - drag.y; drag.x = e.clientX; drag.y = e.clientY; paint(); });
+    view.addEventListener('pointerdown', e => { if (e.button !== 0) return; e.preventDefault(); view.setPointerCapture(e.pointerId); drag = { id: e.pointerId, x: e.clientX, y: e.clientY, startX: e.clientX, startY: e.clientY, outside: e.target === view, moved: false }; view.classList.add('dragging'); });
+    view.addEventListener('pointermove', e => { if (!drag || drag.id !== e.pointerId) return; x += e.clientX - drag.x; y += e.clientY - drag.y; drag.moved ||= Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) > 4; drag.x = e.clientX; drag.y = e.clientY; paint(); });
     const endDrag = () => { drag = null; view.classList.remove('dragging'); };
-    view.addEventListener('pointerup', endDrag); view.addEventListener('pointercancel', endDrag); view.addEventListener('lostpointercapture', endDrag);
+    view.addEventListener('pointerup', e => { if (!drag || drag.id !== e.pointerId) return; const dismiss = drag.outside && !drag.moved && Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) <= 4; endDrag(); if (dismiss) close(); });
+    view.addEventListener('pointercancel', endDrag); view.addEventListener('lostpointercapture', endDrag);
     document.addEventListener('keydown', onKey, true);
     lightbox = host;
     document.documentElement.append(host);

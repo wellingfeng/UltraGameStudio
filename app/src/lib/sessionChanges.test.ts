@@ -12,6 +12,7 @@ import {
 } from './sessionChanges';
 
 vi.mock('./tauri', () => ({
+  tauriAvailable: () => false,
   ensureWorkspaceChangesBaseline: vi.fn(),
   listWorkspaceChanges: vi.fn(),
   readWorkspaceChangesCache: vi.fn(),

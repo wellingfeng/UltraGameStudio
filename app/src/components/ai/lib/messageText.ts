@@ -1,5 +1,7 @@
 import { segmentMessage } from './segmenter';
-import { extractToolSentinels, hasToolSentinel } from './toolEvent';
+import { hasToolSentinel } from './toolEvent';
+import { cachedToolProjection } from './cachedToolProjection';
+import { createBoundedTextCache } from './boundedTextCache';
 import { formatClock, formatDuration } from '@/runtime/format';
 
 const ROUTE_LINE_RE =
@@ -7,6 +9,7 @@ const ROUTE_LINE_RE =
 
 /** Leading `⏱ HH:MM:SS → HH:MM:SS · 耗时 …` line prepended to assistant turns. */
 const TIMING_LINE_RE = /^⏱[^\n]*(?:\n|$)/;
+const cleanTextCache = createBoundedTextCache<string>(128, 1_000_000);
 
 export function routeLabelFromText(text: string): string {
   const match = text.match(ROUTE_LINE_RE);
@@ -26,8 +29,10 @@ export function stripRouteLine(text: string): string {
  * search indexes and plain fallbacks never show raw protocol JSON.
  */
 export function cleanMessageText(text: string): string {
-  const visible = hasToolSentinel(text) ? extractToolSentinels(text).text : text;
-  return stripRouteLine(visible.replace(TIMING_LINE_RE, ''));
+  return cleanTextCache.get(text, () => {
+    const visible = hasToolSentinel(text) ? cachedToolProjection(text).text : text;
+    return stripRouteLine(visible.replace(TIMING_LINE_RE, ''));
+  }, (value) => value.length);
 }
 
 export function renderMessageText(text: string): string {

@@ -14,6 +14,7 @@ import { initializeGatewayConfigStore } from "@/lib/gatewayConfig";
 import { initializeApiConfigStore, syncGatewayFromProviders } from "@/lib/apiConfig";
 import { initializePersonalInstructionsStore } from "@/lib/composerStorage";
 import { refreshModelPricing } from "@/lib/modelPricing";
+import { startUiPerformanceMonitor } from "@/lib/uiPerformance";
 
 const rootEl = document.getElementById("root");
 if (!rootEl) {
@@ -61,8 +62,22 @@ async function bootstrap(): Promise<void> {
     </StrictMode>,
   );
 
+  // 仅清理已在磁盘核对一致的旧会话改动缓存，避免占满 WebView2 配额。
+  void import('@/lib/sessionChanges').then(({ prunePersistedSessionChangesCache }) => prunePersistedSessionChangesCache());
+
   // 启动时联网刷新一次模型价格目录（OpenRouter 公开接口），不阻塞渲染。
   void refreshModelPricing();
+}
+
+// Start before hydration so cold-start stalls are observable as well. The
+// monitor is optional, numeric-only and never delays bootstrap or quit flush.
+const stopUiPerformanceMonitor = startUiPerformanceMonitor();
+window.addEventListener("pagehide", stopUiPerformanceMonitor, { once: true });
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    window.removeEventListener("pagehide", stopUiPerformanceMonitor);
+    stopUiPerformanceMonitor();
+  });
 }
 
 void bootstrap();

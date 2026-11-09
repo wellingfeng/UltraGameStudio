@@ -47,6 +47,11 @@ const gatewayMocks = vi.hoisted(() => ({
   resolveCliGatewayRoute: vi.fn(),
 }));
 
+const handoffSelectionMocks = vi.hoisted(() => ({
+  resolve: vi.fn(async (selection: import('@/core/ir').GatewaySelection) => ({ ...selection, modelOverride: 'gpt-future-frontier', thinkingLevel: 'ultra' })),
+}));
+vi.mock('@/lib/sessionHandoffModel', () => ({ resolveHandoffSelection: handoffSelectionMocks.resolve }));
+
 const skillLearningMocks = vi.hoisted(() => ({
   beginSkillLearningTurn: vi.fn(),
 }));
@@ -69,6 +74,7 @@ const tauriMocks = vi.hoisted(() => ({
   tauriAvailable: vi.fn(() => false),
   ensureWorkspaceChangesBaseline: vi.fn(async () => ({ rootPath: 'E:/project', generatedAtMs: 1, fileCount: 1, truncated: false })),
   listWorkspaceChanges: vi.fn(async () => ({ rootPath: 'E:/project', generatedAtMs: 2, files: [], truncated: false })),
+  saveSessionHandoffSnapshot: vi.fn(),
 }));
 
 const notificationMocks = vi.hoisted(() => ({
@@ -104,6 +110,7 @@ vi.mock('@/lib/tauri', async () => {
     tauriAvailable: tauriMocks.tauriAvailable,
     ensureWorkspaceChangesBaseline: tauriMocks.ensureWorkspaceChangesBaseline,
     listWorkspaceChanges: tauriMocks.listWorkspaceChanges,
+    saveSessionHandoffSnapshot: tauriMocks.saveSessionHandoffSnapshot,
   };
 });
 
@@ -126,15 +133,20 @@ import {
   aiEditViewActive,
   gatewayRouteHeader,
   gatewayRouteLine,
+  getSessionConversationMessages,
   isActiveAiEditingSession,
   isWorkflowReadOnly,
   removeAiEditChannel,
+  sessionFromRecord,
+  syncAndPersistSessionRunStatus,
   __resetSimpleChatRuntimeForTests,
 } from './useStore';
 import type { AiEditChannel } from './useStore';
 import { historyStore } from './history/store';
 import type { Message, Session } from './types';
-import { activeAiEdits } from './channelRegistry';
+import { activeAiEdits, aiEditSnapshots } from './channelRegistry';
+import { streamPublications } from './streamPublication';
+import { IncrementalProtocolText } from './incrementalProtocolText';
 import { orderDisplayMessages } from '@/components/ai/lib/orderDisplayMessages';
 
 function cloneGraph(graph: IRGraph): IRGraph {
@@ -151,6 +163,8 @@ function resetStore(workflow: IRGraph): void {
     aiStreaming: false,
     aiEditingSessions: [],
     chattingSessions: [],
+    jobSessions: [],
+    waitingInputSessions: [],
     queuedChatMessageIds: [],
     steerableQueuedChatMessageIds: [],
     editingQueuedChatMessageId: null,
@@ -243,6 +257,7 @@ afterEach(async () => {
   tauriMocks.isTauri.mockReset();
   tauriMocks.previewLocalFile.mockReset();
   tauriMocks.tauriAvailable.mockReset();
+  tauriMocks.saveSessionHandoffSnapshot.mockReset();
   notificationMocks.dismissSessionWaitingInputNotification.mockReset();
   notificationMocks.notifySessionComplete.mockReset();
   tauriMocks.freeProxyEnsure.mockResolvedValue({ port: 8766, token: 'test-token' });
@@ -259,7 +274,406 @@ afterEach(async () => {
   await refreshCliRuntime();
 });
 
+describe('会话交接', () => {
+  it('保存完整消息，在原会话展示续开发提示语而不启动新会话', async () => {
+    resetStore(simpleBlueprint('交接来源'));
+    const workspace = await historyStore.resolveWorkspaceByPath('E:/project');
+    const messages: Message[] = [
+      { id: 'old', role: 'user', text: '早期目标', createdAt: 1 },
+      { id: 'latest', role: 'assistant', text: '最新进展', createdAt: 2, contextCompressed: true },
+    ];
+    await historyStore.createSession({ workspaceId: workspace.id, id: 'source', isWorkflow: false, messages, title: '交接来源' });
+    const originalSendPrompt = useStore.getState().sendPrompt;
+    const send = vi.fn((_text: string, options?: Parameters<typeof originalSendPrompt>[1]) => {
+      options?.onChatTerminal?.('completed');
+      return true;
+    });
+    useStore.setState({ historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: 'source',
+      workspaces: [workspace], messages, composer: { ...defaultComposer, workspace: 'E:/project' }, sendPrompt: send });
+    useStore.getState().setSessionRunSelection({ ...systemDefaultGatewaySelection('codex'), modelOverride: 'model-x', thinkingLevel: 'high' });
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.saveSessionHandoffSnapshot.mockResolvedValue({ snapshotPath: 'E:/project/old.json', summaryPath: 'E:/project/handoff.md' });
+    tauriMocks.previewLocalFile.mockResolvedValue({ kind: 'text', text: '# 交接文档' });
+    try {
+      await useStore.getState().continueSessionWithHandoff();
+      const state = useStore.getState();
+      expect(state.activeSessionId).toBe('source');
+      expect(state.messages.slice(0, 2)).toEqual(messages);
+      expect(state.messages.at(-1)).toMatchObject({ role: 'assistant', localOnly: true });
+      expect(state.messages.at(-1)?.text).toContain('请接手前一个会话的任务');
+      expect(state.messages.at(-1)?.text).toContain('E:/project/handoff.md');
+      expect((await historyStore.getSession(workspace.id, 'source'))?.messages.at(-1)?.text).toBe(state.messages.at(-1)?.text);
+      expect(state.composer.workspace).toBe('E:/project');
+      expect(workflowDefaultGatewaySelection(state.workflow)).toMatchObject({ adapter: 'codex', modelOverride: 'model-x', thinkingLevel: 'high' });
+      expect(JSON.parse(tauriMocks.saveSessionHandoffSnapshot.mock.calls[0][1]).messages).toEqual(messages);
+      expect(send).toHaveBeenCalledOnce();
+      expect(send.mock.calls[0][0]).toContain('E:/project/handoff.md');
+      expect(send.mock.calls[0][0]).toContain('E:/project/old.json');
+      expect(send.mock.calls[0][1]?.gatewaySelectionOverride).toMatchObject({ adapter: 'codex', modelOverride: 'gpt-future-frontier', thinkingLevel: 'ultra' });
+      expect(state.composerBySession[`${workspace.id}::source`]?.gatewaySelection).toMatchObject({ modelOverride: 'model-x', thinkingLevel: 'high' });
+    } finally {
+      useStore.setState({ sendPrompt: originalSendPrompt });
+    }
+  });
+
+  it('保存期间切换会话时，不切回也不发送交接请求', async () => {
+    resetStore(simpleBlueprint('交接来源'));
+    const workspace = await historyStore.resolveWorkspaceByPath('E:/project');
+    const originalSendPrompt = useStore.getState().sendPrompt;
+    const send = vi.fn((_text: string) => true);
+    useStore.setState({ historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: 'source',
+      workspaces: [workspace], messages: [{ id: 'u', role: 'user', text: '目标', createdAt: 1 }],
+      composer: { ...defaultComposer, workspace: 'E:/project' }, sendPrompt: send });
+    useStore.getState().setSessionRunSelection(systemDefaultGatewaySelection('codex'));
+    tauriMocks.isTauri.mockReturnValue(true);
+    let finish!: (value: { snapshotPath: string; summaryPath: string }) => void;
+    tauriMocks.saveSessionHandoffSnapshot.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    try {
+      const pending = useStore.getState().continueSessionWithHandoff();
+      useStore.setState({ activeSessionId: 'other' });
+      finish({ snapshotPath: 'E:/project/old.json', summaryPath: 'E:/project/handoff.md' });
+      await expect(pending).rejects.toThrow('会话已切换或发生变化');
+      expect(useStore.getState().activeSessionId).toBe('other');
+      expect(send).not.toHaveBeenCalled();
+    } finally {
+      useStore.setState({ sendPrompt: originalSendPrompt });
+    }
+  });
+
+  it('汇总期间切换会话时，提示语保存在来源会话，不影响当前会话', async () => {
+    resetStore(simpleBlueprint('交接来源'));
+    const workspace = await historyStore.resolveWorkspaceByPath('E:/project');
+    const messages: Message[] = [{ id: 'u', role: 'user', text: '目标', createdAt: 1 }];
+    const otherMessages: Message[] = [{ id: 'other', role: 'user', text: '其他会话', createdAt: 2 }];
+    await historyStore.createSession({ workspaceId: workspace.id, id: 'source', isWorkflow: false, messages, title: '交接来源' });
+    await historyStore.createSession({ workspaceId: workspace.id, id: 'other', isWorkflow: false, messages: otherMessages, title: '其他会话' });
+    const originalSendPrompt = useStore.getState().sendPrompt;
+    let finish!: (status: 'completed') => void;
+    const send = vi.fn((_text: string, options?: Parameters<typeof originalSendPrompt>[1]) => {
+      finish = options!.onChatTerminal!;
+      return true;
+    });
+    useStore.setState({ historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: 'source',
+      workspaces: [workspace], messages, composer: { ...defaultComposer, workspace: 'E:/project' }, sendPrompt: send });
+    useStore.getState().setSessionRunSelection(systemDefaultGatewaySelection('codex'));
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.saveSessionHandoffSnapshot.mockResolvedValue({ snapshotPath: 'E:/project/old.json', summaryPath: 'E:/project/handoff.md' });
+    tauriMocks.previewLocalFile.mockResolvedValue({ kind: 'text', text: '# 交接文档' });
+    try {
+      const pending = useStore.getState().continueSessionWithHandoff();
+      await waitFor(() => send.mock.calls.length === 1, 'summary turn started');
+      useStore.setState({ activeSessionId: 'other', messages: otherMessages });
+      finish('completed');
+      await pending;
+      expect(useStore.getState().activeSessionId).toBe('other');
+      expect(useStore.getState().messages).toEqual(otherMessages);
+      expect((await historyStore.getSession(workspace.id, 'source'))?.messages.at(-1)?.text).toContain('E:/project/handoff.md');
+      expect((await historyStore.getSession(workspace.id, 'other'))?.messages).toEqual(otherMessages);
+      expect(send).toHaveBeenCalledOnce();
+    } finally {
+      useStore.setState({ sendPrompt: originalSendPrompt });
+    }
+  });
+
+  it('摘要文件未落地时保留原会话，不启动新的开发会话', async () => {
+    resetStore(simpleBlueprint('交接来源'));
+    const workspace = await historyStore.resolveWorkspaceByPath('E:/project');
+    const originalSendPrompt = useStore.getState().sendPrompt;
+    const send = vi.fn((_text: string, options?: Parameters<typeof originalSendPrompt>[1]) => {
+      options?.onChatTerminal?.('completed');
+      return true;
+    });
+    useStore.setState({ historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: 'source',
+      workspaces: [workspace], messages: [{ id: 'u', role: 'user', text: '目标', createdAt: 1 }],
+      composer: { ...defaultComposer, workspace: 'E:/project' }, sendPrompt: send });
+    useStore.getState().setSessionRunSelection(systemDefaultGatewaySelection('codex'));
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.saveSessionHandoffSnapshot.mockResolvedValue({ snapshotPath: 'E:/project/old.json', summaryPath: 'E:/project/handoff.md' });
+    tauriMocks.previewLocalFile.mockResolvedValue({ kind: 'text', text: '  ' });
+    try {
+      await expect(useStore.getState().continueSessionWithHandoff()).rejects.toThrow('交接文档不存在或为空');
+      expect(useStore.getState().activeSessionId).toBe('source');
+      expect(send).toHaveBeenCalledOnce();
+    } finally {
+      useStore.setState({ sendPrompt: originalSendPrompt });
+    }
+  });
+
+  it('只读权限及后台任务运行时拒绝交接', async () => {
+    resetStore(simpleBlueprint('交接来源'));
+    const workspace = await historyStore.resolveWorkspaceByPath('E:/project');
+    useStore.setState({ activeWorkspaceId: workspace.id, activeSessionId: 'source', workspaces: [workspace],
+      messages: [{ id: 'u', role: 'user', text: '目标', createdAt: 1 }],
+      composer: { ...defaultComposer, workspace: 'E:/project', permission: 'readonly' } });
+    useStore.getState().setSessionRunSelection(systemDefaultGatewaySelection('codex'));
+    tauriMocks.isTauri.mockReturnValue(true);
+    await expect(useStore.getState().continueSessionWithHandoff()).rejects.toThrow('只读权限');
+    useStore.setState({ composer: { ...defaultComposer, workspace: 'E:/project' },
+      jobSessions: [{ workspaceId: workspace.id, sessionId: 'source' }] });
+    await expect(useStore.getState().continueSessionWithHandoff()).rejects.toThrow('后台任务仍在运行');
+    useStore.setState({ jobSessions: [], waitingInputSessions: [{ workspaceId: workspace.id, sessionId: 'source' }] });
+    await expect(useStore.getState().continueSessionWithHandoff()).rejects.toThrow('待回答的问题');
+    expect(tauriMocks.saveSessionHandoffSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('真实聊天状态链只运行汇总，并把提示语留在原会话', async () => {
+    resetStore(simpleBlueprint('交接来源'));
+    const workspace = await historyStore.resolveWorkspaceByPath('E:/project');
+    const messages: Message[] = [{ id: 'u', role: 'user', text: '早期目标', createdAt: 1 },
+      { id: 'a', role: 'assistant', text: '尚未完成', createdAt: 2 }];
+    const record = await historyStore.createSession({ workspaceId: workspace.id, id: 'handoff-source', isWorkflow: false, messages, title: '交接来源' });
+    useStore.setState({ historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: record.id,
+      workspaces: [workspace], messages, composer: { ...defaultComposer, workspace: 'E:/project' } });
+    useStore.getState().setSessionRunSelection(systemDefaultGatewaySelection('codex'));
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.saveSessionHandoffSnapshot.mockResolvedValue({ snapshotPath: 'E:/project/old.json', summaryPath: 'E:/project/handoff.md' });
+    tauriMocks.previewLocalFile.mockResolvedValue({ kind: 'text', text: '# 目标\n完成开发' });
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockImplementation(async (selection) => ({
+      selection, adapter: 'codex', modelClass: 'default', model: 'model-x', transport: 'cli', mode: 'cli', label: 'Codex', source: 'global', cliCommand: 'codex',
+    }));
+    tauriMocks.aiEditViaCli.mockResolvedValue('处理完成');
+    await useStore.getState().continueSessionWithHandoff();
+    const calls = tauriMocks.aiEditViaCli.mock.calls.filter(([prompt]) => String(prompt).includes('E:/project/handoff.md'));
+    expect(calls).toHaveLength(1);
+    expect(calls[0][0]).toContain('E:/project/old.json');
+    expect(calls[0][2]).toMatchObject({ env: { UGS_THINKING_LEVEL: 'ultra' } });
+    expect(gatewayMocks.resolveCliGatewayRoute.mock.calls.some(([selection]) => selection.modelOverride === 'gpt-future-frontier' && selection.thinkingLevel === 'ultra')).toBe(true);
+    expect(workflowDefaultGatewaySelection(useStore.getState().workflow)).toMatchObject({ adapter: 'codex', modelClass: 'default' });
+    expect(useStore.getState().activeSessionId).toBe(record.id);
+    const savedMessages = (await historyStore.getSession(workspace.id, record.id))?.messages ?? [];
+    expect(savedMessages.some((message) => message.text === '早期目标')).toBe(true);
+    expect(savedMessages.at(-1)?.text).toContain('请接手前一个会话的任务');
+    expect(savedMessages.at(-2)?.text).toContain('处理完成');
+  });
+});
+
+describe('读取会话内容用于复制和导出', () => {
+  it('读取当前会话的内存消息，不依赖磁盘', async () => {
+    resetStore(simpleBlueprint('Active'));
+    const messages: Message[] = [{ id: 'active', role: 'user', text: '未写入磁盘', createdAt: 1 }];
+    useStore.setState({ activeWorkspaceId: 'ws1', activeSessionId: 'active', messages });
+    const read = vi.spyOn(historyStore, 'getSession');
+    try {
+      expect(await getSessionConversationMessages('ws1', 'active')).toEqual(messages);
+      expect(read).not.toHaveBeenCalled();
+    } finally { read.mockRestore(); }
+  });
+
+  it('合并后台会话的实时消息，保留磁盘中更新的其他消息', async () => {
+    resetStore(simpleBlueprint('Other'));
+    useStore.setState({ activeWorkspaceId: 'ws2', activeSessionId: 'other', messages: [] });
+    const persisted: Message[] = [
+      { id: 'u', role: 'user', text: '问题', createdAt: 1 },
+      { id: 'a', role: 'assistant', text: '旧流', createdAt: 2, completedAt: 4 },
+      { id: 'newer', role: 'assistant', text: '磁盘最终结果', createdAt: 3, completedAt: 9 },
+    ];
+    const read = vi.spyOn(historyStore, 'getSession').mockResolvedValue({
+      id: 'target', workspaceId: 'ws1', title: 'Target', isWorkflow: false,
+      createdAt: 1, updatedAt: 9, messages: persisted,
+    });
+    const channel: AiEditChannel = {
+      key: 'ws1::target::turn', sessionKey: 'ws1::target', workspaceId: 'ws1', sessionId: 'target',
+      workflow: simpleBlueprint('Target'), cliRunIds: new Set(), abortController: new AbortController(),
+      workflowSession: false, chat: true, ownedMessageIds: new Set(['a']),
+      messages: [persisted[0], { ...persisted[1], text: '最新流' }, { ...persisted[2], text: '过期快照', completedAt: 5 }],
+    };
+    activeAiEdits.set(channel.key, channel);
+    try {
+      const result = await getSessionConversationMessages('ws1', 'target');
+      expect(result.map((message) => message.text)).toEqual(['问题', '最新流', '磁盘最终结果']);
+      expect(useStore.getState().activeSessionId).toBe('other');
+      activeAiEdits.delete(channel.key);
+      aiEditSnapshots.set(channel.key, channel);
+      expect((await getSessionConversationMessages('ws1', 'target'))[1].text).toBe('旧流');
+    } finally {
+      activeAiEdits.delete(channel.key);
+      aiEditSnapshots.delete(channel.key);
+      read.mockRestore();
+    }
+  });
+
+  it('目标会话不存在时报告读取失败', async () => {
+    resetStore(simpleBlueprint('Other'));
+    const read = vi.spyOn(historyStore, 'getSession').mockResolvedValue(null);
+    try {
+      await expect(getSessionConversationMessages('ws1', 'missing')).rejects.toThrow('Session not found');
+    } finally { read.mockRestore(); }
+  });
+
+  it('后台会话有多个实时回复时同时读取各自最新内容', async () => {
+    resetStore(simpleBlueprint('Other'));
+    const persisted: Message[] = [
+      { id: 'u1', role: 'user', text: '问题一', createdAt: 1 },
+      { id: 'a1', role: 'assistant', text: '旧回答一', createdAt: 2 },
+      { id: 'u2', role: 'user', text: '问题二', createdAt: 3 },
+      { id: 'a2', role: 'assistant', text: '旧回答二', createdAt: 4 },
+    ];
+    const read = vi.spyOn(historyStore, 'getSession').mockResolvedValue({
+      id: 'target', workspaceId: 'ws1', title: 'Target', isWorkflow: false,
+      createdAt: 1, updatedAt: 4, messages: persisted,
+    });
+    const channel = (key: string, owned: string[], messages: Message[]): AiEditChannel => ({
+      key, sessionKey: 'ws1::target', workspaceId: 'ws1', sessionId: 'target',
+      workflow: simpleBlueprint('Target'), cliRunIds: new Set(), abortController: new AbortController(),
+      workflowSession: false, chat: true, ownedMessageIds: new Set(owned), messages,
+    });
+    const first = channel('first', ['u1', 'a1'], [persisted[0], { ...persisted[1], text: '最新回答一' }]);
+    const second = channel('second', ['u2', 'a2'], [...persisted.slice(0, 3), { ...persisted[3], text: '最新回答二' }]);
+    activeAiEdits.set(first.key, first);
+    activeAiEdits.set(second.key, second);
+    try {
+      expect((await getSessionConversationMessages('ws1', 'target')).map((message) => message.text))
+        .toEqual(['问题一', '最新回答一', '问题二', '最新回答二']);
+    } finally {
+      activeAiEdits.delete(first.key);
+      activeAiEdits.delete(second.key);
+      read.mockRestore();
+    }
+  });
+});
+
 describe('simple-workflow chat mode', () => {
+  it('活动回复流式发布不读取封存历史消息标识', async () => {
+    resetStore(simpleBlueprint('Indexed streaming'));
+    mockDirectRoute();
+    let reads = 0;
+    const history: Message[] = Array.from({ length: 2_000 }, (_, index) => ({
+      get id() { reads += 1; return `sealed-${index}`; },
+      role: index % 2 ? 'assistant' : 'user', text: '封存正文', createdAt: index + 1, completedAt: index + 2,
+    }));
+    useStore.setState({ messages: history });
+    let deliver!: (chunk: string) => void;
+    let finish!: (text: string) => void;
+    gatewayMocks.completeGatewayText.mockImplementation((request) => {
+      deliver = request.onDelta;
+      return new Promise<string>((resolve) => { finish = resolve; });
+    });
+    useStore.getState().sendPrompt('定点回复');
+    await waitFor(() => !!deliver, 'indexed delta callback');
+    const ch = [...activeAiEdits.values()][0];
+    reads = 0;
+    deliver('最新内容');
+    streamPublications.flush(ch);
+    expect(reads).toBe(0);
+    expect(useStore.getState().messages[0]).toBe(history[0]);
+    expect(useStore.getState().messages.at(-1)?.text).toContain('最新内容');
+    finish('最新内容');
+    await waitFor(() => !useStore.getState().aiStreaming, 'indexed completion');
+  });
+
+  it('直连生产路径使用增量协议视图并保留最终原文', async () => {
+    resetStore(simpleBlueprint('Incremental direct'));
+    mockDirectRoute();
+    const display = vi.spyOn(IncrementalProtocolText.prototype, 'display');
+    let deliver!: (chunk: string) => void;
+    let finish!: (text: string) => void;
+    gatewayMocks.completeGatewayText.mockImplementation((request) => {
+      deliver = request.onDelta;
+      return new Promise<string>((resolve) => { finish = resolve; });
+    });
+    useStore.getState().sendPrompt('流式协议');
+    await waitFor(() => !!deliver, 'incremental callback');
+    deliver('<think>思考</think>\n正文\n');
+    streamPublications.flush([...activeAiEdits.values()][0]);
+    expect(display).toHaveBeenCalledOnce();
+    finish('<think>思考</think>\n正文\n');
+    await waitFor(() => !useStore.getState().aiStreaming, 'incremental direct completion');
+    expect(useStore.getState().messages.at(-1)?.text).toContain('<think>思考</think>\n正文');
+    display.mockRestore();
+  });
+
+  it('取消同步 flush 未发布直连文本且迟到 delta 不复活通道', async () => {
+    resetStore(simpleBlueprint('Cancel batching'));
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({ workspaceId: workspace.id, isWorkflow: false, messages: [], title: 'Cancel batching' });
+    useStore.setState({ historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: record.id, workspaces: [workspace] });
+    mockDirectRoute();
+    let deliver!: (chunk: string) => void;
+    let finish!: (text: string) => void;
+    gatewayMocks.completeGatewayText.mockImplementation((request) => {
+      deliver = request.onDelta;
+      return new Promise<string>((resolve) => { finish = resolve; });
+    });
+    useStore.getState().sendPrompt('执行并取消');
+    await waitFor(() => !!deliver, 'cancel delta callback');
+    deliver('取消前不可丢失');
+    useStore.getState().stopChat();
+    expect(useStore.getState().messages.some((message) => message.text.includes('取消前不可丢失'))).toBe(true);
+    const stopped = useStore.getState().messages;
+    deliver('迟到文本');
+    finish('迟到结果');
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    expect(useStore.getState().messages).toBe(stopped);
+    expect(activeAiEdits.size).toBe(0);
+  });
+
+  it('合批 CLI burst 并在错误时保留未发布工具文本', async () => {
+    resetStore(simpleBlueprint('CLI batching'));
+    const display = vi.spyOn(IncrementalProtocolText.prototype, 'display');
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({ workspaceId: workspace.id, isWorkflow: false, messages: [], title: 'CLI batching' });
+    useStore.setState({ historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: record.id, workspaces: [workspace] });
+    tauriMocks.isTauri.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockImplementation(async (selection) => ({
+      selection, adapter: 'claude-code', modelClass: 'sonnet', model: 'sonnet',
+      transport: 'cli', mode: 'cli', label: 'Claude Code', source: 'global', cliCommand: 'claude',
+    }));
+    let deliver!: (chunk: string) => void;
+    let reject!: (error: Error) => void;
+    tauriMocks.aiEditViaCli.mockImplementation((_prompt, _runId, options) => {
+      deliver = options.onProgress;
+      return new Promise<string>((_resolve, fail) => { reject = fail; });
+    });
+    expect(useStore.getState().sendPrompt('执行 CLI')).toBe(true);
+    await waitFor(() => !!deliver, 'CLI callback');
+    let publications = 0;
+    const unsubscribe = useStore.subscribe((state, prior) => {
+      if (state.messages !== prior.messages) publications += 1;
+    });
+    try {
+      for (let index = 0; index < 100; index += 1) deliver('字');
+      deliver(encodeToolPatch({ id: 'batch-tool', name: 'Read', status: 'done', subject: 'E:/project/a.ts' }));
+      expect(publications).toBe(0);
+      reject(new Error('stream failed'));
+      await waitFor(() => !useStore.getState().aiStreaming, 'CLI error completion');
+      expect(display).toHaveBeenCalledOnce();
+      const text = useStore.getState().messages.at(-1)?.text ?? '';
+      expect(text).toContain('字'.repeat(100));
+      expect(text).toContain('batch-tool');
+      expect(text).toContain('stream failed');
+    } finally { unsubscribe(); display.mockRestore(); }
+  });
+
+  it('合批直连 burst 并在完成前发布最后文本', async () => {
+    resetStore(simpleBlueprint('Batched stream'));
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({ workspaceId: workspace.id, isWorkflow: false, messages: [], title: 'Batched stream' });
+    useStore.setState({ historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: record.id, workspaces: [workspace] });
+    mockDirectRoute();
+    let deliver!: (chunk: string) => void;
+    let finish!: (text: string) => void;
+    gatewayMocks.completeGatewayText.mockImplementation((request) => {
+      deliver = request.onDelta;
+      return new Promise<string>((resolve) => { finish = resolve; });
+    });
+    expect(useStore.getState().sendPrompt('执行合批')).toBe(true);
+    await waitFor(() => !!deliver, 'direct delta callback');
+    let publications = 0;
+    const unsubscribe = useStore.subscribe((state, prior) => {
+      if (state.messages !== prior.messages) publications += 1;
+    });
+    try {
+      for (let index = 0; index < 100; index += 1) deliver('字');
+      expect(publications).toBe(0);
+      finish('字'.repeat(100));
+      await waitFor(() => !useStore.getState().aiStreaming, 'batched completion');
+      expect(useStore.getState().messages.at(-1)?.text).toContain('字'.repeat(100));
+      expect(publications).toBeLessThan(10);
+    } finally { unsubscribe(); }
+  });
+
   it('resends an edited input while retaining subsequent context and persisting display replacement', async () => {
     resetStore(simpleBlueprint('Revision'));
     mockDirectRoute();
@@ -4375,7 +4789,7 @@ describe('simple-workflow chat mode', () => {
     ).toBe(true);
   });
 
-  it('mints a fresh native session when claude exits 0 without any reply', async () => {
+  it('keeps a partial native reply and does not replay an uncertain empty exit', async () => {
     window.localStorage.clear();
     await historyStore.ready();
     const workspace = await historyStore.resolveWorkspaceByPath('');
@@ -4426,6 +4840,8 @@ describe('simple-workflow chat mode', () => {
       calls.push({ prompt, opts });
       if (calls.length === 1) return '第一轮回答。';
       if (calls.length === 2) {
+        opts.onProgress?.('\n已执行工具并准备输出文档。\n');
+        opts.onUsage?.({ input_tokens: 120, cached_input_tokens: 80, output_tokens: 12 });
         throw new Error(
           'CLI "claude" 未产生任何回复就退出（退出码 0）：CLI 退出但未返回任何内容',
         );
@@ -4441,29 +4857,57 @@ describe('simple-workflow chat mode', () => {
 
     useStore.getState().sendPrompt('第二轮问题');
     await waitFor(
-      () => !useStore.getState().aiStreaming && calls.length === 3,
-      'empty-exit fallback CLI chat call',
+      () => !useStore.getState().aiStreaming && calls.length === 2,
+      'empty-exit failure without replay',
     );
 
     expect(calls[1].opts.sessionId).toBe(calls[0].opts.sessionId);
     expect(calls[1].opts.resume).toBe(true);
-    expect(calls[2].opts.sessionId).toEqual(expect.any(String));
-    expect(calls[2].opts.sessionId).not.toBe(calls[0].opts.sessionId);
-    expect(calls[2].opts.resume).toBe(false);
-    expect(calls[2].prompt).toContain('之前的对话');
-    expect(calls[2].prompt).toContain('第一轮问题');
-    expect(calls[2].prompt).toContain('第一轮回答。');
-    expect(calls[2].prompt).toContain('第二轮问题');
+    expect(calls).toHaveLength(2);
+    expect(useStore.getState().messages.find((message) => message.text.includes('未自动重试'))?.usage)
+      .toMatchObject({ inputTokens: 120, cachedInputTokens: 80, outputTokens: 12 });
     expect(
       useStore
         .getState()
         .messages.some(
-          (m) => m.role === 'assistant' && m.text.includes('恢复后的回答。'),
+          (m) => m.role === 'assistant' && m.text.includes('已执行工具并准备输出文档。') && m.text.includes('未自动重试'),
         ),
     ).toBe(true);
   });
 
-  it('retries once when a stateless CLI call exits 0 without any reply', async () => {
+  it('passes the completed tool trace to a stateless Codex history-recall continuation', async () => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({ workspaceId: workspace.id, isWorkflow: false, messages: [], title: 'Chat' });
+    resetStore(simpleBlueprint('Chat'));
+    useStore.setState({ historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: record.id,
+      workspaces: [workspace], sessions: [], sessionTree: { [workspace.id]: [] }, locale: 'zh-CN' });
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockImplementation(async (selection) => ({
+      selection, adapter: 'codex', modelClass: 'codex', model: 'gpt-6-astra', transport: 'cli',
+      mode: 'cli', label: 'Codex', source: 'global', cliCommand: 'codex',
+    }));
+    const calls: string[] = [];
+    const tool = '\n<<UGS_TOOL>>{"id":"write-1","name":"commandExecution","subject":"保存报告","status":"done","result":"报告已生成"}<<UGS_TOOL_END>>\n';
+    tauriMocks.aiEditViaCli.mockImplementation(async (prompt, _adapter, opts) => {
+      calls.push(prompt);
+      if (calls.length === 1) {
+        opts.onProgress?.(`已生成报告。${tool}`);
+        return '已生成报告。\n<<UGS_RECALL>>{"query":"之前的报告"}<<UGS_RECALL_END>>';
+      }
+      return '继续完成。';
+    });
+    useStore.getState().sendPrompt('执行任务并参考之前的报告');
+    await waitFor(() => !useStore.getState().aiStreaming && calls.length === 2, 'history recall continuation');
+    expect(calls[1]).toContain('报告已生成');
+    expect(calls[1]).toContain('不要重复执行');
+    expect(useStore.getState().messages.some((message) => message.text.includes('write-1'))).toBe(true);
+  });
+
+  it('does not replay a stateless CLI call when the execution state is unknown', async () => {
     window.localStorage.clear();
     await historyStore.ready();
     const workspace = await historyStore.resolveWorkspaceByPath('');
@@ -4526,21 +4970,19 @@ describe('simple-workflow chat mode', () => {
 
     useStore.getState().sendPrompt('看这个附件 E:\\docs\\spec.pdf 第一问');
     await waitFor(
-      () => !useStore.getState().aiStreaming && calls.length === 2,
-      'stateless empty-exit CLI retry call',
+      () => !useStore.getState().aiStreaming && calls.length === 1,
+      'stateless empty-exit failure without replay',
     );
 
     // 会话含文档 → 非 Anthropic 原生上游不会走 native session：两轮都是无会话全量调用。
     expect(calls[0].opts.sessionId).toBeUndefined();
     expect(calls[0].opts.resume).toBeUndefined();
-    expect(calls[1].opts.sessionId).toBeUndefined();
-    expect(calls[1].opts.resume).toBeUndefined();
-    expect(calls[1].prompt).toBe(calls[0].prompt);
+    expect(calls).toHaveLength(1);
     expect(
       useStore
         .getState()
         .messages.some(
-          (m) => m.role === 'assistant' && m.text.includes('重试后的回答。'),
+          (m) => m.role === 'assistant' && m.text.includes('执行状态未知，未自动重试'),
         ),
     ).toBe(true);
   });
@@ -4880,6 +5322,105 @@ describe('simple-workflow chat mode', () => {
     expect(useStore.getState().chattingSessions.length).toBe(0);
   });
 
+  it('keeps the latest completed status when an interrupted session is reopened after a history write failure', async () => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({
+      workspaceId: workspace.id,
+      isWorkflow: false,
+      title: '恢复的会话',
+      messages: [{ id: 'old', role: 'user', text: '原任务', createdAt: 1 }],
+      meta: { runStatus: 'interrupted' },
+    });
+    const session: Session = {
+      id: record.id, workspaceId: workspace.id, title: record.title,
+      createdAt: record.createdAt, updatedAt: record.updatedAt,
+      isWorkflow: false, messageCount: 1, runStatus: 'interrupted',
+    };
+    resetStore(simpleBlueprint('恢复的会话'));
+    useStore.setState({
+      historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: record.id,
+      workspaces: [workspace], sessions: [session], sessionTree: { [workspace.id]: [session] },
+      messages: record.messages, locale: 'zh-CN',
+    });
+    mockDirectRoute();
+    gatewayMocks.completeGatewayText.mockResolvedValue('恢复后已完成。');
+    const write = vi.spyOn(historyStore, 'updateSession')
+      .mockRejectedValue(new Error('HISTORY_SERIALIZATION_BYTES_FULL'));
+    try {
+      useStore.getState().sendPrompt('继续');
+      await waitFor(() => !useStore.getState().aiStreaming &&
+        useStore.getState().messages.some((message) => message.text.includes('恢复后已完成。')),
+      'resumed turn to complete');
+      expect(useStore.getState().sessions.find((item) => item.id === record.id)?.runStatus).toBe('success');
+      expect((await historyStore.getSession(workspace.id, record.id))?.meta?.runStatus).toBe('interrupted');
+
+      useStore.setState({ activeSessionId: 'other' });
+      useStore.getState().selectSession(record.id, workspace.id);
+      await waitFor(() => useStore.getState().activeSessionId === record.id, 'session reopen');
+      expect(useStore.getState().sessions.find((item) => item.id === record.id)?.runStatus).toBe('success');
+      expect(useStore.getState().sessionTree[workspace.id].find((item) => item.id === record.id)?.runStatus).toBe('success');
+      write.mockRestore();
+      useStore.getState().selectSession(record.id, workspace.id);
+      await waitFor(async () => (await historyStore.getSession(workspace.id, record.id))?.meta?.runStatus === 'success',
+        'retry to persist the latest terminal status');
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('keeps the newest terminal status when an older status write finishes late', async () => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({
+      workspaceId: workspace.id, isWorkflow: false, title: '状态顺序',
+      meta: { runStatus: 'interrupted' },
+    });
+    resetStore(simpleBlueprint('状态顺序'));
+    let finishOlder!: (value: typeof record) => void;
+    const write = vi.spyOn(historyStore, 'updateSession')
+      .mockImplementationOnce(() => new Promise((resolve) => { finishOlder = resolve; }))
+      .mockRejectedValue(new Error('HISTORY_SERIALIZATION_BYTES_FULL'));
+    try {
+      const key = { workspaceId: workspace.id, sessionId: record.id };
+      syncAndPersistSessionRunStatus(key, 'success');
+      syncAndPersistSessionRunStatus(key, 'error');
+      finishOlder(record);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(sessionFromRecord(record).runStatus).toBe('error');
+      syncAndPersistSessionRunStatus(key, 'interrupted');
+      expect(sessionFromRecord(record).runStatus).toBe('interrupted');
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('uses newer persisted status after the pending terminal write succeeds', async () => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({
+      workspaceId: workspace.id, isWorkflow: false, title: '持久化状态',
+      meta: { runStatus: 'interrupted' },
+    });
+    resetStore(simpleBlueprint('持久化状态'));
+    let finish!: (value: typeof record) => void;
+    const write = vi.spyOn(historyStore, 'updateSession')
+      .mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    try {
+      syncAndPersistSessionRunStatus({ workspaceId: workspace.id, sessionId: record.id }, 'success');
+      expect(sessionFromRecord(record).runStatus).toBe('success');
+      finish(record);
+      await Promise.resolve();
+      expect(sessionFromRecord({ ...record, meta: { runStatus: 'error' } }).runStatus).toBe('error');
+    } finally {
+      write.mockRestore();
+    }
+  });
+
   it('resumes the same native Claude session after an interrupted turn', async () => {
     window.localStorage.clear();
     await historyStore.ready();
@@ -4949,6 +5490,7 @@ describe('simple-workflow chat mode', () => {
     useStore.getState().sendPrompt('用 Rider MCP + UBA 编译引擎直到成功');
     await waitFor(() => calls.length === 1, 'first Claude turn');
     useStore.getState().stopChat();
+    expect(useStore.getState().sessions.find((item) => item.id === record.id)?.runStatus).toBe('interrupted');
     await waitFor(
       () => tauriMocks.cancelAiCli.mock.calls.length === 1,
       'Claude turn cancellation',
@@ -4959,6 +5501,11 @@ describe('simple-workflow chat mode', () => {
       () => !useStore.getState().aiStreaming && calls.length === 2,
       'interrupted Claude continuation',
     );
+
+    expect(useStore.getState().sessions.find((item) => item.id === record.id)?.runStatus).toBe('success');
+    expect(useStore.getState().sessionTree[workspace.id].find((item) => item.id === record.id)?.runStatus).toBe('success');
+    await waitFor(async () => (await historyStore.getSession(workspace.id, record.id))?.meta?.runStatus === 'success',
+      'resumed terminal status persisted');
 
     expect(calls[1].opts.sessionId).toBe(calls[0].opts.sessionId);
     expect(calls[1].opts.resume).toBe(true);
@@ -5052,13 +5599,12 @@ describe('simple-workflow chat mode', () => {
     );
     const runId = tauriMocks.aiEditViaCli.mock.calls[0]?.[2]?.runId;
 
-    // Reproduce real history: persistence has stamped completedAt while the
-    // native CLI is still running, and an old local card has no completedAt.
+    // Persisting an in-flight reply must not mark it complete.
     const channel = [...activeAiEdits.values()].find((ch) => ch.activeAssistantMessageId);
     expect(channel).toBeDefined();
     aiEditCommitMessages(channel!, true);
     const replyId = channel!.activeAssistantMessageId!;
-    expect(useStore.getState().messages.find((m) => m.id === replyId)?.completedAt).toBeDefined();
+    expect(useStore.getState().messages.find((m) => m.id === replyId)?.completedAt).toBeUndefined();
 
     useStore.getState().sendPrompt('补充：也检查测试');
     await waitFor(
@@ -5689,6 +6235,27 @@ describe('simple-workflow chat mode', () => {
     );
   });
 
+  it('retains earlier streamed commentary when a CLI returns only its final message', async () => {
+    resetStore(simpleBlueprint('Simple chat'));
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.tauriAvailable.mockReturnValue(true);
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockResolvedValue({
+      selection: { adapter: 'codex', modelClass: 'codex' }, adapter: 'codex', modelClass: 'codex',
+      model: 'gpt-6-astra', transport: 'cli', mode: 'cli', label: 'Codex', source: 'fallback', cliCommand: 'codex',
+    });
+    tauriMocks.aiEditViaCli.mockImplementation(async (_prompt, _adapter, opts) => {
+      opts.onProgress?.('先读取资料。\n');
+      opts.onProgress?.('准备输出文档。\n');
+      return '文档已生成。';
+    });
+    useStore.getState().sendPrompt('整理文档');
+    await waitFor(() => !useStore.getState().aiStreaming && useStore.getState().messages.some((m) => m.text.includes('文档已生成。')), 'CLI final response');
+    const answer = useStore.getState().messages.find((message) => message.text.includes('文档已生成。'));
+    expect(answer?.text).toContain('先读取资料。');
+    expect(answer?.text).toContain('准备输出文档。');
+  });
+
   it('streams CLI progress into the plain chat bubble before the final reply', async () => {
     resetStore(simpleBlueprint('Simple chat'));
     useStore.getState().setSessionRunSelection({ adapter: 'claude-code', modelClass: 'sonnet', thinkingLevel: 'high' });
@@ -6123,6 +6690,9 @@ describe('simple-workflow chat mode', () => {
     let finish!: (value: string) => void;
     let progressEmit!: (chunk: string) => void;
     gatewayMocks.completeGatewayText.mockImplementation(async (request) => {
+      // Naming is a separate, non-streaming request and must not replace the
+      // real chat callback while durable source initialization is in flight.
+      if (!request.onDelta) return 'Chat title';
       progressEmit = (chunk: string) => request.onDelta?.(chunk);
       return await new Promise<string>((resolve) => {
         finish = resolve;
@@ -6909,13 +7479,14 @@ describe('simple-workflow chat mode', () => {
       );
     // The round-1 tool ran chronologically before the conclusion the model
     // emitted last, so its card must render ABOVE the final prose.
-    const round1Idx = assistant?.text.indexOf('src/diagnose.ts') ?? -1;
+    const firstRound = useStore.getState().messages.find((m) => m.text.includes('src/diagnose.ts'));
+    const round1Idx = firstRound?.text.indexOf('src/diagnose.ts') ?? -1;
     const round2Idx = assistant?.text.indexOf('src/fix.ts') ?? -1;
     const proseIdx = assistant?.text.indexOf('结论：已按方案B修复完成。') ?? -1;
     expect(round1Idx).toBeGreaterThanOrEqual(0);
     expect(round2Idx).toBeGreaterThanOrEqual(0);
     expect(proseIdx).toBeGreaterThanOrEqual(0);
-    expect(round1Idx).toBeLessThan(proseIdx);
+    expect(useStore.getState().messages.indexOf(firstRound!)).toBeLessThan(useStore.getState().messages.indexOf(assistant!));
     expect(round2Idx).toBeLessThan(proseIdx);
   });
 });

@@ -2,7 +2,9 @@ import {
   useState,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
+  useRef,
   useSyncExternalStore,
   type CSSProperties,
 } from 'react';
@@ -36,6 +38,8 @@ import RemoteWorkspaceStatusBadge, {
   remoteWorkspaceConnectionLabel,
 } from '@/components/RemoteWorkspaceStatusBadge';
 import { cn } from '@/lib/cn';
+import { copyConversationText, exportConversationText } from '@/lib/conversationActions';
+import { serializeConversation } from '@/panels/aidock/search';
 import {
   getCliUpdateSnapshot,
   subscribeCliUpdateStatus,
@@ -58,6 +62,7 @@ import { searchSessionIdsIndexed } from '@/lib/sessionIndex';
 import type { SessionReader } from '@/lib/sessionSearch';
 import {
   sessionLiveStatus,
+  getSessionConversationMessages,
   useStore,
   workflowDeleteProtectionReason,
   workflowSessionKeyId,
@@ -2215,10 +2220,12 @@ export default function Sidebar({
 
       {menu && (
         <SessionContextMenu
+          key={`${menu.workspaceId ?? activeWorkspaceId}:${menu.sessionId}`}
           x={menu.x}
           y={menu.y}
           locale={locale}
           sessionId={menu.sessionId}
+          title={menu.title}
           workspaceId={menu.workspaceId ?? activeWorkspaceId}
           historyRootPath={historyRootPath}
           isPinned={menuPinned}
@@ -2492,6 +2499,7 @@ function SessionContextMenu({
   y,
   locale,
   sessionId,
+  title,
   workspaceId,
   historyRootPath,
   isPinned,
@@ -2511,6 +2519,7 @@ function SessionContextMenu({
   y: number;
   locale: Locale;
   sessionId: string;
+  title: string;
   workspaceId: string | null;
   historyRootPath: string | null;
   isPinned: boolean;
@@ -2527,6 +2536,49 @@ function SessionContextMenu({
   onClose: () => void;
 }) {
   const [copiedSessionId, setCopiedSessionId] = useState(false);
+  const [actionBusy, setActionBusy] = useState(false);
+  const [actionStatus, setActionStatus] = useState<{ kind: 'done' | 'error'; text: string } | null>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useLayoutEffect(() => {
+    const element = menuRef.current;
+    if (!element) return;
+    element.style.transform = '';
+    const rect = element.getBoundingClientRect();
+    const dx = Math.min(0, window.innerWidth - rect.right - 8);
+    const dy = Math.min(0, window.innerHeight - rect.bottom - 8);
+    element.style.transform = `translate(${dx}px, ${dy}px)`;
+  }, [x, y, actionStatus, canSchedule]);
+
+  useEffect(() => {
+    if (actionStatus?.kind !== 'done') return;
+    const timer = window.setTimeout(onClose, 1200);
+    return () => window.clearTimeout(timer);
+  }, [actionStatus, onClose]);
+
+  const runConversationAction = useCallback(async (action: 'copy' | 'export') => {
+    setActionBusy(true);
+    setActionStatus(null);
+    try {
+      const messages = await getSessionConversationMessages(workspaceId, sessionId);
+      if (messages.every((message) => message.localOnly)) {
+        setActionStatus({ kind: 'error', text: t(locale, 'dock.conversationEmpty') });
+        return;
+      }
+      const text = serializeConversation(messages);
+      if (action === 'copy') {
+        await copyConversationText(text);
+        setActionStatus({ kind: 'done', text: t(locale, 'dock.conversationCopied') });
+      } else if (await exportConversationText(text, title || t(locale, 'dock.newSession'))) {
+        setActionStatus({ kind: 'done', text: t(locale, 'dock.conversationExported') });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setActionStatus({ kind: 'error', text: `${t(locale, 'sidebar.conversationActionFailed')}: ${message}` });
+    } finally {
+      setActionBusy(false);
+    }
+  }, [locale, sessionId, title, workspaceId]);
 
   const copySessionLocation = useCallback(async () => {
     const resolvedWorkspaceId = workspaceId ?? DEFAULT_WORKSPACE_ID;
@@ -2578,7 +2630,8 @@ function SessionContextMenu({
         }}
       />
       <div
-        className="absolute z-40 min-w-[140px] overflow-hidden rounded-md border border-border bg-panel shadow-2xl"
+        ref={menuRef}
+        className="absolute z-40 max-h-[calc(100vh-16px)] min-w-[140px] overflow-y-auto rounded-md border border-border bg-panel shadow-2xl"
         style={{ left: x, top: y }}
       >
         <button
@@ -2638,6 +2691,24 @@ function SessionContextMenu({
         )}
         <button
           type="button"
+          disabled={actionBusy}
+          onClick={() => void runConversationAction('copy')}
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-fg-dim transition-colors hover:bg-panel-2 hover:text-fg disabled:opacity-50"
+        >
+          <Copy size={13} className="text-fg-faint" />
+          <span>{t(locale, 'sidebar.copyConversation')}</span>
+        </button>
+        <button
+          type="button"
+          disabled={actionBusy}
+          onClick={() => void runConversationAction('export')}
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-fg-dim transition-colors hover:bg-panel-2 hover:text-fg disabled:opacity-50"
+        >
+          <Download size={13} className="text-fg-faint" />
+          <span>{t(locale, 'sidebar.exportConversation')}</span>
+        </button>
+        <button
+          type="button"
           onClick={() => void copySessionLocation()}
           className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-fg-dim transition-colors hover:bg-panel-2 hover:text-fg"
         >
@@ -2662,6 +2733,11 @@ function SessionContextMenu({
           <Trash2 size={13} className="text-fg-faint" />
           <span>{t(locale, 'sidebar.deleteSession')}</span>
         </button>
+        {actionStatus && (
+          <div role="status" className={`max-w-[220px] px-3 py-2 text-xs ${actionStatus.kind === 'error' ? 'text-accent-3' : 'text-accent-2'}`}>
+            {actionStatus.text}
+          </div>
+        )}
       </div>
     </>
   );

@@ -64,6 +64,35 @@ describe('ImagePreviewPane', () => {
     expect(menu.defaultPrevented).toBe(true);
   });
 
+  it('dismisses only a left click on empty space, not the image or a drag', async () => {
+    const onDismiss = vi.fn();
+    await act(async () => { root.render(createElement(ImagePreviewPane, { src: 'a.png', alt: '测试图片', onDismiss })); });
+    const imagePointer = async (type: string) => {
+      const event = new MouseEvent(type, { bubbles: true, button: 0, clientX: 400, clientY: 300 });
+      Object.defineProperty(event, 'pointerId', { value: 1 });
+      await act(async () => { image().dispatchEvent(event); });
+    };
+    await imagePointer('pointerdown');
+    await imagePointer('pointerup');
+    expect(onDismiss).not.toHaveBeenCalled();
+    await pointer('pointerdown', 0, 100, 100);
+    await pointer('pointermove', 0, 130, 140);
+    await pointer('pointermove', 0, 100, 100);
+    await pointer('pointerup', 0, 100, 100);
+    expect(onDismiss).not.toHaveBeenCalled();
+    await pointer('pointerdown', 2, 100, 100);
+    await pointer('pointerup', 2, 100, 100);
+    expect(onDismiss).not.toHaveBeenCalled();
+    await pointer('pointerdown', 0, 100, 100);
+    await pointer('pointerup', 0, 102, 101);
+    expect(onDismiss).toHaveBeenCalledOnce();
+    onDismiss.mockClear();
+    await act(async () => { container.querySelector<HTMLButtonElement>('button')!.click(); });
+    expect(onDismiss).not.toHaveBeenCalled();
+    await act(async () => { container.querySelector<HTMLSpanElement>('span')!.click(); });
+    expect(onDismiss).toHaveBeenCalledOnce();
+  });
+
   it('clamps zoom and resets size and position on request or image change', async () => {
     await wheel(-100000);
     expect(container.querySelector('output')?.textContent).toBe('1600%');

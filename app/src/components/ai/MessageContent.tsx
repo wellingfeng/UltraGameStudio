@@ -1,5 +1,6 @@
 import { memo, useMemo } from 'react';
 import { segmentMessage } from './lib/segmenter';
+import { TOOL_CLOSE } from './lib/toolEvent';
 import Markdown from './Markdown';
 import ExecutionProcess from './ExecutionProcess';
 import { groupExecutionSegments } from './executionSegments';
@@ -13,7 +14,9 @@ import SkillLearningCard, { type SkillLearningCardProps } from './SkillLearningC
 import type { SkillReviewState } from '@/runtime/skills/types';
 import { isSkillReviewVisible } from './lib/skillReviewVisibility';
 import MessageReferences from './MessageReferences';
-import { collectMessageReferences, mergeReferenceSources, sourcesFromMessageTools, type ReferenceSource } from '@/lib/messageReferences';
+import { sourcesFromMessageTools, type ReferenceSource } from '@/lib/messageReferences';
+import { admitAndMergeSources } from './lib/referenceAdmission';
+import { useMessageReferences } from './lib/useMessageReferences';
 
 
 /**
@@ -56,8 +59,14 @@ function MessageContentImpl({
 }) {
   const locale = useStore((s) => s.locale);
   const segments = segmentMessage(text, streaming);
-  const references = useMemo(() => collectReferences ? collectMessageReferences(text,
-    mergeReferenceSources(referenceSources ?? [], sourcesFromMessageTools(text)), streaming) : [], [text, referenceSources, streaming, collectReferences]);
+  const copyText = useMemo(() => showActions ? answerActionText(text) : '', [text, showActions]);
+  const sourceEnd = text.lastIndexOf(TOOL_CLOSE);
+  const sourcePrefix = sourceEnd < 0 ? '' : text.slice(0, sourceEnd + TOOL_CLOSE.length);
+  // Unclosed patches cannot establish successful web evidence. The completed
+  // source prefix stays unchanged while prose/partial tool tails stream.
+  const toolSources = useMemo(() => sourcesFromMessageTools(sourcePrefix), [sourcePrefix]);
+  const admittedSources = admitAndMergeSources(referenceSources ?? [], toolSources);
+  const references = useMessageReferences(text, admittedSources, streaming, collectReferences);
 
   if (segments.length === 0 && !isSkillReviewVisible(skillLearning)) {
     return streaming ? <span className="ai-caret" aria-hidden /> : null;
@@ -76,11 +85,11 @@ function MessageContentImpl({
   // The very last segment overall — a trailing caret goes after it while live.
   const lastIdx = segments.length - 1;
 
-  const copyText = answerActionText(text);
+
 
   return (
     <FileChipBudgetProvider>
-      <div className="ai-message group/msg relative flex flex-col gap-2">
+      <div className="ai-message group/msg relative flex flex-col gap-2" data-reference-admission={admittedSources === null ? 'rejected' : undefined}>
         <MessageReferences references={references}>
         {showActions && copyText && (
           <div className="absolute -top-1 right-0 z-10 opacity-0 transition-opacity group-hover/msg:opacity-100">

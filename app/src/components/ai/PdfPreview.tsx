@@ -242,8 +242,8 @@ export default function PdfPreview({ url }: { url: string }) {
         </div>
       </div>
       {imagePreview && <div role="dialog" aria-label="PDF 图片查看" className="absolute inset-0 z-10 flex flex-col bg-bg">
-        <div className="flex justify-end border-b border-border-soft px-3 py-1.5"><button type="button" onClick={() => setImagePreview(null)} className="rounded px-2 py-1 text-xs text-fg-dim hover:bg-panel-2">关闭</button></div>
-        <ImagePreviewPane src={imagePreview} alt="PDF 图片" />
+        <div className="flex justify-end border-b border-border-soft px-3 py-1.5" onClick={(event) => { if (event.target === event.currentTarget) setImagePreview(null); }}><button type="button" onClick={() => setImagePreview(null)} className="rounded px-2 py-1 text-xs text-fg-dim hover:bg-panel-2">关闭</button></div>
+        <ImagePreviewPane src={imagePreview} alt="PDF 图片" onDismiss={() => setImagePreview(null)} />
       </div>}
     </div>
   );

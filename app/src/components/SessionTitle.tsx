@@ -1,5 +1,8 @@
 import { useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 
+const SCROLL_PIXELS_PER_SECOND = 26; // Two 13px Chinese characters per second.
+const SCROLL_PAUSE_SECONDS = 0.5;
+
 /** Scroll only titles clipped by the current session row width. */
 export default function SessionTitle({ title }: { title: string }) {
   const viewportRef = useRef<HTMLSpanElement>(null);
@@ -27,6 +30,9 @@ export default function SessionTitle({ title }: { title: string }) {
     };
   }, [title]);
 
+  const duration = overflow / SCROLL_PIXELS_PER_SECOND + SCROLL_PAUSE_SECONDS * 2;
+  const pausePercent = SCROLL_PAUSE_SECONDS / duration * 100;
+
   return (
     <span
       ref={viewportRef}
@@ -35,7 +41,8 @@ export default function SessionTitle({ title }: { title: string }) {
       data-overflow={overflow > 0 ? 'true' : 'false'}
       style={{
         '--ugs-title-scroll-distance': `${-overflow}px`,
-        '--ugs-title-scroll-duration': '2s',
+        '--ugs-title-scroll-duration': `${duration}s`,
+        '--ugs-title-scroll-easing': `linear(0, 0 ${pausePercent}%, 1 ${100 - pausePercent}%, 1)`,
       } as CSSProperties}
     >
       <span ref={textRef} className="ugs-session-title-text">{title}</span>

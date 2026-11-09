@@ -11,11 +11,10 @@
  * rest as `answer` segments, preserving stream order so think → answer → think →
  * answer interleaving renders correctly.
  *
- * This is a pure, whole-string segmenter (re-run on the full message text each
- * render) rather than an incremental push-parser: the AI dock already keeps the
- * full accumulated `message.text`, and re-segmenting a few KB per keystroke is
- * cheap. To stay flicker-free while streaming, an *unclosed* trailing `<think>`
- * is treated as reasoning that is still in progress (`done: false`), and a
+ * This remains a pure whole-string segmenter, with bounded revision caching
+ * and reuse of already closed tool projections. Streaming tails still use the
+ * original decoder: an *unclosed* trailing `<think>` is treated as reasoning
+ * that is still in progress (`done: false`), and a
  * trailing partial tag (e.g. `…</thin`) is held back rather than leaked into the
  * answer text.
  */
@@ -26,7 +25,6 @@ export type Segment =
   | { type: 'tools'; events: ToolEvent[] };
 
 import {
-  extractToolSentinels,
   mergeToolPatches,
   hasToolSentinel,
   type ToolEvent,
@@ -38,6 +36,8 @@ import {
 } from './legacyXmlTool';
 import { parseToolLine } from './toolLine';
 import { compactRuntimeHeartbeatLines } from '@/core/interaction';
+import { createBoundedTextCache } from './boundedTextCache';
+import { cachedToolProjection as extractToolSentinels } from './cachedToolProjection';
 
 const OPEN = /<think(?:ing)?>/i;
 const CLOSE = /<\/think(?:ing)?>/i;
@@ -74,7 +74,15 @@ export function hasReasoning(text: string): boolean {
  * controls whether a dangling open `<think>` (no close yet) is reported as
  * in-progress reasoning (true) or simply closed off (false, final render).
  */
+const segmentCache = createBoundedTextCache<Segment[]>(128, 1_000_000);
+
 export function segmentMessage(text: string, streaming = false): Segment[] {
+  return segmentCache.get(`${streaming ? '1' : '0'}${text}`, () => parseMessage(text, streaming),
+    (segments) => segments.reduce((size, segment) => size +
+      (segment.type === 'tools' ? JSON.stringify(segment.events).length : segment.text.length), 0));
+}
+
+function parseMessage(text: string, streaming: boolean): Segment[] {
   const displayText = compactRuntimeHeartbeatLines(text);
   if (!hasReasoning(displayText)) {
     return expandTools(displayText ? [{ type: 'answer', text: displayText }] : [], streaming);
@@ -175,15 +183,16 @@ function expandTools(segments: Segment[], streaming: boolean): Segment[] {
     return -1;
   })();
   const allPatches: ToolEventPatch[] = [];
+  const projections: Array<{ text: string; split: ReturnType<typeof extractToolSentinels> | null } | null> = [];
   for (let i = 0; i < segments.length; i += 1) {
     const s = segments[i];
     if (s.type === 'answer') {
       const streamingTail = streaming && i === lastAnswerIndex;
       const toolText = legacyXmlToolsToSentinels(s.text, { streamingTail });
-      if (hasToolSentinel(toolText)) {
-        allPatches.push(...extractToolSentinels(toolText, { streamingTail }).patches);
-      }
-    }
+      const split = hasToolSentinel(toolText) ? extractToolSentinels(toolText, { streamingTail }) : null;
+      projections.push({ text: toolText, split });
+      if (split) allPatches.push(...split.patches);
+    } else projections.push(null);
   }
   const merged = mergeToolPatches(allPatches);
   const byId = new Map(merged.map((e) => [e.id, e]));
@@ -219,6 +228,10 @@ function expandTools(segments: Segment[], streaming: boolean): Segment[] {
     if (emitted.has(id)) return;
     const event = byId.get(id);
     if (!event) return;
+    // Older Codex histories incorrectly encoded the user's prompt as a tool.
+    if ((event.name === 'userMessage' || event.name === 'user_message') &&
+        typeof event.args === 'object' && event.args !== null &&
+        (event.args as { type?: string }).type === event.name) return;
     if (event.ephemeral) {
       // Runtime heartbeats are transient. Show only the latest heartbeat when
       // it is the current tail of the live stream; once real output appears
@@ -249,14 +262,13 @@ function expandTools(segments: Segment[], streaming: boolean): Segment[] {
       out.push(s);
       continue;
     }
-    const streamingTail = streaming && i === lastAnswerIndex;
-    const toolText = legacyXmlToolsToSentinels(s.text, { streamingTail });
-    if (!hasToolSentinel(toolText)) {
-      pushTextWithLegacyTools(toolText);
+    const projection = projections[i]!;
+    if (!projection.split) {
+      pushTextWithLegacyTools(projection.text);
       continue;
     }
     // Walk the ordered parts so tool cards land exactly between prose runs.
-    for (const part of extractToolSentinels(toolText, { streamingTail }).parts) {
+    for (const part of projection.split.parts) {
       if ('text' in part) pushTextWithLegacyTools(part.text);
       else pushTool(part.patch);
     }

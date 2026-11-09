@@ -95,6 +95,8 @@ export interface Message {
   createdAt: number;
   /** Epoch milliseconds when an assistant turn finished. Used for history order. */
   completedAt?: number;
+  /** Monotonic revision of a streamed assistant message, including checkpoints. */
+  streamUpdatedAt?: number;
   /** Native runtime confirmed that this assistant turn compressed its context. */
   contextCompressed?: boolean;
   /** File summary captured at turn completion; survives history reloads. */

@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 
 const INITIAL_VIEW = { scale: 1, x: 0, y: 0 };
 
-export default function ImagePreviewPane({ src, alt }: { src: string; alt: string }) {
+export default function ImagePreviewPane({ src, alt, onDismiss }: { src: string; alt: string; onDismiss?: () => void }) {
   const viewportRef = useRef<HTMLDivElement>(null);
-  const dragRef = useRef<{ id: number; x: number; y: number } | null>(null);
+  const dragRef = useRef<{ id: number; x: number; y: number; startX: number; startY: number; outside: boolean; moved: boolean } | null>(null);
   const [view, setView] = useState(INITIAL_VIEW);
   const [dragging, setDragging] = useState(false);
 
@@ -36,8 +36,9 @@ export default function ImagePreviewPane({ src, alt }: { src: string; alt: strin
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg">
-      <div className="flex shrink-0 items-center gap-3 border-b border-border-soft px-3 py-1.5 text-[11px] text-fg-faint">
-        <span>滚轮缩放 · 按住左键拖动</span>
+      <div className="flex shrink-0 items-center gap-3 border-b border-border-soft px-3 py-1.5 text-[11px] text-fg-faint"
+        onClick={(event) => { if (!(event.target as Element).closest('button')) onDismiss?.(); }}>
+        <span>滚轮缩放 · 按住左键拖动{onDismiss && ' · 点击空白关闭'}</span>
         <output aria-label="图片缩放比例" className="ml-auto tabular-nums">{Math.round(view.scale * 100)}%</output>
         <button
           type="button"
@@ -55,7 +56,7 @@ export default function ImagePreviewPane({ src, alt }: { src: string; alt: strin
           if (event.button !== 0) return;
           event.preventDefault();
           event.currentTarget.setPointerCapture(event.pointerId);
-          dragRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY };
+          dragRef.current = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, outside: event.target === event.currentTarget, moved: false };
           setDragging(true);
         }}
         onPointerMove={(event) => {
@@ -63,16 +64,18 @@ export default function ImagePreviewPane({ src, alt }: { src: string; alt: strin
           if (!drag || drag.id !== event.pointerId) return;
           const dx = event.clientX - drag.x;
           const dy = event.clientY - drag.y;
-          dragRef.current = { id: drag.id, x: event.clientX, y: event.clientY };
+          dragRef.current = { ...drag, x: event.clientX, y: event.clientY, moved: drag.moved || Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > 4 };
           setView((previous) => ({ ...previous, x: previous.x + dx, y: previous.y + dy }));
         }}
         onPointerUp={(event) => {
-          if (dragRef.current?.id !== event.pointerId) return;
+          const drag = dragRef.current;
+          if (!drag || drag.id !== event.pointerId) return;
           dragRef.current = null;
           setDragging(false);
           if (event.currentTarget.hasPointerCapture(event.pointerId)) {
             event.currentTarget.releasePointerCapture(event.pointerId);
           }
+          if (drag.outside && !drag.moved && Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) <= 4) onDismiss?.();
         }}
         onPointerCancel={() => { dragRef.current = null; setDragging(false); }}
         onLostPointerCapture={() => { dragRef.current = null; setDragging(false); }}

@@ -27,6 +27,8 @@ interface CachedModelList {
 export interface ModelListResult {
   models: string[];
   source: 'remote' | 'local' | 'catalog' | 'cache';
+  /** Exact live response, before merging older cached or manually added IDs. */
+  availableModels?: string[];
   updatedAt?: number;
   error?: string;
 }
@@ -444,6 +446,7 @@ export async function refreshFreeChannelModels(
         return {
           models: nextCached.models,
           source: 'local',
+          availableModels: uniqueModels(localModels),
           updatedAt: nextCached.updatedAt,
         };
       }
@@ -479,6 +482,7 @@ export async function refreshFreeChannelModels(
       return {
         models: nextCached.models,
         source: 'remote',
+        availableModels: models,
         updatedAt: nextCached.updatedAt,
       };
     }
@@ -518,16 +522,18 @@ export async function refreshProviderModels(
       apiKey: provider.apiKey,
       transport: providerTransport(provider),
     });
+    const availableModels = uniqueModels(response.models);
     const models = uniqueModels([
-      ...response.models,
+      ...availableModels,
       ...(provider.models ?? []),
       ...(cached?.models ?? []),
     ]);
-    if (models.length > 0) {
+    if (availableModels.length > 0) {
       const nextCached = saveCachedModels(cacheKey, models);
       return {
         models: nextCached.models,
         source: 'remote',
+        availableModels,
         updatedAt: nextCached.updatedAt,
       };
     }

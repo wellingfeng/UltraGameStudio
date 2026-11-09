@@ -1,3 +1,4 @@
+import { hydrateSessionPayload } from '@/store/history/chunkedSession';
 import { tauriAvailable } from '@/lib/tauri';
 import { SCHEDULED_TASK_SCOPE, SCHEDULED_TASK_HISTORY_DIR } from '@/lib/scheduledTaskScope';
 import type { SessionRecord } from '@/store/history/types';
@@ -73,7 +74,7 @@ async function localSkillRequest<T>(request: SkillServiceRequest): Promise<T> {
 }
 
 /** Fresh storage read, never historyStore's optimistic/session-record cache. */
-export async function readPersistedSkillSourceSession(workspaceId: string, sessionId: string): Promise<SessionRecord | null> {
+export async function readPersistedSkillSourceSession(workspaceId: string, sessionId: string, messageId?: string): Promise<SessionRecord | null> {
   if ([workspaceId, sessionId].some((id) => !id || id.length > 256 || /[\\/:\u0000]/.test(id) || id === '.' || id === '..')) {
     throw new Error('SKILL_SOURCE_NOT_PERSISTED');
   }
@@ -88,14 +89,19 @@ export async function readPersistedSkillSourceSession(workspaceId: string, sessi
   if (typeof raw !== 'string') throw new Error('SKILL_SOURCE_MESSAGE_NOT_PERSISTED');
   const record: SessionRecord = JSON.parse(raw);
   if (!record || !Array.isArray(record.messages)) throw new Error('SKILL_SOURCE_MESSAGE_NOT_PERSISTED');
-  return record;
+  return hydrateSessionPayload(record, relPath, async (path) => {
+    const chunk = tauriAvailable()
+      ? await (await import('@tauri-apps/api/core')).invoke<string | null>('history_read_json', { relPath: path })
+      : typeof window === 'undefined' ? null : window.localStorage.getItem(`ultragamestudio.history.v1:${path}`);
+    return chunk === null ? null : JSON.parse(chunk);
+  }, messageId);
 }
 
 async function localSkillBind(request: SkillRunBindingRequest): Promise<void> {
   if (!tauriAvailable()) throw new Error('SKILL_HOST_UNAVAILABLE');
   if (request.actor === 'background') {
     const { workspaceId, sessionId, turnId } = request.origin;
-    const record = await readPersistedSkillSourceSession(workspaceId, sessionId);
+    const record = await readPersistedSkillSourceSession(workspaceId, sessionId, turnId);
     const matches = record?.messages.filter((message) => message.id === turnId) ?? [];
     if (!record || record.workspaceId !== workspaceId || (record.sessionId ?? record.id) !== sessionId || record.deletedAt ||
       matches.length !== 1 || matches[0].role !== 'user' || typeof matches[0].text !== 'string') {

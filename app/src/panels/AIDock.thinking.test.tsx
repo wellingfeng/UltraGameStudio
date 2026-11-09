@@ -4,6 +4,7 @@ import { expect, it } from 'vitest';
 import { simpleBlueprint } from '@/core/defaultBlueprint';
 import { defaultComposer, samplePromptGroups } from '@/store/sampleSessions';
 import { useStore } from '@/store/useStore';
+import { encodeToolPatch } from '@/components/ai/lib/toolEvent';
 import AIDock from './AIDock';
 
 it('shows recorded thinking levels beside routes without applying current settings to history', async () => {
@@ -37,6 +38,49 @@ it('shows recorded thinking levels beside routes without applying current settin
     await act(async () => { useStore.getState().setSessionRunSelection({ adapter: 'claude-code', modelClass: 'sonnet', thinkingLevel: 'xhigh' }); });
     expect(headers()[0]).toContain('思考深度：高');
     expect(headers()[3]).not.toContain('思考深度');
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+    useStore.setState({ messages: [], queuedChatMessageIds: [] });
+  }
+});
+
+it('keeps chat route headers while skill activity displays only the skill name', async () => {
+  const workflow = simpleBlueprint('Simple chat');
+  workflow.meta.gateway = { defaults: { adapter: 'claude-code', modelClass: 'sonnet', thinkingLevel: 'low' } };
+  const runningSkill = encodeToolPatch({ id: 'skill-pending', name: 'Skill', args: { skill: 'diagnose' },
+    status: 'running', provenance: 'native-tool' });
+  const finishedSkill = encodeToolPatch({ id: 'skill-done', name: 'Skill', args: { skill: 'diagnose' },
+    status: 'done', evidenceStatus: 'success', provenance: 'native-tool' });
+  const messages = [
+    { id: 'user', role: 'user' as const, text: '提问', createdAt: 100 },
+    { id: 'pending', role: 'assistant' as const, routeLabel: 'KuroCC · claude-opus-5.5', thinkingLevel: 'high', text: runningSkill, createdAt: 200 },
+    { id: 'old-error', role: 'assistant' as const, text: '技能来源不可用：Error: SKILL_SOURCE_MESSAGE_NOT_PERSISTED', createdAt: 300 },
+    { id: 'answer', role: 'assistant' as const, thinkingLevel: 'xhigh', text: `⚙ 路由：Codex · 模型：gpt-6\n${finishedSkill}正常回答`, createdAt: 400 },
+  ];
+  useStore.setState({
+    mode: 'design', workflow, selectedNodeId: null,
+    composer: defaultComposer, composerDraft: '', composerDrafts: {}, locale: 'zh-CN',
+    promptGroups: samplePromptGroups, messages,
+    queuedChatMessageIds: [], activeWorkspaceId: null, activeSessionId: null, workspaceHistory: [],
+    aiStreaming: false, aiEditingSessions: [], chattingSessions: [], blockedSendTip: null,
+  });
+  const container = document.createElement('div');
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  try {
+    await act(async () => { root.render(<AIDock layout="chat" />); });
+    expect(container.textContent).toContain('正常回答');
+    expect(container.textContent).not.toContain('技能来源不可用');
+    expect(container.textContent).not.toContain('SKILL_SOURCE_MESSAGE_NOT_PERSISTED');
+    const rows = [...container.querySelectorAll('[data-ugs-message-row]')];
+    expect(rows).toHaveLength(3);
+    expect(rows[0].textContent).toContain('you');
+    expect(rows[1].querySelector('span[title]')?.textContent).toBe('⟳ KuroCC · claude-opus-5.5 · 思考深度：高');
+    expect(rows[2].querySelector('span[title]')?.textContent).toBe('⟳ Codex · gpt-6 · 思考深度：极高');
+    expect(rows[1].querySelector('[data-ugs-skill-activity]')).toBeNull();
+    expect(rows[2].querySelector('[data-ugs-skill-activity]')?.textContent).toBe('使用技能：diagnose');
+    expect(useStore.getState().messages).toEqual(messages);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

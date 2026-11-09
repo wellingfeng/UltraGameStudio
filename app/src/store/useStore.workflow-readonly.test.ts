@@ -536,6 +536,190 @@ describe('workflow read-only guard', () => {
     }
   });
 
+  it('removes a newly created empty session immediately while deletion is pending', async () => {
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('E:\\delete-empty-session-test');
+    resetStore('design', false);
+    useStore.setState({
+      historyReady: true,
+      workspaces: [workspace],
+      activeWorkspaceId: workspace.id,
+      activeSessionId: null,
+      sessions: [],
+      sessionTree: { [workspace.id]: [] },
+    });
+
+    let releaseDelete!: () => void;
+    const deletionGate = new Promise<void>((resolve) => { releaseDelete = resolve; });
+    const deleteSession = historyStore.deleteSession.bind(historyStore);
+    let sessionId = '';
+    let deletion: Promise<void> | undefined;
+    vi.spyOn(historyStore, 'deleteSession').mockImplementation((...args) => {
+      deletion = deletionGate.then(() => deleteSession(...args));
+      return deletion;
+    });
+
+    try {
+      useStore.getState().newSession();
+      sessionId = useStore.getState().activeSessionId!;
+      expect(useStore.getState().sessions.map((session) => session.id)).toContain(sessionId);
+      useStore.getState().deleteSession(sessionId, workspace.id);
+
+      expect(useStore.getState().sessions.map((session) => session.id)).not.toContain(sessionId);
+      expect(useStore.getState().sessionTree[workspace.id]).toEqual([]);
+      expect(useStore.getState().activeSessionId).toBeNull();
+    } finally {
+      releaseDelete();
+      await deletion;
+      await historyStore.flush();
+    }
+    expect(await historyStore.getSessionForGeneration(workspace.id, sessionId)).toBeNull();
+  });
+
+  it('restores an existing session and reports a failed deletion', async () => {
+    const workspaceId = 'ws_delete_failure';
+    const session = testSession(workspaceId, 's_failure', 'Failure');
+    let rejectDelete!: (error: Error) => void;
+    vi.spyOn(historyStore, 'deleteSession').mockImplementation(
+      () => new Promise<void>((_resolve, reject) => { rejectDelete = reject; }),
+    );
+    vi.spyOn(historyStore, 'getSessionForGeneration').mockResolvedValue(testRecord(workspaceId, session.id, session.title));
+    vi.spyOn(historyStore, 'getSession').mockResolvedValue(testRecord(workspaceId, session.id, session.title));
+    vi.spyOn(historyStore, 'patchConfig').mockResolvedValue({ schemaVersion: 1 });
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    resetStore('design', false);
+    useStore.setState({
+      historyReady: true,
+      locale: 'zh-CN',
+      workspaces: [testWorkspace(workspaceId, 1)],
+      activeWorkspaceId: workspaceId,
+      activeSessionId: session.id,
+      sessions: [session],
+      sessionTree: { [workspaceId]: [session] },
+    });
+
+    useStore.getState().deleteSession(session.id, workspaceId);
+    expect(useStore.getState().sessions).toEqual([]);
+    rejectDelete(new Error('disk failure'));
+    await waitForStore(() => useStore.getState().activeSessionId === session.id, 'restored session activation');
+    expect(useStore.getState().sessions.map((item) => item.id)).toEqual([session.id]);
+    expect(alert).toHaveBeenCalledWith('删除会话失败: disk failure');
+  });
+
+  it('does not restore a row when deletion moved its record before an index failure', async () => {
+    const workspaceId = 'ws_delete_partial_failure';
+    const session = testSession(workspaceId, 's_partial', 'Partial failure');
+    vi.spyOn(historyStore, 'deleteSession').mockRejectedValue(new Error('index failure'));
+    vi.spyOn(historyStore, 'getSessionForGeneration').mockResolvedValue(null);
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    resetStore('design', false);
+    useStore.setState({
+      historyReady: true,
+      locale: 'zh-CN',
+      workspaces: [testWorkspace(workspaceId, 1)],
+      activeWorkspaceId: workspaceId,
+      activeSessionId: session.id,
+      sessions: [session],
+      sessionTree: { [workspaceId]: [session] },
+    });
+
+    useStore.getState().deleteSession(session.id, workspaceId);
+    await waitForStore(() => alert.mock.calls.length > 0, 'partial deletion failure');
+    expect(useStore.getState().sessions).toEqual([]);
+    expect(useStore.getState().activeSessionId).toBeNull();
+    expect(alert).toHaveBeenCalledWith('删除会话失败: index failure');
+  });
+
+  it('does not revive a session whose selection was pending when it was deleted', async () => {
+    const workspaceId = 'ws_delete_pending_selection';
+    const sessionA = testSession(workspaceId, 's_a_pending', 'A');
+    const sessionB = testSession(workspaceId, 's_b_pending', 'B');
+    let resolveSelection!: (record: SessionRecord) => void;
+    vi.spyOn(historyStore, 'getSession').mockImplementation(
+      () => new Promise((resolve) => { resolveSelection = resolve; }),
+    );
+    vi.spyOn(historyStore, 'deleteSession').mockResolvedValue(undefined);
+    vi.spyOn(historyStore, 'listWorkspaces').mockResolvedValue([testWorkspace(workspaceId, 1)]);
+    resetStore('design', false);
+    useStore.setState({
+      historyReady: true,
+      workspaces: [testWorkspace(workspaceId, 2)],
+      activeWorkspaceId: workspaceId,
+      activeSessionId: sessionB.id,
+      sessions: [sessionA, sessionB],
+      sessionTree: { [workspaceId]: [sessionA, sessionB] },
+    });
+
+    useStore.getState().selectSession(sessionA.id, workspaceId);
+    useStore.getState().deleteSession(sessionA.id, workspaceId);
+    resolveSelection(testRecord(workspaceId, sessionA.id, sessionA.title));
+    await waitForStore(() => vi.mocked(historyStore.listWorkspaces).mock.calls.length > 0, 'deletion completion');
+    expect(useStore.getState().activeSessionId).toBe(sessionB.id);
+    expect(useStore.getState().sessions.map((item) => item.id)).toEqual([sessionB.id]);
+  });
+
+  it('preserves a different selection already in flight when the active session is deleted', async () => {
+    const workspaceId = 'ws_delete_other_pending_selection';
+    const sessionA = testSession(workspaceId, 's_a_other', 'A');
+    const sessionB = testSession(workspaceId, 's_b_other', 'B');
+    const sessionC = testSession(workspaceId, 's_c_other', 'C');
+    let resolveSelection!: (record: SessionRecord) => void;
+    vi.spyOn(historyStore, 'getSession').mockImplementation(
+      () => new Promise((resolve) => { resolveSelection = resolve; }),
+    );
+    vi.spyOn(historyStore, 'deleteSession').mockResolvedValue(undefined);
+    vi.spyOn(historyStore, 'listWorkspaces').mockResolvedValue([testWorkspace(workspaceId, 2)]);
+    vi.spyOn(historyStore, 'patchConfig').mockResolvedValue({ schemaVersion: 1 });
+    resetStore('design', false);
+    useStore.setState({
+      historyReady: true,
+      workspaces: [testWorkspace(workspaceId, 3)],
+      activeWorkspaceId: workspaceId,
+      activeSessionId: sessionA.id,
+      sessions: [sessionA, sessionB, sessionC],
+      sessionTree: { [workspaceId]: [sessionA, sessionB, sessionC] },
+    });
+
+    useStore.getState().selectSession(sessionC.id, workspaceId);
+    useStore.getState().deleteSession(sessionA.id, workspaceId);
+    expect(historyStore.getSession).toHaveBeenCalledTimes(1);
+    resolveSelection(testRecord(workspaceId, sessionC.id, sessionC.title));
+    await waitForStore(() => useStore.getState().activeSessionId === sessionC.id, 'selected session activation');
+    expect(useStore.getState().sessions.map((item) => item.id)).toContain(sessionC.id);
+  });
+
+  it('selects the next surviving session when consecutive deletions cancel a pending selection', async () => {
+    const workspaceId = 'ws_delete_consecutive';
+    const sessionA = testSession(workspaceId, 's_a_consecutive', 'A');
+    const sessionB = testSession(workspaceId, 's_b_consecutive', 'B');
+    const sessionC = testSession(workspaceId, 's_c_consecutive', 'C');
+    let resolveB!: (record: SessionRecord) => void;
+    vi.spyOn(historyStore, 'getSession').mockImplementation((_workspaceId, sessionId) => {
+      if (sessionId === sessionB.id) return new Promise((resolve) => { resolveB = resolve; });
+      return Promise.resolve(testRecord(workspaceId, sessionC.id, sessionC.title));
+    });
+    vi.spyOn(historyStore, 'deleteSession').mockResolvedValue(undefined);
+    vi.spyOn(historyStore, 'listWorkspaces').mockResolvedValue([testWorkspace(workspaceId, 1)]);
+    vi.spyOn(historyStore, 'patchConfig').mockResolvedValue({ schemaVersion: 1 });
+    resetStore('design', false);
+    useStore.setState({
+      historyReady: true,
+      workspaces: [testWorkspace(workspaceId, 3)],
+      activeWorkspaceId: workspaceId,
+      activeSessionId: sessionA.id,
+      sessions: [sessionA, sessionB, sessionC],
+      sessionTree: { [workspaceId]: [sessionA, sessionB, sessionC] },
+    });
+
+    useStore.getState().deleteSession(sessionA.id, workspaceId);
+    useStore.getState().deleteSession(sessionB.id, workspaceId);
+    resolveB(testRecord(workspaceId, sessionB.id, sessionB.title));
+    await waitForStore(() => useStore.getState().activeSessionId === sessionC.id, 'surviving session activation');
+    expect(useStore.getState().sessions.map((item) => item.id)).toEqual([sessionC.id]);
+  });
+
   it('removes the deleted active session before activating the next history session', async () => {
     const workspaceId = 'ws_delete_active';
     const sessionA = testSession(workspaceId, 's_a', 'Workflow A');
@@ -755,7 +939,7 @@ describe('workflow read-only guard', () => {
     expect(
       state.sessionTree[workspaceId]?.map((session) => session.id),
     ).toEqual([sessionB.id, sessionC.id]);
-    expect(historyStore.getSession).not.toHaveBeenCalledWith(
+    expect(historyStore.getSession).toHaveBeenCalledWith(
       workspaceId,
       sessionB.id,
     );

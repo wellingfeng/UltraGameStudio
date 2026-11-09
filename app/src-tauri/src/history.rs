@@ -15,6 +15,8 @@ use crate::storage_paths;
 
 #[path = "history_retention.rs"]
 mod history_retention;
+#[path = "history_journal.rs"]
+mod history_journal;
 use history_retention::delete_session_backups;
 
 #[cfg(windows)]
@@ -42,7 +44,26 @@ const MAX_BACKUP_FILES_TOTAL: usize = 5000;
 const MAX_BACKUP_BYTES_TOTAL: u64 = 512 * 1024 * 1024;
 const BACKUP_PRUNE_INTERVAL_SECS: u64 = 300;
 
+#[cfg(test)]
+#[path = "history_persistence_tests.rs"]
+mod history_persistence_tests;
+
 static LAST_BACKUP_PRUNE_SECS: AtomicU64 = AtomicU64::new(0);
+static HISTORY_NAMESPACE: std::sync::RwLock<()> = std::sync::RwLock::new(());
+static HISTORY_LANES: std::sync::OnceLock<[std::sync::Mutex<()>; 64]> = std::sync::OnceLock::new();
+static HISTORY_REVISION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+fn history_revision(clock: &str) -> String {
+    format!("{clock}-{}-{}", std::process::id(), HISTORY_REVISION_SEQUENCE.fetch_add(1, Ordering::SeqCst))
+}
+fn history_lane(path: &Path) -> Result<std::sync::MutexGuard<'static, ()>, String> {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    let identity = path.to_string_lossy();
+    #[cfg(windows)] let identity = identity.to_lowercase();
+    identity.hash(&mut hash);
+    HISTORY_LANES.get_or_init(|| std::array::from_fn(|_| std::sync::Mutex::new(())))
+        [(hash.finish() % 64) as usize].lock().map_err(|_| "history lane poisoned".into())
+}
 
 fn ensure_dir(path: &Path, label: &str) -> Result<(), String> {
     fs::create_dir_all(path).map_err(|e| format!("创建 {label} 失败: {e}"))
@@ -259,22 +280,15 @@ fn write_staged_json(path: &Path, json: &str) -> Result<PathBuf, String> {
     Ok(tmp)
 }
 
-fn write_json_direct(path: &Path, json: &str) -> Result<(), String> {
-    ensure_parent_dir(path)?;
-    let mut f = fs::File::create(path)
-        .map_err(|e| format!("直接写入 JSON 失败 {}: {e}", path.display()))?;
-    f.write_all(json.as_bytes())
-        .map_err(|e| format!("直接写入 JSON 失败 {}: {e}", path.display()))?;
-    f.sync_all()
-        .map_err(|e| format!("同步 JSON 失败 {}: {e}", path.display()))?;
-    Ok(())
+fn persist_json_file(path: &Path, json: &str) -> Result<(), String> {
+    persist_json_file_with(path, json, replace_file)
 }
 
-fn persist_json_file(path: &Path, json: &str) -> Result<(), String> {
+fn persist_json_file_with(path: &Path, json: &str, replace: impl Fn(&Path, &Path) -> Result<(), String>) -> Result<(), String> {
     let mut last_err: Option<String> = None;
     for _ in 0..2 {
         let tmp = write_staged_json(path, json)?;
-        match replace_file(&tmp, path) {
+        match replace(&tmp, path) {
             Ok(()) => return Ok(()),
             Err(err) => {
                 last_err = Some(err);
@@ -283,15 +297,9 @@ fn persist_json_file(path: &Path, json: &str) -> Result<(), String> {
         }
     }
 
-    // If Windows loses the staged file or MoveFileEx keeps returning a transient
-    // "file not found", keep history usable. JSON was already validated and any
-    // existing target was backed up by the caller before this fallback.
-    write_json_direct(path, json).map_err(|direct_err| {
-        format!(
-            "{} (直接写入也失败: {direct_err})",
-            last_err.unwrap_or_else(|| "替换文件失败".to_string())
-        )
-    })
+    // Never truncate the durable base after a failed atomic replacement.
+    // A session's previous journal must remain recoverable on every failure.
+    Err(last_err.unwrap_or_else(|| "替换文件失败".to_string()))
 }
 
 fn backup_existing_file(root: &Path, rel_path: &str, source: &Path) -> Result<(), String> {
@@ -453,6 +461,98 @@ fn validate_json(json: &str) -> Result<(), String> {
         .map_err(|e| format!("JSON 无效: {e}"))
 }
 
+fn is_session_path(rel: &str) -> bool {
+    normalized_rel_segments(rel).ok().is_some_and(|parts| {
+        let name = parts.last().map(String::as_str).unwrap_or("");
+        name.ends_with(".json") && name != "index.json" &&
+          ((parts.len() == 4 && parts[0] == "workspaces" && parts[2] == "sessions") ||
+           (parts.len() == 3 && parts[0] == "scheduled-tasks" && parts[1] == "sessions"))
+    })
+}
+
+fn chunk_hash(rel: &str) -> Option<String> {
+    let parts = normalized_rel_segments(rel).ok()?;
+    let valid_parent = (parts.len() == 5 && parts[0] == "workspaces" && parts[2] == "sessions")
+        || (parts.len() == 4 && parts[0] == "scheduled-tasks" && parts[1] == "sessions");
+    if !valid_parent || !parts[parts.len() - 2].ends_with(".json.chunks") { return None; }
+    let hash = parts.last()?.strip_suffix(".json")?;
+    (hash.len() == 64 && hash.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))).then(|| hash.to_owned())
+}
+
+fn validate_chunk(json: &str, hash: &str) -> Result<(), String> {
+    use sha2::{Digest, Sha256};
+    if json.len() > 2 * 1024 * 1024 { return Err("HISTORY_CHUNK_CORRUPT".into()); }
+    let payload: serde_json::Value = serde_json::from_str(json).map_err(|_| "HISTORY_CHUNK_CORRUPT")?;
+    let text = payload.get("text").and_then(serde_json::Value::as_str).ok_or("HISTORY_CHUNK_CORRUPT")?;
+    if text.encode_utf16().count() > 128 * 1024 || hex::encode(Sha256::digest(text.as_bytes())) != hash {
+        return Err("HISTORY_CHUNK_CORRUPT".into());
+    }
+    Ok(())
+}
+
+fn reject_chunk_redirects(path: &Path) -> Result<(), String> {
+    for ancestor in path.ancestors() {
+        match fs::symlink_metadata(ancestor) {
+            Ok(metadata) => {
+                let mut redirected = metadata.file_type().is_symlink();
+                #[cfg(windows)]
+                { use std::os::windows::fs::MetadataExt; redirected |= metadata.file_attributes() & 0x400 != 0; }
+                if redirected { return Err("HISTORY_CHUNK_UNSAFE_PATH".into()); }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+            Err(error) => return Err(format!("检查分块路径失败: {error}")),
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn read_chunk_file(path: &Path, hash: &str) -> Result<Option<String>, String> {
+    use std::io::Read;
+    reject_chunk_redirects(path)?;
+    let parents = match history_journal::history_journal_safety::lock_parents(path) {
+        Ok(parents) => parents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("读取分块目录失败: {error}")),
+    };
+    let mut file = match history_journal::history_journal_safety::open_bound(path, &parents) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(format!("打开分块失败: {error}")),
+    };
+    if file.metadata().map_err(|error| error.to_string())?.len() > 2 * 1024 * 1024 { return Err("HISTORY_CHUNK_CORRUPT".into()); }
+    let mut json = String::new();
+    file.read_to_string(&mut json).map_err(|error| format!("读取分块失败: {error}"))?;
+    validate_chunk(&json, hash)?;
+    Ok(Some(json))
+}
+
+fn write_chunk_file(path: &Path, hash: &str, json: &str) -> Result<(), String> {
+    validate_chunk(json, hash)?;
+    reject_chunk_redirects(path)?;
+    ensure_parent_dir(path)?;
+    let parents = history_journal::history_journal_safety::lock_parents(path).map_err(|error| format!("打开分块目录失败: {error}"))?;
+    match history_journal::history_journal_safety::open_bound(path, &parents) {
+        Ok(mut file) => {
+            use std::io::Read;
+            if file.metadata().map_err(|error| error.to_string())?.len() > 2 * 1024 * 1024 { return Err("HISTORY_CHUNK_CORRUPT".into()); }
+            let mut old = String::new();
+            file.read_to_string(&mut old).map_err(|error| error.to_string())?;
+            validate_chunk(&old, hash)?;
+            return Ok(());
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(format!("打开分块失败: {error}")),
+    }
+    #[cfg(windows)]
+    {
+        history_journal::history_journal_safety::replace_bound(path, &parents, json.as_bytes())
+            .map_err(|error| format!("写入分块失败: {error}"))?;
+    }
+    #[cfg(not(windows))]
+    { persist_json_file(path, json)?; }
+    Ok(())
+}
+
 fn is_memory_path(rel: &str) -> bool {
     normalized_rel_segments(rel)
         .ok()
@@ -461,7 +561,7 @@ fn is_memory_path(rel: &str) -> bool {
 }
 
 #[tauri::command]
-pub async fn memory_read_json(window: tauri::WebviewWindow, rel_path: String) -> Result<Option<String>, String> {
+pub async fn memory_read_json(window: tauri::Webview, rel_path: String) -> Result<Option<String>, String> {
     crate::require_skill_app(&window)?;
     tauri::async_runtime::spawn_blocking(move || {
         crate::memory_transactions::read_at(&global_history_root()?, &rel_path)
@@ -472,7 +572,7 @@ pub async fn memory_read_json(window: tauri::WebviewWindow, rel_path: String) ->
 
 #[tauri::command]
 pub async fn memory_compare_exchange_json(
-    window: tauri::WebviewWindow,
+    window: tauri::Webview,
     rel_path: String,
     expected_json: Option<String>,
     json: String,
@@ -509,14 +609,39 @@ pub async fn history_root() -> Result<String, String> {
 #[tauri::command]
 pub async fn history_read_json(rel_path: String) -> Result<Option<String>, String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<Option<String>, String> {
+        history_read_at(&global_history_root()?, &rel_path)
+    })
+    .await
+    .map_err(|e| format!("history_read_json 调度失败: {e}"))?
+}
+
+/// Read a small bounded batch of content-addressed chunks in one IPC request.
+#[tauri::command]
+pub async fn history_read_chunks(rel_paths: Vec<String>) -> Result<Vec<Option<String>>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        history_read_chunks_at(&global_history_root()?, &rel_paths)
+    }).await.map_err(|e| format!("history_read_chunks 调度失败: {e}"))?
+}
+
+fn history_read_chunks_at(root: &Path, rel_paths: &[String]) -> Result<Vec<Option<String>>, String> {
+    if rel_paths.len() > 16 || rel_paths.iter().any(|path| chunk_hash(path).is_none()) {
+        return Err("HISTORY_CHUNK_REFERENCE_INVALID".into());
+    }
+    rel_paths.iter().map(|path| history_read_at(root, path)).collect()
+}
+
+pub(crate) fn history_read_at(root: &Path, rel_path: &str) -> Result<Option<String>, String> {
+    let _namespace = HISTORY_NAMESPACE.read().map_err(|_| "history namespace poisoned")?;
+    let validated_path = safe_join(root, rel_path)?;
+    let _lane = history_lane(&validated_path)?;
         if !rel_path.ends_with(".json") {
             return Err("history_read_json 只接受 .json 路径".into());
         }
-        let root = global_history_root()?;
         if is_memory_path(&rel_path) {
             return crate::memory_transactions::read_at(&root, &rel_path);
         }
         let path = safe_join(&root, &rel_path)?;
+        if let Some(hash) = chunk_hash(rel_path) { return read_chunk_file(&path, &hash); }
         match fs::read_to_string(&path) {
             Ok(s) => {
                 if serde_json::from_str::<serde_json::Value>(&s).is_err() {
@@ -525,28 +650,35 @@ pub async fn history_read_json(rel_path: String) -> Result<Option<String>, Strin
                     }
                     return Ok(None);
                 }
+                if is_session_path(rel_path) { return history_journal::replay(&path, &s).and_then(|json| history_journal::visible(&json)).map(Some); }
                 Ok(Some(s))
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(format!("读取失败 {rel_path}: {e}")),
         }
-    })
-    .await
-    .map_err(|e| format!("history_read_json 调度失败: {e}"))?
 }
 
 /// Atomically write JSON to a path under `.ultragamestudio`. The data is staged into
 /// a temp file in the same directory and then renamed over the target. If the
 /// target already exists, a copy is saved under `backups/` first.
 #[tauri::command]
-pub async fn history_write_json(rel_path: String, json: String) -> Result<(), String> {
+pub async fn history_write_json(rel_path: String, json: String, stream_checkpoint: Option<bool>) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        history_write_at(&global_history_root()?, &rel_path, &json, stream_checkpoint.unwrap_or(false))
+    })
+    .await
+    .map_err(|e| format!("history_write_json 调度失败: {e}"))?
+}
+
+pub(crate) fn history_write_at(root: &Path, rel_path: &str, json: &str, stream_checkpoint: bool) -> Result<(), String> {
+    let _namespace = HISTORY_NAMESPACE.read().map_err(|_| "history namespace poisoned")?;
+    let validated_path = safe_join(root, rel_path)?;
+    let _lane = history_lane(&validated_path)?;
         if !rel_path.ends_with(".json") {
             return Err("history_write_json 只允许写 .json".into());
         }
         validate_json(&json)?;
 
-        let root = global_history_root()?;
         if is_memory_path(&rel_path) {
             return Err(
                 "Memory writes require exact memory_compare_exchange_json; legacy overwrite denied"
@@ -554,19 +686,51 @@ pub async fn history_write_json(rel_path: String, json: String) -> Result<(), St
             );
         }
         let path = safe_join(&root, &rel_path)?;
+        if let Some(hash) = chunk_hash(rel_path) { return write_chunk_file(&path, &hash, json); }
         if path.exists() && path.is_dir() {
             return Err(format!("目标是目录，不能写入 JSON: {}", path.display()));
         }
-
-        if path.exists() && !is_internal_path(&rel_path) {
-            backup_existing_file(&root, &rel_path, &path)?;
+        let payload: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+        if payload.get("__ugsJournal").is_some() {
+            if !stream_checkpoint || !is_session_path(rel_path) { return Err("journal 只允许用于会话 checkpoint".into()); }
+            return history_journal::append(&path, json);
         }
 
-        persist_json_file(&path, &json)?;
+        // Checkpoints replace only a session record atomically. Keep the normal
+        // backups intact instead of rotating them every few seconds of a stream.
+        let checkpoint = stream_checkpoint && is_session_path(rel_path);
+        if path.exists() && !is_internal_path(&rel_path) && !checkpoint {
+            backup_existing_file(&root, &rel_path, &path)?;
+        }
+        // A checkpoint can compact a full journal into a chunked record. Keep
+        // the portable legacy base before that first format migration too.
+        if checkpoint && path.exists() && payload.get("__ugsHistoryChunkVersion") == Some(&serde_json::json!(1)) {
+            let old = fs::read_to_string(&path).map_err(|e| format!("读取旧会话失败: {e}"))?;
+            let old: serde_json::Value = serde_json::from_str(&old).map_err(|e| format!("旧会话无效: {e}"))?;
+            if old.get("__ugsHistoryChunkVersion") != Some(&serde_json::json!(1)) {
+                backup_existing_file(root, rel_path, &path)?;
+            }
+        }
+
+        let mut persisted = payload;
+        let compacting = is_session_path(rel_path) && history_journal::path_for(&path).exists();
+        if compacting {
+            persisted.as_object_mut().ok_or("会话记录必须是 object")?
+                .insert("__ugsHistoryRevision".into(), serde_json::Value::String(history_revision(&timestamp_token())));
+        }
+        let compacted_json;
+        let output = if compacting { compacted_json = persisted.to_string(); &compacted_json } else { json };
+        persist_json_file(&path, output)?;
+        if is_session_path(rel_path) {
+            history_journal::forget(&path);
+            let journal = history_journal::path_for(&path);
+            match fs::remove_file(&journal) {
+                Ok(()) => (),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(e) => return Err(format!("压实后清理 journal 失败: {e}")),
+            }
+        }
         Ok(())
-    })
-    .await
-    .map_err(|e| format!("history_write_json 调度失败: {e}"))?
 }
 
 /// Remove a file or directory under `.ultragamestudio`. `soft=true` (the default
@@ -575,36 +739,37 @@ pub async fn history_write_json(rel_path: String, json: String) -> Result<(), St
 /// so callers can be idempotent.
 #[tauri::command]
 pub async fn history_remove(rel_path: String, soft: bool) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
-        let root = global_history_root()?;
-        if is_memory_path(&rel_path) {
-            return Err("Memory removal requires a scoped CAS transaction".into());
+    tauri::async_runtime::spawn_blocking(move || history_remove_at(&global_history_root()?, &rel_path, soft))
+        .await.map_err(|e| format!("history_remove 调度失败: {e}"))?
+}
+fn history_remove_at(root: &Path, rel_path: &str, soft: bool) -> Result<(), String> {
+    let _namespace = HISTORY_NAMESPACE.write().map_err(|_| "history namespace poisoned")?;
+    if is_memory_path(rel_path) { return Err("Memory removal requires a scoped CAS transaction".into()); }
+    let path = safe_join(root, rel_path)?;
+    let journal = is_session_path(rel_path).then(|| history_journal::path_for(&path));
+    history_journal::forget(&path);
+    if soft {
+        let trash = root.join("trash"); ensure_dir(&trash, "trash 目录")?;
+        let safe_name = rel_path.replace(['/', '\\'], "_");
+        let dest = trash.join(format!("{}-{safe_name}", timestamp_token()));
+        let moved_base = path.exists();
+        if moved_base { replace_file(&path, &dest)?; }
+        if let Some(journal) = journal.filter(|journal| journal.exists()) {
+            if let Err(error) = replace_file(&journal, &history_journal::path_for(&dest)) {
+                if moved_base {
+                    if let Err(rollback) = replace_file(&dest, &path) { return Err(format!("{error}; trash rollback failed: {rollback}")); }
+                }
+                return Err(error);
+            }
         }
-        let path = safe_join(&root, &rel_path)?;
-        if !path.exists() {
-            return Ok(());
+    } else {
+        if path.is_dir() { fs::remove_dir_all(&path).map_err(|e| format!("删除目录失败: {e}"))?; }
+        else if path.exists() { fs::remove_file(&path).map_err(|e| format!("删除文件失败: {e}"))?; }
+        if let Some(journal) = journal.filter(|journal| journal.exists()) {
+            fs::remove_file(&journal).map_err(|e| format!("删除 journal 失败: {e}"))?;
         }
-        if soft {
-            let trash = root.join("trash");
-            ensure_dir(&trash, "trash 目录")?;
-            let safe_name = rel_path.replace(['/', '\\'], "_");
-            let dest = trash.join(format!("{}-{safe_name}", timestamp_token()));
-            replace_file(&path, &dest).map_err(|e| {
-                format!(
-                    "移入 trash 失败 {} -> {}: {e}",
-                    path.display(),
-                    dest.display()
-                )
-            })?;
-        } else if path.is_dir() {
-            fs::remove_dir_all(&path).map_err(|e| format!("删除目录失败: {e}"))?;
-        } else {
-            fs::remove_file(&path).map_err(|e| format!("删除文件失败: {e}"))?;
-        }
-        Ok(())
-    })
-    .await
-    .map_err(|e| format!("history_remove 调度失败: {e}"))?
+    }
+    Ok(())
 }
 
 /// List the direct children inside `rel_path` under `.ultragamestudio`. Empty

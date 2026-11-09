@@ -40,22 +40,18 @@ beforeEach(() => {
 });
 afterEach(async () => { await act(async () => root?.unmount()); root = undefined; container.remove(); vi.restoreAllMocks(); });
 
-it('mounts the fresh persisted cancellation at its original assistant, not the latest turn', async () => {
+it('keeps a resultless persisted cancellation in diagnostics without a chat card', async () => {
   const journal = await loadMemoryReviewJournal();
   await saveMemoryReviewJournal(journal.raw, { ...journal.value, jobs: [{ id: 'real-journal-job', source,
     phase: 'cancelled', appliedOps: 0, queuedOps: 0, error: 'AbortError: Memory review cancelled', updatedAt: 12 }] });
   const before = useStore.getState().messages;
   await act(async () => root!.render(<AIDock layout="chat" />));
-  const card = container.querySelector('[data-ugs-memory-review]');
-  expect(card).not.toBeNull();
-  expect(card?.textContent).toContain('记忆复盘已取消');
-  expect(card?.getAttribute('data-tone')).toBe('interrupted');
-  expect(card?.closest('[data-ugs-message-row]')?.textContent).toContain('第一轮原始回答');
-  expect(card?.closest('[data-ugs-message-row]')?.textContent).not.toContain('第二轮回答');
+  expect(container.querySelector('[data-ugs-memory-review]')).toBeNull();
+  expect((await loadMemoryReviewJournal()).value.jobs[0]).toMatchObject({ phase: 'cancelled', error: 'AbortError: Memory review cancelled' });
   expect(useStore.getState().messages).toBe(before);
 });
 
-it('forwards real producer reading and applied events to the mounted original answer without writing chat', async () => {
+it('runs the real producer in the background and shows its result on the original answer', async () => {
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   model.review.mockImplementation(async () => { await gate; return { appliedOps: 1, queuedOps: 0, lastErrors: [] }; });
@@ -67,14 +63,40 @@ it('forwards real producer reading and applied events to the mounted original an
   let pending!: ReturnType<typeof turn.finish>;
   try {
     await act(async () => { pending = turn.finish('completed'); await vi.waitFor(() => expect(model.review).toHaveBeenCalled()); });
-    expect(container.querySelector('[data-ugs-memory-review] [role="status"]')?.textContent).toBe('正在复盘记忆');
-    expect(container.querySelector('[data-ugs-memory-review]')?.getAttribute('data-active')).toBe('true');
+    expect(container.querySelector('[data-ugs-memory-review]')).toBeNull();
     await act(async () => { release(); await pending; });
     expect(container.querySelector('[data-ugs-memory-review] [role="status"]')?.textContent).toBe('记忆已保存');
     expect(container.querySelector('[data-ugs-memory-review]')?.closest('[data-ugs-message-row]')?.textContent).toContain('第一轮原始回答');
     expect(useStore.getState().messages).toBe(before);
     expect(model.review).toHaveBeenCalledTimes(1);
   } finally { release(); await pending; }
+});
+
+it.each(['skipped', 'disabled'] as const)('does not display an actual %s admission decision', async phase => {
+  await act(async () => root!.render(<AIDock layout="chat" />));
+  const before = useStore.getState().messages;
+  const turn = beginMemoryReviewTurn({ source: { ...source, runId: `hidden-${phase}` },
+    config: { reviewEnabled: phase !== 'disabled', writeEnabled: true, reviewMinMessages: phase === 'skipped' ? 4 : 2, reviewMinIntervalMinutes: 0 },
+    messages: before.slice(0, 2), ready: Promise.resolve() });
+  await act(async () => { await turn.finish('completed'); });
+  expect(getMemoryReviewStates().find(state => state.source.runId === `hidden-${phase}`)?.phase).toBe(phase);
+  expect(container.querySelector('[data-ugs-memory-review]')).toBeNull();
+  expect(model.review).not.toHaveBeenCalled();
+  expect(useStore.getState().messages).toBe(before);
+});
+
+it('records a completed review without changes in diagnostics without displaying it', async () => {
+  model.review.mockResolvedValue({ appliedOps: 0, queuedOps: 0, lastErrors: [] });
+  await act(async () => root!.render(<AIDock layout="chat" />));
+  const messages = useStore.getState().messages;
+  const turn = beginMemoryReviewTurn({ source: { ...source, runId: 'hidden-noop' },
+    config: { reviewEnabled: true, writeEnabled: true, reviewMinMessages: 2, reviewMinIntervalMinutes: 0 },
+    messages: messages.slice(0, 2), ready: Promise.resolve() });
+  await act(async () => { await turn.finish('completed'); });
+  expect(model.review).toHaveBeenCalledTimes(1);
+  expect(container.querySelector('[data-ugs-memory-review]')).toBeNull();
+  expect((await loadMemoryReviewJournal()).value.jobs[0]).toMatchObject({ phase: 'noop', appliedOps: 0, queuedOps: 0 });
+  expect(useStore.getState().messages).toBe(messages);
 });
 
 it('mounts resultless skill retry with the existing persisted-state controller', async () => {
@@ -172,14 +194,13 @@ it.each(['host', 'namespace', 'workspace', 'session', 'turn', 'source', 'assista
     expect((await loadMemoryReviewJournal()).raw).toBe(saved.raw);
   });
 
-it('does not animate a saved in-flight phase without a live producer after remount', async () => {
+it('keeps an unconfirmed saved in-flight phase out of chat after remount', async () => {
   const journal = await loadMemoryReviewJournal();
   await saveMemoryReviewJournal(journal.raw, { ...journal.value, jobs: [{ id: 'interrupted', source,
     phase: 'reading', appliedOps: 0, queuedOps: 0, updatedAt: 12 }] });
   await act(async () => root!.render(<AIDock layout="chat" />));
   const card = container.querySelector('[data-ugs-memory-review="interrupted"]');
-  expect(card?.getAttribute('data-active')).toBe('false');
-  expect(card?.textContent).toContain('上次记忆复盘未确认结束');
+  expect(card).toBeNull();
   expect(model.review).not.toHaveBeenCalled();
 });
 

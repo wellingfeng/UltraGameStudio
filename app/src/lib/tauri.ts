@@ -608,6 +608,29 @@ export interface RemoteModelListResult {
   url: string;
 }
 
+export interface CodexCatalogModel {
+  id: string;
+  description: string;
+  reasoningEfforts: string[];
+  reasoningEffortDescriptions?: Record<string, string>;
+  providerId?: string;
+}
+
+export async function listZcodeModels(cwd: string, cliCommand?: string): Promise<CodexCatalogModel[]> {
+  if (!tauriAvailable()) throw new Error('NO_BACKEND');
+  const invoke = await getInvoke();
+  return invoke<CodexCatalogModel[]>('list_zcode_models', { cwd, cliCommand: cliCommand ?? null });
+}
+
+export async function listCodexModels(cliCommand?: string): Promise<CodexCatalogModel[]> {
+  if (!tauriAvailable()) throw new Error('NO_BACKEND');
+  const invoke = await getInvoke();
+  return invoke<CodexCatalogModel[]>('list_codex_models', {
+    cliCommand: cliCommand ?? null,
+    shell: runShellPayload(),
+  });
+}
+
 export interface CloudflareImageRequest {
   accountId: string;
   apiKey: string;
@@ -662,6 +685,13 @@ export function isTauri(): boolean {
 async function getInvoke() {
   const { invoke } = await import('@tauri-apps/api/core');
   return invoke;
+}
+
+/** Save the full session snapshot for a fresh CLI to review. */
+export async function saveSessionHandoffSnapshot(cwd: string, snapshot: string): Promise<{ snapshotPath: string; summaryPath: string }> {
+  if (!tauriAvailable()) throw new Error('NO_BACKEND');
+  const invoke = await getInvoke();
+  return invoke('save_session_handoff_snapshot', { cwd, snapshot });
 }
 
 /** Dynamically load the `listen` event API (Tauri-only). */

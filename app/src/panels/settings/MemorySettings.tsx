@@ -145,8 +145,6 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
   });
   const [reviewOptions, setReviewOptions] = useState<{ id: string; label: string }[]>([]);
   const [journal, setJournal] = useState<MemoryReviewJournalJob[]>([]);
-  const [journalError, setJournalError] = useState('');
-  const [journalBusy, setJournalBusy] = useState(false);
   const [transactions, setTransactions] = useState<MemoryTransactionView[]>([]);
   const [undoPreview, setUndoPreview] = useState<MemoryTransactionView | null>(null);
   const [undoBusy, setUndoBusy] = useState(false);
@@ -169,14 +167,14 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
     } catch (error) { setError(String(error)); }
     finally { setUndoBusy(false); }
   };
-  const readJournal = useCallback(async () => {
-    setJournalBusy(true);
-    setJournalError('');
-    try { setJournal((await loadMemoryReviewJournal()).value.jobs); }
-    catch (error) { setJournalError(String(error)); }
-    finally { setJournalBusy(false); }
+  useEffect(() => {
+    let active = true;
+    // Retain journal scopes for transaction history without displaying diagnostics.
+    void loadMemoryReviewJournal()
+      .then(({ value }) => { if (active) setJournal(value.jobs); })
+      .catch((error) => console.warn('Failed to read memory review journal for transaction history:', error));
+    return () => { active = false; };
   }, []);
-  useEffect(() => { void readJournal(); }, [readJournal]);
 
   useEffect(() => {
     try {
@@ -342,32 +340,6 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
           {error}
         </p>
       )}
-
-      <section aria-label="记忆复盘诊断" className="min-w-0 space-y-2 rounded-lg border border-border p-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h4 className="text-xs font-semibold text-fg">记忆复盘诊断 · {config.reviewEnabled && config.writeEnabled ? 'ON' : 'OFF'}</h4>
-          <button type="button" disabled={journalBusy} onClick={() => void readJournal()}
-            className="min-h-11 rounded border border-border px-3 text-xs text-fg-dim hover:border-accent focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent disabled:opacity-40">刷新诊断（只读）</button>
-        </div>
-        <p className="text-[11px] text-fg-faint">关闭复盘保留历史；刷新只读取持久记录，不重试模型或产生新调用。日志不是目标读回证明。</p>
-        {journalError && <p role="alert" className="break-all text-xs text-status-error">{journalError}</p>}
-        {!journal.length && !journalError && <p className="text-xs text-fg-faint">暂无持久复盘记录</p>}
-        <ul className="space-y-2">
-          {journal.map((job) => (
-            <li key={job.id} className="min-w-0 space-y-1 border-t border-border pt-2 text-xs">
-              <p className={job.phase === 'failed' ? 'text-status-error' : job.phase === 'applied' ? 'text-status-success' : job.phase === 'awaiting_approval' ? 'text-status-warning' : 'text-fg-dim'}>{job.phase} · 已应用 {job.appliedOps} · 待审批 {job.queuedOps}</p>
-              <p className="break-all text-fg-dim">原项目：{job.source.workspaceId || '未知'} · 原会话：{job.source.sessionId} · 来源消息：{job.source.sourceMessageId}</p>
-              <details className="text-fg-faint"><summary className="min-h-11 cursor-pointer py-3 focus-visible:outline focus-visible:outline-accent">完整来源与预算</summary>
-                <pre className="whitespace-pre-wrap break-all">{JSON.stringify(job.source, null, 2)}</pre>
-                <p>预算记录：未知（历史未记录，不以当前配置推断）</p>
-              </details>
-              <p className="text-fg-faint">调用：{job.usage?.calls ?? '未知'} · 输入 tokens：{job.usage?.inputTokens ?? '未知'} · 输出 tokens：{job.usage?.outputTokens ?? '未知'} · {job.usage ? job.usage.estimated ? '估算' : '供应商报告' : '用量未知'}</p>
-              {job.error && <p className="whitespace-pre-wrap break-all text-status-error">{job.error}</p>}
-              {job.recordingError && <p className="whitespace-pre-wrap break-all text-status-warning">审计记录失败：{job.recordingError}</p>}
-            </li>
-          ))}
-        </ul>
-      </section>
 
       {pending.length > 0 && (
         <div className="space-y-2 rounded-lg border border-status-warning/50 bg-status-warning/5 p-3">

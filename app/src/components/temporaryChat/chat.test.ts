@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { TemporaryChat, handleChatAction, type ChatEvent, type ChatPort, type ChatRequest } from './chat';
+import { ChatSessions } from './sessions';
 
 function fixture() {
   const requests: ChatRequest[] = [];
@@ -29,7 +30,7 @@ describe('isolated temporary chat', () => {
     expect(f.chat.state.turns[0].assistant).toBe(''); expect(f.port.cancel).not.toHaveBeenCalled();
     admitted(); await new Promise(resolve => setTimeout(resolve, 0));
     expect(f.port.cancel).toHaveBeenCalledWith(f.requests[0].requestId);
-    f.chat.dispose(); expect(f.chat.state.turns).toEqual([]);
+    f.chat.dispose(); expect(f.chat.state.turns[0].status).toBe('stopped');
   });
   it('retries errors without duplicating the user turn and rejects unsupported bridge actions', async () => {
     const f = fixture(); await f.chat.refresh();
@@ -63,5 +64,58 @@ describe('isolated temporary chat', () => {
     await failed.refresh(); await Promise.resolve(); failed.send('问题');
     expect(failed.state.reference).toMatchObject({ status: 'error', note: '读取失败' });
     expect(f.requests).toHaveLength(1);
+  });
+  it('keeps multiple sessions isolated while replies finish after switching', async () => {
+    const f = fixture(); await f.chat.refresh();
+    f.chat.send('第一条');
+    const first = f.chat.state.sessionId;
+    f.chat.newSession();
+    const second = f.chat.state.sessionId;
+    f.chat.send('第二条');
+    f.callbacks[0]({ type: 'delta', text: '第一答' }); f.callbacks[0]({ type: 'done' });
+    expect(f.chat.state.turns[0].user).toBe('第二条');
+    f.callbacks[1]({ type: 'delta', text: '第二答' }); f.callbacks[1]({ type: 'done' });
+    f.chat.selectSession(first);
+    expect(f.chat.state.turns[0]).toMatchObject({ user: '第一条', assistant: '第一答', status: 'done' });
+    f.chat.send('追问');
+    expect(f.requests[2].messages).toEqual([{ role: 'user', content: '第一条' }, { role: 'assistant', content: '第一答' }, { role: 'user', content: '追问' }]);
+    f.callbacks[2]({ type: 'done' });
+    f.chat.deleteSession(second);
+    expect(f.chat.state.sessions.map(s => s.id)).toEqual([first]);
+  });
+  it('shares one source across windows, separates other sources, and restores saved turns', async () => {
+    const f = fixture();
+    const key = `file-a-${crypto.randomUUID()}`;
+    const a = { key, label: '文件 A', load: async () => ({ label: '文件 A', text: '仅引用，不存储' }) };
+    const b = { key: `${key}-other`, label: '文件 B', load: async () => ({ label: '文件 B', text: '文件 B 内容' }) };
+    const one = new TemporaryChat(f.changed, f.port, a);
+    const otherWindow = new TemporaryChat(f.changed, f.port, a);
+    await one.refresh(); await otherWindow.refresh(); await Promise.resolve();
+    one.send('文件 A 问题'); f.callbacks[0]({ type: 'delta', text: '文件 A 回答' }); f.callbacks[0]({ type: 'done' });
+    expect(otherWindow.state.turns[0].assistant).toBe('文件 A 回答');
+    one.newSession(); one.send('新会话问题'); f.callbacks[1]({ type: 'done' });
+    one.setSource(b); await Promise.resolve();
+    expect(one.state.sessions).toHaveLength(1); expect(one.state.turns).toEqual([]);
+    one.send('文件 B 问题'); f.callbacks[2]({ type: 'done' });
+    one.setSource(a); await Promise.resolve();
+    expect(one.state.sessions).toHaveLength(2);
+    const restored = new ChatSessions(key);
+    expect(restored.sessions.flatMap(s => s.turns.map(t => t.user))).toEqual(expect.arrayContaining(['文件 A 问题', '新会话问题']));
+    expect(JSON.stringify(restored.sessions)).not.toContain('仅引用，不存储');
+    one.dispose(); otherWindow.dispose();
+  });
+  it('protects unreadable stored history and reports write failures', () => {
+    const key = `invalid-${crypto.randomUUID()}`;
+    const storageKey = `ultragamestudio.temporaryChat.sessions.v1:${encodeURIComponent(key)}`;
+    localStorage.setItem(storageKey, '{');
+    const group = new ChatSessions(key); group.create();
+    expect(group.storageError).toContain('停止写入');
+    expect(localStorage.getItem(storageKey)).toBe('{');
+    localStorage.removeItem(storageKey);
+    const quota = new ChatSessions(`quota-${crypto.randomUUID()}`);
+    const write = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota'); });
+    quota.create();
+    expect(quota.storageError).toContain('保存失败');
+    write.mockRestore();
   });
 });

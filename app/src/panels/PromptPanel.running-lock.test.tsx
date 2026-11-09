@@ -1032,12 +1032,15 @@ describe('PromptPanel running lock', () => {
     const originalSendPrompt = useStore.getState().sendPrompt;
     const originalBranchSessionFromMessage =
       useStore.getState().branchSessionFromMessage;
+    const originalContinueSessionWithHandoff = useStore.getState().continueSessionWithHandoff;
     const sendPrompt = vi.fn(() => true);
     const branchSessionFromMessage = vi.fn();
+    const continueSessionWithHandoff = vi.fn(async (): Promise<{ thinkingLevel?: string }> => ({}));
     useStore.setState({
       workflow: simpleBlueprint('Plain chat'),
       sendPrompt,
       branchSessionFromMessage,
+      continueSessionWithHandoff,
       messages: [
         { id: 'm_user_1', role: 'user', text: '第一个问题', createdAt: 1 },
         { id: 'm_ai_1', role: 'assistant', text: '第一个回答', createdAt: 2 },
@@ -1050,6 +1053,7 @@ describe('PromptPanel running lock', () => {
     try {
       expect(view.container.querySelectorAll('button[aria-label="复制 AI 回答"]')).toHaveLength(2);
       expect(view.container.querySelectorAll('button[aria-label="创建会话分支"]')).toHaveLength(2);
+      expect(view.container.querySelectorAll('button[aria-label="汇总并生成续开发提示语"]')).toHaveLength(2);
       expect(view.container.querySelectorAll('button[aria-label="重新生成回答"]')).toHaveLength(2);
       expect(view.container.querySelectorAll('button[aria-label="切换模型回答"]')).toHaveLength(2);
       expect(view.container.querySelectorAll('button[aria-label="翻译回答"]')).toHaveLength(2);
@@ -1060,6 +1064,11 @@ describe('PromptPanel running lock', () => {
       });
 
       expect(branchSessionFromMessage).toHaveBeenCalledWith('m_ai_1');
+
+      await act(async () => { buttonByAriaLabel(view.container, '汇总并生成续开发提示语').click(); });
+      expect(continueSessionWithHandoff).toHaveBeenCalledOnce();
+      expect(view.container.textContent).toContain('交接文档和续开发提示语已生成。');
+      expect(view.container.textContent).toContain('当前 CLI 未提供可控思考档');
 
       await act(async () => {
         buttonByAriaLabel(view.container, '重新生成回答').click();
@@ -1072,7 +1081,33 @@ describe('PromptPanel running lock', () => {
       useStore.setState({
         sendPrompt: originalSendPrompt,
         branchSessionFromMessage: originalBranchSessionFromMessage,
+        continueSessionWithHandoff: originalContinueSessionWithHandoff,
       });
+    }
+  });
+
+  it('shows and copies the continuation prompt from a local handoff result', async () => {
+    resetStoreForPromptLock('design');
+    const text = '交接文档已生成。下次新会话可复制以下提示语：\n\n请接手前一个会话的任务。先读取交接文档：\nE:/project/handoff.md';
+    useStore.setState({
+      workflow: simpleBlueprint('Plain chat'),
+      messages: [
+        { id: 'user', role: 'user', text: '目标', createdAt: 1 },
+        { id: 'handoff', role: 'assistant', text, createdAt: 2, localOnly: true },
+      ],
+    });
+    const clipboard = Object.getOwnPropertyDescriptor(navigator, 'clipboard');
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { configurable: true, value: { writeText } });
+    const view = await renderChatDock();
+    try {
+      expect(view.container.textContent).toContain('请接手前一个会话的任务');
+      await act(async () => { buttonByAriaLabel(view.container, '复制 AI 回答').click(); });
+      expect(writeText).toHaveBeenCalledWith(text);
+    } finally {
+      await view.cleanup();
+      if (clipboard) Object.defineProperty(navigator, 'clipboard', clipboard);
+      else Reflect.deleteProperty(navigator, 'clipboard');
     }
   });
 

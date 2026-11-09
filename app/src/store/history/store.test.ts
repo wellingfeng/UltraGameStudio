@@ -90,6 +90,29 @@ afterEach(() => {
 });
 
 describe('historyStore session title derivation', () => {
+  it('propagates browser fallback quota errors from final saves and flush', async () => {
+    const storage = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => { throw new Error('quota exceeded'); });
+    try {
+      await expect(historyStore.createSession({ workspaceId: '__default__', id: 'quota', isWorkflow: false })).rejects.toThrow('quota exceeded');
+      await expect(historyStore.flush()).rejects.toThrow('quota exceeded');
+    } finally { storage.mockRestore(); await historyStore.flush().catch(() => {}); }
+  });
+  it('keeps a newer stream checkpoint when an older queued snapshot arrives', async () => {
+    const workspaceId = '__default__';
+    const id = `checkpoint-${Date.now()}`;
+    const original = { id: 'answer', role: 'assistant' as const, text: '占位', createdAt: 1, streamUpdatedAt: 2 };
+    await historyStore.createSession({ workspaceId, id, isWorkflow: false, messages: [original] });
+    await historyStore.updateSession(workspaceId, id, {
+      mergeMessages: true, streamCheckpoint: true,
+      messages: [{ ...original, text: '已执行两步', streamUpdatedAt: 4 }],
+    });
+    await historyStore.updateSession(workspaceId, id, {
+      mergeMessages: true, messages: [{ ...original, text: '旧步骤', streamUpdatedAt: 3 }],
+    });
+    const saved = await historyStore.getSession(workspaceId, id);
+    expect(saved?.messages[0].text).toBe('已执行两步');
+  });
+
   it('merges a stale chat snapshot without dropping later messages or downgrading learning state', async () => {
     const origin = { hostId: 'local', workspaceId: '__default__', sessionId: 'merge-source', turnId: 'initial', runId: 'review-a' };
     const initial = { id: 'initial', role: 'user' as const, text: 'Original task.', createdAt: 1 };

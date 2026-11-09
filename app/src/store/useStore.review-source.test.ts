@@ -159,7 +159,8 @@ describe('real sendPrompt source persistence barrier', () => {
     expect(useStore.getState().sendPrompt('Verify the actual persisted source.')).toBe(true);
     await vi.waitFor(() => expect(useStore.getState().chattingSessions).toHaveLength(0));
     expect(hostCalls()).toEqual([]);
-    expect(useStore.getState().messages.some((message) => message.text.includes('SKILL_SOURCE_MESSAGE_NOT_PERSISTED'))).toBe(true);
+    expect(useStore.getState().messages.some((message) => message.text.includes('技能来源不可用'))).toBe(false);
+    expect(boundary.complete.mock.calls.some(([request]) => request.runId)).toBe(true);
   });
 
   it('never grants skill reads or review when append fails in an existing session', async () => {
@@ -168,6 +169,7 @@ describe('real sendPrompt source persistence barrier', () => {
     await vi.waitFor(() => expect(useStore.getState().chattingSessions).toHaveLength(0));
     expect(append).toHaveBeenCalled();
     expect(hostCalls()).toEqual([]);
-    expect(useStore.getState().messages.some((message) => message.text.includes('SOURCE_APPEND_FAILED'))).toBe(true);
+    expect(useStore.getState().messages.some((message) => message.text.includes('技能来源不可用'))).toBe(false);
+    expect(boundary.complete.mock.calls.some(([request]) => request.runId)).toBe(true);
   });
 });

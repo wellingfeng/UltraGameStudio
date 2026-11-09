@@ -521,17 +521,13 @@ async function initHistoryFromDisk(): Promise<void> {
     // Rehydrate in-memory `composerDrafts` for sessions that still have a
     // persisted `meta.composerDraft` but were not activated this run. Without
     // this the sidebar draft badge / draft-first ordering silently degrades to
-    // pure time ordering after a restart, because `draftSessionKeys` only reads
-    // the in-memory map and the per-session disk→memory restore only runs on
-    // session activation. We scan every session in the active workspace once
-    // here: `historyStore.getSession` is cached, so the disk read also prewarms
-    // the record cache for later activations.
+    // pure time ordering after a restart. Read only the draft field: hydrating
+    // every transcript here blocks startup and evicts the useful session cache.
     const draftByKey: Record<string, string> = {};
     await Promise.all(
       sessions.map(async (summary) => {
         if (active && summary.id === active.id) return;
-        const record = await historyStore.getSession(workspace.id, summary.id);
-        const text = record?.meta?.composerDraft;
+        const text = await historyStore.getSessionComposerDraft(workspace.id, summary.id);
         if (typeof text === 'string' && text.trim().length > 0) {
           draftByKey[
             workflowSessionKeyId({

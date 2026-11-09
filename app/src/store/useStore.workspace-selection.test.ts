@@ -52,6 +52,49 @@ describe('top workspace switcher selection (selectedWorkspaceId)', () => {
     window.localStorage.clear();
   });
 
+  it('opens a session without writing an already-cleared unread flag', async () => {
+    await historyStore.ready();
+    const ws = await historyStore.resolveWorkspaceByPath('E:/session-switch-no-unread');
+    const record = await historyStore.createSession({ workspaceId: ws.id, isWorkflow: false, title: '会话' });
+    const summary = summaryFor(ws.id, record.id, record.title);
+    useStore.setState({ historyReady: true, activeWorkspaceId: ws.id, activeSessionId: null,
+      workspaces: [ws], sessions: [summary], sessionTree: { [ws.id]: [summary] }, workflow: defaultBlueprint('会话') });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(historyStore, 'getSession').mockImplementationOnce(async () => { await gate; return record; });
+    const writes = vi.spyOn(historyStore, 'updateSession');
+    useStore.getState().selectSession(record.id, ws.id);
+    try { expect(writes).not.toHaveBeenCalled(); }
+    finally { release(); await waitFor(() => useStore.getState().activeSessionId === record.id, 'session activation'); }
+    await historyStore.flush();
+    expect(writes).not.toHaveBeenCalled();
+  });
+
+  it('clears an unread completion after showing the session', async () => {
+    await historyStore.ready();
+    const ws = await historyStore.resolveWorkspaceByPath('E:/session-switch-unread');
+    const record = await historyStore.createSession({ workspaceId: ws.id, isWorkflow: false, title: '会话',
+      meta: { unreadCompletion: true } });
+    const summary = { ...summaryFor(ws.id, record.id, record.title), unreadCompletion: true };
+    useStore.setState({ historyReady: true, activeWorkspaceId: ws.id, activeSessionId: null,
+      workspaces: [ws], sessions: [summary], sessionTree: { [ws.id]: [summary] }, workflow: defaultBlueprint('会话') });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(historyStore, 'getSession').mockImplementationOnce(async () => { await gate; return record; });
+    const original = historyStore.updateSession.bind(historyStore);
+    let activeAtWrite: string | null = null;
+    const writes = vi.spyOn(historyStore, 'updateSession').mockImplementation((...args) => {
+      activeAtWrite = useStore.getState().activeSessionId;
+      return original(...args);
+    });
+    useStore.getState().selectSession(record.id, ws.id);
+    try { expect(writes).not.toHaveBeenCalled(); }
+    finally { release(); await waitFor(() => useStore.getState().activeSessionId === record.id, 'session activation'); }
+    await historyStore.flush();
+    expect(activeAtWrite).toBe(record.id);
+    expect((await historyStore.getSession(ws.id, record.id))?.meta?.unreadCompletion).toBe(false);
+  });
+
   it('does not follow a session click into another workspace', async () => {
     await historyStore.ready();
     const wsA = await historyStore.resolveWorkspaceByPath('E:\\test_project_ue53');
@@ -93,6 +136,32 @@ describe('top workspace switcher selection (selectedWorkspaceId)', () => {
     expect(state.activeSessionId).toBe(sessionB.id);
     // ...but the top switcher's pinned workspace stays put.
     expect(state.selectedWorkspaceId).toBe(wsA.id);
+  });
+
+  it('does not cancel an in-flight workspace switch when deleting the active session', async () => {
+    await historyStore.ready();
+    const wsA = await historyStore.resolveWorkspaceByPath('E:/delete-workspace-a');
+    const wsB = await historyStore.resolveWorkspaceByPath('E:/delete-workspace-b');
+    const sessionA = await historyStore.createSession({ workspaceId: wsA.id, isWorkflow: false, title: 'A' });
+    const sessionNext = await historyStore.createSession({ workspaceId: wsA.id, isWorkflow: false, title: 'Next' });
+    const sessionB = await historyStore.createSession({ workspaceId: wsB.id, isWorkflow: false, title: 'B' });
+    const summaryA = summaryFor(wsA.id, sessionA.id, sessionA.title);
+    const summaryNext = summaryFor(wsA.id, sessionNext.id, sessionNext.title);
+    const summaryB = summaryFor(wsB.id, sessionB.id, sessionB.title);
+    useStore.setState({ historyReady: true, activeWorkspaceId: wsA.id, selectedWorkspaceId: wsA.id,
+      activeSessionId: sessionA.id, workspaces: [wsA, wsB], sessions: [summaryA, summaryNext],
+      sessionTree: { [wsA.id]: [summaryA, summaryNext], [wsB.id]: [summaryB] },
+      workflow: defaultBlueprint('Current workflow'), locale: 'zh-CN' });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(historyStore, 'resolveWorkspaceByPath').mockImplementation(async () => { await gate; return wsB; });
+    vi.spyOn(historyStore, 'deleteSession').mockResolvedValue(undefined);
+
+    useStore.getState().setWorkspace(wsB.path);
+    useStore.getState().deleteSession(sessionA.id, wsA.id);
+    release();
+    await waitFor(() => useStore.getState().selectedWorkspaceId === wsB.id, 'workspace selection after deletion');
+    expect(useStore.getState().activeSessionId).toBe(sessionB.id);
   });
 
   it('updates the pinned workspace only when switched explicitly', async () => {

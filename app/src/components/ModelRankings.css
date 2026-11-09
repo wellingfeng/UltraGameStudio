@@ -1,0 +1,47 @@
+.ugs-model-rankings { position: relative; height: 100%; display: flex; align-items: center; flex: none; }
+.ugs-model-rankings-trigger { display: flex; align-items: center; justify-content: center; width: 29px; height: 29px; margin: 0 8px; padding: 0; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--fg-dim); }
+.ugs-model-rankings-trigger:hover, .ugs-model-rankings-trigger[aria-expanded='true'] { color: var(--fg); border-color: color-mix(in oklab, var(--accent) 26%, var(--border)); background: color-mix(in oklab, var(--accent) 10%, var(--panel)); }
+.ugs-model-rankings-trigger svg { color: var(--accent); }
+.ugs-model-rankings-panel { position: absolute; top: 100%; right: 0; width: min(460px, calc(100vw - 20px)); max-height: min(680px, calc(100vh - 50px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid color-mix(in oklab, var(--accent) 16%, var(--border)); border-radius: 12px; background: var(--bg-alt); color: var(--fg); box-shadow: 0 20px 55px rgba(0, 0, 0, .35), 0 3px 12px rgba(0, 0, 0, .18); user-select: text; }
+.ugs-model-rankings-heading { display: flex; align-items: center; gap: 11px; padding: 17px 18px 14px; background: radial-gradient(ellipse at 12% 0%, color-mix(in oklab, var(--accent) 13%, transparent), transparent 65%); }
+.ugs-model-rankings-icon { display: grid; place-items: center; flex: none; width: 38px; height: 38px; border: 1px solid color-mix(in oklab, var(--accent) 30%, transparent); border-radius: 11px; background: color-mix(in oklab, var(--accent) 13%, var(--panel)); color: var(--accent); }
+.ugs-model-rankings-heading-copy { display: grid; flex: 1; gap: 3px; min-width: 0; }
+.ugs-model-rankings-heading-copy strong { font-size: 14px; font-weight: 650; }
+.ugs-model-rankings-heading-copy span { color: var(--fg-faint); font-size: 11px; }
+.ugs-model-rankings-refresh { display: grid; place-items: center; width: 32px; height: 32px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel); color: var(--fg-dim); }
+.ugs-model-rankings-refresh:hover:not([aria-disabled='true']) { color: var(--accent); border-color: var(--accent); }
+.ugs-model-rankings-refresh[aria-disabled='true'] { opacity: .65; cursor: wait; }
+.ugs-model-rankings-spinning { animation: ugs-model-rankings-spin 1s linear infinite; }
+@keyframes ugs-model-rankings-spin { to { transform: rotate(360deg); } }
+.ugs-model-rankings-toolbar { display: flex; gap: 8px; padding: 0 18px; }
+.ugs-model-rankings-search { display: flex; align-items: center; flex: 1; min-width: 0; gap: 7px; height: 32px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px; color: var(--fg-faint); background: var(--bg); }
+.ugs-model-rankings-search:focus-within { border-color: var(--accent); }
+.ugs-model-rankings-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--fg); font-size: 11px; }
+.ugs-model-rankings-search input::placeholder { color: var(--fg-faint); }
+.ugs-model-rankings-meta { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 12px 18px 8px; color: var(--fg-faint); font-size: 10px; }
+.ugs-model-rankings-meta button { display: inline-flex; align-items: center; gap: 2px; flex: none; border: 0; padding: 0; background: none; color: var(--accent); font-size: 10px; }
+.ugs-model-rankings-error { margin: 0 18px 6px; padding: 7px 9px; border-radius: 6px; background: color-mix(in oklab, var(--status-warning) 12%, var(--bg)); color: var(--status-warning); font-size: 11px; }
+.ugs-model-rankings-list { flex: 1; min-height: 80px; overflow-y: auto; overscroll-behavior: contain; padding: 0 12px; }
+.ugs-model-rankings-row { display: flex; align-items: center; min-height: 53px; gap: 10px; padding: 8px 6px; border-bottom: 1px solid var(--border-soft); }
+.ugs-model-rankings-row:last-child { border-bottom: 0; }
+.ugs-model-rankings-row:hover { background: color-mix(in oklab, var(--accent) 5%, transparent); }
+.ugs-model-rankings-rank { width: 23px; flex: none; color: var(--fg-faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.ugs-model-rankings-rank.is-top { color: var(--accent); font-weight: 700; }
+.ugs-model-rankings-model { display: grid; flex: 1; gap: 3px; min-width: 0; }
+.ugs-model-rankings-model strong, .ugs-model-rankings-model span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ugs-model-rankings-model strong { color: var(--fg); font-size: 11px; font-weight: 600; }
+.ugs-model-rankings-model span { color: var(--fg-faint); font-size: 10px; }
+.ugs-model-rankings-bar { height: 3px; margin-top: 2px; overflow: hidden; border-radius: 4px; background: var(--panel-2); }
+.ugs-model-rankings-bar i { display: block; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
+.ugs-model-rankings-score { flex: none; min-width: 35px; text-align: right; color: var(--accent); font-size: 15px; font-weight: 700; font-variant-numeric: tabular-nums; }
+.ugs-model-rankings-column-header { display: grid; grid-template-columns: minmax(0, 1fr) 35px 92px; gap: 10px; padding: 2px 6px 5px 39px; color: var(--fg-faint); font-size: 10px; }
+.ugs-model-rankings-column-header span:not(:first-child) { text-align: right; }
+.ugs-model-rankings-price { display: grid; flex: none; gap: 3px; width: 92px; text-align: right; color: var(--fg); font-size: 11px; font-variant-numeric: tabular-nums; }
+.ugs-model-rankings-price span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ugs-model-rankings-price small { color: var(--fg-faint); font-size: 10px; }
+.ugs-model-rankings-empty { padding: 30px 12px; text-align: center; color: var(--fg-faint); font-size: 12px; }
+.ugs-model-rankings-footer { display: flex; justify-content: space-between; gap: 8px; padding: 11px 18px; border-top: 1px solid var(--border-soft); color: var(--fg-faint); font-size: 10px; }
+.ugs-model-rankings-footer span:first-child { display: flex; align-items: center; gap: 6px; }
+.ugs-model-rankings-footer i { width: 6px; height: 6px; border-radius: 50%; background: var(--accent-2); }
+.ugs-model-rankings-footer i.is-error { background: var(--status-warning); }
+@media (max-width: 900px) { .ugs-model-rankings-trigger { margin: 0 4px; } }

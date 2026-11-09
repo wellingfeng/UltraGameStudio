@@ -1,177 +1,151 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { MainSurfaceProvider } from '@/components/MainSurface';
-import { OPEN_TEMPORARY_CHAT_EVENT } from '@/components/temporaryChat/TemporaryChatWindows';
-import { CLOSE_PROJECT_RIGHT_PANEL_EVENT, PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, SELECT_PROJECT_RIGHT_PANEL_TAB_EVENT } from '@/panels/projectRightPanelEvents';
+import { MainSurfaceProvider, useMainSurface } from '@/components/MainSurface';
+import { TitleBarContent, TitleBarLayout } from '@/components/TitleBar';
+import { PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, CLOSE_PROJECT_RIGHT_PANEL_EVENT } from '@/panels/projectRightPanelEvents';
+import { FilePreviewTabs } from '@/components/ai/FilePreviewTabs';
+import { filePreviewScope, useFilePreviewTabs } from '@/store/filePreviewTabs';
+import { useStore } from '@/store/useStore';
+import BrowserOpenButton from './BrowserOpenButton';
 import WorkspaceToolsLayout from './WorkspaceToolsLayout';
 
-vi.mock('@/components/WorkspaceMainSurface', () => ({ default: () => <div data-ugs-chat-surface>聊天</div> }));
-vi.mock('./BrowserPane', () => ({ default: ({ onClose, expanded, onExpandedChange }: { onClose: () => void; expanded: boolean; onExpandedChange: (value: boolean) => void }) => <aside data-ugs-browser-panel><button onClick={() => onExpandedChange(!expanded)}>{expanded ? '还原侧栏' : '放大浏览器'}</button><button onClick={onClose}>关闭浏览器</button></aside> }));
+vi.mock('@/components/WorkspaceMainSurface', () => ({ default: () => {
+  const scope = filePreviewScope(useStore((state) => state.composer.workspace));
+  return <div data-ugs-chat-surface><TitleBarContent enabled><header>
+    <FilePreviewTabs scope={scope}><button>测试会话</button></FilePreviewTabs>
+    <div className="ugs-chat-header-actions"><BrowserOpenButton scope={scope} /><button>复制</button></div>
+  </header></TitleBarContent>聊天</div>;
+} }));
+vi.mock('./BrowserPane', () => ({ default: ({ onClose, expanded, visible = true, onExpandedChange }: { onClose: () => void; expanded: boolean; visible?: boolean; onExpandedChange: (value: boolean) => void }) => <aside data-ugs-browser-panel data-expanded={expanded} hidden={!visible}><button onClick={() => onExpandedChange(!expanded)}>{expanded ? '还原侧栏' : '放大浏览器'}</button><button onClick={onClose}>关闭浏览器</button></aside> }));
+
+function SurfaceControls() {
+  const { setSurface } = useMainSurface();
+  return <><button onClick={() => setSurface('scheduled-tasks')}>切换到任务</button><button onClick={() => setSurface('chat')}>切换到会话</button></>;
+}
 
 let root: Root;
 let container: HTMLDivElement;
 
 beforeEach(async () => {
+  useFilePreviewTabs.setState({ tabs: [], activeByScope: {}, browserTabs: [] });
+  useStore.setState({ composer: { ...useStore.getState().composer, workspace: 'E:/Game' } });
   container = document.createElement('div');
   document.body.append(container);
   root = createRoot(container);
-  await act(async () => root.render(<MainSurfaceProvider><WorkspaceToolsLayout /></MainSurfaceProvider>));
+  await act(async () => root.render(<MainSurfaceProvider><TitleBarLayout><WorkspaceToolsLayout /><SurfaceControls /></TitleBarLayout></MainSurfaceProvider>));
 });
-afterEach(async () => { await act(async () => root.unmount()); container.remove(); });
+afterEach(async () => { await act(async () => root.unmount()); container.remove(); useFilePreviewTabs.setState({ tabs: [], activeByScope: {}, browserTabs: [] }); });
 
-function button(label: string): HTMLButtonElement {
-  const result = container.querySelector<HTMLButtonElement>(`button[aria-label="${label}"]`);
-  expect(result).not.toBeNull();
-  return result!;
+async function click(selector: string) {
+  const button = container.querySelector<HTMLElement>(selector);
+  expect(button).not.toBeNull();
+  await act(async () => button!.click());
 }
 
-function toolbar(): HTMLElement {
-  return container.querySelector<HTMLElement>('[role="toolbar"]')!;
+async function clickText(text: string) {
+  const button = [...container.querySelectorAll('button')].find((item) => item.textContent === text);
+  expect(button).not.toBeUndefined();
+  await act(async () => button!.click());
 }
 
-async function enterToolbar() {
-  await act(async () => toolbar().dispatchEvent(new MouseEvent('mouseover', { bubbles: true })));
-}
-
-async function leaveToolbar() {
-  await act(async () => toolbar().dispatchEvent(new MouseEvent('mouseout', { bubbles: true })));
-}
-
-describe('右上角快捷工具', () => {
-  it('仅显示四个图标，并切换现有文件面板', async () => {
-    expect(container.querySelector('[role="toolbar"]')?.querySelectorAll('button')).toHaveLength(4);
-    await enterToolbar();
-    const selected = vi.fn();
-    window.addEventListener(SELECT_PROJECT_RIGHT_PANEL_TAB_EVENT, selected);
-    await act(async () => button('会话文件').click());
-    expect(selected.mock.calls[0][0].detail.tab).toBe('session');
-    await act(async () => window.dispatchEvent(new CustomEvent(PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, { detail: { open: true, tab: 'session' } })));
-    expect(button('会话文件').getAttribute('aria-pressed')).toBe('true');
-    await act(async () => button('项目文件').click());
-    expect(selected.mock.calls[1][0].detail.tab).toBe('files');
-    window.removeEventListener(SELECT_PROJECT_RIGHT_PANEL_TAB_EVENT, selected);
+describe('标题栏浏览器入口', () => {
+  it('每次点击都新建浏览器标签，切换及关闭时保留其他标签', async () => {
+    await click('[aria-label="打开浏览器"]');
+    const first = container.querySelector<HTMLElement>('[data-ugs-browser-panel]')!;
+    await click('[aria-label="打开浏览器"]');
+    const tabs = container.querySelectorAll<HTMLElement>('[role="tab"][aria-label="浏览器"]');
+    const panes = container.querySelectorAll<HTMLElement>('[data-ugs-browser-panel]');
+    expect(tabs).toHaveLength(2);
+    expect(panes).toHaveLength(2);
+    expect(first.hidden).toBe(true);
+    expect(panes[1].hidden).toBe(false);
+    await act(async () => tabs[0].click());
+    expect(first.hidden).toBe(false);
+    expect(panes[1].hidden).toBe(true);
+    const closeButtons = container.querySelectorAll<HTMLButtonElement>('[aria-label="关闭预览：浏览器"]');
+    await act(async () => closeButtons[0].click());
+    expect(container.querySelectorAll('[role="tab"][aria-label="浏览器"]')).toHaveLength(1);
+    expect(container.querySelector('[data-ugs-browser-panel]')).toBe(panes[1]);
+    expect(panes[1].hidden).toBe(false);
   });
 
-  it('浏览器与文件面板互斥，临时聊天沿用现有入口', async () => {
+  it('位于标题栏操作区首位，移除原工作区悬浮工具', async () => {
+    const action = container.querySelector<HTMLButtonElement>('[aria-label="打开浏览器"]')!;
+    expect(action.closest('.ugs-titlebar-content')).not.toBeNull();
+    expect(action.parentElement?.firstElementChild).toBe(action);
+    expect(container.querySelector('.ugs-workspace-chat-region [aria-label="快捷工具"]')).toBeNull();
+    expect(container.querySelector('.ugs-workspace-chat-region [aria-label="会话文件"]')).toBeNull();
+    expect(container.querySelector('.ugs-workspace-chat-region [aria-label="项目文件"]')).toBeNull();
+    expect(container.querySelector('.ugs-workspace-chat-region [aria-label="新建临时聊天"]')).toBeNull();
+  });
+
+  it('首次点击直接打开信息流标签，不关闭项目文件面板', async () => {
     const closed = vi.fn();
-    const chat = vi.fn();
     window.addEventListener(CLOSE_PROJECT_RIGHT_PANEL_EVENT, closed);
-    window.addEventListener(OPEN_TEMPORARY_CHAT_EVENT, chat);
-    await enterToolbar();
-    await act(async () => button('浏览器').click());
-    expect(closed).toHaveBeenCalledOnce();
-    expect(container.querySelector('[data-ugs-browser-panel]')).not.toBeNull();
-    await act(async () => button('新建临时聊天').click());
-    expect(chat).toHaveBeenCalledOnce();
-    await act(async () => button('项目文件').click());
+    try {
+      await click('[aria-label="打开浏览器"]');
+      const pane = container.querySelector<HTMLElement>('[data-ugs-browser-panel]')!;
+      expect(pane.dataset.expanded).toBe('true');
+      expect(pane.hidden).toBe(false);
+      expect(container.querySelector('[role="tab"][aria-label="浏览器"]')?.getAttribute('aria-selected')).toBe('true');
+      expect(closed).not.toHaveBeenCalled();
+    } finally { window.removeEventListener(CLOSE_PROJECT_RIGHT_PANEL_EVENT, closed); }
+  });
+
+  it('切换会话时保留浏览器，重新点击入口新建标签', async () => {
+    await click('[aria-label="打开浏览器"]');
+    const first = container.querySelector<HTMLElement>('[data-ugs-browser-panel]')!;
+    await click('[aria-label="会话信息流"]');
+    expect(first.hidden).toBe(true);
+    await click('[aria-label="打开浏览器"]');
+    const panes = container.querySelectorAll<HTMLElement>('[data-ugs-browser-panel]');
+    expect(panes).toHaveLength(2);
+    expect(panes[0]).toBe(first);
+    expect(first.hidden).toBe(true);
+    expect(panes[1].hidden).toBe(false);
+    expect(container.querySelectorAll('[role="tab"][aria-label="浏览器"]')).toHaveLength(2);
+  });
+
+  it('切换文件、工作区和其他主界面时隐藏网页，返回后保留原浏览器', async () => {
+    await click('[aria-label="打开浏览器"]');
+    const pane = container.querySelector<HTMLElement>('[data-ugs-browser-panel]')!;
+    await act(async () => useFilePreviewTabs.getState().open({ scope: 'e:/game', ref: { path: 'one.md', basename: 'one.md' }, previewFile: vi.fn(), diffEnabled: false, canOpenExternally: false }));
+    expect(pane.hidden).toBe(true);
+    await click('[role="tab"][aria-label="浏览器"]');
+    expect(pane.hidden).toBe(false);
+    await act(async () => useStore.setState({ composer: { ...useStore.getState().composer, workspace: 'E:/Other' } }));
+    expect(pane.hidden).toBe(true);
+    await act(async () => useStore.setState({ composer: { ...useStore.getState().composer, workspace: 'E:/Game' } }));
+    expect(pane.hidden).toBe(false);
+    await clickText('切换到任务');
+    expect(pane.hidden).toBe(true);
+    await clickText('切换到会话');
+    expect(container.querySelector('[data-ugs-browser-panel]')).toBe(pane);
+    expect(pane.hidden).toBe(false);
+  });
+
+  it('还原到侧栏后点击标题栏，新建标签并保留原浏览器', async () => {
+    await click('[aria-label="打开浏览器"]');
+    const pane = container.querySelector<HTMLElement>('[data-ugs-browser-panel]')!;
+    await clickText('还原侧栏');
+    expect(container.querySelector('[role="tab"][aria-label="浏览器"]')).toBeNull();
+    expect(pane.dataset.expanded).toBe('false');
+    expect(pane.hidden).toBe(false);
+    await click('[aria-label="打开浏览器"]');
+    const panes = container.querySelectorAll<HTMLElement>('[data-ugs-browser-panel]');
+    expect(panes).toHaveLength(2);
+    expect(panes[0]).toBe(pane);
+    expect(pane.dataset.expanded).toBe('true');
+    expect(pane.hidden).toBe(true);
+    expect(panes[1].hidden).toBe(false);
+    expect(container.querySelectorAll('[role="tab"][aria-label="浏览器"]')).toHaveLength(2);
+  });
+
+  it('手动还原到侧栏后，打开文件面板会关闭浏览器侧栏', async () => {
+    await click('[aria-label="打开浏览器"]');
+    await clickText('还原侧栏');
+    await act(async () => window.dispatchEvent(new CustomEvent(PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, { detail: { open: true } })));
     expect(container.querySelector('[data-ugs-browser-panel]')).toBeNull();
-    window.removeEventListener(CLOSE_PROJECT_RIGHT_PANEL_EVENT, closed);
-    window.removeEventListener(OPEN_TEMPORARY_CHAT_EVENT, chat);
-  });
-
-  it('放大时隐藏信息流，恢复时保留浏览器并显示信息流', async () => {
-    await act(async () => button('浏览器').click());
-    const pane = container.querySelector('[data-ugs-browser-panel]');
-    const region = container.querySelector<HTMLElement>('.ugs-workspace-chat-region')!;
-    await act(async () => [...container.querySelectorAll('button')].find((item) => item.textContent === '放大浏览器')!.click());
-    expect(region.style.display).toBe('none');
-    expect(container.querySelector('[data-ugs-browser-panel]')).toBe(pane);
-    await act(async () => [...container.querySelectorAll('button')].find((item) => item.textContent === '还原侧栏')!.click());
-    expect(region.style.display).toBe('');
-    expect(container.querySelector('[data-ugs-browser-panel]')).toBe(pane);
-    expect(toolbar().dataset.expanded).toBe('false');
-  });
-  it('默认收起，靠近展开，离开一秒后收起', async () => {
-    vi.useFakeTimers();
-    try {
-      const more = container.querySelector<HTMLElement>('.ugs-floating-tools-more')!;
-      expect(toolbar().dataset.expanded).toBe('false');
-      expect(more.getAttribute('aria-hidden')).toBe('true');
-      expect(button('浏览器').tabIndex).toBe(0);
-      expect(button('会话文件').tabIndex).toBe(-1);
-      await enterToolbar();
-      expect(toolbar().dataset.expanded).toBe('true');
-      expect(more.getAttribute('aria-hidden')).toBe('false');
-      expect(button('会话文件').tabIndex).toBe(0);
-      await leaveToolbar();
-      await act(async () => vi.advanceTimersByTime(999));
-      expect(toolbar().dataset.expanded).toBe('true');
-      await act(async () => vi.advanceTimersByTime(1));
-      expect(toolbar().dataset.expanded).toBe('false');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('延时期间重新靠近会取消收起', async () => {
-    vi.useFakeTimers();
-    try {
-      await enterToolbar();
-      await leaveToolbar();
-      await act(async () => vi.advanceTimersByTime(500));
-      await enterToolbar();
-      await act(async () => vi.advanceTimersByTime(1000));
-      expect(toolbar().dataset.expanded).toBe('true');
-      await leaveToolbar();
-      await act(async () => vi.advanceTimersByTime(1000));
-      expect(toolbar().dataset.expanded).toBe('false');
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('鼠标点击后的焦点不会阻止离开时收起', async () => {
-    vi.useFakeTimers();
-    try {
-      const browser = button('浏览器');
-      const matches = vi.spyOn(browser, 'matches').mockReturnValue(false);
-      await enterToolbar();
-      await act(async () => browser.focus());
-      await leaveToolbar();
-      await act(async () => vi.advanceTimersByTime(1000));
-      expect(toolbar().dataset.expanded).toBe('false');
-      matches.mockRestore();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('收起前移除隐藏入口的鼠标焦点', async () => {
-    vi.useFakeTimers();
-    try {
-      await enterToolbar();
-      const fileButton = button('会话文件');
-      const matches = vi.spyOn(fileButton, 'matches').mockReturnValue(false);
-      await act(async () => fileButton.focus());
-      await leaveToolbar();
-      await act(async () => vi.advanceTimersByTime(1000));
-      expect(toolbar().dataset.expanded).toBe('false');
-      expect(document.activeElement).not.toBe(fileButton);
-      matches.mockRestore();
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  it('键盘聚焦时保持展开，焦点移出后延时收起', async () => {
-    vi.useFakeTimers();
-    const outside = document.createElement('button');
-    document.body.append(outside);
-    try {
-      await act(async () => button('浏览器').focus());
-      expect(toolbar().dataset.expanded).toBe('true');
-      await act(async () => button('会话文件').focus());
-      await enterToolbar();
-      await leaveToolbar();
-      await act(async () => vi.advanceTimersByTime(1000));
-      expect(toolbar().dataset.expanded).toBe('true');
-      await act(async () => outside.focus());
-      await act(async () => vi.advanceTimersByTime(1000));
-      expect(toolbar().dataset.expanded).toBe('false');
-    } finally {
-      outside.remove();
-      vi.useRealTimers();
-    }
   });
 });

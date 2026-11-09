@@ -1313,15 +1313,15 @@ pre,
 }
 
 @keyframes ugs-title-scroll {
-  0%, 15% { transform: translateX(0); }
-  85%, 100% { transform: translateX(var(--ugs-title-scroll-distance)); }
+  from { transform: translateX(0); }
+  to { transform: translateX(var(--ugs-title-scroll-distance)); }
 }
 
 @media (prefers-reduced-motion: no-preference) {
   .ugs-sidebar-session:is(:hover, :focus-visible) .ugs-session-title[data-overflow='true'] .ugs-session-title-text {
     max-width: none;
     overflow: visible;
-    animation: ugs-title-scroll var(--ugs-title-scroll-duration) linear infinite;
+    animation: ugs-title-scroll var(--ugs-title-scroll-duration) var(--ugs-title-scroll-easing) infinite;
   }
 }
 

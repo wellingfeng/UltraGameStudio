@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import MemorySettings from './MemorySettings';
 import { applyMemoryOp, loadMemory } from '@/lib/memoryStore';
-import { queuePendingMemoryWrites } from '@/lib/memoryPending';
+import { listPendingMemoryWrites, queuePendingMemoryWrites, resolvePendingMemoryWrites } from '@/lib/memoryPending';
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -28,8 +28,8 @@ afterEach(() => {
 const flush = () => act(async () => { await Promise.resolve(); });
 
 describe('MemorySettings', () => {
-  it('reads every persisted journal phase while OFF and refreshes diagnostics without model retry', async () => {
-    const { saveMemoryReviewJournal } = await import('@/lib/memoryConfig');
+  it('keeps review diagnostics in the background while showing pending proposals', async () => {
+    const { loadMemoryReviewJournal, saveMemoryReviewJournal } = await import('@/lib/memoryConfig');
     const source = { hostId: 'desktop', namespaceId: 'local', workspaceId: 'original-A', sessionId: 'saved-session',
       turnId: 'saved-user', sourceMessageId: 'saved-user', runId: 'original-run', cwd: 'E:/original' };
     const jobs = (['reading', 'applied', 'awaiting_approval', 'noop', 'failed', 'cancelled'] as const).map((phase) => ({
@@ -38,25 +38,39 @@ describe('MemorySettings', () => {
       ...(phase === 'failed' ? { error: 'provider unavailable', recordingError: 'audit unavailable' } : {}),
     }));
     await saveMemoryReviewJournal(null, { version: 1, scheduler: { consumed: [], attempted: [], lastCompleted: [] }, jobs });
+    await queuePendingMemoryWrites([{ target: 'user', operations: [{ action: 'add', content: 'pending fact' }] }], 'review');
     await act(async () => { root.render(<MemorySettings locale="zh-CN" workspaceId="current-B" />); });
     await flush();
-    const journal = container.querySelector('[aria-label="记忆复盘诊断"]');
-    expect(journal).toBeTruthy();
-    expect(journal!.textContent).toContain('OFF');
-    for (const phase of jobs.map((job) => job.phase)) expect(journal!.textContent).toContain(phase);
-    expect(journal!.textContent).toContain('original-A');
-    expect(journal!.textContent).toContain('saved-session');
-    expect(journal!.textContent).toContain('saved-user');
-    expect(journal!.textContent).toContain('输出 tokens：未知');
-    expect(journal!.textContent).toContain('估算');
-    expect(journal!.textContent).toContain('provider unavailable');
-    expect(journal!.textContent).toContain('audit unavailable');
-    const { readMemoryJson } = await import('@/lib/memoryTransactions');
-    const raw = await readMemoryJson('memories/review-jobs.v1.json');
-    await saveMemoryReviewJournal(raw, { version: 1, scheduler: { consumed: [], attempted: [], lastCompleted: [] }, jobs: [] });
-    await act(async () => { (journal!.querySelector('button') as HTMLButtonElement).click(); });
+    expect(container.querySelector('[aria-label="记忆复盘诊断"]')).toBeNull();
+    expect(container.textContent).not.toContain('刷新诊断');
+    expect(container.textContent).not.toContain('saved-session');
+    expect(container.textContent).not.toContain('provider unavailable');
+    expect(container.textContent).toContain('pending fact');
+    expect(Array.from(container.querySelectorAll('button')).some((button) => button.title === '通过')).toBe(true);
+    const reject = Array.from(container.querySelectorAll('button')).find((button) => button.title === '拒绝');
+    expect(reject).toBeTruthy();
+    await act(async () => { reject!.click(); });
     await flush();
-    expect(journal!.textContent).toContain('暂无持久复盘记录');
+    expect(await listPendingMemoryWrites()).toEqual([]);
+    expect(await loadMemory('user')).toEqual([]);
+    expect((await loadMemoryReviewJournal()).value.jobs).toEqual(jobs);
+  });
+
+  it('uses hidden journal scopes to find receipts from another workspace', async () => {
+    const { saveMemoryReviewJournal } = await import('@/lib/memoryConfig');
+    await queuePendingMemoryWrites([{ target: 'memory', operations: [{ action: 'add', content: 'saved fact' }] }], 'review', 'original-A');
+    const [batch] = await listPendingMemoryWrites();
+    await resolvePendingMemoryWrites([batch.id], 'approve');
+    const source = { hostId: 'desktop', namespaceId: 'local', workspaceId: 'original-A', sessionId: 'saved-session',
+      turnId: 'saved-user', sourceMessageId: 'saved-user', runId: 'original-run' };
+    await saveMemoryReviewJournal(null, { version: 1, scheduler: { consumed: [], attempted: [], lastCompleted: [] },
+      jobs: [{ id: 'applied', source, phase: 'applied', appliedOps: 1, queuedOps: 0, updatedAt: 1000 }] });
+    await act(async () => { root.render(<MemorySettings locale="zh-CN" workspaceId="current-B" />); });
+    await flush();
+    const transactions = container.querySelector('[aria-label="记忆事务与撤销"]');
+    expect(transactions?.textContent).toContain('原项目：original-A');
+    expect(transactions?.textContent).toContain('预览撤销');
+    expect(container.querySelector('[aria-label="记忆复盘诊断"]')).toBeNull();
   });
 
   it('exposes undo only from fresh target receipts and restores the original batch scope', async () => {

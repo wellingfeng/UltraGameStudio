@@ -1,8 +1,21 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, Webview, WebviewUrl};
 use url::Url;
 
-const LABEL: &str = "floating-browser";
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserEvent {
+    browser_id: String,
+    url: String,
+}
+
+fn browser_label(browser_id: &str) -> Result<String, String> {
+    if browser_id.is_empty() || browser_id.len() > 80
+        || !browser_id.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') {
+        return Err("浏览器标识无效".into());
+    }
+    Ok(format!("floating-browser-{browser_id}"))
+}
 
 #[derive(Deserialize)]
 pub struct BrowserBounds {
@@ -57,29 +70,31 @@ fn dev_origin(webview: &Webview) -> Option<String> {
 }
 
 #[tauri::command]
-pub async fn floating_browser_open(webview: Webview, url: String, bounds: BrowserBounds) -> Result<(), String> {
+pub async fn floating_browser_open(webview: Webview, browser_id: String, url: String, bounds: BrowserBounds) -> Result<(), String> {
     require_main(&webview)?;
     validate_bounds(&bounds)?;
     let origin = dev_origin(&webview);
     let url = parse_url(&url, origin.as_deref())?;
+    let label = browser_label(&browser_id)?;
     let app = webview.app_handle().clone();
-    if let Some(browser) = app.get_webview(LABEL) {
+    if let Some(browser) = app.get_webview(&label) {
         browser.navigate(url).map_err(|error| error.to_string())?;
         return Ok(());
     }
     let new_window_app = app.clone();
     let navigation_origin = origin.clone();
     let new_window_origin = origin.clone();
-    let builder = tauri::webview::WebviewBuilder::new(LABEL, WebviewUrl::External(url))
+    let new_window_id = browser_id.clone();
+    let builder = tauri::webview::WebviewBuilder::new(label, WebviewUrl::External(url))
         .on_navigation(move |url| allowed_url(url, navigation_origin.as_deref()))
         .on_new_window(move |url, _| {
             if allowed_url(&url, new_window_origin.as_deref()) {
-                let _ = new_window_app.emit_to("main", "ugs:browser-open-url", url.to_string());
+                let _ = new_window_app.emit_to("main", "ugs:browser-open-url", BrowserEvent { browser_id: new_window_id.clone(), url: url.to_string() });
             }
             tauri::webview::NewWindowResponse::Deny
         })
-        .on_page_load(|browser, payload| {
-            let _ = browser.app_handle().emit_to("main", "ugs:browser-location", payload.url().to_string());
+        .on_page_load(move |browser, payload| {
+            let _ = browser.app_handle().emit_to("main", "ugs:browser-location", BrowserEvent { browser_id: browser_id.clone(), url: payload.url().to_string() });
         });
     webview.window().add_child(builder,
         tauri::LogicalPosition::new(bounds.x, bounds.y),
@@ -89,10 +104,10 @@ pub async fn floating_browser_open(webview: Webview, url: String, bounds: Browse
 }
 
 #[tauri::command]
-pub async fn floating_browser_bounds(webview: Webview, bounds: BrowserBounds) -> Result<(), String> {
+pub async fn floating_browser_bounds(webview: Webview, browser_id: String, bounds: BrowserBounds) -> Result<(), String> {
     require_main(&webview)?;
     validate_bounds(&bounds)?;
-    if let Some(browser) = webview.app_handle().get_webview(LABEL) {
+    if let Some(browser) = webview.app_handle().get_webview(&browser_label(&browser_id)?) {
         browser.set_position(tauri::LogicalPosition::new(bounds.x, bounds.y)).map_err(|error| error.to_string())?;
         browser.set_size(tauri::LogicalSize::new(bounds.width, bounds.height)).map_err(|error| error.to_string())?;
     }
@@ -100,9 +115,18 @@ pub async fn floating_browser_bounds(webview: Webview, bounds: BrowserBounds) ->
 }
 
 #[tauri::command]
-pub async fn floating_browser_action(webview: Webview, action: String) -> Result<(), String> {
+pub async fn floating_browser_visibility(webview: Webview, browser_id: String, visible: bool) -> Result<(), String> {
     require_main(&webview)?;
-    let browser = webview.app_handle().get_webview(LABEL).ok_or("浏览器尚未打开")?;
+    if let Some(browser) = webview.app_handle().get_webview(&browser_label(&browser_id)?) {
+        if visible { browser.show() } else { browser.hide() }.map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn floating_browser_action(webview: Webview, browser_id: String, action: String) -> Result<(), String> {
+    require_main(&webview)?;
+    let browser = webview.app_handle().get_webview(&browser_label(&browser_id)?).ok_or("浏览器尚未打开")?;
     match action.as_str() {
         "back" => browser.eval("history.back()"),
         "forward" => browser.eval("history.forward()"),
@@ -112,17 +136,17 @@ pub async fn floating_browser_action(webview: Webview, action: String) -> Result
 }
 
 #[tauri::command]
-pub async fn floating_browser_current_url(webview: Webview) -> Result<String, String> {
+pub async fn floating_browser_current_url(webview: Webview, browser_id: String) -> Result<String, String> {
     require_main(&webview)?;
-    let browser = webview.app_handle().get_webview(LABEL).ok_or("浏览器尚未打开")?;
+    let browser = webview.app_handle().get_webview(&browser_label(&browser_id)?).ok_or("浏览器尚未打开")?;
     browser.url().map(|url| url.to_string()).map_err(|error| error.to_string())
 }
 
 // Read the rendered page in its own webview so SPA state and logged-in pages are preserved.
 #[tauri::command]
-pub async fn floating_browser_page_context(webview: Webview) -> Result<serde_json::Value, String> {
+pub async fn floating_browser_page_context(webview: Webview, browser_id: String) -> Result<serde_json::Value, String> {
     require_main(&webview)?;
-    let browser = webview.app_handle().get_webview(LABEL).ok_or("浏览器尚未打开")?;
+    let browser = webview.app_handle().get_webview(&browser_label(&browser_id)?).ok_or("浏览器尚未打开")?;
     #[cfg(target_os = "windows")]
     {
         use webview2_com::ExecuteScriptCompletedHandler;
@@ -150,9 +174,9 @@ pub async fn floating_browser_page_context(webview: Webview) -> Result<serde_jso
 }
 
 #[tauri::command]
-pub async fn floating_browser_close(webview: Webview) -> Result<(), String> {
+pub async fn floating_browser_close(webview: Webview, browser_id: String) -> Result<(), String> {
     require_main(&webview)?;
-    if let Some(browser) = webview.app_handle().get_webview(LABEL) {
+    if let Some(browser) = webview.app_handle().get_webview(&browser_label(&browser_id)?) {
         browser.close().map_err(|error| error.to_string())?;
     }
     Ok(())
@@ -211,6 +235,18 @@ fn open_system_browser_file(url: &Url) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_labels_are_unique_and_cannot_target_other_webviews() {
+        assert_ne!(browser_label("first-1").unwrap(), browser_label("second-2").unwrap());
+        for input in ["", "main", "../main", "bad id", "UPPER"] {
+            if input == "main" {
+                assert_eq!(browser_label(input).unwrap(), "floating-browser-main");
+            } else {
+                assert!(browser_label(input).is_err(), "{input}");
+            }
+        }
+    }
 
     #[test]
     fn blocks_app_origins_and_unsafe_schemes() {

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { simpleBlueprint } from '@/core/defaultBlueprint';
+import { readStartUserInputs, setStartUserInputs } from '@/core/startInputs';
 import { defaultComposer } from './sampleSessions';
 import { getAiEditViewSource } from './channelRegistry';
 const gateway = vi.hoisted(() => ({ complete: vi.fn() }));
@@ -9,7 +10,7 @@ vi.mock('@/lib/modelGateway/modelGateway', async (original) => ({
   completeGatewayText: gateway.complete,
 }));
 import { historyStore, __resetHistorySessionCacheForTests } from './history/store';
-import { __resetSimpleChatRuntimeForTests, createScheduledTaskSession, loadSessionTree, sessionFromRecord, sessionLiveStatus, useStore } from './useStore';
+import { __resetSimpleChatRuntimeForTests, clearScheduledTaskSession, createScheduledTaskSession, loadSessionTree, sessionFromRecord, sessionLiveStatus, useStore } from './useStore';
 import { SCHEDULED_TASK_SCOPE } from '@/lib/scheduledTaskScope';
 import { taskFromTemplate, SCHEDULED_TASK_TEMPLATES } from '@/lib/scheduledTaskTemplates';
 const originalSendPrompt = useStore.getState().sendPrompt;
@@ -98,6 +99,79 @@ describe('定时任务独立归属', () => {
     expect(useStore.getState().messages).toEqual(foreground);
     expect(useStore.getState().activeSessionId).toBe('current');
     expect(useStore.getState().composer.workspace).toBe('E:/original-execution');
+  });
+
+  it('清空持久化内容与内存快照，旧写入不能恢复，下一次运行从空会话开始', async () => {
+    gateway.complete.mockResolvedValue('旧运行结果');
+    const task = taskFromTemplate(SCHEDULED_TASK_TEMPLATES[0], 'zh-CN');
+    const record = await historyStore.createSession({ workspaceId: SCHEDULED_TASK_SCOPE, isWorkflow: false, meta: { scheduledTask: task }, messages: [] });
+    const foreground = [{ id: 'foreground', role: 'user' as const, text: '当前会话', createdAt: 1 }];
+    useStore.setState({ historyReady: true, activeWorkspaceId: 'project', activeSessionId: 'current', workflow: simpleBlueprint('当前会话'), composer: defaultComposer, messages: foreground, sessions: [], sessionTree: { [SCHEDULED_TASK_SCOPE]: [sessionFromRecord(record)] }, composerBySession: {}, aiEditingSessions: [], runningSessions: [], chattingSessions: [], waitingInputSessions: [], jobSessions: [] });
+    const key = { workspaceId: SCHEDULED_TASK_SCOPE, sessionId: record.id };
+    await useStore.getState().runScheduledTaskSession(record.id, SCHEDULED_TASK_SCOPE, task);
+    await vi.waitFor(async () => {
+      expect(sessionLiveStatus(key, useStore.getState())).toBeNull();
+      expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.messages.length).toBeGreaterThan(0);
+    });
+    const oldMessages = [...(getAiEditViewSource(SCHEDULED_TASK_SCOPE, record.id)?.messages ?? [])];
+    expect(oldMessages.some((message) => message.text.includes('旧运行结果'))).toBe(true);
+    await clearScheduledTaskSession(SCHEDULED_TASK_SCOPE, record.id);
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.messages).toEqual([]);
+    expect(getAiEditViewSource(SCHEDULED_TASK_SCOPE, record.id)?.messages).toEqual([]);
+    expect(useStore.getState().messages).toEqual(foreground);
+    await historyStore.updateSession(SCHEDULED_TASK_SCOPE, record.id, { messages: oldMessages, mergeMessages: true });
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.messages).toEqual([]);
+    __resetHistorySessionCacheForTests();
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.messages).toEqual([]);
+    const send = vi.spyOn(useStore.getState(), 'sendPrompt').mockReturnValue(true);
+    await useStore.getState().runScheduledTaskSession(record.id, SCHEDULED_TASK_SCOPE, task);
+    expect(send).toHaveBeenCalledWith(task.reminderText, expect.objectContaining({ externalSession: expect.objectContaining({ messages: [] }) }));
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.meta?.scheduledTask).toEqual(task);
+  });
+
+  it('清空旧任务的会话输入，保留排程配置', async () => {
+    const task = taskFromTemplate(SCHEDULED_TASK_TEMPLATES[0], 'zh-CN');
+    const workflow = setStartUserInputs(simpleBlueprint('旧任务'), ['之前的会话输入']);
+    const record = await historyStore.createSession({ workspaceId: SCHEDULED_TASK_SCOPE, isWorkflow: true, workflow, meta: { scheduledTask: task, contextCompressed: true }, messages: [{ id: 'old', role: 'user', text: '之前的会话输入', createdAt: 1 }] });
+    useStore.setState({ historyReady: true, activeWorkspaceId: 'project', activeSessionId: 'current', sessionTree: { [SCHEDULED_TASK_SCOPE]: [sessionFromRecord(record)] }, aiEditingSessions: [], runningSessions: [], chattingSessions: [], waitingInputSessions: [], jobSessions: [] });
+    await clearScheduledTaskSession(SCHEDULED_TASK_SCOPE, record.id);
+    const saved = await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id);
+    expect(saved?.messages).toEqual([]);
+    expect(readStartUserInputs(saved?.workflow?.nodes.find((node) => node.type === 'start')?.params)).toEqual([]);
+    expect(saved?.meta?.scheduledTask).toEqual(task);
+    expect(saved?.meta?.contextCompressed).toBe(false);
+  });
+
+  it('备份清理失败时仍更新会话，并明确报告已清空', async () => {
+    const task = taskFromTemplate(SCHEDULED_TASK_TEMPLATES[0], 'zh-CN');
+    const record = await historyStore.createSession({ workspaceId: SCHEDULED_TASK_SCOPE, isWorkflow: false, meta: { scheduledTask: task }, messages: [{ id: 'old', role: 'assistant', text: '旧记录', createdAt: 1 }] });
+    useStore.setState({ locale: 'zh-CN', historyReady: true, activeWorkspaceId: 'project', activeSessionId: 'current', sessionTree: { [SCHEDULED_TASK_SCOPE]: [sessionFromRecord(record)] }, aiEditingSessions: [], runningSessions: [], chattingSessions: [], waitingInputSessions: [], jobSessions: [] });
+    const originalClear = historyStore.clearScheduledTaskHistory.bind(historyStore);
+    vi.spyOn(historyStore, 'clearScheduledTaskHistory').mockImplementation(async (...args) => ({ ...await originalClear(...args), backupError: 'disk error' }));
+    await expect(clearScheduledTaskSession(SCHEDULED_TASK_SCOPE, record.id)).rejects.toThrow('会话已清空，但历史备份清理失败');
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.messages).toEqual([]);
+    expect(useStore.getState().sessionTree[SCHEDULED_TASK_SCOPE][0].messageCount).toBe(0);
+  });
+
+  it('运行中禁止清空，等待清空完成后才派发同一任务', async () => {
+    const task = taskFromTemplate(SCHEDULED_TASK_TEMPLATES[0], 'zh-CN');
+    const record = await historyStore.createSession({ workspaceId: SCHEDULED_TASK_SCOPE, isWorkflow: false, meta: { scheduledTask: task }, messages: [{ id: 'old', role: 'assistant', text: '旧记录', createdAt: 1 }] });
+    const key = { workspaceId: SCHEDULED_TASK_SCOPE, sessionId: record.id };
+    useStore.setState({ historyReady: true, activeWorkspaceId: 'project', activeSessionId: 'current', sessionTree: { [SCHEDULED_TASK_SCOPE]: [sessionFromRecord(record)] }, aiEditingSessions: [], runningSessions: [], chattingSessions: [key], waitingInputSessions: [], jobSessions: [] });
+    await expect(clearScheduledTaskSession(SCHEDULED_TASK_SCOPE, record.id)).rejects.toThrow();
+    expect((await historyStore.getSession(SCHEDULED_TASK_SCOPE, record.id))?.messages).toHaveLength(1);
+    useStore.setState({ chattingSessions: [] });
+    const originalClear = historyStore.clearScheduledTaskHistory.bind(historyStore);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    vi.spyOn(historyStore, 'clearScheduledTaskHistory').mockImplementation(async (...args) => { await gate; return originalClear(...args); });
+    const send = vi.spyOn(useStore.getState(), 'sendPrompt').mockReturnValue(true);
+    const clearing = clearScheduledTaskSession(SCHEDULED_TASK_SCOPE, record.id);
+    const running = useStore.getState().runScheduledTaskSession(record.id, SCHEDULED_TASK_SCOPE, task);
+    expect(send).not.toHaveBeenCalled();
+    release();
+    await Promise.all([clearing, running]);
+    expect(send).toHaveBeenCalledWith(task.reminderText, expect.objectContaining({ externalSession: expect.objectContaining({ messages: [] }) }));
   });
 
   it('保存保留次数时清理旧记录，迟到的合并写入不能恢复它们', async () => {

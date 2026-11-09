@@ -339,6 +339,7 @@ export interface StoreState {
   newSimpleWorkflow: () => void;
   newCaptainWorkflow: () => void;
   newSession: () => void;
+  continueSessionWithHandoff: () => Promise<{ thinkingLevel?: string }>;
   selectSession: (sessionId: string, workspaceId?: string) => void;
   deleteSession: (sessionId: string, workspaceId?: string) => void;
   deleteWorkspaceHistory: (workspaceId: string) => void;
@@ -379,7 +380,7 @@ export interface StoreState {
   ) => Promise<void>;
   sendPrompt: (
     text: string,
-    options?: { forceGameExperts?: boolean; gameExpertIds?: string[]; skillIds?: string[]; locale?: Locale; reviseMessageId?: string; scheduledTaskRun?: boolean; externalSession?: { workspaceId: string; sessionId: string; messages: Message[] } },
+    options?: { forceGameExperts?: boolean; gameExpertIds?: string[]; skillIds?: string[]; locale?: Locale; reviseMessageId?: string; scheduledTaskRun?: boolean; onChatTerminal?: (status: 'completed' | 'cancelled' | 'failed') => void; gatewaySelectionOverride?: GatewaySelection; externalSession?: { workspaceId: string; sessionId: string; messages: Message[] } },
   ) => boolean;
   /** Explicit skill review never falls through to the normal chat gateway. */
   learnSkills: (kind: 'learn' | 'refine', text: string) => boolean;

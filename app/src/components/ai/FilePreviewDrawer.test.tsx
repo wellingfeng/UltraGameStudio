@@ -103,6 +103,18 @@ describe('FilePreviewDrawer', () => {
     await act(async () => image.click());
     expect(container.querySelector('[role="dialog"][aria-label="图片查看"]')).not.toBeNull();
     expect(vi.mocked(previewLocalFile)).toHaveBeenCalledTimes(1);
+    const viewport = container.querySelector<HTMLDivElement>('.ai-image-preview-viewport')!;
+    viewport.setPointerCapture = vi.fn();
+    viewport.hasPointerCapture = vi.fn(() => true);
+    viewport.releasePointerCapture = vi.fn();
+    for (const type of ['pointerdown', 'pointerup']) {
+      const event = new MouseEvent(type, { bubbles: true, button: 0, clientX: 20, clientY: 20 });
+      Object.defineProperty(event, 'pointerId', { value: 1 });
+      await act(async () => viewport.dispatchEvent(event));
+    }
+    expect(container.querySelector('[role="dialog"][aria-label="图片查看"]')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    await act(async () => image.click());
     await act(async () => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
     expect(container.querySelector('[role="dialog"][aria-label="图片查看"]')).toBeNull();
     expect(onClose).not.toHaveBeenCalled();
