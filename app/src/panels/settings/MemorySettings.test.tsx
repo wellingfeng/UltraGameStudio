@@ -178,6 +178,20 @@ describe('MemorySettings', () => {
     expect(await loadMemory('user')).toEqual([]);
   });
 
+  it('explains a changed target and retains the proposal for review', async () => {
+    await applyMemoryOp('user', { action: 'add', content: 'original target' });
+    await queuePendingMemoryWrites([{ target: 'user', operations: [{ action: 'remove', oldText: 'target' }] }], 'review');
+    await applyMemoryOp('user', { action: 'replace', oldText: 'target', content: 'changed target' });
+    await act(async () => { root.render(<MemorySettings locale="zh-CN" workspaceId="B" />); });
+    await flush();
+    await act(async () => { Array.from(container.querySelectorAll('button')).find((button) => button.title === '通过')!.click(); });
+    await flush();
+    expect(container.textContent).toContain('待删除或替换的记忆已变化：target');
+    expect(container.textContent).toContain('提案未写入');
+    expect(await listPendingMemoryWrites()).toHaveLength(1);
+    expect((await loadMemory('user')).map((entry) => entry.text)).toEqual(['changed target']);
+  });
+
   it('adds a user entry through the input', async () => {
     await act(async () => {
       root.render(<MemorySettings locale="zh-CN" workspaceId={null} />);

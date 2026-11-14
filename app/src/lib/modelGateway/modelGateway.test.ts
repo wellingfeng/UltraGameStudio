@@ -1,5 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { completeGatewayText } from './modelGateway';
+import type { GatewayTextRequest } from './types';
+import { readActiveAgentUsage, readAgentUsageHistory } from '@/lib/agentUsageHistory';
 import {
   readUsageMeterSnapshot,
   sessionCachePercent,
@@ -51,6 +53,28 @@ describe('completeGatewayText', () => {
       source: 'system',
     });
     mocks.aiEditViaCli.mockResolvedValue('cli fallback');
+  });
+
+  it('tracks concurrent direct calls independently and removes failed calls', async () => {
+    const pending: Array<{ resolve: (value: string) => void; reject: (error: Error) => void; request: GatewayTextRequest }> = [];
+    mocks.completeOpenAICompatible.mockImplementation((request) => new Promise<string>((resolve, reject) => pending.push({ resolve, reject, request })));
+    const route = (model: string) => ({
+      selection: { adapter: 'codex' as const, modelClass: model }, adapter: 'codex' as const,
+      modelClass: model, model, transport: 'openai-compatible' as const, mode: 'direct' as const,
+      baseUrl: 'http://localhost:1234', label: model, source: 'global' as const,
+    });
+    const first = completeGatewayText({ route: route('terra'), system: '', userContent: 'one' });
+    const second = completeGatewayText({ route: route('astra'), system: '', userContent: 'two' });
+    expect(readActiveAgentUsage().map((row) => row.model).sort()).toEqual(['astra', 'terra']);
+    pending[1].request.onUsage?.({ inputTokens: 123, outputTokens: 45 });
+    expect(readActiveAgentUsage().find((row) => row.model === 'astra')).toMatchObject({ hasUsage: true, inputTokens: 123, outputTokens: 45 });
+    pending[0].reject(new Error('stopped'));
+    await expect(first).rejects.toThrow('stopped');
+    expect(readActiveAgentUsage().map((row) => row.model)).toEqual(['astra']);
+    pending[1].resolve('done');
+    await expect(second).resolves.toBe('done');
+    expect(readActiveAgentUsage()).toEqual([]);
+    expect(readAgentUsageHistory()).toEqual([expect.objectContaining({ model: 'astra', inputTokens: 123, outputTokens: 45 })]);
   });
 
   it('forwards scoped skill authority and abort signal through ordinary direct-to-CLI fallback', async () => {

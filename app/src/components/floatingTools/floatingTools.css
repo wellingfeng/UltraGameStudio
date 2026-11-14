@@ -14,13 +14,14 @@
 .ugs-browser-resize{position:absolute;z-index:2;top:0;bottom:0;left:-4px;width:8px;cursor:col-resize}
 .ugs-browser-heading{display:flex;align-items:center;gap:8px;flex:none;height:38px;padding:0 10px 0 13px;border-bottom:1px solid var(--border-soft);color:var(--fg-dim);font-size:12px;font-weight:500}
 .ugs-browser-heading span{flex:1}.ugs-browser-pane button{width:26px;height:26px;border-radius:5px}
+.ugs-browser-floating-tools-slot{position:relative;flex:1;min-width:36px;height:100%}
+.ugs-browser-floating-tools-slot .ugs-preview-floating-tools{top:1px;right:4px}
 .ugs-browser-pane button:hover:not(:disabled){color:var(--fg);background:var(--panel-2)}.ugs-browser-pane button:disabled{opacity:.35;cursor:default}
 .ugs-browser-navigation{display:flex;align-items:center;gap:2px;flex:none;padding:5px 7px;border-bottom:1px solid var(--border-soft);background:var(--panel)}
 .ugs-browser-navigation input{flex:1;min-width:0;height:27px;margin:0 3px;padding:0 8px;border:1px solid var(--border-soft);border-radius:5px;background:var(--bg);color:var(--fg);font:inherit;font-size:12px}
 .ugs-browser-navigation input::placeholder{color:var(--fg-faint)}
 .ugs-browser-body{position:relative;display:flex;flex:1;min-height:0}
 .ugs-browser-page{position:relative;display:flex;flex:1;min-width:0;min-height:0}
-.ugs-browser-body-gutter{padding-right:46px;background:var(--bg)}
 .ugs-browser-viewport{position:relative;flex:1;min-width:0;min-height:0;background:var(--bg)}
 .ugs-preview-floating-tools{top:12px;right:20px}
 .ugs-preview-floating-tools button{cursor:grab;touch-action:none;user-select:none}

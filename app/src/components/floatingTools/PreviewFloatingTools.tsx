@@ -34,10 +34,7 @@ function localPosition(element: HTMLElement, position: Position): { local: Posit
   const bounds = parent.getBoundingClientRect();
   const rect = element.getBoundingClientRect();
   if (!bounds.width || !bounds.height || !rect.width || !rect.height) return null;
-  // A native browser webview is above the main webview. Keep the control in its gutter.
-  const nativeViewport = parent.classList.contains('ugs-browser-body-gutter')
-    ? parent.querySelector<HTMLElement>('.ugs-browser-viewport')?.getBoundingClientRect() : null;
-  const left = Math.max(bounds.left, nativeViewport?.right ?? bounds.left, 0);
+  const left = Math.max(bounds.left, 0);
   const top = Math.max(bounds.top, 0);
   const right = Math.min(bounds.right, window.innerWidth);
   const bottom = Math.min(bounds.bottom, window.innerHeight);

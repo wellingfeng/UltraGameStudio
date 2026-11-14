@@ -9,6 +9,13 @@ struct BrowserEvent {
     url: String,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserTitleEvent {
+    browser_id: String,
+    title: String,
+}
+
 fn browser_label(browser_id: &str) -> Result<String, String> {
     if browser_id.is_empty() || browser_id.len() > 80
         || !browser_id.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-') {
@@ -85,6 +92,7 @@ pub async fn floating_browser_open(webview: Webview, browser_id: String, url: St
     let navigation_origin = origin.clone();
     let new_window_origin = origin.clone();
     let new_window_id = browser_id.clone();
+    let title_browser_id = browser_id.clone();
     let builder = tauri::webview::WebviewBuilder::new(label, WebviewUrl::External(url))
         .on_navigation(move |url| allowed_url(url, navigation_origin.as_deref()))
         .on_new_window(move |url, _| {
@@ -92,6 +100,9 @@ pub async fn floating_browser_open(webview: Webview, browser_id: String, url: St
                 let _ = new_window_app.emit_to("main", "ugs:browser-open-url", BrowserEvent { browser_id: new_window_id.clone(), url: url.to_string() });
             }
             tauri::webview::NewWindowResponse::Deny
+        })
+        .on_document_title_changed(move |browser, title| {
+            let _ = browser.app_handle().emit_to("main", "ugs:browser-title", BrowserTitleEvent { browser_id: title_browser_id.clone(), title });
         })
         .on_page_load(move |browser, payload| {
             let _ = browser.app_handle().emit_to("main", "ugs:browser-location", BrowserEvent { browser_id: browser_id.clone(), url: payload.url().to_string() });

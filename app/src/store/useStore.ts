@@ -33,6 +33,7 @@ import {
 } from '@/components/ai/lib/toolEvent';
 import { legacyXmlToolsToSentinels } from '@/components/ai/lib/legacyXmlTool';
 import { scanFileRefs } from '@/components/ai/lib/fileScan';
+import { latestUserInput } from '@/components/ai/lib/orderDisplayMessages';
 import {
   displayFileRefPath,
   isDocumentFileRef,
@@ -69,7 +70,10 @@ import {
   recordModelCall,
   timeoutPolicyForSelection,
 } from '@/lib/modelSpeed';
+import { finishActiveAgentUsage, updateActiveAgentUsage } from '@/lib/agentUsageHistory';
 import {
+  startActiveModelUsage,
+  updateActiveModelUsage,
   estimateGatewayUsage,
   estimateUsageForText,
   recordEstimatedModelUsageForSelection,
@@ -5506,7 +5510,7 @@ export const useStore = create<StoreState>((set, get) => ({
   updateQueuedChatMessage: (messageId, text) => {
     const entry = queuedChatTurnEntryForMessage(messageId);
     const nextText = text.trim();
-    if (!entry || !nextText) return false;
+    if (!entry || !nextText || !aiEditViewActive(entry.channel) || latestUserInput(get().messages)?.id !== messageId) return false;
     const ch = entry.channel;
     ch.messages = ch.messages.map((message) =>
       message.id === messageId ? { ...message, text: nextText } : message,
@@ -5611,7 +5615,7 @@ export const useStore = create<StoreState>((set, get) => ({
   beginQueuedChatMessageEdit: (messageId) => {
     // Only a message that is still queued may be edited; otherwise the gate
     // would pause a slot that no longer exists.
-    if (!queuedChatTurnEntryForMessage(messageId)) return;
+    if (!queuedChatTurnEntryForMessage(messageId) || latestUserInput(get().messages)?.id !== messageId) return;
     beginQueuedChatEditGate(messageId);
     useStore.setState({ editingQueuedChatMessageId: messageId });
   },
@@ -5664,7 +5668,8 @@ export const useStore = create<StoreState>((set, get) => ({
     const revisionMessage = revisionPosition >= 0 ? state.messages[revisionPosition] : undefined;
     if (options?.reviseMessageId) {
       if (options.externalSession || !state.workflow.meta?.simple || revisionMessage?.role !== 'user' || revisionMessage.localOnly ||
-          revisionMessage.interaction || state.queuedChatMessageIds.includes(revisionMessage.id)) return false;
+          revisionMessage.interaction || state.queuedChatMessageIds.includes(revisionMessage.id) ||
+          latestUserInput(state.messages)?.id !== revisionMessage.id) return false;
     }
     // Image generation is routed explicitly (the /image-mode-* sticky mode and
     // /image one-shot command in AIDock), never inferred from message text here.
@@ -5713,7 +5718,9 @@ export const useStore = create<StoreState>((set, get) => ({
       id: shortId('m'),
       role: 'user',
       text: trimmed,
-      createdAt: Date.now(),
+      // A preceding revision may already be ahead of the wall clock.
+      createdAt: state.messages.reduce((latest, message) =>
+        message.role === 'user' ? Math.max(latest, message.createdAt + 1) : latest, Date.now()),
       ...(options?.scheduledTaskRun ? { scheduledTaskRun: true } : {}),
     };
     linkMessageManagedAssets(userMsg, aiEditingSession);
@@ -6238,14 +6245,17 @@ ${previousReply.slice(0, 4000)}
       let realUsage: ModelUsageReport | null = null;
       let usageRecorded = false;
       const usageRoute = {
-        baseUrl: cli.baseUrl, model: cli.model, providerName: cli.providerName,
+        baseUrl: cli.baseUrl, model: opts.model ?? cli.model, providerName: cli.providerName,
         channelName: cli.channelName, label: cli.label,
       };
+      const activeUsageId = startActiveModelUsage({ ...usageRoute, selection: cli.selection }, startedAt);
       const recordRealUsage = (report: ModelUsageReport) => {
         if (usageRecorded) return;
         usageRecorded = true;
         recordModelUsageForRoute({ ...usageRoute, selection: cli.selection }, report, {
           estimated: false, context: { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
+          elapsedMs: Date.now() - startedAt,
+          firstResponseMs: firstProgressAt ? firstProgressAt - startedAt : undefined,
         });
         rememberExplicitUsage(report, { estimated: false });
       };
@@ -6264,10 +6274,17 @@ ${previousReply.slice(0, 4000)}
           signal: ch.abortController.signal,
           onUsage: (raw) => {
             realUsage = mergeUsageReports(realUsage, usageReportFromCliUsage(raw));
+            if (realUsage) updateActiveModelUsage(activeUsageId, realUsage, {
+              elapsedMs: Date.now() - startedAt,
+              firstResponseMs: firstProgressAt ? firstProgressAt - startedAt : undefined,
+            });
           },
           onProgress: opts.onProgress
             ? (chunk) => {
-                firstProgressAt ??= Date.now();
+                if (chunk && firstProgressAt === undefined) {
+                  firstProgressAt = Date.now();
+                  updateActiveAgentUsage(activeUsageId, { firstResponseMs: firstProgressAt - startedAt });
+                }
                 opts.onProgress?.(chunk);
               }
             : undefined,
@@ -6287,6 +6304,8 @@ ${previousReply.slice(0, 4000)}
             usageRoute,
             {
               context: { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
+              elapsedMs: Date.now() - startedAt,
+              firstResponseMs: firstProgressAt ? firstProgressAt - startedAt : undefined,
             },
           );
         }
@@ -6305,6 +6324,7 @@ ${previousReply.slice(0, 4000)}
         });
         throw err;
       } finally {
+        finishActiveAgentUsage(activeUsageId);
         if (ch.liveSteer?.runId === runId) {
           ch.liveSteer.accepting = false;
           syncQueuedChatMessageIds();
@@ -9408,7 +9428,9 @@ function startExplicitSkillLearning(kind: 'learn' | 'refine', text: string): boo
     ...(previous?.origin.cwd ? { cwd: previous.origin.cwd } : {}),
   };
   const command: Message = { id: commandId, role: 'user', text: `/${kind}${input ? ` ${input}` : ''}`,
-    createdAt: Date.now(), localOnly: true, ...(kind === 'learn' ? { skillContext: {
+    createdAt: current.messages.reduce((latest, message) =>
+      message.role === 'user' ? Math.max(latest, message.createdAt + 1) : latest, Date.now()),
+    localOnly: true, ...(kind === 'learn' ? { skillContext: {
       origin: { ...origin }, loadedSkills: [], catalogRevision: '',
     } } : {}) };
   const source = { workspaceId, sessionId };
@@ -11020,9 +11042,12 @@ async function invokeAgentCli(
 ): Promise<string> {
   const runId = makeCliRunId();
   ch.cliRunIds.add(runId);
+  const startedAt = Date.now();
+  let firstResponseMs: number | undefined;
   // Capture the backend's real token usage (cache hits included) so node runs
   // also feed true cache percentages into the meter instead of estimates.
   let realUsage: ModelUsageReport | null = null;
+  const activeUsageId = opts.selection ? startActiveModelUsage({ selection: opts.selection, model: opts.model }, startedAt) : undefined;
   try {
     const text = await aiEditViaCli(prompt, adapter, {
       ...opts,
@@ -11034,9 +11059,17 @@ async function invokeAgentCli(
       idleTimeoutSeconds: opts.idleTimeoutSeconds,
       runId,
       onTool: opts.onToolEvent,
+      onProgress: opts.onProgress ? (chunk) => {
+        if (chunk && firstResponseMs === undefined) {
+          firstResponseMs = Date.now() - startedAt;
+          if (activeUsageId) updateActiveAgentUsage(activeUsageId, { firstResponseMs });
+        }
+        opts.onProgress?.(chunk);
+      } : undefined,
       signal: guiSkillRuns.get(ch)?.signal,
       onUsage: (raw) => {
         realUsage = mergeUsageReports(realUsage, usageReportFromCliUsage(raw));
+        if (activeUsageId && realUsage) updateActiveModelUsage(activeUsageId, realUsage, { elapsedMs: Date.now() - startedAt, firstResponseMs });
       },
     });
     if (opts.selection) {
@@ -11054,6 +11087,8 @@ async function invokeAgentCli(
           {
             estimated: false,
             context: { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
+            elapsedMs: Date.now() - startedAt,
+            firstResponseMs,
           },
         );
       } else {
@@ -11064,12 +11099,15 @@ async function invokeAgentCli(
           usageRoute,
           {
             context: { workspaceId: ch.workspaceId, sessionId: ch.sessionId },
+            elapsedMs: Date.now() - startedAt,
+            firstResponseMs,
           },
         );
       }
     }
     return text;
   } finally {
+    if (activeUsageId) finishActiveAgentUsage(activeUsageId);
     ch.cliRunIds.delete(runId);
   }
 }

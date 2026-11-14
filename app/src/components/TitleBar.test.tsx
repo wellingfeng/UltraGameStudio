@@ -41,6 +41,12 @@ it('moves the existing chat header into chrome without duplicating it', async ()
   expect(host.querySelectorAll('header')).toHaveLength(1);
 });
 
+it('places agent usage immediately before model rankings', async () => {
+  await render();
+  const usage = host.querySelector('.ugs-agent-usage');
+  expect(usage?.nextElementSibling).toBe(host.querySelector('.ugs-model-rankings'));
+});
+
 it('uses native window actions and does not maximize when editing the title', async () => {
   await render();
   for (const [label, method] of [['最小化', 'minimize'], ['最大化', 'toggleMaximize'], ['关闭窗口', 'close']] as const) {

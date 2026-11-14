@@ -16,6 +16,7 @@ mod autosave;
 mod cache_cleanup;
 mod cc_switch_import;
 mod cli_runtime;
+mod claude_usage;
 mod dsh_log;
 mod free_proxy;
 mod floating_browser;
@@ -37,6 +38,9 @@ mod temporary_chat;
 mod tools;
 use tools::mcp::{ProbeResult as ProjectMcpProbeResult, ServerConfig as ProjectMcpProbeServerConfig};
 use native_background::PipeWriter;
+use claude_usage::ClaudeUsageTracker;
+#[cfg(test)]
+use claude_usage::claude_message_usage;
 
 /// Windows CreateProcess flag: don't allocate a console window for the child.
 /// Without this, spawning the `claude` console binary pops up a black terminal
@@ -14866,8 +14870,13 @@ async fn check_cli_updates() -> Result<Vec<CliVersionStatus>, String> {
 }
 
 #[tauri::command]
-async fn update_cli(adapter: String) -> Result<String, String> {
-    native_background::run_bounded(native_background::update_lane(), std::time::Duration::from_secs(360), move || run_cli_update_blocking(&adapter)).await
+async fn update_cli(adapter: String, on_started: tauri::ipc::Channel<()>) -> Result<String, String> {
+    native_background::run_queued(
+        native_background::update_lane(),
+        std::time::Duration::from_secs(360),
+        move || { let _ = on_started.send(()); },
+        move || run_cli_update_blocking(&adapter),
+    ).await
 }
 
 /// Manual "clean up now" sweep triggered from the Settings UI (设置 > 通用).
@@ -17820,38 +17829,6 @@ fn codex_status_success(status: &str) -> bool {
     )
 }
 
-/// Extract the cumulative token usage from a claude `stream-json` event. The
-/// `result` event nests it under `/usage`, while `assistant` events carry it on
-/// `/message/usage`. Either object includes `input_tokens`, `output_tokens` and
-/// the `cache_read_input_tokens` / `cache_creation_input_tokens` cache counters.
-fn claude_message_usage(event: &serde_json::Value) -> Option<serde_json::Value> {
-    let usage = event
-        .get("usage")
-        .or_else(|| event.pointer("/message/usage"))?;
-    if !usage.is_object() {
-        return None;
-    }
-    // Ignore empty/zeroed usage objects so we don't clobber a real snapshot
-    // with a placeholder that would render as 0%.
-    let has_tokens = [
-        "input_tokens",
-        "output_tokens",
-        "cache_read_input_tokens",
-        "cache_creation_input_tokens",
-    ]
-    .iter()
-    .any(|key| {
-        usage
-            .get(*key)
-            .and_then(|v| v.as_u64())
-            .is_some_and(|n| n > 0)
-    });
-    if !has_tokens {
-        return None;
-    }
-    Some(usage.clone())
-}
-
 fn codex_last_message_ready(path: &std::path::Path) -> bool {
     let Ok(meta) = std::fs::metadata(path) else {
         return false;
@@ -18070,6 +18047,13 @@ fn write_claude_stream_message(
 ) -> Result<(), String> {
     let message = claude_stream_input_message(text);
     write_protocol_message(stdin, &message)
+}
+
+fn write_claude_initial_stream_message(stdin: &Arc<PipeWriter>, text: &str) -> Result<(), String> {
+    let mut bytes = serde_json::to_vec(&claude_stream_input_message(text))
+        .map_err(|e| format!("编码管道请求失败: {e}"))?;
+    bytes.push(b'\n');
+    stdin.write_bytes_until_closed(bytes)
 }
 
 fn claude_stream_input_message(text: &str) -> serde_json::Value {
@@ -19588,6 +19572,8 @@ async fn ai_cli_runtime(
 
         let writer_stdin = codex_stdin.clone();
         let writer_claude_stdin = claude_stdin.clone();
+        let claude_startup_error = Arc::new(Mutex::new(None::<String>));
+        let writer_claude_startup_error = Arc::clone(&claude_startup_error);
         let writer_thread_id = Arc::clone(&codex_thread_id);
         let writer_turn_id = Arc::clone(&codex_turn_id);
         let writer_startup_error = Arc::clone(&codex_startup_error);
@@ -19732,8 +19718,13 @@ async fn ai_cli_runtime(
         } else if claude_stream_input {
             std::thread::spawn(move || {
                 let _slot = stdin_slot;
-                if let Some(stdin) = writer_claude_stdin {
-                    let _ = write_claude_stream_message(&stdin, &prompt);
+                let result = writer_claude_stdin
+                    .ok_or_else(|| "Claude 输入管道不可用。".to_string())
+                    .and_then(|stdin| write_claude_initial_stream_message(&stdin, &prompt));
+                if let Err(error) = result {
+                    if let Ok(mut slot) = writer_claude_startup_error.lock() {
+                        *slot = Some(format!("Claude 初始输入写入失败：{error}；执行状态未知，未自动重试。"));
+                    }
                 }
             })
         } else if zcode_app_server {
@@ -19898,9 +19889,8 @@ async fn ai_cli_runtime(
         let codex_turn_status_reader = Arc::clone(&codex_turn_status);
         let codex_usage = Arc::new(Mutex::new(None::<serde_json::Value>));
         let codex_usage_reader = Arc::clone(&codex_usage);
-        // Claude's stream-json reports cumulative token usage (including cache
-        // read/creation hits) on assistant/result events. Capture it so the
-        // status bar can show the real cache percentage instead of `--`.
+        // Claude reports per-message usage during streaming and cumulative
+        // usage on the result event. Keep the latest aggregate for the caller.
         let claude_usage = Arc::new(Mutex::new(None::<serde_json::Value>));
         let claude_usage_reader = Arc::clone(&claude_usage);
         // Claude/gemini stream-json can end on a terminal `result` event that
@@ -20025,6 +20015,7 @@ async fn ai_cli_runtime(
             // fallback instead of reporting a misleading "no reply" failure.
             let mut partial_text = String::new();
             let mut saw_text_delta_for_message = false;
+            let mut claude_usage_tracker = ClaudeUsageTracker::default();
             // `prev_kind` tracks the last delta kind ("text" / "thinking") so we
             // can insert a separator when the model switches between them.
             let mut prev_kind: &str = "";
@@ -20713,6 +20704,12 @@ async fn ai_cli_runtime(
                         }
                         continue;
                     }
+                    if let Some(usage) = claude_usage_tracker.observe(&v) {
+                        if let Ok(mut current) = claude_usage_reader.lock() {
+                            *current = Some(usage.clone());
+                        }
+                        emit_usage(&app2, &run2, &usage);
+                    }
                     match v.get("type").and_then(|t| t.as_str()) {
                         Some("system") => {
                             // The opening `init` event is the first "I'm alive"
@@ -20793,15 +20790,6 @@ async fn ai_cli_runtime(
                             }
                         }
                         Some("assistant") => {
-                            // Capture per-turn usage as a fallback; the terminal
-                            // `result` event usually carries the authoritative
-                            // cumulative figure but some CLI versions only report
-                            // it on assistant messages.
-                            if let Some(usage) = claude_message_usage(&v) {
-                                if let Ok(mut current) = claude_usage_reader.lock() {
-                                    *current = Some(usage);
-                                }
-                            }
                             if let Some(content) =
                                 v.pointer("/message/content").and_then(|c| c.as_array())
                             {
@@ -20902,15 +20890,6 @@ async fn ai_cli_runtime(
                             // turn genuinely completed (even a tool-only turn with
                             // no closing text is a real, finished turn).
                             received_content_reader.store(true, Ordering::Relaxed);
-                            // The terminal `result` event carries the final
-                            // cumulative usage (input/output + cache_read/creation).
-                            // Prefer it over per-assistant snapshots.
-                            if let Some(usage) = claude_message_usage(&v) {
-                                if let Ok(mut current) = claude_usage_reader.lock() {
-                                    *current = Some(usage.clone());
-                                }
-                                emit_usage(&app2, &run2, &usage);
-                            }
                             progress.flush();
                             // Signal the wait loop that the turn is logically
                             // complete so it needn't wait on a lingering process.
@@ -21082,6 +21061,11 @@ async fn ai_cli_runtime(
                     terminate_ai_cli_tree(&mut child, &run_id);
                     break Ok(WaitOutcome::CodexLastMessageReady);
                 }
+            }
+            if let Some(error) = claude_startup_error.lock().ok().and_then(|slot| slot.clone()) {
+                skills::native_launch::cancel_native_cli(&run_id);
+                terminate_ai_cli_tree(&mut child, &run_id);
+                break Err(error);
             }
             if zcode_app_server {
                 // The writer thread records a `session/create`/`session/resume`/
@@ -21272,6 +21256,12 @@ async fn ai_cli_runtime(
                 &output,
                 &stderr,
             ));
+        }
+
+        // A clean child exit can race the input writer: preserve its real failure
+        // after joining, rather than reporting a misleading empty response.
+        if let Some(error) = claude_startup_error.lock().ok().and_then(|slot| slot.clone()) {
+            return Err(append_cli_error_context(error, &output, &stderr));
         }
 
         // A failed terminal event stays failed even when it contains useful
@@ -23522,7 +23512,8 @@ requires_openai_auth = true\n";
         let env = HashMap::from([("UGS_TEST_STDOUT_MODE".into(), mode.into())]);
         let started = std::time::Instant::now();
         let result = tauri::async_runtime::block_on(ai_cli_runtime(
-            "fixture input".into(), adapter.into(), Some(binary.to_string_lossy().into_owned()),
+            if mode == "slow-claude" || mode == "claude-closed-input" { "x".repeat(262_144) } else { "fixture input".into() },
+            adapter.into(), Some(binary.to_string_lossy().into_owned()),
             None, Some(dir.to_string_lossy().into_owned()), None, Some("readonly".into()),
             Some(env), Some(timeout), Some(idle), run_id.clone(), None, None, None, None, None,
             app.handle().clone(),
@@ -23533,6 +23524,89 @@ requires_openai_auth = true\n";
         }
         assert_stdio_run_released(&run_id);
         (result, started.elapsed(), dir)
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_slow_start_receives_complete_large_prompt() {
+        let (result, _, dir) = run_stdio_fixture("slow-claude", "claude-code", 60, 30);
+        std::fs::remove_dir_all(dir).unwrap();
+        let answer = result.expect("slow startup must not truncate the initial prompt");
+        assert_eq!(answer.text, "fixture complete");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_closed_input_reports_write_failure_instead_of_empty_exit() {
+        let (result, _, dir) = run_stdio_fixture("claude-closed-input", "claude-code", 60, 30);
+        std::fs::remove_dir_all(dir).unwrap();
+        let error = result.err().expect("closed input must fail");
+        assert!(error.contains("Claude 初始输入写入失败"), "{error}");
+        assert!(error.contains("未自动重试"), "{error}");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_cancel_interrupts_a_blocked_initial_prompt() {
+        let binary = stdio_fixture_binary();
+        let dir = preview_fixture_dir("claude-cancel-input");
+        let run_id = format!("fixture-claude-cancel-input-{}", now_ms());
+        let mut context = tauri::generate_context!();
+        context.config_mut().app.windows.clear();
+        let app = tauri::Builder::default().any_thread().build(context).unwrap();
+        let cancel_id = run_id.clone();
+        let marker = dir.join("transport-started");
+        let canceller = std::thread::spawn(move || {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !marker.is_file() && std::time::Instant::now() < until {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            assert!(marker.is_file(), "must cancel the running fixture");
+            std::thread::sleep(std::time::Duration::from_millis(250));
+            cancel_ai_cli(cancel_id).unwrap();
+        });
+        let env = HashMap::from([("UGS_TEST_STDOUT_MODE".into(), "slow-claude".into())]);
+        let result = tauri::async_runtime::block_on(ai_cli_runtime(
+            "x".repeat(262_144), "claude-code".into(), Some(binary.to_string_lossy().into_owned()),
+            None, Some(dir.to_string_lossy().into_owned()), None, Some("readonly".into()),
+            Some(env), Some(0), Some(0), run_id.clone(), None, None, None, None, None,
+            app.handle().clone(),
+        ));
+        canceller.join().unwrap();
+        assert_stdio_run_released(&run_id);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(result.err().unwrap().contains("已由用户中断"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires explicit real Claude gateway credentials"]
+    fn claude_live_gateway_through_native_bridge() {
+        let key = std::env::var("UGS_LIVE_CLAUDE_KEY").expect("explicit test key required");
+        let base = std::env::var("UGS_LIVE_CLAUDE_BASE").expect("explicit test URL required");
+        let model = std::env::var("UGS_LIVE_CLAUDE_MODEL").expect("explicit test model required");
+        let binary = std::env::var("UGS_LIVE_CLAUDE_BINARY").expect("explicit test CLI required");
+        let dir = preview_fixture_dir("claude-live-gateway");
+        let run_id = format!("fixture-claude-live-{}", now_ms());
+        let mut context = tauri::generate_context!();
+        context.config_mut().app.windows.clear();
+        let app = tauri::Builder::default().any_thread().build(context).unwrap();
+        let env = HashMap::from([
+            ("ANTHROPIC_API_KEY".into(), key.clone()),
+            ("ANTHROPIC_AUTH_TOKEN".into(), key),
+            ("ANTHROPIC_BASE_URL".into(), base),
+            ("ANTHROPIC_MODEL".into(), model.clone()),
+        ]);
+        let result = tauri::async_runtime::block_on(ai_cli_runtime(
+            "只回复：诊断通过。".into(), "claude-code".into(), Some(binary),
+            Some(model), Some(dir.to_string_lossy().into_owned()), None, Some("readonly".into()),
+            Some(env), Some(0), Some(0), run_id.clone(), None, None, None, None, None,
+            app.handle().clone(),
+        ));
+        assert_stdio_run_released(&run_id);
+        std::fs::remove_dir_all(dir).unwrap();
+        let response = result.expect("real Claude gateway call failed");
+        assert!(response.text.contains("诊断通过"), "unexpected response: {}", response.text);
     }
 
     #[cfg(windows)]
@@ -23994,6 +24068,7 @@ requires_openai_auth = true\n";
     fn claude_message_usage_reads_result_cache_fields() {
         let result = serde_json::json!({
             "type": "result",
+            "total_cost_usd": 0.045,
             "usage": {
                 "input_tokens": 120,
                 "output_tokens": 40,
@@ -24004,6 +24079,7 @@ requires_openai_auth = true\n";
         let usage = claude_message_usage(&result).expect("result usage");
         assert_eq!(usage["cache_read_input_tokens"], 800);
         assert_eq!(usage["cache_creation_input_tokens"], 80);
+        assert_eq!(usage["total_cost_usd"], 0.045);
 
         let assistant = serde_json::json!({
             "type": "assistant",

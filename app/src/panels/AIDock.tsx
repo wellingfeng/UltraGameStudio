@@ -16,7 +16,9 @@ import { FilePreviewTabs, MainFilePreview } from "@/components/ai/FilePreviewTab
 import UserMessageEditor from "@/components/ai/UserMessageEditor";
 import ChatRevisionControls from "@/components/ai/ChatRevisionControls";
 import { filePreviewScope, useFilePreviewTabs } from "@/store/filePreviewTabs";
-import { TitleBarContent } from "@/components/TitleBar";
+import { runKey } from "@/store/sessionKey";
+import { beginSessionHandoff, finishSessionHandoff, useSessionHandoffStatus } from "@/store/sessionHandoffStatus";
+import { TitleBarActions, TitleBarContent } from "@/components/TitleBar";
 import SidebarToggleButton from "@/components/SidebarToggleButton";
 import BrowserOpenButton from "@/components/floatingTools/BrowserOpenButton";
 import {
@@ -327,7 +329,7 @@ import {
   parentDirectoryPath,
 } from "@/components/ai/lib/filePath";
 import { scanFileRefs } from "@/components/ai/lib/fileScan";
-import { hideReplacedUserMessages, orderDisplayMessages } from "@/components/ai/lib/orderDisplayMessages";
+import { hideReplacedUserMessages, latestUserInput, orderDisplayMessages } from "@/components/ai/lib/orderDisplayMessages";
 import FileChip, {
   FileChipBudgetProvider,
   type OpenFileIntent,
@@ -1904,6 +1906,7 @@ export default function AIDock({
   // timeline summaries stable while the live answer's text grows.
   const userMessages = useStore((s) => s.messages.filter((message) => message.role === 'user'), shallow);
   const presentationTopics = useMemo(() => hideReplacedUserMessages(userMessages), [userMessages]);
+  const latestInput = useMemo(() => latestUserInput(userMessages), [userMessages]);
   const sendPrompt = useStore((s) => s.sendPrompt);
   const learnSkills = useStore((s) => s.learnSkills);
   const reviewSkillLearningAction = useStore((s) => s.reviewSkillLearningAction);
@@ -2148,8 +2151,9 @@ export default function AIDock({
     kind: "busy" | "done" | "error";
     text: string;
   } | null>(null);
-  const [handoffBusy, setHandoffBusy] = useState(false);
-  const handoffInFlightRef = useRef(false);
+  const handoffKey = runKey(activeWorkspaceId, activeSessionId);
+  const handoffStatus = useSessionHandoffStatus((state) => state.bySession[handoffKey]);
+  const visibleStatus = handoffStatus ?? captureStatus;
   const [forceEagerCapture, setForceEagerCapture] = useState(false);
   const captureInFlightRef = useRef(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -2158,6 +2162,8 @@ export default function AIDock({
   const skipNextTitleBlurCommitRef = useRef(false);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const inputDropRef = useRef<HTMLDivElement>(null);
+  const stickyPromptRef = useRef<HTMLDivElement>(null);
+  const queuedEditGenerationRef = useRef(0);
   const draftRef = useRef(draft);
   const selectionRef = useRef<TextSelection>({ start: 0, end: 0 });
   const slashTriggerRef = useRef<SlashTrigger | null>(null);
@@ -2285,6 +2291,7 @@ export default function AIDock({
     [locale, shortcutSettings],
   );
   const [dropActive, setDropActive] = useState(false);
+  const [stickyDropActive, setStickyDropActive] = useState(false);
   const previewScope = filePreviewScope(composer.workspace);
   const activePreviewId = useFilePreviewTabs((state) => state.activeByScope[previewScope]);
   const showMainPreview = isChat && Boolean(activePreviewId);
@@ -2301,7 +2308,6 @@ export default function AIDock({
   );
   const [queuedEditDraft, setQueuedEditDraft] = useState("");
   const [historyEdit, setHistoryEdit] = useState(false);
-  const [stickyPromptId, setStickyPromptId] = useState<string | null>(null);
   const [chatTitleSaving, setChatTitleSaving] = useState(false);
   // The organization chart is no longer a top tab beside the stream; it pops up
   // from a `$组织架构` trigger at the input bottom and collapses on outside click.
@@ -2808,13 +2814,16 @@ export default function AIDock({
 
   useEffect(() => {
     if (!queuedEditMessageId) return;
-    if (historyEdit && messages.some((message) => message.id === queuedEditMessageId)) return;
-    if (queuedChatMessageIds.includes(queuedEditMessageId)) return;
+    if (latestInput?.id === queuedEditMessageId && (historyEdit || queuedChatMessageIds.includes(queuedEditMessageId))) return;
+    queuedEditGenerationRef.current += 1;
     setQueuedEditMessageId(null);
     setQueuedEditDraft("");
-  }, [queuedChatMessageIds, queuedEditMessageId, historyEdit, messages]);
+    setHistoryEdit(false);
+    cancelQueuedChatMessageEdit();
+  }, [queuedChatMessageIds, queuedEditMessageId, historyEdit, latestInput, cancelQueuedChatMessageEdit]);
 
   useEffect(() => {
+    queuedEditGenerationRef.current += 1;
     setQueuedEditMessageId(null);
     setQueuedEditDraft("");
     setHistoryEdit(false);
@@ -2823,16 +2832,19 @@ export default function AIDock({
 
   const beginQueuedMessageEdit = useCallback(
     (message: Message) => {
+      if (message.id !== latestInput?.id) return;
+      queuedEditGenerationRef.current += 1;
       cancelQueuedChatMessageEdit();
       setHistoryEdit(false);
       setQueuedEditMessageId(message.id);
       setQueuedEditDraft(message.text);
       beginQueuedChatMessageEdit(message.id);
     },
-    [beginQueuedChatMessageEdit, cancelQueuedChatMessageEdit],
+    [beginQueuedChatMessageEdit, cancelQueuedChatMessageEdit, latestInput],
   );
 
   const cancelQueuedMessageEdit = useCallback(() => {
+    queuedEditGenerationRef.current += 1;
     setQueuedEditMessageId(null);
     setQueuedEditDraft("");
     cancelQueuedChatMessageEdit();
@@ -2840,21 +2852,24 @@ export default function AIDock({
 
   const commitQueuedMessageEdit = useCallback(
     (messageId: string) => {
-      if (!queuedEditDraft.trim()) return;
+      if (!queuedEditDraft.trim() || messageId !== latestInput?.id) return;
       if ((historyEdit ? reviseChatMessage : updateQueuedChatMessage)(messageId, queuedEditDraft)) {
+        queuedEditGenerationRef.current += 1;
         setQueuedEditMessageId(null);
         setQueuedEditDraft("");
       }
     },
-    [queuedEditDraft, updateQueuedChatMessage, historyEdit, reviseChatMessage],
+    [queuedEditDraft, updateQueuedChatMessage, historyEdit, reviseChatMessage, latestInput],
   );
 
   const beginHistoryMessageEdit = useCallback((message: Message) => {
+    if (message.id !== latestInput?.id) return;
+    queuedEditGenerationRef.current += 1;
     cancelQueuedChatMessageEdit();
     setHistoryEdit(true);
     setQueuedEditMessageId(message.id);
     setQueuedEditDraft(message.text);
-  }, [cancelQueuedChatMessageEdit]);
+  }, [cancelQueuedChatMessageEdit, latestInput]);
 
   // One bottom "Channel" select owns the active runtime route. The default
   // group mirrors Settings -> Default Channels: each configured provider is a
@@ -5373,31 +5388,9 @@ export default function AIDock({
     );
   }, [topicMessageIds]);
 
-  const updateStickyPromptFromScroll = useCallback(() => {
-    const stream = streamRef.current;
-    if (!stream || !isChat) return;
-    const top = stream.getBoundingClientRect().top;
-    const passed = visibleMessages.findLast((message) => message.role === "user" && !message.localOnly &&
-      !queuedChatMessageIdSet.has(message.id) &&
-      (messageRefs.current.get(message.id)?.getBoundingClientRect().top ?? top) < top - 1);
-    // A windowed list can start inside an answer. Its prompt is in the hidden prefix.
-    const preceding = hiddenMessageCount > 0
-      ? displayMessages.slice(0, hiddenMessageCount).findLast((message) => message.role === "user" && !message.localOnly)
-      : undefined;
-    const id = passed?.id ?? preceding?.id ?? null;
-    setStickyPromptId((current) => current === id ? current : id);
-  }, [isChat, visibleMessages, queuedChatMessageIdSet, hiddenMessageCount, displayMessages]);
-
-  const stickyPrompt = messages.find((message) => message.id === stickyPromptId);
-  const stickyEditing = !!stickyPrompt && historyEdit && queuedEditMessageId === stickyPrompt.id;
-  useLayoutEffect(() => { updateStickyPromptFromScroll(); }, [activeStreamScrollKey, updateStickyPromptFromScroll]);
-  useEffect(() => {
-    if (typeof ResizeObserver === "undefined" || !streamRef.current) return;
-    const observer = new ResizeObserver(updateStickyPromptFromScroll);
-    observer.observe(streamRef.current);
-    if (streamContentRef.current) observer.observe(streamContentRef.current);
-    return () => observer.disconnect();
-  }, [updateStickyPromptFromScroll]);
+  const stickyPrompt = latestInput;
+  const stickyPromptSummary = useMemo(() => stickyPrompt ? summarizeTimelineText(stickyPrompt.text) : '', [stickyPrompt]);
+  const stickyEditing = !!stickyPrompt && queuedEditMessageId === stickyPrompt.id;
 
   // Track whether the user is parked at (or near) the bottom. Manual upward
   // scroll pins this session to the visible message anchor; bottom stays sticky
@@ -5426,15 +5419,13 @@ export default function AIDock({
         stickToBottomRef.current = atBottom;
       }
       updateActiveTopicFromScroll();
-      updateStickyPromptFromScroll();
       return;
     }
     // A real gesture overrides any write we had pending.
     marks.length = 0;
     rememberStreamScrollSnapshot();
     updateActiveTopicFromScroll();
-    updateStickyPromptFromScroll();
-  }, [rememberStreamScrollSnapshot, updateActiveTopicFromScroll, updateStickyPromptFromScroll]);
+  }, [rememberStreamScrollSnapshot, updateActiveTopicFromScroll]);
 
   useLayoutEffect(() => {
     updateActiveTopicFromScroll();
@@ -6193,6 +6184,93 @@ export default function AIDock({
     ],
   );
 
+  const stickyCanAcceptFiles = !!stickyPrompt && !isReadOnly &&
+    !stickyPrompt.localOnly && !stickyPrompt.interaction;
+
+  // Capture the edit and selection at drop time, before a remote upload can
+  // finish. A cancelled/replaced edit must never receive an old upload.
+  const prepareStickyFileDrop = useCallback(() => {
+    if (!stickyCanAcceptFiles || !stickyPrompt) return null;
+    const editor = stickyPromptRef.current?.querySelector<HTMLTextAreaElement>(
+      'textarea[aria-label="编辑用户输入"]',
+    );
+    const selection = editor
+      ? { start: editor.selectionStart, end: editor.selectionEnd }
+      : { start: stickyPrompt.text.length, end: stickyPrompt.text.length };
+    if (!stickyEditing) {
+      if (queuedChatMessageIdSet.has(stickyPrompt.id)) beginQueuedMessageEdit(stickyPrompt);
+      else beginHistoryMessageEdit(stickyPrompt);
+    }
+    const generation = queuedEditGenerationRef.current;
+    const streamKey = activeStreamScrollKeyRef.current;
+    const messageId = stickyPrompt.id;
+    return (paths: string[]) => {
+      const inserted = formatFilePathInsertion(paths);
+      if (!inserted || generation !== queuedEditGenerationRef.current ||
+          streamKey !== activeStreamScrollKeyRef.current ||
+          latestUserInput(useStore.getState().messages.filter((message) => message.role === "user"))?.id !== messageId) return;
+      setQueuedEditDraft((previous) => {
+        const start = clampSelection(selection.start, previous.length);
+        const end = clampSelection(selection.end, previous.length);
+        return previous.slice(0, start) + inserted + previous.slice(end);
+      });
+      window.requestAnimationFrame(() => {
+        if (generation !== queuedEditGenerationRef.current || streamKey !== activeStreamScrollKeyRef.current) return;
+        const target = stickyPromptRef.current?.querySelector<HTMLTextAreaElement>(
+          'textarea[aria-label="编辑用户输入"]',
+        );
+        if (!target) return;
+        const caret = selection.start + inserted.length;
+        target.focus();
+        target.setSelectionRange(caret, caret);
+      });
+    };
+  }, [stickyCanAcceptFiles, stickyPrompt, stickyEditing, queuedChatMessageIdSet, beginQueuedMessageEdit, beginHistoryMessageEdit]);
+
+  const handleStickyDragOver = useCallback((event: ReactDragEvent<HTMLElement>) => {
+    const hasProjectPaths = hasProjectFileDragData(event.dataTransfer);
+    const hasFiles = Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    if (!stickyCanAcceptFiles || (!hasProjectPaths && !hasFiles)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    if (hasProjectPaths) {
+      setProjectFileDragAccepted(true);
+      applyProjectFileDragDropEffect(event.dataTransfer);
+    }
+    setStickyDropActive(true);
+  }, [stickyCanAcceptFiles]);
+
+  const handleStickyDragLeave = useCallback((event: ReactDragEvent<HTMLElement>) => {
+    if (event.relatedTarget instanceof Node && event.currentTarget.contains(event.relatedTarget)) return;
+    setStickyDropActive(false);
+    setProjectFileDragAccepted(false);
+  }, []);
+
+  const handleStickyDrop = useCallback((event: ReactDragEvent<HTMLElement>) => {
+    const hasProjectPaths = hasProjectFileDragData(event.dataTransfer);
+    const hasFiles = Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    if (!stickyCanAcceptFiles || (!hasProjectPaths && !hasFiles)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    setStickyDropActive(false);
+    setProjectFileDragAccepted(false);
+    const insert = prepareStickyFileDrop();
+    if (!insert) return;
+    if (hasProjectPaths) {
+      const paths = activeRemoteWorkspaceRoot
+        ? projectFileRelativePathsFromDataTransfer(event.dataTransfer)
+        : projectFilePathsFromDataTransfer(event.dataTransfer);
+      clearProjectFileDragData();
+      insert(paths);
+    } else if (activeRemoteWorkspaceRoot) {
+      void Promise.allSettled(filesFromDataTransfer(event.dataTransfer).map((file) =>
+        uploadRemoteFile(activeRemoteWorkspaceRoot, file),
+      )).then((results) => insert(uploadedPathsFromResults(results, { remote: true })));
+    } else {
+      insert(pathsFromDataTransfer(event.dataTransfer));
+    }
+  }, [activeRemoteWorkspaceRoot, prepareStickyFileDrop, stickyCanAcceptFiles, uploadedPathsFromResults]);
+
   const handleComposerDragOver = useCallback(
     (event: ReactDragEvent<HTMLElement>) => {
       const hasProjectPaths = hasProjectFileDragData(event.dataTransfer);
@@ -6289,13 +6367,15 @@ export default function AIDock({
   const updateProjectDragFeedbackAtPoint = useCallback(
     (point: { clientX: number; clientY: number }): boolean => {
       const el = inputDropRef.current ?? inputRef.current;
-      const accepted =
-        !isReadOnly && !!el && clientPointInsideElement(point, el);
-      setProjectFileDragAccepted(accepted);
-      setDropActive(accepted);
-      return accepted;
+      const sticky = stickyPromptRef.current;
+      const overSticky = stickyCanAcceptFiles && !!sticky && clientPointInsideElement(point, sticky);
+      const overComposer = !isReadOnly && !!el && clientPointInsideElement(point, el);
+      setProjectFileDragAccepted(overSticky || overComposer);
+      setStickyDropActive(overSticky);
+      setDropActive(!overSticky && overComposer);
+      return overSticky || overComposer;
     },
-    [isReadOnly],
+    [isReadOnly, stickyCanAcceptFiles],
   );
 
   /** Clamp the input width to keep both panes usable within the dock. */
@@ -6575,27 +6655,36 @@ export default function AIDock({
         if (disposed) return;
         const payload = event.payload;
         const el = inputDropRef.current ?? inputRef.current;
+        const sticky = stickyPromptRef.current;
 
         if (payload.type === "leave") {
           setDropActive(false);
+          setStickyDropActive(false);
           return;
         }
-        if (!el || isReadOnly) {
-          setDropActive(false);
-          return;
-        }
-        if (payload.type === "enter") {
-          setDropActive(pointInsideElement(payload.position, el));
-          return;
-        }
-        if (payload.type === "over") {
-          setDropActive(pointInsideElement(payload.position, el));
+        const overSticky = stickyCanAcceptFiles && !!sticky && pointInsideElement(payload.position, sticky);
+        const overComposer = !isReadOnly && !!el && pointInsideElement(payload.position, el);
+        if (payload.type === "enter" || payload.type === "over") {
+          setStickyDropActive(overSticky);
+          setDropActive(!overSticky && overComposer);
           return;
         }
         if (payload.type === "drop") {
-          const inside = pointInsideElement(payload.position, el);
           setDropActive(false);
-          if (!inside) return;
+          setStickyDropActive(false);
+          if (overSticky) {
+            const insert = prepareStickyFileDrop();
+            if (!insert) return;
+            if (activeRemoteWorkspaceRoot) {
+              void Promise.allSettled(payload.paths.map((path) =>
+                uploadLocalPathToRemote(activeRemoteWorkspaceRoot, path),
+              )).then((results) => insert(uploadedPathsFromResults(results, { remote: true })));
+            } else {
+              insert(payload.paths);
+            }
+            return;
+          }
+          if (!overComposer) return;
           if (activeRemoteWorkspaceRoot) {
             void Promise.allSettled(
               payload.paths.map((path) =>
@@ -6629,6 +6718,8 @@ export default function AIDock({
     activeRemoteWorkspaceRoot,
     insertFilePaths,
     isReadOnly,
+    prepareStickyFileDrop,
+    stickyCanAcceptFiles,
     uploadedPathsFromResults,
   ]);
 
@@ -6673,11 +6764,25 @@ export default function AIDock({
     const onProjectFileDragEnd = (event: Event) => {
       const { detail } = event as CustomEvent<ProjectFileDragEndDetail>;
       const el = inputDropRef.current ?? inputRef.current;
+      const sticky = stickyPromptRef.current;
       setDropActive(false);
+      setStickyDropActive(false);
       setProjectFileDragAccepted(false);
 
-      if (!el || isReadOnly || !detail?.paths?.length) return;
-      if (!clientPointInsideElement(detail, el)) return;
+      if (!detail?.paths?.length || isReadOnly) return;
+      if (stickyCanAcceptFiles && sticky && clientPointInsideElement(detail, sticky)) {
+        const insert = prepareStickyFileDrop();
+        if (!insert) return;
+        if (activeRemoteWorkspaceRoot) {
+          const remotePaths = remoteProjectDragInsertPaths(activeRemoteWorkspaceRoot, detail.paths, detail.relativePaths);
+          if (remotePaths.length > 0) insert(remotePaths);
+          else void Promise.allSettled(detail.paths.map((path) =>
+            uploadLocalPathToRemote(activeRemoteWorkspaceRoot, path),
+          )).then((results) => insert(uploadedPathsFromResults(results, { remote: true })));
+        } else insert(detail.paths);
+        return;
+      }
+      if (!el || !clientPointInsideElement(detail, el)) return;
 
       closeComposerSuggestions();
       if (activeRemoteWorkspaceRoot) {
@@ -6715,6 +6820,8 @@ export default function AIDock({
     closeComposerSuggestions,
     insertFilePaths,
     isReadOnly,
+    prepareStickyFileDrop,
+    stickyCanAcceptFiles,
     uploadedPathsFromResults,
   ]);
 
@@ -8046,21 +8153,15 @@ export default function AIDock({
     }
   }, [messages, locale, chatTitle]);
   const handleSessionHandoff = useCallback(async () => {
-    if (handoffInFlightRef.current) return;
-    handoffInFlightRef.current = true;
-    setHandoffBusy(true);
-    setCaptureStatus({ kind: "busy", text: t(locale, "dock.handoffPreparing") });
+    if (!beginSessionHandoff(handoffKey, t(locale, "dock.handoffPreparing"))) return;
     try {
       const result = await continueSessionWithHandoff();
-      setCaptureStatus({ kind: "done", text: `${t(locale, "dock.handoffStarted")}${result.thinkingLevel ? "" : ` ${t(locale, "dock.handoffThinkingUnavailable")}`}` });
+      finishSessionHandoff(handoffKey, { kind: "done", text: `${t(locale, "dock.handoffStarted")}${result.thinkingLevel ? "" : ` ${t(locale, "dock.handoffThinkingUnavailable")}`}` });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      setCaptureStatus({ kind: "error", text: `${t(locale, "dock.handoffFailed")}: ${message}` });
-    } finally {
-      handoffInFlightRef.current = false;
-      setHandoffBusy(false);
+      finishSessionHandoff(handoffKey, { kind: "error", text: `${t(locale, "dock.handoffFailed")}: ${message}` });
     }
-  }, [continueSessionWithHandoff, locale]);
+  }, [continueSessionWithHandoff, handoffKey, locale]);
   const headerActionButtonClass =
     "ugs-control flex h-8 shrink-0 items-center gap-1.5 rounded-md bg-transparent px-2.5 text-[13px] text-fg-dim transition-colors hover:bg-border-soft hover:text-fg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-40";
   const openTeamDetailsFromMain = useCallback((nodeId: string) => {
@@ -8087,15 +8188,6 @@ export default function AIDock({
         className={headerActionButtonClass}
       >
         <ArrowDownToLine size={14} strokeWidth={1.5} />
-      </button>
-      <button
-        type="button"
-        onClick={() => newSession()}
-        title={t(locale, "dock.newSession")}
-        aria-label={t(locale, "dock.newSession")}
-        className={headerActionButtonClass}
-      >
-        <Plus size={14} strokeWidth={1.5} />
       </button>
     </>
   );
@@ -8480,7 +8572,19 @@ export default function AIDock({
               </span>
             )}
             <div className={"ml-auto flex shrink-0 items-center gap-1" + (isChat ? " ugs-chat-header-actions" : "")}>
+              {isChat && (
+                <button
+                  type="button"
+                  onClick={() => newSession()}
+                  title={t(locale, "dock.newSession")}
+                  aria-label={t(locale, "dock.newSession")}
+                  className={headerActionButtonClass}
+                >
+                  <Plus size={14} strokeWidth={1.5} />
+                </button>
+              )}
               {isChat && <BrowserOpenButton scope={previewScope} />}
+              {isChat && <TitleBarActions />}
               {conversationActions}
               {searchToggleButton}
               {isChat && (
@@ -8575,31 +8679,36 @@ export default function AIDock({
         >
           {isChat && stickyPrompt && !forceEagerCapture && !normalizedSearch && (
             <div data-ugs-sticky-prompt={stickyPrompt.id}
-              className="absolute left-6 right-12 top-2 z-20 rounded-lg border border-accent/25 bg-panel/95 shadow-xl backdrop-blur"
+              ref={stickyPromptRef}
+              onDragOver={handleStickyDragOver}
+              onDragLeave={handleStickyDragLeave}
+              onDrop={handleStickyDrop}
+              className={"absolute left-6 right-12 top-2 z-20 rounded-lg border bg-panel/95 shadow-xl backdrop-blur " +
+                (stickyDropActive ? "border-accent" : "border-accent/25")}
               style={{ right: `${Math.max(48, chatVisibleRightInset + 24)}px` }}>
               {stickyEditing ? <UserMessageEditor value={queuedEditDraft} onChange={setQueuedEditDraft}
-                onCancel={cancelQueuedMessageEdit} onSave={() => commitQueuedMessageEdit(stickyPrompt.id)} onPaste={handleQueuedEditPaste} />
-                : <button type="button" aria-label="编辑当前输入" title="点击编辑，保存后重新发送" disabled={isReadOnly}
-                  onClick={() => beginHistoryMessageEdit(stickyPrompt)}
+                queued={!historyEdit} onCancel={cancelQueuedMessageEdit} onSave={() => commitQueuedMessageEdit(stickyPrompt.id)} onPaste={handleQueuedEditPaste} />
+                : <button type="button" aria-label="编辑当前输入" title={stickyPrompt.localOnly || stickyPrompt.interaction ? "此输入暂不支持修改" : queuedChatMessageIdSet.has(stickyPrompt.id) ? "点击编辑排队输入" : "点击编辑，保存后重新发送"} disabled={isReadOnly || !!stickyPrompt.localOnly || !!stickyPrompt.interaction}
+                  onClick={() => queuedChatMessageIdSet.has(stickyPrompt.id) ? beginQueuedMessageEdit(stickyPrompt) : beginHistoryMessageEdit(stickyPrompt)}
                   className="block w-full min-w-0 truncate rounded-lg px-3 py-2 text-left text-xs text-fg-dim hover:text-fg disabled:opacity-40">
-                  {summarizeTimelineText(stickyPrompt.text)}
+                  {stickyPromptSummary}
                 </button>}
             </div>
           )}
-          {captureStatus && (
+          {visibleStatus && (
             <div
               className={
                 "pointer-events-none absolute left-1/2 top-2 z-30 -translate-x-1/2 rounded-md border px-3 py-1.5 text-xs shadow-lg " +
-                (captureStatus.kind === "error"
+                (visibleStatus.kind === "error"
                   ? "border-accent-3/50 bg-panel-2 text-accent-3"
-                  : captureStatus.kind === "busy"
+                  : visibleStatus.kind === "busy"
                     ? "border-accent/40 bg-panel-2 text-fg-dim"
                     : "border-accent/50 bg-panel-2 text-fg")
               }
               role="status"
               aria-live="polite"
             >
-              {captureStatus.text}
+              {visibleStatus.text}
             </div>
           )}
           <div
@@ -8655,7 +8764,7 @@ export default function AIDock({
                   const queuedUserMessage =
                     isChatUser && queuedChatMessageIdSet.has(m.id);
                   const editingQueuedMessage =
-                    queuedUserMessage && queuedEditMessageId === m.id;
+                    queuedUserMessage && queuedEditMessageId === m.id && !stickyEditing;
                   const editingHistoryMessage = isChatUser && historyEdit && queuedEditMessageId === m.id && !stickyEditing;
                   const isSystem = m.role === "system";
                   // Standalone review records are transcript scaffolding, not
@@ -8793,7 +8902,7 @@ export default function AIDock({
                                 <Zap size={13} />
                               </button>
                             )}
-                            <button
+                            {m.id === latestInput?.id && <button
                               type="button"
                               onClick={() => beginQueuedMessageEdit(m)}
                               title={t(locale, "common.edit")}
@@ -8801,7 +8910,7 @@ export default function AIDock({
                               className="shrink-0 rounded text-fg-faint opacity-0 transition-colors transition-opacity hover:text-fg group-hover/msg:opacity-100"
                             >
                               <Pencil size={13} />
-                            </button>
+                            </button>}
                             <button
                               type="button"
                               onClick={() => {
@@ -8820,10 +8929,10 @@ export default function AIDock({
                         )}
                         {isChatUser && !queuedUserMessage && !m.localOnly && !m.interaction && !normalizedSearch && (
                           <>
-                            <ChatRevisionControls message={m} disabled={aiBusy} onSelect={selectChatRevision} />
-                            <button type="button" onClick={() => beginHistoryMessageEdit(m)} disabled={isReadOnly}
+                            {m.id === latestInput?.id && <ChatRevisionControls message={m} disabled={aiBusy} onSelect={selectChatRevision} />}
+                            {m.id === latestInput?.id && <button type="button" onClick={() => beginHistoryMessageEdit(m)} disabled={isReadOnly}
                               title="编辑历史输入" aria-label="编辑历史输入"
-                              className="shrink-0 rounded text-fg-faint opacity-0 transition-opacity hover:text-accent group-hover/msg:opacity-100 focus-visible:opacity-100 disabled:opacity-40"><Pencil size={13} /></button>
+                              className="shrink-0 rounded text-fg-faint opacity-0 transition-opacity hover:text-accent group-hover/msg:opacity-100 focus-visible:opacity-100 disabled:opacity-40"><Pencil size={13} /></button>}
                           </>
                         )}
                       </div>}
@@ -8982,7 +9091,7 @@ export default function AIDock({
                           modelOptions={modelOptionsForMode}
                           modelValue={modelValueForMode}
                           canRegenerate={canRegenerate}
-                          handoffDisabled={aiBusy || activeBackgroundJob || activeWaitingInput || handoffBusy}
+                          handoffDisabled={aiBusy || activeBackgroundJob || activeWaitingInput || handoffStatus?.kind === "busy"}
                           usage={m.usage}
                           onToggleMenu={(kind) =>
                             setMessageActionMenu((current) =>

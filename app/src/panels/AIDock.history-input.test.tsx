@@ -19,7 +19,7 @@ async function view() {
     messages: [
       { id: 'u1', role: 'user', text: '第一轮输入 `E:/photo.png`', createdAt: 1 },
       { id: 'a1', role: 'assistant', text: '第一轮回答', createdAt: 2 },
-      { id: 'u2', role: 'user', text: '第二轮输入', createdAt: 3 },
+      { id: 'u2', role: 'user', text: '第二轮输入 `E:/photo.png`', createdAt: 3 },
       { id: 'a2', role: 'assistant', text: '第二轮回答', createdAt: 4 },
     ],
   });
@@ -37,36 +37,6 @@ async function view() {
   const cleanup = async () => { await act(async () => root.unmount()); container.remove(); };
   return { container, scroll, cleanup };
 }
-
-it('pins only passed user inputs and switches to the preceding turn on upward scroll', async () => {
-  const v = await view();
-  try {
-    await v.scroll(0);
-    expect(v.container.querySelector('[data-ugs-sticky-prompt]')).toBeNull();
-    await v.scroll(250);
-    expect(v.container.querySelector('[data-ugs-sticky-prompt]')?.getAttribute('data-ugs-sticky-prompt')).toBe('u1');
-    await v.scroll(500);
-    expect(v.container.querySelector('[data-ugs-sticky-prompt]')?.getAttribute('data-ugs-sticky-prompt')).toBe('u2');
-    await v.scroll(250);
-    expect(v.container.querySelector('[data-ugs-sticky-prompt]')?.getAttribute('data-ugs-sticky-prompt')).toBe('u1');
-    await v.scroll(0);
-    expect(v.container.querySelector('[data-ugs-sticky-prompt]')).toBeNull();
-  } finally { await v.cleanup(); }
-});
-
-it('stops measuring older prompts once the latest passed prompt is found', async () => {
-  const v = await view();
-  try {
-    const rows = [...v.container.querySelectorAll<HTMLElement>('[data-ugs-message-row]')];
-    const first = vi.spyOn(rows[0], 'getBoundingClientRect');
-    const last = vi.spyOn(rows[2], 'getBoundingClientRect');
-    await v.scroll(500);
-    expect(v.container.querySelector('[data-ugs-sticky-prompt]')?.getAttribute('data-ugs-sticky-prompt')).toBe('u2');
-    // The topic navigator also measures each row once. The sticky-prompt
-    // calculation must not measure the older row again.
-    expect(first.mock.calls.length).toBeLessThan(last.mock.calls.length);
-  } finally { await v.cleanup(); }
-});
 
 it('does not require the user to open a tool catalogue from the chat composer', async () => {
   const v = await view();
@@ -87,7 +57,7 @@ it('hides superseded inputs in the stream, sticky prompt and topic navigation af
     expect(v.container.textContent).toContain('第一轮回答');
     expect(v.container.querySelectorAll('[data-ugs-message-row]')).toHaveLength(4);
     await v.scroll(250);
-    expect(v.container.querySelector('[data-ugs-sticky-prompt="u1"]')).toBeNull();
+    expect(v.container.querySelector('[data-ugs-sticky-prompt]')?.getAttribute('data-ugs-sticky-prompt')).toBe('u1-edited');
   } finally { await v.cleanup(); }
 });
 
@@ -107,7 +77,7 @@ it('shares the history editor with the pinned input, preserves file refs and can
     await act(async () => v.container.querySelector<HTMLButtonElement>('[data-ugs-message-row] [aria-label="编辑历史输入"]')!.click());
     const editor = v.container.querySelector<HTMLTextAreaElement>('[aria-label="编辑用户输入"]')!;
     await act(async () => editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', ctrlKey: true, bubbles: true })));
-    expect(send).toHaveBeenCalledWith('u1', '第一轮输入 `E:/photo.png`');
+    expect(send).toHaveBeenCalledWith('u2', '第二轮输入 `E:/photo.png`');
   } finally { await v.cleanup(); }
 });
 
@@ -139,13 +109,102 @@ it('opens the editor from pinned prompt text without scrolling and resends the c
     expect(stream.scrollTop).toBe(before);
     expect(pinned.querySelector('[aria-label="编辑当前输入"]')).toBeNull();
     const editor = v.container.querySelector<HTMLTextAreaElement>('[aria-label="编辑用户输入"]')!;
-    expect(editor.value).toBe('第一轮输入 `E:/photo.png`');
+    expect(editor.value).toBe('第二轮输入 `E:/photo.png`');
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')!.set!.call(editor, '修订输入 `E:/photo.png`');
       editor.dispatchEvent(new Event('input', { bubbles: true }));
     });
     await act(async () => v.container.querySelector<HTMLButtonElement>('button[aria-label="保存并重新发送"]')!.click());
-    expect(send).toHaveBeenCalledExactlyOnceWith('u1', '修订输入 `E:/photo.png`');
+    expect(send).toHaveBeenCalledExactlyOnceWith('u2', '修订输入 `E:/photo.png`');
     expect(v.container.querySelector('[aria-label="编辑用户输入"]')).toBeNull();
+  } finally { await v.cleanup(); }
+});
+
+it('always pins the latest user input regardless of scroll and prevents older edits', async () => {
+  const v = await view();
+  try {
+    for (const top of [0, 250, 500, 250, 0]) {
+      await v.scroll(top);
+      expect(v.container.querySelector('[data-ugs-sticky-prompt]')?.getAttribute('data-ugs-sticky-prompt')).toBe('u2');
+    }
+    const rows = [...v.container.querySelectorAll<HTMLElement>('[data-ugs-message-row]')];
+    expect(rows[0].querySelector('[aria-label="编辑历史输入"]')).toBeNull();
+    expect(rows[2].querySelector('[aria-label="编辑历史输入"]')).not.toBeNull();
+  } finally { await v.cleanup(); }
+});
+
+it('pins a newer queued input and edits that queue entry', async () => {
+  const v = await view();
+  const update = vi.fn(() => true);
+  const original = useStore.getState().updateQueuedChatMessage;
+  try {
+    await act(async () => useStore.setState((state) => ({
+      messages: [...state.messages, { id: 'u3', role: 'user', text: '排队的新输入', createdAt: 5 }],
+      queuedChatMessageIds: ['u3'], updateQueuedChatMessage: update,
+    })));
+    expect(v.container.querySelector('[data-ugs-sticky-prompt]')?.getAttribute('data-ugs-sticky-prompt')).toBe('u3');
+    await act(async () => v.container.querySelector<HTMLButtonElement>('[data-ugs-sticky-prompt] [aria-label="编辑当前输入"]')!.click());
+    expect(v.container.querySelector<HTMLTextAreaElement>('[aria-label="编辑用户输入"]')?.value).toBe('排队的新输入');
+    await act(async () => v.container.querySelector<HTMLButtonElement>('button[aria-label="保存"]')!.click());
+    expect(update).toHaveBeenCalledExactlyOnceWith('u3', '排队的新输入');
+  } finally { await act(async () => useStore.setState({ updateQueuedChatMessage: original })); await v.cleanup(); }
+});
+
+it('closes a stale editor as soon as a newer input arrives', async () => {
+  const v = await view();
+  const send = vi.fn(() => true);
+  await act(async () => useStore.setState({ reviseChatMessage: send }));
+  try {
+    await act(async () => v.container.querySelector<HTMLButtonElement>('[data-ugs-sticky-prompt] [aria-label="编辑当前输入"]')!.click());
+    expect(v.container.querySelector('[aria-label="编辑用户输入"]')).not.toBeNull();
+    await act(async () => useStore.setState((state) => ({ messages: [
+      ...state.messages, { id: 'u3', role: 'user', text: '后续输入', createdAt: 5 },
+    ] })));
+    expect(v.container.querySelector('[aria-label="编辑用户输入"]')).toBeNull();
+    expect(v.container.querySelector('[data-ugs-sticky-prompt]')?.getAttribute('data-ugs-sticky-prompt')).toBe('u3');
+    expect(send).not.toHaveBeenCalled();
+    await act(async () => v.container.querySelector<HTMLButtonElement>('[data-ugs-sticky-prompt] [aria-label="编辑当前输入"]')!.click());
+    await act(async () => v.container.querySelector<HTMLButtonElement>('button[aria-label="保存并重新发送"]')!.click());
+    expect(send).toHaveBeenCalledExactlyOnceWith('u3', '后续输入');
+  } finally { await v.cleanup(); }
+});
+
+it('uses send time when an interjection is displayed before older turns', async () => {
+  const v = await view();
+  try {
+    await act(async () => useStore.setState((state) => ({ messages: [
+      ...state.messages, { id: 'u3', role: 'user', text: '最后插话', createdAt: 5, interjected: true, interjectedReplyId: 'a1' },
+    ] })));
+    const rows = [...v.container.querySelectorAll<HTMLElement>('[data-ugs-message-row]')];
+    expect(rows.findIndex((row) => row.textContent?.includes('最后插话'))).toBeLessThan(rows.findIndex((row) => row.textContent?.includes('第二轮输入')));
+    expect(v.container.querySelector('[data-ugs-sticky-prompt]')?.getAttribute('data-ugs-sticky-prompt')).toBe('u3');
+  } finally { await v.cleanup(); }
+});
+
+it('does not expose an editor on older queued inputs', async () => {
+  const v = await view();
+  try {
+    await act(async () => useStore.setState((state) => ({ messages: [
+      ...state.messages, { id: 'u3', role: 'user', text: '旧排队输入', createdAt: 5 },
+      { id: 'u4', role: 'user', text: '新排队输入', createdAt: 6 },
+    ], queuedChatMessageIds: ['u3', 'u4'] })));
+    const rows = [...v.container.querySelectorAll<HTMLElement>('[data-ugs-message-row]')];
+    const old = rows.find((row) => row.textContent?.includes('旧排队输入'))!;
+    const latest = rows.find((row) => row.textContent?.includes('新排队输入'))!;
+    expect(old.querySelector('[aria-label="编辑"]')).toBeNull();
+    expect(latest.querySelector('[aria-label="编辑"]')).not.toBeNull();
+    expect(v.container.querySelector('[data-ugs-sticky-prompt]')?.getAttribute('data-ugs-sticky-prompt')).toBe('u4');
+  } finally { await v.cleanup(); }
+});
+
+it('shows a later local command without allowing an older message to be edited', async () => {
+  const v = await view();
+  try {
+    await act(async () => useStore.setState((state) => ({ messages: [
+      ...state.messages, { id: 'command', role: 'user', text: '/learn 本地指令', createdAt: 5, localOnly: true },
+    ] })));
+    expect(v.container.querySelector('[data-ugs-sticky-prompt]')?.getAttribute('data-ugs-sticky-prompt')).toBe('command');
+    expect(v.container.querySelector<HTMLButtonElement>('[data-ugs-sticky-prompt] [aria-label="编辑当前输入"]')?.disabled).toBe(true);
+    expect(v.container.querySelector('[aria-label="编辑历史输入"]')).toBeNull();
   } finally { await v.cleanup(); }
 });

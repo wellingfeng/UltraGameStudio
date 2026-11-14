@@ -921,7 +921,6 @@ export async function aiEditViaCli(
   // Subscribe to per-run progress events (best-effort; the final result is
   // returned regardless of whether any progress chunks arrive).
   const unlisteners: UnlistenFn[] = [];
-  let usageSeen = false;
   const progressBatcher = opts.onProgress
     ? createProgressBatcher(opts.onProgress)
     : null;
@@ -951,7 +950,6 @@ export async function aiEditViaCli(
             'ai-cli-usage',
             (event) => {
               if (event.payload?.runId === runId) {
-                usageSeen = true;
                 opts.onUsage!(event.payload.usage);
               }
             },
@@ -998,8 +996,7 @@ export async function aiEditViaCli(
       });
     }, opts.signal, undefined);
     if (isAiCliResult(result)) {
-      if (result.usage != null && !usageSeen) {
-        usageSeen = true;
+      if (result.usage != null) {
         opts.onUsage?.(result.usage);
       }
       return result.text;
@@ -2416,12 +2413,14 @@ export async function checkCliUpdates(): Promise<CliVersionStatus[]> {
  * `npm install -g @google/gemini-cli@latest` for gemini (no native updater).
  * Resolves with the combined stdout/stderr log on success. Desktop-only.
  */
-export async function updateCli(adapter: string): Promise<string> {
+export async function updateCli(adapter: string, onStarted?: () => void): Promise<string> {
   if (!tauriAvailable()) {
     throw new Error('NO_BACKEND');
   }
-  const invoke = await getInvoke();
-  return invoke<string>('update_cli', { adapter });
+  const { invoke, Channel } = await import('@tauri-apps/api/core');
+  const channel = new Channel<null>();
+  channel.onmessage = () => onStarted?.();
+  return invoke<string>('update_cli', { adapter, onStarted: channel });
 }
 
 /** Result of a manual "clean up now" cache sweep. */

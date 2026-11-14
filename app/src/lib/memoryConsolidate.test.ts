@@ -81,7 +81,7 @@ describe('memoryConsolidate approvalMode queue (M2)', () => {
     const opts = { transcript: 'source', workspaceId: 'A', reviewSource: source, bases: { memory: base }, approvalMode: 'queue' as const,
       invokeModel: async () => {
         opts.workspaceId = 'B'; source.workspaceId = 'B'; base.raw = null;
-        await applyMemoryOp('memory', { action: 'add', content: 'later edit' }, 'A');
+        await applyMemoryOp('memory', { action: 'replace', oldText: 'original', content: 'later edit' }, 'A');
         return '<<UGS_MEMORY>>{"target":"memory","operations":[{"action":"remove","oldText":"original"}]}<<UGS_MEMORY_END>>';
       } };
     await runConsolidatingReview(opts);
@@ -92,7 +92,7 @@ describe('memoryConsolidate approvalMode queue (M2)', () => {
     expect(pending[0].base?.raw).not.toBeNull();
     const resolved = await resolvePendingMemoryWrites([pending[0].id], 'approve', 'B');
     expect(resolved.outcomes[0].status).toBe('conflicted');
-    expect((await loadMemory('memory', 'A')).map((e) => e.text)).toEqual(['original', 'later edit']);
+    expect((await loadMemory('memory', 'A')).map((e) => e.text)).toEqual(['later edit']);
   });
 
   it('queues an unattended destructive batch even when direct mode was selected', async () => {

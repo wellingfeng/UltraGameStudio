@@ -9,6 +9,16 @@ export function hideReplacedUserMessages(messages: Message[]): Message[] {
     : messages;
 }
 
+/** Latest real user input by send time, independent of display or queue order. */
+export function latestUserInput(messages: Message[]): Message | undefined {
+  let latest: Message | undefined;
+  for (const message of hideReplacedUserMessages(messages)) {
+    if (message.role !== 'user') continue;
+    if (!latest || message.createdAt >= latest.createdAt) latest = message;
+  }
+  return latest;
+}
+
 /**
  * Display-only chronological ordering for the AI-return stream.
  *

@@ -16,11 +16,27 @@ fn close_stdout_and_linger() -> ! {
 
 fn main() {
     if std::env::args().any(|arg| arg == "--help") {
-        println!("fixture app server --stdio");
+        println!("fixture app server --stdio --input-format stream-json");
         return;
     }
     let mode = std::env::var("UGS_TEST_STDOUT_MODE").unwrap();
     std::fs::write("transport-started", "native fixture").unwrap();
+    if mode == "claude-closed-input" {
+        unsafe { CloseHandle(GetStdHandle((-10_i32) as u32)); }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        return;
+    }
+    if mode == "slow-claude" {
+        println!("{}", r#"{"type":"system","subtype":"init"}"#);
+        std::io::stdout().flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(3000));
+        let mut input = String::new();
+        std::io::stdin().lock().read_line(&mut input).unwrap();
+        if input.len() > 250_000 && input.ends_with('\n') {
+            println!("{}", r#"{"type":"result","result":"fixture complete"}"#);
+        }
+        return;
+    }
     if mode == "stream-complete" || mode == "stream-failed" || mode == "clean-exit" {
         if mode == "stream-failed" {
             println!("{}", r#"{"type":"result","is_error":true,"result":"fixture upstream failed"}"#);

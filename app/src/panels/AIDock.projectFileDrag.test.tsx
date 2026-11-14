@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defaultBlueprint } from '@/core/defaultBlueprint';
 import {
   clearProjectFileDragData,
+  finishProjectFileDrag,
   hasProjectFileDragData,
   PROJECT_FILE_DRAG_MIME,
   setProjectFileDragData,
@@ -181,7 +182,7 @@ function resetStore(options: { withWorkspace?: boolean } = {}): void {
   });
 }
 
-async function renderDock(): Promise<{
+async function renderDock(layout: "dock" | "chat" = "dock"): Promise<{
   container: HTMLDivElement;
   cleanup: () => Promise<void>;
 }> {
@@ -190,7 +191,7 @@ async function renderDock(): Promise<{
   const root: Root = createRoot(container);
 
   await act(async () => {
-    root.render(<AIDock />);
+    root.render(<AIDock layout={layout} />);
   });
 
   return {
@@ -1045,4 +1046,130 @@ describe('AIDock project file drag', () => {
       await view.cleanup();
     }
   });
+});
+
+describe('sticky prompt file drag', () => {
+  async function setup(options: { queued?: boolean; edit?: boolean } = {}) {
+    resetStore();
+    useStore.setState({
+      messages: [{ id: 'latest-input', role: 'user', text: '原始输入', createdAt: 1 }],
+      queuedChatMessageIds: options.queued ? ['latest-input'] : [],
+    });
+    const view = await renderDock('chat');
+    const pinned = view.container.querySelector<HTMLElement>('[data-ugs-sticky-prompt]')!;
+    Object.defineProperty(pinned, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 10, top: 10, right: 600, bottom: 200, width: 590, height: 190, x: 10, y: 10, toJSON: () => ({}) }),
+    });
+    if (options.edit !== false) {
+      await act(async () => pinned.querySelector<HTMLButtonElement>('[aria-label="编辑当前输入"]')!.click());
+    }
+    return { ...view, pinned };
+  }
+
+  it('inserts native desktop paths at the selection and submits the edited latest input', async () => {
+    const original = useStore.getState().reviseChatMessage;
+    const revise = vi.fn(() => true);
+    const view = await setup();
+    await act(async () => useStore.setState({ reviseChatMessage: revise }));
+    try {
+      const editor = view.pinned.querySelector<HTMLTextAreaElement>('[aria-label="编辑用户输入"]')!;
+      editor.setSelectionRange(0, 2);
+      const paths = ['E:\\My Project\\file one.txt', 'E:\\My Project\\folder'];
+      await act(async () => tauriWebviewMock.listeners[0]({ payload: { type: 'drop', position: { x: 40, y: 40 }, paths } }));
+      const expected = `\`${paths[0]}\`\n\`${paths[1]}\`输入`;
+      expect(editor.value).toBe(expected);
+      expect(useStore.getState().composerDraft).toBe('');
+      await act(async () => view.pinned.querySelector<HTMLButtonElement>('[aria-label="保存并重新发送"]')!.click());
+      expect(revise).toHaveBeenCalledExactlyOnceWith('latest-input', expected);
+    } finally { await act(async () => useStore.setState({ reviseChatMessage: original })); await view.cleanup(); }
+  });
+
+  it('opens the collapsed latest input when a desktop file is dropped on it', async () => {
+    const view = await setup({ edit: false });
+    try {
+      await act(async () => tauriWebviewMock.listeners[0]({ payload: { type: 'drop', position: { x: 40, y: 40 }, paths: ['E:\\file.txt'] } }));
+      expect(view.pinned.querySelector<HTMLTextAreaElement>('[aria-label="编辑用户输入"]')?.value).toBe('原始输入`E:\\file.txt`');
+      expect(useStore.getState().composerDraft).toBe('');
+    } finally { await view.cleanup(); }
+  });
+
+  it('accepts project drag and drop in a queued input without duplicating the drag-end fallback', async () => {
+    const original = useStore.getState().updateQueuedChatMessage;
+    const update = vi.fn(() => true);
+    const view = await setup({ queued: true });
+    await act(async () => useStore.setState({ updateQueuedChatMessage: update }));
+    try {
+      const editor = view.pinned.querySelector<HTMLTextAreaElement>('[aria-label="编辑用户输入"]')!;
+      editor.setSelectionRange(editor.value.length, editor.value.length);
+      setProjectFileDragData(plainDataTransfer(), dragEntry);
+      const dataTransfer = plainDataTransfer();
+      const props = reactProps<ComposerDropProps>(view.pinned);
+      const preventDefault = vi.fn();
+      await act(async () => props.onDragOver?.({ dataTransfer, currentTarget: view.pinned, target: editor, relatedTarget: null, preventDefault, stopPropagation: vi.fn() }));
+      expect(preventDefault).toHaveBeenCalled();
+      await act(async () => props.onDrop?.({ dataTransfer, currentTarget: view.pinned, target: editor, relatedTarget: null, preventDefault: vi.fn(), stopPropagation: vi.fn() }));
+      await act(async () => finishProjectFileDrag({ clientX: 40, clientY: 40 }));
+      const expected = `原始输入\`${dragEntry.path}\``;
+      expect(editor.value).toBe(expected);
+      await act(async () => view.pinned.querySelector<HTMLButtonElement>('[aria-label="保存"]')!.click());
+      expect(update).toHaveBeenCalledExactlyOnceWith('latest-input', expected);
+    } finally { await act(async () => useStore.setState({ updateQueuedChatMessage: original })); await view.cleanup(); }
+  });
+
+  it('uses the project drag-end fallback over the sticky editor', async () => {
+    const view = await setup();
+    try {
+      const editor = view.pinned.querySelector<HTMLTextAreaElement>('[aria-label="编辑用户输入"]')!;
+      editor.setSelectionRange(editor.value.length, editor.value.length);
+      setProjectFileDragData(plainDataTransfer(), dragEntry);
+      await act(async () => finishProjectFileDrag({ clientX: 40, clientY: 40 }));
+      expect(editor.value).toBe(`原始输入\`${dragEntry.path}\``);
+      expect(useStore.getState().composerDraft).toBe('');
+    } finally { await view.cleanup(); }
+  });
+
+  it('shows drop feedback at scaled native coordinates and clears it on leave', async () => {
+    vi.stubGlobal('devicePixelRatio', 2);
+    const view = await setup();
+    try {
+      await act(async () => tauriWebviewMock.listeners[0]({ payload: { type: 'enter', position: { x: 80, y: 80 } } }));
+      expect(view.pinned.className).toContain('border-accent');
+      expect(view.pinned.className).not.toContain('border-accent/25');
+      await act(async () => tauriWebviewMock.listeners[0]({ payload: { type: 'leave' } }));
+      expect(view.pinned.className).toContain('border-accent/25');
+      await act(async () => tauriWebviewMock.listeners[0]({ payload: { type: 'drop', position: { x: 80, y: 80 }, paths: ['E:\\scaled.txt'] } }));
+      expect(view.pinned.querySelector<HTMLTextAreaElement>('textarea')?.value).toContain('`E:\\scaled.txt`');
+    } finally { await view.cleanup(); }
+  });
+
+  it('ignores native drops on inputs that cannot be edited', async () => {
+    const view = await setup({ edit: false });
+    try {
+      await act(async () => useStore.setState({ messages: [
+        { id: 'local-command', role: 'user', text: '/learn 本地指令', createdAt: 2, localOnly: true },
+      ] }));
+      await act(async () => tauriWebviewMock.listeners[0]({ payload: { type: 'drop', position: { x: 40, y: 40 }, paths: ['E:\\file.txt'] } }));
+      expect(view.pinned.querySelector('textarea')).toBeNull();
+      expect(useStore.getState().composerDraft).toBe('');
+    } finally { await view.cleanup(); }
+  });
+
+  it('inserts browser file paths into the editing selection', async () => {
+    const view = await setup();
+    try {
+      const editor = view.pinned.querySelector<HTMLTextAreaElement>('textarea')!;
+      editor.setSelectionRange(2, 4);
+      const file = new File(['content'], 'local.txt');
+      Object.defineProperty(file, 'path', { value: 'E:\\browser file.txt' });
+      const transfer = { ...fileItemDataTransfer(file), files: [file] } as unknown as DataTransfer;
+      const props = reactProps<ComposerDropProps>(view.pinned);
+      const preventDefault = vi.fn();
+      await act(async () => props.onDrop?.({ dataTransfer: transfer, currentTarget: view.pinned, target: editor, relatedTarget: null, preventDefault, stopPropagation: vi.fn() }));
+      expect(preventDefault).toHaveBeenCalled();
+      expect(editor.value).toBe('原始`E:\\browser file.txt`');
+      expect(useStore.getState().composerDraft).toBe('');
+    } finally { await view.cleanup(); }
+  });
+
 });

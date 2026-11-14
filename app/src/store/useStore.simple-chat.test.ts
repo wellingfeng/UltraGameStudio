@@ -375,6 +375,95 @@ describe('会话交接', () => {
     }
   });
 
+  it('不同会话可并发交接且结果写回各自会话', async () => {
+    resetStore(simpleBlueprint('交接来源'));
+    const workspace = await historyStore.resolveWorkspaceByPath('E:/project');
+    const firstMessages: Message[] = [{ id: 'u1', role: 'user', text: '第一会话', createdAt: 1 }];
+    const secondMessages: Message[] = [{ id: 'u2', role: 'user', text: '第二会话', createdAt: 2 }];
+    await historyStore.createSession({ workspaceId: workspace.id, id: 'source-a', isWorkflow: false, messages: firstMessages, title: '来源 A' });
+    await historyStore.createSession({ workspaceId: workspace.id, id: 'source-b', isWorkflow: false, messages: secondMessages, title: '来源 B' });
+    const originalSendPrompt = useStore.getState().sendPrompt;
+    const terminal = new Map<string, (status: 'completed') => void>();
+    const send = vi.fn((_text: string, options?: Parameters<typeof originalSendPrompt>[1]) => {
+      terminal.set(useStore.getState().activeSessionId!, options!.onChatTerminal!);
+      return true;
+    });
+    useStore.setState({ historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: 'source-a',
+      workspaces: [workspace], messages: firstMessages, composer: { ...defaultComposer, workspace: 'E:/project' }, sendPrompt: send });
+    useStore.getState().setSessionRunSelection(systemDefaultGatewaySelection('codex'));
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.saveSessionHandoffSnapshot
+      .mockResolvedValueOnce({ snapshotPath: 'E:/project/a.json', summaryPath: 'E:/project/a.md' })
+      .mockResolvedValueOnce({ snapshotPath: 'E:/project/b.json', summaryPath: 'E:/project/b.md' });
+    tauriMocks.previewLocalFile.mockResolvedValue({ kind: 'text', text: '# 交接文档' });
+    try {
+      const first = useStore.getState().continueSessionWithHandoff();
+      await waitFor(() => terminal.has('source-a'), 'first summary turn started');
+      useStore.setState({ activeSessionId: 'source-b', messages: secondMessages });
+      const second = useStore.getState().continueSessionWithHandoff();
+      await waitFor(() => terminal.has('source-b'), 'second summary turn started');
+      terminal.get('source-a')!('completed');
+      await first;
+      expect(useStore.getState().messages).toEqual(secondMessages);
+      expect((await historyStore.getSession(workspace.id, 'source-a'))?.messages.at(-1)?.text).toContain('E:/project/a.md');
+      terminal.get('source-b')!('completed');
+      await second;
+      expect(useStore.getState().messages.at(-1)?.text).toContain('E:/project/b.md');
+      expect((await historyStore.getSession(workspace.id, 'source-b'))?.messages.at(-1)?.text).toContain('E:/project/b.md');
+      expect(send).toHaveBeenCalledTimes(2);
+    } finally {
+      useStore.setState({ sendPrompt: originalSendPrompt });
+    }
+  });
+
+  it('真实聊天状态链切换会话后可并发交接', async () => {
+    resetStore(simpleBlueprint('交接来源'));
+    const workspace = await historyStore.resolveWorkspaceByPath('E:/project');
+    const firstMessages: Message[] = [{ id: 'u-a', role: 'user', text: '第一会话', createdAt: 1 }];
+    const secondMessages: Message[] = [{ id: 'u-b', role: 'user', text: '第二会话', createdAt: 2 }];
+    const sessionA = await historyStore.createSession({ workspaceId: workspace.id, id: 'real-handoff-a', isWorkflow: false, messages: firstMessages, title: '来源 A' });
+    const sessionB = await historyStore.createSession({ workspaceId: workspace.id, id: 'real-handoff-b', isWorkflow: false, messages: secondMessages, title: '来源 B' });
+    useStore.setState({ historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: sessionA.id,
+      workspaces: [workspace], messages: firstMessages, composer: { ...defaultComposer, workspace: 'E:/project' } });
+    useStore.getState().setSessionRunSelection(systemDefaultGatewaySelection('codex'));
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.saveSessionHandoffSnapshot
+      .mockResolvedValueOnce({ snapshotPath: 'E:/project/a.json', summaryPath: 'E:/project/a.md' })
+      .mockResolvedValueOnce({ snapshotPath: 'E:/project/b.json', summaryPath: 'E:/project/b.md' });
+    tauriMocks.previewLocalFile.mockResolvedValue({ kind: 'text', text: '# 交接文档' });
+    gatewayMocks.resolveDirectGatewayRoute.mockReturnValue(null);
+    gatewayMocks.resolveCliGatewayRoute.mockImplementation(async (selection) => ({
+      selection, adapter: 'codex', modelClass: 'default', model: 'model-x', transport: 'cli', mode: 'cli', label: 'Codex', source: 'global', cliCommand: 'codex',
+    }));
+    const resolvers: Array<(text: string) => void> = [];
+    tauriMocks.aiEditViaCli.mockImplementation(() => new Promise<string>((resolve) => { resolvers.push(resolve); }));
+    const pending: Array<Promise<{ thinkingLevel?: string }>> = [];
+    try {
+      const first = useStore.getState().continueSessionWithHandoff();
+      pending.push(first);
+      void first.catch(() => {});
+      await waitFor(() => resolvers.length === 1, 'first real chat summary started');
+      useStore.getState().selectSession(sessionB.id, workspace.id);
+      await waitFor(() => useStore.getState().activeSessionId === sessionB.id && useStore.getState().messages.some((message) => message.id === 'u-b'), 'session B activated');
+      const second = useStore.getState().continueSessionWithHandoff();
+      pending.push(second);
+      void second.catch(() => {});
+      await waitFor(() => resolvers.length === 2, 'second real chat summary started');
+      resolvers[0]('第一份总结完成');
+      await first;
+      expect(useStore.getState().activeSessionId).toBe(sessionB.id);
+      expect(useStore.getState().messages.some((message) => message.text.includes('E:/project/a.md'))).toBe(false);
+      expect((await historyStore.getSession(workspace.id, sessionA.id))?.messages.at(-1)?.text).toContain('E:/project/a.md');
+      resolvers[1]('第二份总结完成');
+      await second;
+      expect((await historyStore.getSession(workspace.id, sessionB.id))?.messages.at(-1)?.text).toContain('E:/project/b.md');
+      expect(tauriMocks.aiEditViaCli).toHaveBeenCalledTimes(2);
+    } finally {
+      resolvers.forEach((resolve) => resolve('测试结束'));
+      await Promise.allSettled(pending);
+    }
+  });
+
   it('摘要文件未落地时保留原会话，不启动新的开发会话', async () => {
     resetStore(simpleBlueprint('交接来源'));
     const workspace = await historyStore.resolveWorkspaceByPath('E:/project');
@@ -674,7 +763,7 @@ describe('simple-workflow chat mode', () => {
     } finally { unsubscribe(); }
   });
 
-  it('resends an edited input while retaining subsequent context and persisting display replacement', async () => {
+  it('rejects older edits and resends the latest input with its context', async () => {
     resetStore(simpleBlueprint('Revision'));
     mockDirectRoute();
     const original: Message[] = [
@@ -688,11 +777,13 @@ describe('simple-workflow chat mode', () => {
     const record = await historyStore.createSession({ workspaceId: workspace.id, isWorkflow: false, messages: original, title: 'Revision' });
     useStore.setState({ messages: original, historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: record.id, workspaces: [workspace] });
     gatewayMocks.completeGatewayText.mockResolvedValue('修订后的回答');
-    expect(useStore.getState().reviseChatMessage('edit-u', '新问题 `E:/photo.png`')).toBe(true);
+    expect(useStore.getState().reviseChatMessage('edit-u', '旧输入不能改')).toBe(false);
+    expect(gatewayMocks.completeGatewayText).not.toHaveBeenCalled();
+    expect(useStore.getState().reviseChatMessage('after-u', '新问题 `E:/photo.png`')).toBe(true);
     await waitFor(() => !useStore.getState().aiStreaming, 'revised reply');
     const current = useStore.getState().messages;
     expect(current.find((message) => message.id === 'edit-u')?.text).toBe('旧问题 `E:/photo.png`');
-    expect(current.find((message) => message.replacesMessageId === 'edit-u')).toMatchObject({ text: '新问题 `E:/photo.png`' });
+    expect(current.find((message) => message.replacesMessageId === 'after-u')).toMatchObject({ text: '新问题 `E:/photo.png`' });
     expect(current.map((message) => message.id)).toContain('edit-a');
     expect(current.map((message) => message.id)).toContain('after-u');
     const prompt = String(gatewayMocks.completeGatewayText.mock.calls[0][0].userContent);
@@ -703,13 +794,13 @@ describe('simple-workflow chat mode', () => {
     await waitFor(async () => !!(await historyStore.getSession(workspace.id, record.id))?.messages.some((message) => message.text.includes('修订后的回答')), 'persisted revised reply');
     useStore.setState({ messages: (await historyStore.getSession(workspace.id, record.id))!.messages });
     const visible = orderDisplayMessages(useStore.getState().messages);
-    expect(visible.some((message) => message.id === 'edit-u')).toBe(false);
+    expect(visible.some((message) => message.id === 'edit-u')).toBe(true);
     expect(visible.filter((message) => message.text === '新问题 `E:/photo.png`')).toHaveLength(1);
-    expect(visible.some((message) => message.id === 'after-u')).toBe(true);
+    expect(visible.some((message) => message.id === 'after-u')).toBe(false);
     expect(gatewayMocks.completeGatewayText).toHaveBeenCalledTimes(1);
   });
 
-  it('resumes the same Claude context after editing without discarding later turns', async () => {
+  it('resumes the same Claude context after editing the latest input', async () => {
     resetStore(simpleBlueprint('Native revision'));
     useStore.setState({ activeSessionId: 'native-revision' });
     tauriMocks.isTauri.mockReturnValue(true);
@@ -721,12 +812,12 @@ describe('simple-workflow chat mode', () => {
     tauriMocks.aiEditViaCli.mockResolvedValue('回答');
     useStore.getState().sendPrompt('原始问题');
     await waitFor(() => !useStore.getState().aiStreaming, 'original native reply');
-    const id = useStore.getState().messages.find((message) => message.role === 'user')!.id;
     useStore.getState().sendPrompt('第二轮');
     await waitFor(() => !useStore.getState().aiStreaming, 'native resumed reply');
     const firstOptions = tauriMocks.aiEditViaCli.mock.calls[0][2];
     expect(tauriMocks.aiEditViaCli.mock.calls[1][2].resume).toBe(true);
-    useStore.getState().reviseChatMessage(id, '修订问题');
+    const id = useStore.getState().messages.find((message) => message.text === '第二轮')!.id;
+    expect(useStore.getState().reviseChatMessage(id, '修订问题')).toBe(true);
     await waitFor(() => !useStore.getState().aiStreaming, 'native revision reply');
     const revisedCall = tauriMocks.aiEditViaCli.mock.calls[2];
     expect(revisedCall[2].sessionId).toBe(firstOptions.sessionId);
@@ -737,7 +828,8 @@ describe('simple-workflow chat mode', () => {
     useStore.getState().sendPrompt('恢复版本后继续');
     await waitFor(() => !useStore.getState().aiStreaming, 'restored native version reply');
     expect(tauriMocks.aiEditViaCli.mock.calls[3][2].resume).toBe(true);
-    expect(orderDisplayMessages(useStore.getState().messages).some((message) => message.text === '原始问题')).toBe(false);
+    expect(orderDisplayMessages(useStore.getState().messages).some((message) => message.text === '原始问题')).toBe(true);
+    expect(orderDisplayMessages(useStore.getState().messages).some((message) => message.text === '第二轮')).toBe(false);
     expect(useStore.getState().messages.some((message) => message.text === '第二轮')).toBe(true);
   });
 
@@ -5952,6 +6044,41 @@ describe('simple-workflow chat mode', () => {
       '问题一',
       '问题二',
     ]);
+  });
+
+  it('keeps new inputs newer than preceding revisions with future timestamps', async () => {
+    resetStore(simpleBlueprint('Input order'));
+    mockDirectRoute();
+    gatewayMocks.completeGatewayText.mockResolvedValue('回答');
+    const future = Date.now() + 1000;
+    useStore.setState({ messages: [{ id: 'future-revision', role: 'user', text: '此前修订', createdAt: future }] });
+    expect(useStore.getState().sendPrompt('最后输入')).toBe(true);
+    expect(useStore.getState().messages.find((message) => message.text === '最后输入')!.createdAt).toBeGreaterThan(future);
+    await waitFor(() => !useStore.getState().aiStreaming, 'latest input completes');
+  });
+
+  it('rejects editing an older queued input while allowing the latest one', async () => {
+    resetStore(simpleBlueprint('Queued input order'));
+    mockDirectRoute();
+    const resolvers: Array<(value: string) => void> = [];
+    gatewayMocks.completeGatewayText.mockImplementation(() => new Promise<string>((resolve) => { resolvers.push(resolve); }));
+    useStore.getState().sendPrompt('运行中');
+    await waitFor(() => resolvers.length === 1, 'first chat call');
+    useStore.getState().sendPrompt('旧排队输入');
+    useStore.getState().sendPrompt('新排队输入');
+    const [oldId, latestId] = useStore.getState().queuedChatMessageIds;
+    expect(oldId).toBeTruthy();
+    expect(latestId).toBeTruthy();
+    expect(useStore.getState().updateQueuedChatMessage(oldId, '错误修改')).toBe(false);
+    expect(useStore.getState().updateQueuedChatMessage(latestId, '最后修改')).toBe(true);
+    expect(useStore.getState().messages.find((message) => message.id === oldId)?.text).toBe('旧排队输入');
+    resolvers[0]('第一条回答');
+    await waitFor(() => resolvers.length === 2, 'old queued input starts');
+    resolvers[1]('第二条回答');
+    await waitFor(() => resolvers.length === 3, 'latest queued input starts');
+    resolvers[2]('第三条回答');
+    await waitFor(() => !useStore.getState().aiStreaming, 'queued inputs complete');
+    expect(useStore.getState().messages.find((message) => message.id === latestId)?.text).toBe('最后修改');
   });
 
   it('edits a queued interjection before it starts', async () => {

@@ -1,7 +1,10 @@
 import { primeCliRuntime, resolveCliInvocation } from '@/lib/cliConfig';
 import { aiEditViaCli, isTauri } from '@/lib/tauri';
 import { canUseProviderDirectTransport } from '@/lib/apiConfig';
+import { finishActiveAgentUsage } from '@/lib/agentUsageHistory';
 import {
+  startActiveModelUsage,
+  updateActiveModelUsage,
   estimateGatewayUsage,
   mergeUsageReports,
   recordModelUsageForRoute,
@@ -64,22 +67,34 @@ async function completeDirectWithUsage(
   complete: (request: GatewayTextRequest) => Promise<string>,
 ): Promise<string> {
   let usage: ModelUsageReport | null = null;
-  const text = await complete({
-    ...request,
-    onUsage: (report) => {
-      usage = mergeUsageReports(usage, report);
-      request.onUsage?.(report);
-    },
-  });
-  if (!text.trim()) {
-    throw new Error('模型返回了空内容（可能原因：上游鉴权失败、模型不可用、响应被过滤或请求被拦截）。');
+  const startedAt = Date.now();
+  let firstResponseMs: number | undefined;
+  const activeUsageId = startActiveModelUsage(request.route, startedAt);
+  try {
+    const text = await complete({
+      ...request,
+      onDelta: (chunk) => {
+        if (chunk && firstResponseMs === undefined) firstResponseMs = Date.now() - startedAt;
+        request.onDelta?.(chunk);
+      },
+      onUsage: (report) => {
+        usage = mergeUsageReports(usage, report);
+        if (usage) updateActiveModelUsage(activeUsageId, usage, { elapsedMs: Date.now() - startedAt, firstResponseMs });
+        request.onUsage?.(report);
+      },
+    });
+    if (!text.trim()) {
+      throw new Error('模型返回了空内容（可能原因：上游鉴权失败、模型不可用、响应被过滤或请求被拦截）。');
+    }
+    recordModelUsageForRoute(
+      request.route,
+      usage ?? estimateGatewayUsage(request.system, request.userContent, text),
+      { estimated: !usage, context: request.usageContext, elapsedMs: Date.now() - startedAt, firstResponseMs },
+    );
+    return text;
+  } finally {
+    finishActiveAgentUsage(activeUsageId);
   }
-  recordModelUsageForRoute(
-    request.route,
-    usage ?? estimateGatewayUsage(request.system, request.userContent, text),
-    { estimated: !usage, context: request.usageContext },
-  );
-  return text;
 }
 
 async function completeGatewayTextViaCli(
@@ -96,33 +111,40 @@ async function completeGatewayTextViaCli(
   const cli = await resolveCliForRoute(request.route);
   const prompt = `${request.system}\n\n${request.userContent}`;
   let usage: ModelUsageReport | null = null;
-  const text = await aiEditViaCli(prompt, request.route.adapter, {
-    permission: request.permission ?? 'full',
-    cwd: request.cwd,
-    model: request.route.model,
-    cliCommand: cli.command,
-    // Inject the channel's credentials (e.g. a Codex relay key/base url) so the
-    // local CLI targets the selected provider. See gatewayRouteEnv (cli branch).
-    env: request.route.env,
-    timeoutSeconds: request.timeoutSeconds,
-    idleTimeoutSeconds: request.idleTimeoutSeconds,
-    runId: request.runId,
-    skillTools: request.skillTools,
-    signal: request.signal,
-    onTool: request.onToolEvent,
-    onUsage: (rawUsage) => {
-      const report = usageReportFromCliUsage(rawUsage);
-      if (!report) return;
-      usage = mergeUsageReports(usage, report);
-      request.onUsage?.(report);
-    },
-  });
-  recordModelUsageForRoute(
-    request.route,
-    usage ?? estimateGatewayUsage(request.system, request.userContent, text),
-    { estimated: !usage, context: request.usageContext },
-  );
-  return text;
+  const startedAt = Date.now();
+  const activeUsageId = startActiveModelUsage(request.route, startedAt);
+  try {
+    const text = await aiEditViaCli(prompt, request.route.adapter, {
+      permission: request.permission ?? 'full',
+      cwd: request.cwd,
+      model: request.route.model,
+      cliCommand: cli.command,
+      // Inject the channel's credentials (e.g. a Codex relay key/base url) so the
+      // local CLI targets the selected provider. See gatewayRouteEnv (cli branch).
+      env: request.route.env,
+      timeoutSeconds: request.timeoutSeconds,
+      idleTimeoutSeconds: request.idleTimeoutSeconds,
+      runId: request.runId,
+      skillTools: request.skillTools,
+      signal: request.signal,
+      onTool: request.onToolEvent,
+      onUsage: (rawUsage) => {
+        const report = usageReportFromCliUsage(rawUsage);
+        if (!report) return;
+        usage = mergeUsageReports(usage, report);
+        if (usage) updateActiveModelUsage(activeUsageId, usage, { elapsedMs: Date.now() - startedAt });
+        request.onUsage?.(report);
+      },
+    });
+    recordModelUsageForRoute(
+      request.route,
+      usage ?? estimateGatewayUsage(request.system, request.userContent, text),
+      { estimated: !usage, context: request.usageContext, elapsedMs: Date.now() - startedAt },
+    );
+    return text;
+  } finally {
+    finishActiveAgentUsage(activeUsageId);
+  }
 }
 
 function shouldFallbackDirectFetchToCli(

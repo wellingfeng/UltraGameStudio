@@ -21,6 +21,26 @@ export interface BrowserPreviewTab {
   id: string;
   scope: string;
   expanded: boolean;
+  url?: string;
+  title?: string;
+}
+
+export function browserTabLabel(tab: BrowserPreviewTab): string {
+  const title = tab.title?.trim();
+  if (title) return title;
+  const address = tab.url?.trim();
+  if (!address) return '浏览器';
+  try {
+    const url = new URL(address);
+    if (url.protocol !== 'file:') return url.host || address;
+    const name = url.pathname.split('/').filter(Boolean).pop();
+    if (name) {
+      try { return decodeURIComponent(name); } catch { return name; }
+    }
+    return url.host || address;
+  } catch {
+    return address.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || address;
+  }
 }
 
 interface FilePreviewTabsState {
@@ -31,6 +51,8 @@ interface FilePreviewTabsState {
   setPreviewChatOpen: (scope: string, open: boolean) => void;
   open: (tab: Omit<FilePreviewTab, 'id'>) => void;
   openBrowser: (scope: string) => void;
+  setBrowserLocation: (id: string, url: string) => void;
+  setBrowserTitle: (id: string, title: string) => void;
   closeBrowser: (id: string) => void;
   setBrowserExpanded: (id: string, expanded: boolean) => void;
   select: (scope: string, id: string | null) => void;
@@ -63,6 +85,17 @@ export const useFilePreviewTabs = create<FilePreviewTabsState>((set) => ({
         { id, scope, expanded: true }],
       activeByScope: { ...state.activeByScope, [scope]: id },
     };
+  }),
+  setBrowserLocation: (id, url) => set((state) => {
+    const tab = state.browserTabs.find((item) => item.id === id);
+    if (!tab || tab.url === url) return state;
+    return { browserTabs: state.browserTabs.map((item) => item.id === id ? { ...item, url, title: '' } : item) };
+  }),
+  setBrowserTitle: (id, title) => set((state) => {
+    const tab = state.browserTabs.find((item) => item.id === id);
+    const normalized = title.replace(/\s+/g, ' ').trim();
+    if (!tab || tab.title === normalized) return state;
+    return { browserTabs: state.browserTabs.map((item) => item.id === id ? { ...item, title: normalized } : item) };
   }),
   closeBrowser: (id) => set((state) => {
     const tab = state.browserTabs.find((item) => item.id === id);

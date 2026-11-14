@@ -14,7 +14,7 @@ impl<T: Write + Send> PipeSink for T {}
 
 struct WriteRequest {
     bytes: Vec<u8>,
-    deadline: Instant,
+    deadline: Option<Instant>,
     reply: mpsc::Sender<Result<(), String>>,
     _bytes: BytePermit,
 }
@@ -139,7 +139,7 @@ impl PipeWriter {
                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                         Err(_) => break,
                     };
-                    if stop.load(Ordering::SeqCst) || Instant::now() >= request.deadline {
+                    if stop.load(Ordering::SeqCst) || request.deadline.is_some_and(|deadline| Instant::now() >= deadline) {
                         let _ = request.reply.send(Err("管道请求已超时，未写入。".into()));
                         continue;
                     }
@@ -186,6 +186,16 @@ impl PipeWriter {
         }))
     }
     pub(crate) fn write_bytes(&self, bytes: Vec<u8>, deadline: Instant) -> Result<(), String> {
+        self.write_bytes_inner(bytes, Some(deadline))
+    }
+
+    // Initial prompts can exceed the pipe buffer while the CLI starts up.
+    // Wait for the actual write; closing the pipe still cancels blocked I/O.
+    pub(crate) fn write_bytes_until_closed(&self, bytes: Vec<u8>) -> Result<(), String> {
+        self.write_bytes_inner(bytes, None)
+    }
+
+    fn write_bytes_inner(&self, bytes: Vec<u8>, deadline: Option<Instant>) -> Result<(), String> {
         if self.closed.load(Ordering::SeqCst) {
             return Err("管道已关闭。".into());
         }
@@ -210,14 +220,17 @@ impl PipeWriter {
                 _bytes: permit,
             })
             .map_err(|_| "管道队列繁忙或已关闭。".to_string())?;
-        match result.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-            Ok(result) => result,
-            Err(_) => {
-                // In-flight writes may be partial. Close the transport rather than
-                // silently delivering timed-out text later or pretending success.
-                self.close();
-                Err("管道写入超时，传输已关闭（请求可能部分写入）。".into())
-            }
+        match deadline {
+            Some(deadline) => match result.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(result) => result,
+                Err(_) => {
+                    // In-flight writes may be partial. Close the transport rather than
+                    // silently delivering timed-out text later or pretending success.
+                    self.close();
+                    Err("管道写入超时，传输已关闭（请求可能部分写入）。".into())
+                }
+            },
+            None => result.recv().unwrap_or_else(|_| Err("管道写入任务已退出。".into())),
         }
     }
     pub(crate) fn close(&self) {
@@ -498,7 +511,7 @@ mod tests {
             .queue
             .try_send(WriteRequest {
                 bytes: vec![b'x'; 1024 * 1024],
-                deadline: Instant::now() + Duration::from_secs(5),
+                deadline: Some(Instant::now() + Duration::from_secs(5)),
                 reply,
                 _bytes: budget.reserve(1024 * 1024).unwrap(),
             })
@@ -591,7 +604,7 @@ mod tests {
             .queue
             .try_send(WriteRequest {
                 bytes: vec![b'x'; 1024 * 1024],
-                deadline: Instant::now() + Duration::from_secs(5),
+                deadline: Some(Instant::now() + Duration::from_secs(5)),
                 reply,
                 _bytes: budget.reserve(1024 * 1024).unwrap(),
             })
@@ -668,7 +681,7 @@ mod tests {
             .queue
             .try_send(WriteRequest {
                 bytes: vec![b'x'; 1024 * 1024],
-                deadline: Instant::now() + Duration::from_secs(5),
+                deadline: Some(Instant::now() + Duration::from_secs(5)),
                 reply,
                 _bytes: budget.reserve(1024 * 1024).unwrap(),
             })

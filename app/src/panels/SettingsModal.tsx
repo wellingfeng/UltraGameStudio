@@ -1842,7 +1842,13 @@ function CliUpdatePanel({ locale }: { locale: Locale }) {
     [snapshot.statuses],
   );
   const checking = snapshot.status === 'loading';
-  const loaded = snapshot.status === 'ready' || snapshot.status === 'error';
+  const loaded = snapshot.statuses.length > 0 || snapshot.status === 'ready' || snapshot.status === 'error';
+  const updatableStatuses = statuses.filter((status) =>
+    status.updateAvailable &&
+    !!status.installedVersion &&
+    !snapshot.queuedAdapters.includes(status.adapter) &&
+    !snapshot.updatingAdapters.includes(status.adapter),
+  );
 
   const runCheck = useCallback(() => {
     void refreshCliUpdateStatus();
@@ -1872,7 +1878,9 @@ function CliUpdatePanel({ locale }: { locale: Locale }) {
         ) : (
           statuses.map((status) => {
             const label = cliUpdateAdapterLabel(status.adapter, status.label);
+            const isQueued = snapshot.queuedAdapters.includes(status.adapter);
             const isUpdating = snapshot.updatingAdapters.includes(status.adapter);
+            const updateError = snapshot.updateMessages[status.adapter];
             const canInstall = status.installable === true && !status.installedVersion;
             const actionable = status.updateAvailable || canInstall;
             const current = status.installedVersion
@@ -1913,20 +1921,27 @@ function CliUpdatePanel({ locale }: { locale: Locale }) {
                       {status.error}
                     </p>
                   )}
+                  {updateError && !updateError.ok && (
+                    <p className="mt-0.5 text-[10px] text-status-error" title={updateError.detail}>
+                      {t(locale, 'settings.cliUpdate.updateFailedPrefix')}{updateError.detail}
+                    </p>
+                  )}
                 </div>
                 <button
                   type="button"
-                  disabled={!actionable || isUpdating}
+                  disabled={!actionable || isQueued || isUpdating}
                   onClick={() => void runUpdate(status.adapter)}
                   className={cn(
                     'inline-flex shrink-0 items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-xs transition-colors',
-                    actionable && !isUpdating
+                    actionable && !isQueued && !isUpdating
                       ? 'border-accent bg-accent/15 text-fg hover:bg-accent/25'
                       : 'cursor-not-allowed border-border bg-panel-2 text-fg-faint',
                   )}
                 >
                   <UploadCloud size={13} strokeWidth={2.1} />
-                  {isUpdating
+                  {isQueued
+                    ? t(locale, 'settings.cliUpdate.queued')
+                    : isUpdating
                     ? canInstall
                       ? t(locale, 'settings.cliUpdate.installing')
                       : t(locale, 'settings.cliUpdate.updating')
@@ -1940,17 +1955,28 @@ function CliUpdatePanel({ locale }: { locale: Locale }) {
         )}
       </div>
       <div className="flex items-center justify-between gap-2">
-        <button
-          type="button"
-          onClick={() => void runCheck()}
-          disabled={checking}
-          className="inline-flex items-center gap-1.5 rounded-md border border-border bg-panel px-2.5 py-1.5 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          <RefreshCw size={13} strokeWidth={2.1} className={checking ? 'animate-spin' : undefined} />
-          {checking
-            ? t(locale, 'settings.cliUpdate.checking')
-            : t(locale, 'settings.cliUpdate.refresh')}
-        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => void runCheck()}
+            disabled={checking}
+            className="inline-flex items-center gap-1.5 rounded-md border border-border bg-panel px-2.5 py-1.5 text-xs text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <RefreshCw size={13} strokeWidth={2.1} className={checking ? 'animate-spin' : undefined} />
+            {checking
+              ? t(locale, 'settings.cliUpdate.checking')
+              : t(locale, 'settings.cliUpdate.refresh')}
+          </button>
+          <button
+            type="button"
+            onClick={() => updatableStatuses.forEach((status) => runUpdate(status.adapter))}
+            disabled={updatableStatuses.length === 0}
+            className="inline-flex items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-2.5 py-1.5 text-xs text-fg transition-colors hover:bg-accent/25 disabled:cursor-not-allowed disabled:border-border disabled:bg-panel disabled:text-fg-faint"
+          >
+            <UploadCloud size={13} strokeWidth={2.1} />
+            {t(locale, 'settings.cliUpdate.updateAll')}
+          </button>
+        </div>
         {(() => {
           const entries = Object.values(snapshot.updateMessages);
           if (entries.length === 0) return null;

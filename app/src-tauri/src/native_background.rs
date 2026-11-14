@@ -33,6 +33,29 @@ pub(crate) async fn run_bounded<T: Send + 'static>(
     let permit = limit
         .try_acquire_owned()
         .map_err(|_| "后台任务繁忙，请稍后重试。".to_string())?;
+    run_with_permit(permit, timeout, work).await
+}
+
+/// Queue update work asynchronously without tying up a blocking worker while waiting.
+pub(crate) async fn run_queued<T: Send + 'static>(
+    limit: Arc<tokio::sync::Semaphore>,
+    timeout: std::time::Duration,
+    on_started: impl FnOnce(),
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let permit = limit
+        .acquire_owned()
+        .await
+        .map_err(|_| "后台更新通道已关闭。".to_string())?;
+    on_started();
+    run_with_permit(permit, timeout, work).await
+}
+
+async fn run_with_permit<T: Send + 'static>(
+    permit: tokio::sync::OwnedSemaphorePermit,
+    timeout: std::time::Duration,
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
     // A timed-out blocking task keeps its permit until it REALLY exits.
     tokio::time::timeout(
         timeout,
@@ -333,6 +356,62 @@ mod tests {
             assert_eq!(calls.load(Ordering::SeqCst), 0);
         });
     }
+    #[test]
+    fn queued_update_waits_for_a_permit_before_starting_its_timeout() {
+        tauri::async_runtime::block_on(async {
+            use std::time::Duration;
+            let lane = Arc::new(tokio::sync::Semaphore::new(1));
+            let permit = lane.clone().acquire_owned().await.unwrap();
+            let started = Arc::new(AtomicUsize::new(0));
+            let started_observed = started.clone();
+            let task = tauri::async_runtime::spawn(run_queued(
+                lane,
+                Duration::from_millis(50),
+                move || { started_observed.fetch_add(1, Ordering::SeqCst); },
+                || Ok(42),
+            ));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert_eq!(started.load(Ordering::SeqCst), 0);
+            drop(permit);
+            assert_eq!(task.await.unwrap().unwrap(), 42);
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+        });
+    }
+
+    #[test]
+    fn queued_update_waits_for_timed_out_worker_to_really_exit() {
+        tauri::async_runtime::block_on(async {
+            use std::time::Duration;
+            let lane = Arc::new(tokio::sync::Semaphore::new(1));
+            let (release, wait) = std::sync::mpsc::channel::<()>();
+            let (worker_started, worker_ready) = tokio::sync::oneshot::channel();
+            let first = tauri::async_runtime::spawn(run_queued(
+                lane.clone(),
+                Duration::from_millis(50),
+                || {},
+                move || {
+                    let _ = worker_started.send(());
+                    let _ = wait.recv();
+                    Ok(())
+                },
+            ));
+            worker_ready.await.unwrap();
+            let started = Arc::new(AtomicUsize::new(0));
+            let started_observed = started.clone();
+            let second = tauri::async_runtime::spawn(run_queued(
+                lane,
+                Duration::from_secs(1),
+                move || { started_observed.fetch_add(1, Ordering::SeqCst); },
+                || Ok(42),
+            ));
+            assert!(first.await.unwrap().is_err());
+            assert_eq!(started.load(Ordering::SeqCst), 0);
+            release.send(()).unwrap();
+            assert_eq!(second.await.unwrap().unwrap(), 42);
+            assert_eq!(started.load(Ordering::SeqCst), 1);
+        });
+    }
+
     #[test]
     fn concurrent_capability_probe_runs_once_per_key() {
         let cache = Arc::new(ProbeCache::default());

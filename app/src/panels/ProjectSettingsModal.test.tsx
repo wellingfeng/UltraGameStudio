@@ -1,4 +1,4 @@
-import { act } from 'react';
+import { act, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ProjectSettingsModal from './ProjectSettingsModal';
@@ -229,6 +229,117 @@ async function renderEmbeddedProjectTab(
     },
   };
 }
+
+describe('ProjectSettingsModal project name', () => {
+  function setInputValue(input: HTMLInputElement, value: string) {
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set?.call(input, value);
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
+  it('renames the project while retaining its folder, sessions and unsaved settings', async () => {
+    const original = await historyStore.resolveWorkspaceByPath('E:\\projects\\Game');
+    await historyStore.patchWorkspaceMetadata(original.id, {
+      projectSettings: { folders: ['E:\\Engine'] },
+    });
+    const session = await historyStore.createSession({
+      workspaceId: original.id,
+      isWorkflow: false,
+      title: '已有会话',
+    });
+    const initial = (await historyStore.getWorkspace(original.id))!;
+    useStore.setState({ workspaces: [initial] });
+    vi.mocked(tauriAvailable).mockReturnValue(false);
+    vi.mocked(scanProjectEnvironment).mockResolvedValue(unrealScan());
+    useStore.setState({ locale: 'zh-CN', gameExpertSettings: DEFAULT_GAME_EXPERT_SETTINGS });
+
+    function Harness() {
+      const [current, setCurrent] = useState<WorkspaceSummary>(initial);
+      return <ProjectSettingsModal workspace={current} onWorkspaceUpdated={setCurrent} onClose={() => undefined} />;
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    try {
+      await act(async () => root.render(<Harness />));
+      await settle();
+      const gameProject = container.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+      const previousChecked = gameProject.checked;
+      await act(async () => gameProject.click());
+      expect(gameProject.checked).toBe(!previousChecked);
+
+      await act(async () => container.querySelector<HTMLButtonElement>('button[aria-label="修改项目名称"]')!.click());
+      const input = container.querySelector<HTMLInputElement>('input[aria-label="项目名称"]')!;
+      expect(input.value).toBe('Game');
+      await act(async () => setInputValue(input, '  月球项目  '));
+      await act(async () => container.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+      await settle();
+
+      expect(container.querySelector('#project-settings-title')?.textContent).toContain('月球项目');
+      const primary = container.querySelector('button[aria-label="修改项目名称"]')!.closest('li')!;
+      expect(primary.textContent).toContain('月球项目');
+      expect(primary.textContent).toContain(initial.path);
+      expect(container.textContent).toContain('Engine');
+      expect(container.querySelector<HTMLInputElement>('input[type="checkbox"]')?.checked).toBe(!previousChecked);
+      expect(container.querySelector<HTMLButtonElement>('footer button:last-child')?.disabled).toBe(false);
+      expect(useStore.getState().workspaces.find((item) => item.id === original.id)).toMatchObject({
+        name: '月球项目', path: initial.path, sessionCount: 1,
+      });
+      expect(await historyStore.getWorkspace(original.id)).toMatchObject({
+        name: '月球项目', path: initial.path,
+        metadata: { projectSettings: { folders: ['E:\\Engine'] } },
+      });
+      expect((await historyStore.resolveWorkspaceByPath(initial.path)).name).toBe('月球项目');
+      expect((await historyStore.listWorkspaces()).find((item) => item.id === original.id)?.name).toBe('月球项目');
+      expect((await historyStore.getSession(original.id, session.id))?.title).toBe('已有会话');
+
+      await act(async () => root.unmount());
+      const reopenedRoot = createRoot(container);
+      try {
+        await act(async () => reopenedRoot.render(
+          <ProjectSettingsModal workspace={(useStore.getState().workspaces[0])} onClose={() => undefined} />,
+        ));
+        await settle();
+        expect(container.querySelector('#project-settings-title')?.textContent).toContain('月球项目');
+        expect(container.querySelector('button[aria-label="修改项目名称"]')?.closest('li')?.textContent).toContain('月球项目');
+      } finally {
+        await act(async () => reopenedRoot.unmount());
+      }
+    } finally {
+      container.remove();
+    }
+  });
+
+  it('rejects blank names, cancels edits and keeps the draft on save failure', async () => {
+    const original = await historyStore.resolveWorkspaceByPath('E:\\projects\\FailureGame');
+    useStore.setState({ workspaces: [original] });
+    const view = await renderProjectSettingsModal(unrealScan(), original);
+    try {
+      const rename = () => view.container.querySelector<HTMLButtonElement>('button[aria-label="修改项目名称"]')!;
+      await act(async () => rename().click());
+      let input = view.container.querySelector<HTMLInputElement>('input[aria-label="项目名称"]')!;
+      await act(async () => setInputValue(input, '   '));
+      expect(view.container.querySelector<HTMLButtonElement>('button[aria-label="保存项目名称"]')?.disabled).toBe(true);
+      await act(async () => input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })));
+      expect(view.container.querySelector('input[aria-label="项目名称"]')).toBeNull();
+      expect((await historyStore.getWorkspace(original.id))?.name).toBe('FailureGame');
+
+      await act(async () => rename().click());
+      input = view.container.querySelector<HTMLInputElement>('input[aria-label="项目名称"]')!;
+      await act(async () => setInputValue(input, '保留草稿'));
+      vi.spyOn(historyStore, 'renameWorkspace').mockRejectedValue(new Error('写入失败'));
+      await act(async () => view.container.querySelector<HTMLFormElement>('form')!.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true })));
+      await settle();
+      expect(view.container.textContent).toContain('保存项目名称失败：写入失败');
+      expect(view.container.querySelector<HTMLInputElement>('input[aria-label="项目名称"]')?.value).toBe('保留草稿');
+      expect(useStore.getState().workspaces[0].name).toBe('FailureGame');
+      await act(async () => view.container.querySelector<HTMLButtonElement>('button[aria-label="取消修改项目名称"]')!.click());
+      expect(view.container.querySelector('input[aria-label="项目名称"]')).toBeNull();
+    } finally {
+      await view.cleanup();
+    }
+  });
+});
 
 describe('ProjectSettingsModal game project tabs', () => {
   it('keeps the modal open when the backdrop is clicked', async () => {

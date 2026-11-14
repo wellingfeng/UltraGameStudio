@@ -6,10 +6,12 @@ import { tauriAvailable } from '@/lib/tauri';
 import type { Locale } from '@/lib/i18n';
 import SidebarToggleButton from './SidebarToggleButton';
 import ModelRankings from './ModelRankings';
+import AgentUsage from './AgentUsage';
 import './TitleBar.css';
 import { useMainSurface } from './MainSurface';
 
 const TitleBarTarget = createContext<HTMLElement | null>(null);
+const TitleBarActionsTarget = createContext<((target: HTMLDivElement | null) => void) | null>(null);
 
 /** Keep the existing chat header and its interactions in one window chrome row. */
 export function TitleBarLayout({ children, sidebarOpen, onToggleSidebar, locale }: {
@@ -19,6 +21,8 @@ export function TitleBarLayout({ children, sidebarOpen, onToggleSidebar, locale 
   locale?: Locale;
 }) {
   const [target, setTarget] = useState<HTMLDivElement | null>(null);
+  const [actionsTarget, setActionsTarget] = useState<HTMLDivElement | null>(null);
+  const { surface } = useMainSurface();
   const [maximized, setMaximized] = useState(false);
   const [focused, setFocused] = useState(true);
   const [error, setError] = useState('');
@@ -74,6 +78,7 @@ export function TitleBarLayout({ children, sidebarOpen, onToggleSidebar, locale 
 
   return (
     <TitleBarTarget.Provider value={target}>
+      <TitleBarActionsTarget.Provider value={setActionsTarget}>
       <div
         ref={barRef}
         className="ugs-titlebar"
@@ -90,7 +95,9 @@ export function TitleBarLayout({ children, sidebarOpen, onToggleSidebar, locale 
         </div>
         <div ref={setTarget} className="ugs-titlebar-content" data-tauri-drag-region />
         {error && <span className="ugs-titlebar-error" role="alert">{error}</span>}
-        <ModelRankings locale={locale} />
+        {surface === 'chat' && actionsTarget
+          ? createPortal(<><AgentUsage locale={locale} /><ModelRankings locale={locale} /></>, actionsTarget)
+          : <><AgentUsage locale={locale} /><ModelRankings locale={locale} /></>}
         {desktop && !nativeMac && (
           <div className="ugs-titlebar-controls" aria-label="窗口控制">
             <button type="button" aria-label="最小化" title="最小化" onClick={() => run(() => getCurrentWindow().minimize())}>
@@ -106,8 +113,14 @@ export function TitleBarLayout({ children, sidebarOpen, onToggleSidebar, locale 
         )}
       </div>
       {children}
+      </TitleBarActionsTarget.Provider>
     </TitleBarTarget.Provider>
   );
+}
+
+export function TitleBarActions() {
+  const setTarget = useContext(TitleBarActionsTarget);
+  return setTarget ? <div ref={setTarget} className="ugs-titlebar-global-actions" /> : null;
 }
 
 export function TitleBarContent({ children, enabled }: { children: ReactNode; enabled: boolean }) {

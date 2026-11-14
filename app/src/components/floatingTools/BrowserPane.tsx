@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type FormEvent } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { open } from '@tauri-apps/plugin-dialog';
 import { ArrowLeft, ArrowRight, ExternalLink, FileUp, Globe2, Maximize2, Minimize2, RotateCw, X } from 'lucide-react';
 import TemporaryChatFrame from '@/components/temporaryChat/TemporaryChatFrame';
+import { PreviewChatResizeHandle, usePreviewChatWidth } from '@/components/temporaryChat/PreviewChatResize';
 import { useFilePreviewTabs } from '@/store/filePreviewTabs';
 import '@/components/ai/FilePreviewTabs.css';
 import { browserSource, registerVisibleSource } from '@/components/temporaryChat/context';
@@ -36,6 +37,7 @@ export default function BrowserPane({ browserId, onClose, expanded, visible = tr
   const chatOpen = useFilePreviewTabs((state) => !!state.chatOpenByScope[scope]);
   const setChatOpen = useFilePreviewTabs((state) => state.setPreviewChatOpen);
   const [chatStarted, setChatStarted] = useState(false);
+  const { width: chatWidth, resize: resizeChat } = usePreviewChatWidth();
   useEffect(() => { if (expanded && visible && chatOpen && url) setChatStarted(true); }, [expanded, visible, chatOpen, url]);
 
   useEffect(() => url && visible ? registerVisibleSource(browserSource(url, browserId)) : undefined, [browserId, url, visible]);
@@ -55,6 +57,7 @@ export default function BrowserPane({ browserId, onClose, expanded, visible = tr
     if (!next) return;
     setAddress(next);
     setUrl(next);
+    useFilePreviewTabs.getState().setBrowserLocation(browserId, next);
     setError('');
     if (desktop) enqueue(async () => {
       const area = bounds();
@@ -69,13 +72,18 @@ export default function BrowserPane({ browserId, onClose, expanded, visible = tr
     disposed.current = false;
     let cancelled = false;
     let unlistenLocation: (() => void) | undefined;
+    let unlistenTitle: (() => void) | undefined;
     let unlistenOpen: (() => void) | undefined;
     if (desktop) {
       void listen<{ browserId: string; url: string }>('ugs:browser-location', ({ payload }) => {
         if (payload.browserId !== browserId) return;
         if (!editing.current) setAddress(payload.url);
         setUrl(payload.url);
+        useFilePreviewTabs.getState().setBrowserLocation(browserId, payload.url);
       }).then((stop) => { if (cancelled) stop(); else unlistenLocation = stop; });
+      void listen<{ browserId: string; title: string }>('ugs:browser-title', ({ payload }) => {
+        if (payload.browserId === browserId) useFilePreviewTabs.getState().setBrowserTitle(browserId, payload.title);
+      }).then((stop) => { if (cancelled) stop(); else unlistenTitle = stop; });
       void listen<{ browserId: string; url: string }>('ugs:browser-open-url', ({ payload }) => {
         if (payload.browserId === browserId) navigate(payload.url);
       })
@@ -95,6 +103,7 @@ export default function BrowserPane({ browserId, onClose, expanded, visible = tr
       observer.disconnect();
       window.removeEventListener('resize', syncBounds);
       unlistenLocation?.();
+      unlistenTitle?.();
       unlistenOpen?.();
       if (desktop) enqueue(() => invoke('floating_browser_close', { browserId }));
     };
@@ -140,10 +149,14 @@ export default function BrowserPane({ browserId, onClose, expanded, visible = tr
     }
   };
 
+  const floatingTools = <PreviewFloatingTools label="针对当前网页随手聊" source={() => browserSource(url, browserId)} disabled={!url}
+    onOpen={expanded ? () => setChatOpen(scope, true) : undefined} />;
+
   return <aside id={`ugs-floating-browser-${browserId}`} className={`ugs-browser-pane${expanded ? ' ugs-browser-pane-expanded' : ''}`} data-ugs-browser-panel data-expanded={expanded} hidden={!visible}
     style={expanded ? undefined : { width: `min(${width}px, 58%)` }}>
     {!expanded && <div className="ugs-browser-resize" title="拖动调整宽度" onMouseDown={onResizeStart} />}
     <div className="ugs-browser-heading"><Globe2 size={14} /><span>浏览器</span>
+      {desktop && <div className="ugs-browser-floating-tools-slot">{floatingTools}</div>}
       <button type="button" title={expanded ? '还原到侧栏' : '在信息流区域打开'} aria-label={expanded ? '还原到侧栏' : '在信息流区域打开'}
         onClick={() => onExpandedChange(!expanded)}>{expanded ? <Minimize2 size={14} /> : <Maximize2 size={14} />}</button>
       <button type="button" title="用系统浏览器打开" aria-label="用系统浏览器打开" disabled={!url}
@@ -160,17 +173,19 @@ export default function BrowserPane({ browserId, onClose, expanded, visible = tr
       {desktop && <button type="button" title="打开本地网页" aria-label="打开本地网页" onClick={() => { void chooseFile(); }}><FileUp size={14} /></button>}
     </form>
     {error && <div className="ugs-browser-error" role="alert">{error}</div>}
-    {/* The native webview covers the viewport, so desktop keeps the floating rail in a gutter beside it. */}
     <div className="ugs-browser-body">
-      <div className={`ugs-browser-page${desktop ? ' ugs-browser-body-gutter' : ''}`}>
+      <div className="ugs-browser-page">
       <div className="ugs-browser-viewport" ref={viewport}>
         {!url && <div className="ugs-browser-empty"><Globe2 size={28} /><strong>浏览器</strong><span>输入网址，或打开本地 HTML 文件</span></div>}
         {!desktop && url && <iframe title="浏览器页面" src={url} sandbox="allow-scripts allow-forms allow-popups" />}
       </div>
-      <PreviewFloatingTools label="针对当前网页随手聊" source={() => browserSource(url, browserId)} disabled={!url}
-        onOpen={expanded ? () => setChatOpen(scope, true) : undefined} />
+      {!desktop && floatingTools}
       </div>
-      {chatStarted && <section className="ugs-preview-chat" hidden={!expanded || !visible || !chatOpen} aria-label="网页随手聊">
+      {chatStarted && <section className="ugs-preview-chat" hidden={!expanded || !visible || !chatOpen}
+        data-resized={chatWidth !== null}
+        style={chatWidth === null ? undefined : { '--ugs-preview-chat-width': `${Math.max(0, chatWidth)}px` } as CSSProperties}
+        aria-label="网页随手聊">
+        <PreviewChatResizeHandle onResize={resizeChat} />
         <div className="ugs-preview-chat-heading">
           <span className="ugs-preview-chat-mark" aria-hidden="true">✦</span><span>随手聊</span>
           <button type="button" aria-label="关闭网页随手聊" title="关闭随手聊" onClick={() => setChatOpen(scope, false)}><X size={15} /></button>

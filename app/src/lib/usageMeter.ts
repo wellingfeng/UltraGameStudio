@@ -1,6 +1,7 @@
 import type { GatewaySelection } from '@/core/ir';
 import { estimateTokenCount } from '@/lib/contextUsage';
 import type { ResolvedGatewayRoute } from '@/lib/modelGateway/types';
+import { appendAgentUsage, startActiveAgentUsage, updateActiveAgentUsage } from '@/lib/agentUsageHistory';
 
 export interface ModelUsageReport {
   inputTokens?: number;
@@ -8,6 +9,7 @@ export interface ModelUsageReport {
   totalTokens?: number;
   cacheReadInputTokens?: number;
   cacheCreationInputTokens?: number;
+  costUsd?: number;
 }
 
 export interface UsageMeterCall {
@@ -138,7 +140,7 @@ function numberFrom(value: unknown): number | undefined {
   return undefined;
 }
 
-function cleanUsage(report: ModelUsageReport): Required<ModelUsageReport> {
+function cleanUsage(report: ModelUsageReport): Required<Omit<ModelUsageReport, 'costUsd'>> {
   const inputTokens = Math.round(report.inputTokens ?? 0);
   const outputTokens = Math.round(report.outputTokens ?? 0);
   const totalTokens = Math.round(report.totalTokens ?? inputTokens + outputTokens);
@@ -324,6 +326,9 @@ export function mergeUsageReports(
     cacheCreationInputTokens:
       next.cacheCreationInputTokens ?? current.cacheCreationInputTokens,
   };
+  if (next.costUsd !== undefined || current.costUsd !== undefined) {
+    merged.costUsd = next.costUsd ?? current.costUsd;
+  }
   const computedTotal =
     merged.inputTokens !== undefined || merged.outputTokens !== undefined
       ? (merged.inputTokens ?? 0) + (merged.outputTokens ?? 0)
@@ -361,6 +366,8 @@ export function usageReportFromOpenAI(value: unknown): ModelUsageReport | null {
       numberFrom(raw.cache_read_input_tokens),
     cacheCreationInputTokens: numberFrom(raw.cache_creation_input_tokens),
   };
+  const costUsd = numberFrom(raw.cost_usd) ?? numberFrom(raw.total_cost_usd);
+  if (costUsd !== undefined) report.costUsd = costUsd;
   return Object.values(report).some((item) => item !== undefined) ? report : null;
 }
 
@@ -477,6 +484,9 @@ export function usageReportFromCliUsage(value: unknown): ModelUsageReport | null
     cacheReadInputTokens: cacheRead,
     cacheCreationInputTokens: cacheCreation,
   };
+  const costUsd = numberFrom(container.total_cost_usd) ?? numberFrom(container.cost_usd)
+    ?? numberFrom(raw.total_cost_usd) ?? numberFrom(raw.cost_usd);
+  if (costUsd !== undefined) report.costUsd = costUsd;
   return Object.values(report).some((item) => item !== undefined) ? report : null;
 }
 
@@ -501,6 +511,8 @@ export function usageReportFromAnthropic(value: unknown): ModelUsageReport | nul
       cacheRead,
     cacheCreationInputTokens: cacheCreation,
   };
+  const costUsd = numberFrom(raw.cost_usd) ?? numberFrom(raw.total_cost_usd);
+  if (costUsd !== undefined) report.costUsd = costUsd;
   const input = inputTokens ?? 0;
   const output = outputTokens ?? 0;
   if (input || output) report.totalTokens = input + output;
@@ -537,10 +549,32 @@ function modelLabel(route: UsageRoute): string {
   return route.model || route.selection?.modelOverride || route.selection?.modelClass || '';
 }
 
+export function startActiveModelUsage(route: UsageRoute, startedAt: number): string {
+  return startActiveAgentUsage({
+    recordedAt: startedAt,
+    application: route.selection?.adapter ?? '',
+    provider: providerLabel(route),
+    model: modelLabel(route),
+  });
+}
+
+export function updateActiveModelUsage(id: string, report: ModelUsageReport, options: { elapsedMs?: number; firstResponseMs?: number } = {}): void {
+  const usage = usageTurnFromReport(report, { estimated: false });
+  updateActiveAgentUsage(id, {
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cachedInputTokens: usage.cachedInputTokens,
+    hasUsage: true,
+    costUsd: numberFrom(report.costUsd),
+    elapsedMs: numberFrom(options.elapsedMs),
+    firstResponseMs: numberFrom(options.firstResponseMs),
+  });
+}
+
 export function recordModelUsageForRoute(
   route: UsageRoute,
   report: ModelUsageReport,
-  options: { estimated?: boolean; context?: UsageMeterContext } = {},
+  options: { estimated?: boolean; context?: UsageMeterContext; elapsedMs?: number; firstResponseMs?: number } = {},
 ): UsageMeterSnapshot {
   const usage = cleanUsage(report);
   const cachedInputTokens = Math.min(
@@ -579,6 +613,19 @@ export function recordModelUsageForRoute(
     },
     lastCall: call,
   };
+  appendAgentUsage({
+    recordedAt: updatedAt,
+    application: route.selection?.adapter ?? '',
+    provider: providerLabel(route),
+    model: modelLabel(route),
+    inputTokens: call.inputTokens,
+    outputTokens: call.outputTokens,
+    cachedInputTokens: call.cachedInputTokens,
+    estimated: call.estimated,
+    costUsd: numberFrom(report.costUsd),
+    elapsedMs: numberFrom(options.elapsedMs),
+    firstResponseMs: numberFrom(options.firstResponseMs),
+  });
   saveUsageSnapshot(next, options.context);
   return next;
 }
@@ -588,12 +635,12 @@ export function recordEstimatedModelUsageForSelection(
   prompt: string,
   outputText: string,
   route: Omit<UsageRoute, 'selection'> = {},
-  options: { context?: UsageMeterContext } = {},
+  options: { context?: UsageMeterContext; elapsedMs?: number; firstResponseMs?: number } = {},
 ): UsageMeterSnapshot {
   return recordModelUsageForRoute(
     { ...route, selection },
     estimateUsageForText(prompt, outputText),
-    { estimated: true, context: options.context },
+    { ...options, estimated: true },
   );
 }
 

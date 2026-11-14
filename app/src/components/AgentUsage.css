@@ -1,0 +1,23 @@
+.ugs-agent-usage { position: relative; height: 100%; display: flex; align-items: center; flex: none; }
+.ugs-agent-usage-trigger { display: flex; align-items: center; justify-content: center; width: 29px; height: 29px; margin: 0 8px; padding: 0; border: 1px solid transparent; border-radius: 7px; background: transparent; color: var(--fg-dim); }
+.ugs-agent-usage-trigger:hover, .ugs-agent-usage-trigger[aria-expanded='true'] { color: var(--fg); border-color: color-mix(in oklab, var(--accent) 26%, var(--border)); background: color-mix(in oklab, var(--accent) 10%, var(--panel)); }
+.ugs-agent-usage-trigger svg { color: var(--accent); }
+.ugs-agent-usage-panel { position: absolute; top: 100%; right: 0; width: min(1060px, calc(100vw - 20px)); max-height: min(680px, calc(100vh - 50px)); display: flex; flex-direction: column; overflow: hidden; border: 1px solid color-mix(in oklab, var(--accent) 16%, var(--border)); border-radius: 12px; background: var(--bg-alt); color: var(--fg); box-shadow: 0 20px 55px rgba(0, 0, 0, .35), 0 3px 12px rgba(0, 0, 0, .18); user-select: text; }
+.ugs-agent-usage-heading { display: flex; align-items: center; gap: 11px; padding: 17px 18px 14px; background: radial-gradient(ellipse at 12% 0%, color-mix(in oklab, var(--accent) 13%, transparent), transparent 65%); }
+.ugs-agent-usage-icon { display: grid; place-items: center; flex: none; width: 38px; height: 38px; border: 1px solid color-mix(in oklab, var(--accent) 30%, transparent); border-radius: 11px; background: color-mix(in oklab, var(--accent) 13%, var(--panel)); color: var(--accent); }
+.ugs-agent-usage-heading-copy { display: grid; flex: 1; gap: 3px; min-width: 0; }
+.ugs-agent-usage-heading-copy strong { font-size: 14px; font-weight: 650; }
+.ugs-agent-usage-heading-copy span { color: var(--fg-faint); font-size: 11px; }
+.ugs-agent-usage-day select { max-width: 135px; padding: 7px 9px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel); color: var(--fg); font-size: 11px; }
+.ugs-agent-usage-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+.ugs-agent-usage-meta { display: flex; justify-content: space-between; gap: 10px; padding: 0 18px 10px; color: var(--fg-faint); font-size: 10px; }
+.ugs-agent-usage-list { flex: 1; min-height: 80px; overflow: auto; overscroll-behavior: contain; padding: 0 12px; }
+.ugs-agent-usage-list table { width: 100%; min-width: 930px; border-collapse: collapse; text-align: left; font-size: 11px; font-variant-numeric: tabular-nums; }
+.ugs-agent-usage-list th { position: sticky; top: 0; padding: 10px 8px; background: var(--bg-alt); color: var(--fg-faint); font-weight: 500; white-space: nowrap; }
+.ugs-agent-usage-list td { max-width: 170px; padding: 12px 8px; overflow: hidden; border-top: 1px solid var(--border-soft); text-overflow: ellipsis; white-space: nowrap; }
+.ugs-agent-usage-list tr:hover td { background: color-mix(in oklab, var(--accent) 5%, transparent); }
+.ugs-agent-usage-running { display: inline-block; margin-left: 6px; color: var(--accent); font-size: 10px; }
+.ugs-agent-usage-list td:nth-child(5) { font-weight: 600; }
+.ugs-agent-usage-empty { padding: 30px 12px; text-align: center; color: var(--fg-faint); font-size: 12px; }
+.ugs-agent-usage-footer { padding: 11px 18px; border-top: 1px solid var(--border-soft); color: var(--fg-faint); font-size: 10px; }
+@media (max-width: 900px) { .ugs-agent-usage-trigger { margin: 0 4px; } }

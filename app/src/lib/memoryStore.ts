@@ -227,6 +227,8 @@ export interface MemoryBatchOptions {
   beforeDispatch?: () => void;
   /** Exact host bytes captured for this proposal; null means confirmed absent. */
   expectedRaw?: string | null;
+  /** Approval may rebase only when every targeted entry still matches the proposal base. */
+  rebaseUnchangedTargets?: boolean;
   transactionId?: string;
   reviewSource?: MemoryReviewSource;
   sourceConfirmation?: MemorySourceConfirmation;
@@ -260,8 +262,7 @@ function validSourceConfirmation(value: unknown): value is MemorySourceConfirmat
     source.message.id === source.sourceMessageId && source.message.role === 'user' && typeof source.message.text === 'string';
 }
 
-async function readFile(target: MemoryTarget, workspaceId?: string): Promise<NormalizedMemoryFile> {
-  const raw = await readMemoryJson(relPathFor(target, workspaceId));
+function parseMemoryFile(raw: string | null): NormalizedMemoryFile {
   if (raw === null) return { version: 2, entries: [], raw };
   const parsed = JSON.parse(raw) as Partial<MemoryFile>;
   if (Object.keys(parsed ?? {}).some((key) => !['version', 'entries', 'revision', 'receipts'].includes(key))) throw new Error('Unknown memory JSON fields');
@@ -305,6 +306,10 @@ async function readFile(target: MemoryTarget, workspaceId?: string): Promise<Nor
     return { ...(e.id ? { id: e.id } : {}), text: e.text.trim(), ...(e.updatedAt !== undefined ? { updatedAt: e.updatedAt } : {}), ...(importance ? { importance } : {}) };
   });
   return { version: 2, entries, raw, revision: parsed.revision, receipts: parsed.receipts };
+}
+
+async function readFile(target: MemoryTarget, workspaceId?: string): Promise<NormalizedMemoryFile> {
+  return parseMemoryFile(await readMemoryJson(relPathFor(target, workspaceId)));
 }
 
 /** Captures a complete exact target; caller must freeze it before model dispatch. */
@@ -454,6 +459,29 @@ function applyOp(
   };
 }
 
+/** Compare targeted entries in operation order, including entries created earlier in the batch. */
+function changedApprovalTarget(base: MemoryEntry[], current: MemoryEntry[], ops: MemoryOp[], now: number): string | undefined {
+  let original = base;
+  let latest = current;
+  for (const op of ops) {
+    if (op.action !== 'add') {
+      const needle = (op.oldText ?? '').trim();
+      const before = original.filter((entry) => entry.text.includes(needle));
+      const after = latest.filter((entry) => entry.text.includes(needle));
+      if (!needle || before.length !== 1 || after.length !== 1 ||
+          before[0].text !== after[0].text || before[0].importance !== after[0].importance ||
+          before[0].updatedAt !== after[0].updatedAt || (before[0].id !== undefined && before[0].id !== after[0].id)) return needle || '(empty)';
+    }
+    try {
+      original = applyOp(original, op, now, 'off').entries;
+      latest = applyOp(latest, op, now, 'off').entries;
+    } catch {
+      return op.oldText ?? op.content ?? '(invalid operation)';
+    }
+  }
+  return undefined;
+}
+
 /**
  * Drop entries until the store fits `limit`. Entries whose `updatedAt === now`
  * were touched by the current batch and are pinned — they are never evicted
@@ -572,12 +600,15 @@ async function applyMemoryBatchLocked(
     if (prior.signature !== signature) return result(target, file.entries, false, 'Memory transaction identity conflict');
     return { ...result(target, file.entries, true), appliedCount: 0, skippedCount: ops.length, alreadyApplied: true };
   }
+  const now = Date.now();
   if (opts && 'expectedRaw' in opts && opts.expectedRaw !== file.raw) {
-    return result(target, file.entries, false, 'Memory CAS conflict: proposal base changed');
+    if (!opts.rebaseUnchangedTargets) return result(target, file.entries, false, 'Memory CAS conflict: proposal base changed');
+    const original = parseMemoryFile(opts.expectedRaw ?? null);
+    const changed = changedApprovalTarget(original.entries, file.entries, ops, now);
+    if (changed !== undefined) return result(target, file.entries, false, `Memory CAS conflict: proposal target changed: ${changed}`);
   }
   if (!ops.length) return result(target, file.entries, true);
 
-  const now = Date.now();
   const safetyMode = opts?.safetyScan ?? 'reject';
   let working = file.entries;
   const skipped: { reason: string }[] = [];

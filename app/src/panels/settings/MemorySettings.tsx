@@ -258,7 +258,19 @@ export default function MemorySettings({ locale, workspaceId }: MemorySettingsPr
       setPendingDone('');
       try {
         const res = await resolvePendingMemoryWrites(ids, action);
-        const errors = res.outcomes.filter((outcome) => outcome.error).map((outcome) => outcome.error);
+        const errors = res.outcomes.filter((outcome) => outcome.error).map((outcome) => {
+          const prefix = 'Memory CAS conflict: proposal target changed: ';
+          if (outcome.error?.startsWith(prefix)) {
+            const target = outcome.error.slice(prefix.length);
+            return locale === 'zh-CN' ? `待删除或替换的记忆已变化：${target}。提案未写入，请核对后拒绝或重新生成。` :
+              `The memory targeted by this proposal has changed: ${target}. Nothing was saved; review and reject or regenerate the proposal.`;
+          }
+          if (outcome.error && /memory.*cas conflict/i.test(outcome.error)) {
+            return locale === 'zh-CN' ? '记忆在审批时发生并发修改，提案未写入，请重试。' :
+              'Memory changed during approval. Nothing was saved; retry the proposal.';
+          }
+          return outcome.error;
+        });
         if (errors.length) setError(errors.join('；'));
         if (res.resolvedIds.length) setPendingDone(fmt(locale, 'settings.memory.pendingDone', { count: res.resolvedIds.length }));
         await refresh();

@@ -15,10 +15,10 @@ export interface CliUpdateSnapshot {
   hasUnseenUpdate: boolean;
   error?: string;
   /**
-   * Adapters currently being updated. Lives at module scope (not component
-   * state) so an in-flight update keeps running -- and stays visible -- even
-   * after the settings panel is closed/unmounted.
+   * Work lives at module scope so queued and running updates remain visible
+   * and keep running after the settings panel is closed/unmounted.
    */
+  queuedAdapters: string[];
   updatingAdapters: string[];
   /** Last update result message keyed by adapter, for post-update feedback. */
   updateMessages: Record<string, { ok: boolean; detail: string; atMs: number }>;
@@ -30,6 +30,7 @@ let snapshot: CliUpdateSnapshot = {
   status: 'idle',
   statuses: [],
   hasUnseenUpdate: false,
+  queuedAdapters: [],
   updatingAdapters: [],
   updateMessages: {},
 };
@@ -116,23 +117,30 @@ export function startCliUpdate(
   const existing = updatePromises.get(adapter);
   if (existing) return existing;
 
-  if (!snapshot.updatingAdapters.includes(adapter)) {
-    const nextMessages = { ...snapshot.updateMessages };
-    delete nextMessages[adapter];
-    snapshot = {
-      ...snapshot,
-      updatingAdapters: [...snapshot.updatingAdapters, adapter],
-      updateMessages: nextMessages,
-    };
-    emit();
-  }
+  const nextMessages = { ...snapshot.updateMessages };
+  delete nextMessages[adapter];
+  snapshot = {
+    ...snapshot,
+    queuedAdapters: [...snapshot.queuedAdapters, adapter],
+    updateMessages: nextMessages,
+  };
+  emit();
 
   const promise = (async () => {
     try {
-      const detail = await updateCli(adapter);
+      const detail = await updateCli(adapter, () => {
+        if (!snapshot.queuedAdapters.includes(adapter)) return;
+        snapshot = {
+          ...snapshot,
+          queuedAdapters: snapshot.queuedAdapters.filter((a) => a !== adapter),
+          updatingAdapters: [...snapshot.updatingAdapters, adapter],
+        };
+        emit();
+      });
       finishCliUpdate(adapter, { ok: true, detail });
-      // Re-check versions so the row flips to "up to date". Not awaited by the
-      // caller's UI branch, but awaited here to keep ordering deterministic.
+      // A check already in flight may predate this update; run a fresh check
+      // after it finishes so successive queued updates cannot leave stale rows.
+      if (runningPromise) await runningPromise.catch(() => undefined);
       await refreshCliUpdateStatus().catch(() => undefined);
       return { ok: true, detail };
     } catch (err) {
@@ -154,6 +162,7 @@ function finishCliUpdate(
 ): void {
   snapshot = {
     ...snapshot,
+    queuedAdapters: snapshot.queuedAdapters.filter((a) => a !== adapter),
     updatingAdapters: snapshot.updatingAdapters.filter((a) => a !== adapter),
     updateMessages: {
       ...snapshot.updateMessages,

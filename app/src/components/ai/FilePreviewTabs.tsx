@@ -1,47 +1,12 @@
-import { useEffect, useRef, useState, type CSSProperties, type PointerEvent, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { FileText, Globe2, X } from 'lucide-react';
 import { displayFileRefPath } from './lib/filePath';
-import { useFilePreviewTabs, type FilePreviewTab } from '@/store/filePreviewTabs';
+import { browserTabLabel, useFilePreviewTabs, type FilePreviewTab } from '@/store/filePreviewTabs';
 import { fileSource } from '@/components/temporaryChat/context';
 import TemporaryChatFrame from '@/components/temporaryChat/TemporaryChatFrame';
-import { loadPaneWidth, savePaneWidth } from '@/lib/composerStorage';
+import { PreviewChatResizeHandle, usePreviewChatWidth } from '@/components/temporaryChat/PreviewChatResize';
 import FilePreviewDrawer from './FilePreviewDrawer';
 import './FilePreviewTabs.css';
-
-const PREVIEW_CHAT_WIDTH_KEY = 'ultragamestudio.previewChatWidth.v1';
-
-function PreviewChatResizeHandle({ onResize }: { onResize: (width: number) => void }) {
-  const drag = useRef<{ pointerId: number; startX: number; startWidth: number; width: number; moved: boolean } | null>(null);
-
-  const finish = (event: PointerEvent<HTMLDivElement>) => {
-    if (drag.current?.pointerId !== event.pointerId) return;
-    if (drag.current.moved) savePaneWidth(PREVIEW_CHAT_WIDTH_KEY, drag.current.width);
-    drag.current = null;
-  };
-
-  return <div className="ugs-preview-chat-resize" role="separator" aria-orientation="vertical"
-    aria-label="拖动调整随手聊宽度" title="拖动调整随手聊宽度"
-    onPointerDown={(event) => {
-      if (event.button !== 0 || event.isPrimary === false) return;
-      const width = event.currentTarget.parentElement?.getBoundingClientRect().width ?? 0;
-      if (!width) return;
-      event.preventDefault();
-      event.currentTarget.setPointerCapture(event.pointerId);
-      drag.current = { pointerId: event.pointerId, startX: event.clientX, startWidth: width, width, moved: false };
-    }}
-    onPointerMove={(event) => {
-      const current = drag.current;
-      if (!current || current.pointerId !== event.pointerId || (!current.moved && event.clientX === current.startX)) return;
-      const containerWidth = event.currentTarget.parentElement?.parentElement?.getBoundingClientRect().width ?? 0;
-      if (!containerWidth) return;
-      const max = containerWidth - Math.min(200, containerWidth / 2);
-      const min = Math.min(240, containerWidth * 0.42, max);
-      current.width = Math.min(max, Math.max(min, current.startWidth + current.startX - event.clientX));
-      current.moved = true;
-      onResize(current.width);
-    }}
-    onPointerUp={finish} onPointerCancel={finish} onLostPointerCapture={finish} />;
-}
 
 export function FilePreviewTabs({ scope, children }: { scope: string; children: ReactNode }) {
   const tabs = useFilePreviewTabs((state) => state.tabs);
@@ -88,15 +53,17 @@ export function FilePreviewTabs({ scope, children }: { scope: string; children: 
       <button type="button" className="ugs-preview-tab-close" aria-label={`关闭预览：${tab.ref.basename}`}
         title="关闭预览" onClick={() => close(tab.id)}><X size={12} /></button>
     </div>)}
-    {browserTabs.filter((tab) => tab.scope === scope && tab.expanded).map((tab) =>
-      <div key={tab.id} className="ugs-preview-file-tab" data-active={activeId === tab.id}>
-        <button type="button" role="tab" aria-label="浏览器" aria-selected={activeId === tab.id}
-          tabIndex={activeId === tab.id ? 0 : -1} title="浏览器" onClick={() => select(scope, tab.id)}>
-          <Globe2 size={13} aria-hidden="true" /><span>浏览器</span>
+    {browserTabs.filter((tab) => tab.scope === scope && tab.expanded).map((tab) => {
+      const label = browserTabLabel(tab);
+      return <div key={tab.id} className="ugs-preview-file-tab" data-active={activeId === tab.id}>
+        <button type="button" role="tab" aria-label={label} aria-selected={activeId === tab.id}
+          tabIndex={activeId === tab.id ? 0 : -1} title={label} onClick={() => select(scope, tab.id)}>
+          <Globe2 size={13} aria-hidden="true" /><span>{label}</span>
         </button>
-        <button type="button" className="ugs-preview-tab-close" aria-label="关闭预览：浏览器"
+        <button type="button" className="ugs-preview-tab-close" aria-label={`关闭预览：${label}`}
           title="关闭预览" onClick={() => closeBrowser(tab.id)}><X size={12} /></button>
-      </div>)}
+      </div>;
+    })}
   </div>;
 }
 
@@ -106,7 +73,7 @@ export function MainFilePreview({ scope }: { scope: string }) {
   const close = useFilePreviewTabs((state) => state.close);
   const chatOpenByScope = useFilePreviewTabs((state) => state.chatOpenByScope);
   const setChatOpen = useFilePreviewTabs((state) => state.setPreviewChatOpen);
-  const [chatWidth, setChatWidth] = useState(() => loadPaneWidth(PREVIEW_CHAT_WIDTH_KEY));
+  const { width: chatWidth, resize: setChatWidth } = usePreviewChatWidth();
   const active = tabs.find((tab) => tab.scope === scope && tab.id === activeId);
   if (!tabs.length) return null;
   return <div className="ugs-main-file-preview" hidden={!active} role="tabpanel" aria-label={`文件预览：${active?.ref.basename ?? ''}`}>

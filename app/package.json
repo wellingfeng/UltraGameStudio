@@ -1,7 +1,7 @@
 {
   "name": "ultragamestudio-app",
   "private": true,
-  "version": "0.5.22",
+  "version": "0.5.23",
   "type": "module",
   "license": "MIT",
   "bin": {

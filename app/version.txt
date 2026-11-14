@@ -1,11 +1,11 @@
 {
-  "version": "0.5.22",
-  "notes": "UltraGameStudio v0.5.22",
-  "pubDate": "2026-11-09",
+  "version": "0.5.23",
+  "notes": "UltraGameStudio v0.5.23",
+  "pubDate": "2026-11-14",
   "platforms": {
-    "windows": "https://github.com/wellingfeng/UltraGameStudio/releases/download/v0.5.22/UltraGameStudio_0.5.22_x64-setup.exe",
-    "macos": "https://github.com/wellingfeng/UltraGameStudio/releases/download/v0.5.22/UltraGameStudio_0.5.22_universal.dmg",
-    "linux": "https://github.com/wellingfeng/UltraGameStudio/releases/download/v0.5.22/UltraGameStudio_0.5.22_amd64.AppImage"
+    "windows": "https://github.com/wellingfeng/UltraGameStudio/releases/download/v0.5.23/UltraGameStudio_0.5.23_x64-setup.exe",
+    "macos": "https://github.com/wellingfeng/UltraGameStudio/releases/download/v0.5.23/UltraGameStudio_0.5.23_universal.dmg",
+    "linux": "https://github.com/wellingfeng/UltraGameStudio/releases/download/v0.5.23/UltraGameStudio_0.5.23_amd64.AppImage"
   },
-  "url": "https://github.com/wellingfeng/UltraGameStudio/releases/tag/v0.5.22"
+  "url": "https://github.com/wellingfeng/UltraGameStudio/releases/latest"
 }

@@ -27,7 +27,6 @@ beforeEach(() => {
   vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function (this: HTMLElement) {
     if (this.dataset.pane === 'one') return pane;
     if (this.dataset.pane === 'two') return secondPane;
-    if (this.classList.contains('ugs-browser-viewport')) return rect(pane.left, pane.top, pane.width - 46, pane.height);
     if (this.classList.contains('ugs-preview-floating-tools')) {
       const parent = this.parentElement?.dataset.pane === 'two' ? secondPane : pane;
       return rect(parent.left + (parseFloat(this.style.left) || 400), parent.top + (parseFloat(this.style.top) || 50), 37, 37);
@@ -46,8 +45,7 @@ afterEach(async () => {
 
 async function render(two = false, browser = false) {
   await act(async () => root.render(<>
-    <div data-pane="one" className={browser ? 'ugs-browser-body-gutter' : ''}>
-      {browser && <div className="ugs-browser-viewport" />}
+    <div data-pane="one" className={browser ? 'ugs-browser-floating-tools-slot' : ''}>
       <PreviewFloatingTools label="文件随手聊" source={source} onOpen={opened} />
     </div>
     {two && <div data-pane="two"><PreviewFloatingTools label="网页随手聊" source={source} onOpen={opened} /></div>}
@@ -111,12 +109,13 @@ it('预览区缩小时限制显示位置，不覆盖原来的全局位置', asyn
   expect(rail.style.top).toBe('300px');
 });
 
-it('原生浏览器视图保持按钮位于可点击的侧边区域', async () => {
+it('原生浏览器标题栏内保持按钮可见', async () => {
+  pane = rect(100, 50, 600, 38);
   localStorage.setItem(key, JSON.stringify({ x: 300, y: 200 }));
   await render(false, true);
   const rail = host.querySelector<HTMLElement>('.ugs-preview-floating-tools')!;
-  expect(rail.style.left).toBe('554px');
-  expect(rail.style.top).toBe('150px');
+  expect(rail.style.left).toBe('200px');
+  expect(rail.style.top).toBe('1px');
 });
 
 it('取消拖动恢复原位置，方向键移动并保存', async () => {

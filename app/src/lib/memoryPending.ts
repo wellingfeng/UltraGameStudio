@@ -192,15 +192,15 @@ export async function resolvePendingMemoryWrites(
       // No approval bypass for hard safety findings. No hidden destructive eviction.
       try {
         const applied = await applyMemoryBatch(w.target, w.operations, w.workspaceId,
-          { expectedRaw: w.base.raw, transactionId: w.id, reviewSource: w.reviewSource, sourceConfirmation: w.sourceConfirmation, evictOnOverflow: false, safetyScan: 'reject' });
+          { expectedRaw: w.base.raw, rebaseUnchangedTargets: true, transactionId: w.id, reviewSource: w.reviewSource, sourceConfirmation: w.sourceConfirmation, evictOnOverflow: false, safetyScan: 'reject' });
         const skippedCount = applied.skippedCount ?? applied.skipped?.length ?? 0;
         const appliedCount = applied.success ? (applied.appliedCount ?? w.operations.length - skippedCount) : 0;
         result.outcomes.push({ id: w.id, status: applied.success ? (appliedCount ? 'applied' : 'skipped') :
           /conflict/i.test(applied.error ?? '') ? 'conflicted' : 'failed', appliedCount, skippedCount, error: applied.error });
         if (applied.success) result.resolvedIds.push(w.id);
       } catch (error) {
-        result.outcomes.push({ id: w.id, status: 'failed', appliedCount: 0, skippedCount: 0,
-          error: error instanceof Error ? error.message : String(error) });
+        const message = error instanceof Error ? error.message : String(error);
+        result.outcomes.push({ id: w.id, status: /conflict/i.test(message) ? 'conflicted' : 'failed', appliedCount: 0, skippedCount: 0, error: message });
       }
     }
     // All applied results have passed target readback before this queue CAS.

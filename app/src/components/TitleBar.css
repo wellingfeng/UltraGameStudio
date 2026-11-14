@@ -25,6 +25,10 @@
 
 .ugs-titlebar-brand svg { pointer-events: none; color: var(--fg-faint); }
 .ugs-titlebar-content { flex: 1; min-width: 0; height: 100%; }
+.ugs-titlebar-content .ugs-chat-header-actions { align-self: stretch; }
+.ugs-titlebar-global-actions { display: flex; align-self: stretch; }
+.ugs-titlebar-global-actions .ugs-agent-usage-trigger,
+.ugs-titlebar-global-actions .ugs-model-rankings-trigger { width: 28px; height: 28px; margin: 0; }
 
 .ugs-titlebar-content .ugs-ai-return-header {
   position: relative;

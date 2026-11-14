@@ -123,6 +123,7 @@ export interface GatewayTextRequest {
     totalTokens?: number;
     cacheReadInputTokens?: number;
     cacheCreationInputTokens?: number;
+    costUsd?: number;
   }) => void;
   permission?: string;
   cwd?: string;

@@ -27,6 +27,7 @@ import {
   Gamepad2,
   Info,
   Languages,
+  Pencil,
   Plus,
   RefreshCw,
   Rocket,
@@ -1631,6 +1632,9 @@ function ProjectSettingsModalContent({
     [],
   );
   const [record, setRecord] = useState<WorkspaceRecord | null>(null);
+  const [editingProjectName, setEditingProjectName] = useState(false);
+  const [projectNameDraft, setProjectNameDraft] = useState('');
+  const [savingProjectName, setSavingProjectName] = useState(false);
   const [scan, setScan] = useState<ProjectEnvironmentScan | null>(null);
   const [settings, setSettings] = useState<ProjectSettings>(() =>
     projectSettingsFromMetadata(workspace.metadata),
@@ -2254,6 +2258,43 @@ function ProjectSettingsModalContent({
     recommendedLspIds,
     tab,
   ]);
+
+  const saveProjectName = useCallback(async () => {
+    const name = projectNameDraft.trim();
+    if (!name || savingProjectName || saving) return;
+    if (name === (record?.name ?? workspace.name)) {
+      setEditingProjectName(false);
+      return;
+    }
+    setSavingProjectName(true);
+    setStatus(null);
+    try {
+      const nextRecord = await historyStore.renameWorkspace(workspace.id, name);
+      setRecord(nextRecord);
+      useStore.setState((state) => ({
+        workspaces: state.workspaces.map((item) =>
+          item.id === nextRecord.id
+            ? { ...item, name: nextRecord.name, updatedAt: nextRecord.updatedAt }
+            : item,
+        ),
+      }));
+      onWorkspaceUpdated?.({
+        ...workspace,
+        name: nextRecord.name,
+        updatedAt: nextRecord.updatedAt,
+      });
+      setEditingProjectName(false);
+      setStatus(locale === 'zh-CN' ? '项目名称已保存' : 'Project name saved');
+    } catch (err) {
+      setStatus(
+        locale === 'zh-CN'
+          ? `保存项目名称失败：${describeError(err)}`
+          : `Failed to save project name: ${describeError(err)}`,
+      );
+    } finally {
+      setSavingProjectName(false);
+    }
+  }, [locale, onWorkspaceUpdated, projectNameDraft, record?.name, saving, savingProjectName, workspace]);
 
   const persistSettings = useCallback(
     async (next: ProjectSettings) => {
@@ -3465,7 +3506,7 @@ function ProjectSettingsModalContent({
               <button
                 type="button"
                 onClick={() => void addFolder()}
-                disabled={saving}
+                disabled={saving || savingProjectName}
                 className="inline-flex shrink-0 items-center gap-1.5 rounded-md border border-accent/60 bg-accent/10 px-3 py-1.5 text-xs font-semibold text-fg hover:bg-accent/20 disabled:opacity-50"
               >
                 <FolderPlus size={14} />
@@ -3495,9 +3536,71 @@ function ProjectSettingsModalContent({
                         <Folder size={14} className="shrink-0 text-fg-faint" />
                       )}
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-xs font-medium text-fg" title={path}>
-                          {basename(path) || path}
-                        </div>
+                        {isPrimary && editingProjectName ? (
+                          <form
+                            className="flex max-w-lg items-center gap-1"
+                            onSubmit={(event) => {
+                              event.preventDefault();
+                              void saveProjectName();
+                            }}
+                          >
+                            <input
+                              autoFocus
+                              aria-label={locale === 'zh-CN' ? '项目名称' : 'Project name'}
+                              value={projectNameDraft}
+                              onChange={(event) => setProjectNameDraft(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Escape' && !event.nativeEvent.isComposing && !savingProjectName) {
+                                  event.preventDefault();
+                                  setEditingProjectName(false);
+                                }
+                              }}
+                              disabled={savingProjectName}
+                              className="min-w-0 flex-1 rounded border border-accent bg-panel px-2 py-1 text-xs text-fg outline-none disabled:opacity-50"
+                            />
+                            <button
+                              type="submit"
+                              disabled={!projectNameDraft.trim() || savingProjectName || saving}
+                              title={locale === 'zh-CN' ? '保存项目名称' : 'Save project name'}
+                              aria-label={locale === 'zh-CN' ? '保存项目名称' : 'Save project name'}
+                              className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-accent hover:bg-border disabled:opacity-50"
+                            >
+                              <Check size={14} />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={savingProjectName}
+                              onClick={() => setEditingProjectName(false)}
+                              title={locale === 'zh-CN' ? '取消修改项目名称' : 'Cancel project name edit'}
+                              aria-label={locale === 'zh-CN' ? '取消修改项目名称' : 'Cancel project name edit'}
+                              className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-fg-faint hover:bg-border hover:text-fg disabled:opacity-50"
+                            >
+                              <X size={14} />
+                            </button>
+                          </form>
+                        ) : (
+                          <div className="flex min-w-0 items-center gap-1">
+                            <span className="truncate text-xs font-medium text-fg" title={isPrimary ? (record?.name ?? workspace.name) : path}>
+                              {isPrimary ? (record?.name ?? workspace.name) : (basename(path) || path)}
+                            </span>
+                            {isPrimary && (
+                              <button
+                                type="button"
+                                disabled={saving || savingProjectName}
+                                onClick={() => {
+                                  setProjectNameDraft(record?.name ?? workspace.name);
+                                  setEditingProjectName(true);
+                                  setStatus(null);
+                                }}
+                                title={locale === 'zh-CN' ? '修改项目名称' : 'Rename project'}
+                                aria-label={locale === 'zh-CN' ? '修改项目名称' : 'Rename project'}
+                                className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-fg-faint hover:bg-border hover:text-fg disabled:opacity-50"
+                              >
+                                <Pencil size={12} />
+                              </button>
+                            )}
+                          </div>
+                        )}
                         <div
                           className="truncate font-mono text-[10px] text-fg-faint"
                           title={path}
@@ -3525,7 +3628,7 @@ function ProjectSettingsModalContent({
                         <button
                           type="button"
                           onClick={() => void removeFolder(path)}
-                          disabled={saving}
+                          disabled={saving || savingProjectName}
                           title={tr('从项目中移除该文件夹', locale)}
                           aria-label={tr('从项目中移除该文件夹', locale)}
                           className="flex h-7 w-7 shrink-0 items-center justify-center rounded text-fg-faint transition-colors hover:bg-border hover:text-fg disabled:opacity-50"
@@ -5549,7 +5652,7 @@ function ProjectSettingsModalContent({
             <button
               type="button"
               onClick={() => void persistSettings(settings)}
-              disabled={!dirty || saving}
+              disabled={!dirty || saving || savingProjectName}
               className="inline-flex items-center gap-1.5 rounded-md border border-accent bg-accent/15 px-3 py-1.5 text-xs font-semibold text-fg hover:bg-accent/25 disabled:border-border disabled:bg-panel-2 disabled:text-fg-faint"
             >
               <Check size={13} />
