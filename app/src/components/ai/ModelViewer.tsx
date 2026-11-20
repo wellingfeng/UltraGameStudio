@@ -157,9 +157,12 @@ export default function ModelViewer({
         controls.target.set(0, 0, 0);
         controls.update();
 
+        let viewportVisible = true;
         const resize = () => {
           if (!renderer) return;
           const rect = viewport.getBoundingClientRect();
+          viewportVisible = rect.width > 0 && rect.height > 0;
+          if (!viewportVisible) return;
           const width = Math.max(1, Math.floor(rect.width));
           const height = Math.max(1, Math.floor(rect.height));
           camera.aspect = width / height;
@@ -235,9 +238,11 @@ export default function ModelViewer({
         const animate = () => {
           if (disposed || !renderer || !scene || !controls) return;
           const delta = clock.getDelta();
-          animationMixerRef.current?.update(delta);
-          controls.update();
-          renderer.render(scene, camera);
+          if (viewportVisible) {
+            animationMixerRef.current?.update(delta);
+            controls.update();
+            renderer.render(scene, camera);
+          }
           frameId = window.requestAnimationFrame(animate);
         };
         animate();

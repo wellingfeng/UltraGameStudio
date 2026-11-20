@@ -20,6 +20,35 @@ describe('model rankings data', () => {
   beforeEach(() => { localStorage.clear(); http.mockReset(); vi.useFakeTimers(); vi.setSystemTime(new Date('2026-11-02T10:00:00Z')); });
   afterEach(() => { vi.useRealTimers(); });
 
+  it('reads individual models from embedded data when the leaderboard groups releases and omits the creator column', () => {
+    const grouped = `<table><thead><tr><th>Model</th><th>Artificial Analysis Intelligence Index</th></tr></thead><tbody>
+      <tr><td>Model A Max, Default Fallback</td><td>65</td></tr></tbody></table>`;
+    const payload = [
+      { shortName: 'Model A (max)', modelCreatorName: 'Creator A', intelligenceIndex: 64.56, price1mInputTokens: 8, price1mOutputTokens: 40 },
+      { shortName: 'Model A (high)', modelCreatorName: 'Creator A', intelligenceIndex: 61.82, price1mInputTokens: 8, price1mOutputTokens: 40 },
+      { shortName: 'Model A (max)', modelCreatorName: 'Creator B', intelligenceIndex: 50.2, price1mInputTokens: 2, price1mOutputTokens: 4 },
+      { shortName: 'Unevaluated', modelCreatorName: 'Creator A', intelligenceIndex: null },
+    ];
+    const page = `${grouped}<script>self.__next_f.push(${JSON.stringify([1, `22:${JSON.stringify(['$', 'div', null, { initialModels: payload }])}\n`])})</script>`;
+    expect(parseIntelligenceLeaderboard(page)).toEqual([
+      { name: 'Model A (max)', creator: 'Creator A', score: 65, pricing: { inputUsd: 8, outputUsd: 40 } },
+      { name: 'Model A (high)', creator: 'Creator A', score: 62, pricing: { inputUsd: 8, outputUsd: 40 } },
+      { name: 'Model A (max)', creator: 'Creator B', score: 50, pricing: { inputUsd: 2, outputUsd: 4 } },
+    ]);
+    expect(() => parseIntelligenceLeaderboard(grouped)).toThrow();
+  });
+
+  it('keeps scores without prices and excludes conflicting duplicate models', () => {
+    const grouped = '<table><thead><tr><th>Model</th><th>Artificial Analysis Intelligence Index</th></tr></thead></table>';
+    const models = [
+      { shortName: 'No price', modelCreatorName: 'Creator', intelligenceIndex: 40.1 },
+      { shortName: 'Conflict', modelCreatorName: 'Creator', intelligenceIndex: 42 },
+      { shortName: 'Conflict', modelCreatorName: 'Creator', intelligenceIndex: 43 },
+    ];
+    const page = `${grouped}<script>self.__next_f.push(${JSON.stringify([1, `22:${JSON.stringify({ initialModels: models })}\n`])})</script>`;
+    expect(parseIntelligenceLeaderboard(page)).toEqual([{ name: 'No price', creator: 'Creator', score: 40, pricing: null }]);
+  });
+
   it('joins the exact model and creator to the published input and output prices, not cost per task', () => {
     expect(parseIntelligenceLeaderboard(withPrices(modelPrices))).toEqual([
       { name: 'Model B', creator: 'Creator B', score: 59, pricing: { inputUsd: 0, outputUsd: 4 } },

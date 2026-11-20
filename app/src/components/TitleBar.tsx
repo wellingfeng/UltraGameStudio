@@ -11,16 +11,19 @@ import './TitleBar.css';
 import { useMainSurface } from './MainSurface';
 
 const TitleBarTarget = createContext<HTMLElement | null>(null);
+const TitleBarEndTarget = createContext<HTMLElement | null>(null);
 const TitleBarActionsTarget = createContext<((target: HTMLDivElement | null) => void) | null>(null);
 
 /** Keep the existing chat header and its interactions in one window chrome row. */
-export function TitleBarLayout({ children, sidebarOpen, onToggleSidebar, locale }: {
+export function TitleBarLayout({ children, sidebarOpen, onToggleSidebar, locale, projectRun }: {
   children: ReactNode;
   sidebarOpen?: boolean;
   onToggleSidebar?: () => void;
   locale?: Locale;
+  projectRun?: ReactNode;
 }) {
   const [target, setTarget] = useState<HTMLDivElement | null>(null);
+  const [endTarget, setEndTarget] = useState<HTMLDivElement | null>(null);
   const [actionsTarget, setActionsTarget] = useState<HTMLDivElement | null>(null);
   const { surface } = useMainSurface();
   const [maximized, setMaximized] = useState(false);
@@ -78,6 +81,7 @@ export function TitleBarLayout({ children, sidebarOpen, onToggleSidebar, locale 
 
   return (
     <TitleBarTarget.Provider value={target}>
+      <TitleBarEndTarget.Provider value={endTarget}>
       <TitleBarActionsTarget.Provider value={setActionsTarget}>
       <div
         ref={barRef}
@@ -85,35 +89,42 @@ export function TitleBarLayout({ children, sidebarOpen, onToggleSidebar, locale 
         data-focused={focused}
         data-tauri-drag-region
       >
-        <div className="ugs-titlebar-brand" data-tauri-drag-region>
-          {onToggleSidebar && (
-            <SidebarToggleButton side="left" open={sidebarOpen ?? true}
-              onClick={onToggleSidebar} controls="ugs-left-sidebar" locale={locale} />
-          )}
-          <Layers size={14} strokeWidth={1.5} aria-hidden="true" />
-          <span data-tauri-drag-region>UltraGameStudio</span>
-        </div>
-        <div ref={setTarget} className="ugs-titlebar-content" data-tauri-drag-region />
-        {error && <span className="ugs-titlebar-error" role="alert">{error}</span>}
-        {surface === 'chat' && actionsTarget
-          ? createPortal(<><AgentUsage locale={locale} /><ModelRankings locale={locale} /></>, actionsTarget)
-          : <><AgentUsage locale={locale} /><ModelRankings locale={locale} /></>}
-        {desktop && !nativeMac && (
-          <div className="ugs-titlebar-controls" aria-label="窗口控制">
-            <button type="button" aria-label="最小化" title="最小化" onClick={() => run(() => getCurrentWindow().minimize())}>
-              <Minus size={14} strokeWidth={1.5} />
-            </button>
-            <button type="button" aria-label={maximized ? '还原窗口' : '最大化'} title={maximized ? '还原窗口' : '最大化'} onClick={() => run(() => getCurrentWindow().toggleMaximize())}>
-              {maximized ? <Copy size={12} strokeWidth={1.5} /> : <Square size={12} strokeWidth={1.5} />}
-            </button>
-            <button type="button" className="ugs-titlebar-close" aria-label="关闭窗口" title="关闭窗口" onClick={() => run(() => getCurrentWindow().close())}>
-              <X size={16} strokeWidth={1.5} />
-            </button>
+        <div className="ugs-titlebar-start" data-tauri-drag-region>
+          <div className="ugs-titlebar-brand" data-tauri-drag-region>
+            {onToggleSidebar && (
+              <SidebarToggleButton side="left" open={sidebarOpen ?? true}
+                onClick={onToggleSidebar} controls="ugs-left-sidebar" locale={locale} />
+            )}
+            <Layers size={14} strokeWidth={1.5} aria-hidden="true" />
+            <span data-tauri-drag-region>UltraGameStudio</span>
           </div>
-        )}
+          <div ref={setTarget} className="ugs-titlebar-content" data-tauri-drag-region />
+        </div>
+        <div className="ugs-titlebar-project-run">{projectRun}</div>
+        <div className="ugs-titlebar-end" data-tauri-drag-region>
+          {error && <span className="ugs-titlebar-error" role="alert">{error}</span>}
+          <div ref={setEndTarget} className="ugs-titlebar-chat-actions" />
+          {surface === 'chat' && actionsTarget
+            ? createPortal(<><AgentUsage locale={locale} /><ModelRankings locale={locale} /></>, actionsTarget)
+            : <><AgentUsage locale={locale} /><ModelRankings locale={locale} /></>}
+          {desktop && !nativeMac && (
+            <div className="ugs-titlebar-controls" aria-label="窗口控制">
+              <button type="button" aria-label="最小化" title="最小化" onClick={() => run(() => getCurrentWindow().minimize())}>
+                <Minus size={14} strokeWidth={1.5} />
+              </button>
+              <button type="button" aria-label={maximized ? '还原窗口' : '最大化'} title={maximized ? '还原窗口' : '最大化'} onClick={() => run(() => getCurrentWindow().toggleMaximize())}>
+                {maximized ? <Copy size={12} strokeWidth={1.5} /> : <Square size={12} strokeWidth={1.5} />}
+              </button>
+              <button type="button" className="ugs-titlebar-close" aria-label="关闭窗口" title="关闭窗口" onClick={() => run(() => getCurrentWindow().close())}>
+                <X size={16} strokeWidth={1.5} />
+              </button>
+            </div>
+          )}
+        </div>
       </div>
       {children}
       </TitleBarActionsTarget.Provider>
+      </TitleBarEndTarget.Provider>
     </TitleBarTarget.Provider>
   );
 }
@@ -123,8 +134,14 @@ export function TitleBarActions() {
   return setTarget ? <div ref={setTarget} className="ugs-titlebar-global-actions" /> : null;
 }
 
-export function TitleBarContent({ children, enabled }: { children: ReactNode; enabled: boolean }) {
-  const target = useContext(TitleBarTarget);
+export function TitleBarContent({ children, enabled, placement = 'start' }: {
+  children: ReactNode;
+  enabled: boolean;
+  placement?: 'start' | 'end';
+}) {
+  const start = useContext(TitleBarTarget);
+  const end = useContext(TitleBarEndTarget);
+  const target = placement === 'end' ? end : start;
   const { surface } = useMainSurface();
   if (surface !== 'chat') return null;
   return enabled && target ? createPortal(children, target) : children;

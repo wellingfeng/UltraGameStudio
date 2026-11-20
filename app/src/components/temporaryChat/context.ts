@@ -6,7 +6,8 @@ import { extractSessionFiles } from '@/lib/sessionFiles';
 import { useFilePreviewTabs, filePreviewScope } from '@/store/filePreviewTabs';
 
 export type ChatContext = { label: string; text: string; image?: { mime: string; base64: string }; note?: string };
-export type ContextSource = { label: string; key?: string; load: () => Promise<ChatContext | undefined> };
+// live: reload before every send so the reference tracks content that keeps changing (e.g. a running session).
+export type ContextSource = { label: string; key?: string; live?: boolean; load: () => Promise<ChatContext | undefined> };
 export const SOURCE_CHANGED_EVENT = 'ugs:temporary-chat-source-changed';
 const visibleSources = new Map<symbol, ContextSource>();
 export function registerVisibleSource(source: ContextSource): () => void {
@@ -86,24 +87,40 @@ export async function currentSource(): Promise<ContextSource | undefined> {
   const tab = previews.tabs.find(item => item.scope === scope && item.id === previews.activeByScope[scope]);
   if (tab) return fileSource(tab.ref, tab.cwd);
   if (!state.activeSessionId) return { label: '随手聊', key: JSON.stringify(['unscoped']), load: async () => undefined };
-  const sessionId = state.activeSessionId;
-  return { label: '当前会话', key: JSON.stringify(['session', scope, sessionId]), load: async () => {
-  const title = state.sessions.find(item => item.id === state.activeSessionId)?.title || '当前会话';
-  const messages = state.messages.filter(item => (item.role === 'user' || item.role === 'assistant') && item.text.trim());
-  const entries = extractSessionFiles(messages);
-  const cwd = state.composer.workspace;
-    let text = `会话：${title}\n\n` + messages.map(item => `${item.role === 'user' ? '用户' : '助手'}：${item.text}`).join('\n\n');
+  return sessionSource(state.activeSessionId, state.composer.workspace);
+}
+
+// Reads the store at load time so each send sees the latest transcript; long sessions keep the newest part.
+export function sessionSource(sessionId: string, workspace: string): ContextSource {
+  return { label: '当前会话', live: true, key: JSON.stringify(['session', filePreviewScope(workspace), sessionId]), load: async () => {
+    const { useStore } = await import('@/store/useStore');
+    const state = useStore.getState();
+    if (state.activeSessionId !== sessionId) throw new Error('会话已切换，请重新打开随手聊');
+    const title = state.sessions.find(item => item.id === sessionId)?.title || '当前会话';
+    const messages = state.messages.filter(item => (item.role === 'user' || item.role === 'assistant') && item.text.trim());
+    if (!messages.length) return undefined;
+    const header = `会话：${title}\n\n`;
+    let transcript = messages.map(item => `${item.role === 'user' ? '用户' : '助手'}：${item.text}`).join('\n\n');
+    const notes: string[] = [];
+    if (header.length + transcript.length > LIMIT) {
+      const marker = '……（更早的记录已省略）\n\n';
+      transcript = marker + transcript.slice(-(LIMIT - header.length - marker.length));
+      notes.push('会话过长，仅引用最近 6 万字');
+    }
+    let text = header + transcript;
     const omitted: string[] = [];
-    for (const entry of entries) {
+    for (const entry of extractSessionFiles(messages)) {
       if (text.length >= LIMIT) { omitted.push(entry.basename); continue; }
       try {
-        const file = await previewLocalFile(entry.path, { cwd });
+        const file = await previewLocalFile(entry.path, { cwd: state.composer.workspace });
         if (file.kind !== 'text' || file.text == null) { omitted.push(entry.basename); continue; }
         text += `\n\n会话文件：${file.path}\n${file.text}${file.truncated ? '\n（文件已截断）' : ''}`;
       } catch { omitted.push(entry.basename); }
     }
     const result = limited(text);
-    return { label: title, ...result, note: [result.note, omitted.length ? `${omitted.length} 个会话文件未能作为文本读取` : ''].filter(Boolean).join('；') || undefined };
+    if (result.note) notes.push('会话文件内容过长，已截断');
+    if (omitted.length) notes.push(`${omitted.length} 个会话文件未能作为文本读取`);
+    return { label: title, text: result.text, note: notes.join('；') || undefined };
   } };
 }
 

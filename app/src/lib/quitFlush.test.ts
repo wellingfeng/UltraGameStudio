@@ -134,6 +134,22 @@ describe('installQuitFlushHandler', () => {
     }
   });
 
+  it('cancels tray quit when the pending composer draft cannot be saved', async () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+    const log = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    try {
+      mocks.flushComposerDraftPersist.mockRejectedValueOnce(new Error('draft write failed'));
+      await installQuitFlushHandler();
+      getBeforeQuitListener()?.();
+      await vi.waitFor(() => expect(mocks.invoke).toHaveBeenCalledWith('ugs_quit_cancel'));
+      expect(alert).toHaveBeenCalledWith(expect.stringContaining('draft write failed'));
+      expect(mocks.invoke).not.toHaveBeenCalledWith('ugs_quit_flush_done');
+    } finally {
+      alert.mockRestore();
+      log.mockRestore();
+    }
+  });
+
   it('still alerts when the host cannot acknowledge quit cancellation', async () => {
     const alert = vi.spyOn(window, 'alert').mockImplementation(() => undefined);
     try {

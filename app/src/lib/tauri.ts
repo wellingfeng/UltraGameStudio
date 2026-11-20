@@ -1767,6 +1767,14 @@ export async function ensureLocalAssetScope(path: string): Promise<void> {
   await invoke<void>('ensure_local_asset_scope', { path });
 }
 
+export async function renderPresentationPreview(path: string): Promise<string> {
+  if (!tauriAvailable()) {
+    throw new Error('NO_BACKEND');
+  }
+  const invoke = await getInvoke();
+  return invoke<string>('render_presentation_preview', { path });
+}
+
 /** Paged read of a PPTX/XLSX. Only the leading `maxPages` slides/sheets are
  *  parsed, so preview cost stays flat regardless of document length. */
 export async function previewOfficeDocument(
@@ -2544,22 +2552,6 @@ export async function onSlashCatalogUpdated(
   const listen = await getListen();
   return listen<SlashCatalogSnapshot>('slash-catalog-updated', (event) =>
     cb(event.payload),
-  );
-}
-
-/**
- * Subscribe to the desktop-shell single-instance warning. Fired when the user
- * tries to launch a second app process and the existing one is reused instead.
- */
-export async function onSingleInstanceWarning(
-  cb: (message: string) => void,
-): Promise<UnlistenFn> {
-  if (!tauriAvailable()) {
-    return () => {};
-  }
-  const listen = await getListen();
-  return listen<string>('single-instance-warning', (event) =>
-    cb(event.payload || '只能同时运行一个进程'),
   );
 }
 

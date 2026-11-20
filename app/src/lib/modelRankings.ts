@@ -28,19 +28,32 @@ type ModelPricing = NonNullable<IntelligenceEntry['pricing']>;
 const modelKey = (name: string, creator: string) => `${name.trim().toLocaleLowerCase()}\0${creator.trim().toLocaleLowerCase()}`;
 
 /** Read the leaderboard's embedded model data without executing its scripts. */
-function parseLeaderboardPrices(html: string): Map<string, ModelPricing> {
+function parseLeaderboardModels(html: string): { prices: Map<string, ModelPricing>; entries: IntelligenceEntry[] } {
   const prices = new Map<string, ModelPricing>();
   const ambiguous = new Set<string>();
+  const entries = new Map<string, IntelligenceEntry>();
+  const ambiguousEntries = new Set<string>();
   const addModels = (value: unknown) => {
     if (!Array.isArray(value)) return;
     for (const item of value) {
       if (!item || typeof item !== 'object') continue;
-      const model = item as { shortName?: unknown; modelCreatorName?: unknown; price1mInputTokens?: unknown; price1mOutputTokens?: unknown };
-      if (typeof model.shortName !== 'string' || typeof model.modelCreatorName !== 'string') continue;
+      const model = item as { shortName?: unknown; modelCreatorName?: unknown; intelligenceIndex?: unknown; price1mInputTokens?: unknown; price1mOutputTokens?: unknown };
+      if (typeof model.shortName !== 'string' || !model.shortName.trim() || typeof model.modelCreatorName !== 'string' || !model.modelCreatorName.trim()) continue;
       const amount = (value: unknown) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : null;
       const pricing = { inputUsd: amount(model.price1mInputTokens), outputUsd: amount(model.price1mOutputTokens) };
-      if (pricing.inputUsd === null && pricing.outputUsd === null) continue;
       const key = modelKey(model.shortName, model.modelCreatorName);
+      const score = amount(model.intelligenceIndex);
+      if (score !== null) {
+        const entry = { name: model.shortName.trim(), creator: model.modelCreatorName.trim(), score, pricing: pricing.inputUsd === null && pricing.outputUsd === null ? null : pricing };
+        const existingEntry = entries.get(key);
+        if (existingEntry && (existingEntry.score !== entry.score || JSON.stringify(existingEntry.pricing) !== JSON.stringify(entry.pricing))) {
+          entries.delete(key);
+          ambiguousEntries.add(key);
+        } else if (!ambiguousEntries.has(key)) {
+          entries.set(key, entry);
+        }
+      }
+      if (pricing.inputUsd === null && pricing.outputUsd === null) continue;
       const existing = prices.get(key);
       if (existing && (existing.inputUsd !== pricing.inputUsd || existing.outputUsd !== pricing.outputUsd)) {
         prices.delete(key);
@@ -59,7 +72,7 @@ function parseLeaderboardPrices(html: string): Map<string, ModelPricing> {
     }
   };
   for (const script of html.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script\s*>/gi)) {
-    if (!script[1].includes('price1mInputTokens') && !script[1].includes('price1mOutputTokens')) continue;
+    if (!script[1].includes('initialModels')) continue;
     const payload = script[1].match(/^\s*self\.__next_f\.push\(([\s\S]*)\)\s*;?\s*$/);
     if (!payload) continue;
     try {
@@ -72,12 +85,12 @@ function parseLeaderboardPrices(html: string): Map<string, ModelPricing> {
       }
     } catch { /* Ignore malformed or unrelated scripts. */ }
   }
-  return prices;
+  return { prices, entries: Array.from(entries.values()).sort((a, b) => b.score - a.score).map((entry) => ({ ...entry, score: Math.round(entry.score) })) };
 }
 
 /** Parse the published leaderboard table, never the similarly named cost-per-task column. */
 export function parseIntelligenceLeaderboard(html: string): IntelligenceEntry[] {
-  const prices = parseLeaderboardPrices(html);
+  const { prices, entries: embeddedEntries } = parseLeaderboardModels(html);
   const tableMarkup = html.match(/<table\b[\s\S]*?<\/table\s*>/gi) ?? [];
   for (const markup of tableMarkup) {
     // The detached document must not trigger requests for the site's image assets.
@@ -89,7 +102,13 @@ export function parseIntelligenceLeaderboard(html: string): IntelligenceEntry[] 
     const modelIndex = headers.indexOf('Model');
     const creatorIndex = headers.indexOf('Creator');
     const scoreIndex = headers.indexOf('Artificial Analysis Intelligence Index');
-    if (modelIndex < 0 || creatorIndex < 0 || scoreIndex < 0) continue;
+    if (modelIndex < 0 || scoreIndex < 0) continue;
+    // Newer pages group rows by release and omit the creator column. Their
+    // embedded model list retains each variant, creator, score, and prices.
+    if (creatorIndex < 0) {
+      if (embeddedEntries.length > 0) return embeddedEntries;
+      continue;
+    }
     const entries: IntelligenceEntry[] = [];
     for (const row of Array.from(table?.querySelectorAll('tbody tr') ?? [])) {
       const cells = row.querySelectorAll('td');

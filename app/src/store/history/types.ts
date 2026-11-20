@@ -253,6 +253,8 @@ export interface SessionRecord {
   isWorkflow: boolean;
   createdAt: LegacyHistoryTimestamp;
   updatedAt: LegacyHistoryTimestamp;
+  /** Latest user send time; retained even if the message is later deleted. */
+  lastUserMessageAt?: number;
   messages: Message[];
   workflow?: IRGraph;
   /** Legacy extension slot. Canonical writers use `metadata`. */
@@ -352,6 +354,8 @@ export type SessionSummary = Pick<
   /** First 80 chars of the last message - sidebar two-line preview. */
   preview?: string;
   messageCount: number;
+  /** Latest user send time for stable sidebar ordering. */
+  lastUserMessageAt?: number;
   /** Derived from meta.runStatus for lightweight history status badges. */
   runStatus?: SessionMeta['runStatus'];
   /** Derived from meta.unreadCompletion for the "unviewed completion" badge. */
@@ -362,7 +366,7 @@ export type SessionSummary = Pick<
   pinned?: boolean;
   /** Derived from meta.scheduledTask for lightweight schedule rendering. */
   scheduledTask?: ScheduledTaskConfig;
-  /** Internal migration marker for completion-time based ordering. */
+  /** Internal migration marker for session activity fields. */
   activityVersion?: number;
 
   // Forward-compatible canonical fields.

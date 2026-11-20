@@ -1,15 +1,19 @@
 import { useEffect, useState } from 'react';
 import { ChevronLeft, ChevronRight, FileWarning, Loader2 } from 'lucide-react';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import { previewOfficeDocument, type OfficePreview } from '@/lib/tauri';
+import { previewOfficeDocument, renderPresentationPreview, type OfficePreview } from '@/lib/tauri';
 import { useStore } from '@/store/useStore';
 import { t, tArgs } from '@/lib/i18n';
 import { usePreviewTheme } from './lib/previewTheme';
+import PdfPreview from './PdfPreview';
 import PreviewZoomControls from './PreviewZoomControls';
 import { usePreviewZoom, withPreviewInteractions } from './lib/previewZoom';
 
 const DOCX_MIME =
   'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+const PPTX_MIME =
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+const PPT_MIME = 'application/vnd.ms-powerpoint';
 // Office previews previously disabled scripts entirely. Only the injected
 // interaction script is allowed; document-provided scripts remain blocked.
 const OFFICE_PREVIEW_NONCE = Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('');
@@ -20,6 +24,7 @@ const OFFICE_STYLE = [
   'html,body{background:var(--bg);color:var(--fg);}',
   'body{margin:0;padding:16px;box-sizing:border-box;font-family:var(--ugs-font-family);line-height:1.6;overflow-wrap:anywhere;}',
   'h2{font-size:15px;font-weight:600;margin:0 0 12px;padding-bottom:8px;border-bottom:1px solid var(--border-soft);}',
+  '.preview-slide + .preview-slide{margin-top:24px;padding-top:16px;border-top:1px solid var(--border-soft);}',
   'p{margin:0 0 8px;white-space:pre-wrap;}',
   'table{border-collapse:collapse;font-size:12px;max-width:100%;}',
   'td,th{border:1px solid var(--border);padding:4px 8px;vertical-align:top;}',
@@ -36,7 +41,8 @@ const OFFICE_STYLE = [
 type OfficeState =
   | { status: 'loading' }
   | { status: 'docx'; html: string }
-  | { status: 'paged'; preview: OfficePreview }
+  | { status: 'presentation'; pdfPath: string }
+  | { status: 'paged'; preview: OfficePreview; layoutError?: string }
   | { status: 'error'; message: string };
 
 function wrapOfficeHtml(body: string, theme: string): string {
@@ -46,10 +52,8 @@ function wrapOfficeHtml(body: string, theme: string): string {
 /**
  * Word/PowerPoint/Excel preview.
  *
- * DOCX has no fixed pagination, so it still renders as one flowed document —
- * but the bytes are fetched from the asset protocol instead of arriving as a
- * base64 IPC payload. PPTX/XLSX are paged in Rust, which reads only the leading
- * slides/sheets out of the zip container.
+ * Presentations use a rendered PDF when available. The OOXML reader supplies
+ * sheet previews and a limited PPTX preview if the layout renderer fails.
  */
 export default function OfficePreviewPane({
   path,
@@ -105,9 +109,26 @@ export default function OfficePreviewPane({
       };
     }
 
-    void previewOfficeDocument(streamPath || path)
-      .then((preview) => {
-        if (!disposed) setState({ status: 'paged', preview });
+    const source = streamPath || path;
+    const readPreview = async (): Promise<OfficeState> => {
+      if (mime === PPT_MIME || mime === PPTX_MIME) {
+        try {
+          return { status: 'presentation', pdfPath: await renderPresentationPreview(source) };
+        } catch (err) {
+          if (mime === PPT_MIME || disposed) throw err;
+          return {
+            status: 'paged',
+            preview: await previewOfficeDocument(source),
+            layoutError: err instanceof Error ? err.message : String(err),
+          };
+        }
+      }
+      return { status: 'paged', preview: await previewOfficeDocument(source) };
+    };
+
+    void readPreview()
+      .then((previewState) => {
+        if (!disposed) setState(previewState);
       })
       .catch((err: unknown) => {
         if (!disposed) {
@@ -161,37 +182,54 @@ export default function OfficePreviewPane({
     );
   }
 
-  const { preview } = state;
+  if (state.status === 'presentation') {
+    return <PdfPreview url={convertFileSrc(state.pdfPath)} />;
+  }
+
+  const { preview, layoutError } = state;
+  const isSlides = preview.kind === 'pptx';
   const total = Math.max(1, preview.pages.length);
   const current = preview.pages[Math.min(pageNumber, total) - 1];
+  const html = isSlides
+    ? preview.pages.map((page) => `<section class="preview-slide">${page.html}</section>`).join('')
+    : current?.html ?? '';
   const navButton =
     'flex h-6 w-6 items-center justify-center rounded border border-border text-fg-dim transition-colors hover:text-fg disabled:cursor-not-allowed disabled:opacity-40';
 
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-bg">
+      {layoutError !== undefined && (
+        <div role="status" title={layoutError} className="shrink-0 border-b border-border-soft px-3 py-1.5 text-xs text-fg-dim">
+          {t(locale, 'doc.presentationLayoutFallback')}
+        </div>
+      )}
       <div className="flex shrink-0 items-center justify-center gap-3 border-b border-border-soft bg-panel px-3 py-1.5 text-xs text-fg-dim">
         <PreviewZoomControls zoom={zoom} onZoom={setZoom} />
-        <button
-          type="button"
-          className={navButton}
-          onClick={() => setPageNumber((value) => Math.max(1, value - 1))}
-          disabled={pageNumber <= 1}
-          title={t(locale, 'doc.prevPage')}
-        >
-          <ChevronLeft size={13} />
-        </button>
-        <span className="font-mono tabular-nums">
-          {tArgs(locale, 'doc.pageOf', { current: pageNumber, total })}
-        </span>
-        <button
-          type="button"
-          className={navButton}
-          onClick={() => setPageNumber((value) => Math.min(total, value + 1))}
-          disabled={pageNumber >= total}
-          title={t(locale, 'doc.nextPage')}
-        >
-          <ChevronRight size={13} />
-        </button>
+        {!isSlides && (
+          <>
+            <button
+              type="button"
+              className={navButton}
+              onClick={() => setPageNumber((value) => Math.max(1, value - 1))}
+              disabled={pageNumber <= 1}
+              title={t(locale, 'doc.prevPage')}
+            >
+              <ChevronLeft size={13} />
+            </button>
+            <span className="font-mono tabular-nums">
+              {tArgs(locale, 'doc.pageOf', { current: pageNumber, total })}
+            </span>
+            <button
+              type="button"
+              className={navButton}
+              onClick={() => setPageNumber((value) => Math.min(total, value + 1))}
+              disabled={pageNumber >= total}
+              title={t(locale, 'doc.nextPage')}
+            >
+              <ChevronRight size={13} />
+            </button>
+          </>
+        )}
         {preview.truncated && (
           <span className="text-fg-faint">
             {tArgs(locale, 'doc.truncatedPages', {
@@ -204,9 +242,9 @@ export default function OfficePreviewPane({
       <iframe
         ref={frameRef}
         onLoad={onFrameLoad}
-        title={`${fileName} · ${current?.index ?? 1}`}
+        title={isSlides ? fileName : `${fileName} · ${current?.index ?? 1}`}
         sandbox="allow-scripts"
-        srcDoc={wrapOfficeHtml(current?.html ?? '', theme)}
+        srcDoc={wrapOfficeHtml(html, theme)}
         className="min-h-0 flex-1 border-0 bg-bg"
       />
     </div>

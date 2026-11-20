@@ -23,14 +23,13 @@ afterEach(async () => {
 });
 
 describe('MessageContent learning surface', () => {
-  it.each(['queued', 'reading', 'proposing', 'applying', 'failed', 'cancelled'] as const)(
-    'renders the real %s review even when the assistant text is empty', async (status) => {
+  it.each(['queued', 'reading', 'proposing', 'applying', 'awaiting_approval', 'failed', 'cancelled', 'conflicted', 'needs_recovery', 'rejected'] as const)(
+    'omits a textless %s review and preserves normal assistant text', async (status) => {
       await act(async () => { root.render(<MessageContent text="" skillLearning={{ ...state, status }} />); });
-      expect(container.querySelector('article')).not.toBeNull();
-      expect(container.querySelector('[role="status"]')?.textContent).toBeTruthy();
+      expect(container.childElementCount).toBe(0);
       await act(async () => { root.render(<MessageContent text="正常回答保留" skillLearning={{ ...state, status }} />); });
       expect(container.textContent).toContain('正常回答保留');
-      expect(container.querySelector('article')).not.toBeNull();
+      expect(container.querySelector('article')).toBeNull();
     });
   it('omits an empty noop message but preserves real answer content beside a hidden noop review', async () => {
     const noop = { ...state, status: 'noop' as const, result: { ...result, status: 'noop' as const } };
@@ -41,17 +40,18 @@ describe('MessageContent learning surface', () => {
     expect(container.querySelector('article')).toBeNull();
     expect(container.textContent).not.toContain(result.lesson);
   });
-  it('renders a structured learning card even for a textless history message and forwards its exact action', async () => {
-    const onSkillApprove = vi.fn(async () => ({ ...result, status: 'applied' as const, operationsApplied: 1 }));
+  it('renders a confirmed saved lesson for a textless message and forwards its exact rollback', async () => {
+    const saved = { ...result, status: 'applied' as const, operationsApplied: 1, rollbackId: 'rollback-a' };
+    const onSkillRollback = vi.fn(async () => ({ ...saved, rollbackId: undefined }));
     await act(async () => {
-      root.render(<MessageContent text="" skillLearning={state} onSkillApprove={onSkillApprove} />);
+      root.render(<MessageContent text="" skillLearning={{ status: saved.status, origin, result: saved }} onSkillRollback={onSkillRollback} />);
     });
-    expect(container.textContent).toContain('Awaiting approval');
-    expect(container.textContent).toContain(result.lesson);
-    const approve = container.querySelector<HTMLButtonElement>('button[aria-label="Approve changes"]');
-    expect(approve).not.toBeNull();
-    await act(async () => { approve!.click(); });
-    expect(onSkillApprove).toHaveBeenCalledExactlyOnceWith('batch-a');
     expect(container.textContent).toContain('Lesson saved');
+    expect(container.textContent).toContain(result.lesson);
+    const rollback = container.querySelector<HTMLButtonElement>('button[aria-label="Roll back changes"]');
+    expect(rollback).not.toBeNull();
+    await act(async () => { rollback!.click(); });
+    expect(onSkillRollback).toHaveBeenCalledExactlyOnceWith('rollback-a');
+    expect(container.querySelector('article')).toBeNull();
   });
 });

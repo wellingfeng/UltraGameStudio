@@ -11,10 +11,7 @@ async function view(state: Partial<MemoryReviewChatState>, onOpenSettings = vi.f
   return { container, cleanup: async () => { await act(async () => root.unmount()); container.remove(); } };
 }
 it.each([
-  ['awaiting_approval', '记忆提案待审批', 'warning', false, 0, 2],
   ['applied', '记忆已保存', 'success', false, 1, 0],
-  ['failed', '记忆复盘失败', 'error', false, 1, 0],
-  ['cancelled', '记忆复盘已取消', 'interrupted', false, 0, 1],
 ] as const)('presents real %s state with text and semantic activity', async (phase, label, tone, active, appliedOps, queuedOps) => {
   const v = await view({ phase, appliedOps, queuedOps });
   try {
@@ -31,35 +28,24 @@ it.each(['queued', 'admitting', 'reading', 'unconfirmed', 'disabled', 'skipped',
     try { expect(v.container.querySelector('article')).toBeNull(); }
     finally { await v.cleanup(); }
   });
-it.each(['queued', 'admitting', 'reading', 'unconfirmed', 'disabled', 'skipped'] as const)(
+it.each(['queued', 'admitting', 'reading', 'unconfirmed', 'disabled', 'skipped', 'failed', 'cancelled', 'noop', 'awaiting_approval'] as const)(
   'keeps %s in the background even if it carries counts', async phase => {
     const v = await view({ phase, appliedOps: 1 });
     try { expect(v.container.querySelector('article')).toBeNull(); }
     finally { await v.cleanup(); }
   });
-it('guides pending approval to settings without approving or claiming it was saved', async () => {
+it('hides pending approval without invoking settings or claiming it was saved', async () => {
   const open = vi.fn();
   const v = await view({ phase: 'awaiting_approval', queuedOps: 2 }, open);
   try {
-    expect(v.container.textContent).toContain('待审批 2 项');
-    expect(v.container.textContent).toContain('设置 → 记忆 → 待审批');
-    const button = v.container.querySelector<HTMLButtonElement>('button');
-    expect(button?.textContent).toContain('打开设置');
-    await act(async () => button!.click());
-    expect(open).toHaveBeenCalledTimes(1);
-    expect(v.container.textContent).not.toContain('记忆已保存');
+    expect(v.container.childElementCount).toBe(0);
+    expect(open).not.toHaveBeenCalled();
   } finally { await v.cleanup(); }
 });
-it('keeps partial commits and unknown usage truthful in collapsed diagnostics', async () => {
+it('does not display partial or unconfirmed commits as successful reviews', async () => {
   const v = await view({ phase: 'applied', appliedOps: 1, queuedOps: 2, error: 'Other library CAS conflict',
     recordingError: 'Terminal journal readback mismatch', usage: { calls: 1, inputTokens: 19, estimated: true } });
   try {
-    expect(v.container.textContent).toContain('已保存 1 项');
-    expect(v.container.textContent).toContain('待审批 2 项');
-    expect(v.container.textContent).toContain('结果记录未确认');
-    expect(v.container.querySelector('details')?.open).toBe(false);
-    expect(v.container.querySelector('details')?.textContent).toContain('Other library CAS conflict');
-    expect(v.container.querySelector('details')?.textContent).toContain('输出未知');
-    expect(v.container.querySelector('details')?.textContent).toContain('估算');
+    expect(v.container.childElementCount).toBe(0);
   } finally { await v.cleanup(); }
 });

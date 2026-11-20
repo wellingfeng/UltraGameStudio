@@ -21,6 +21,8 @@ import { beginSessionHandoff, finishSessionHandoff, useSessionHandoffStatus } fr
 import { TitleBarActions, TitleBarContent } from "@/components/TitleBar";
 import SidebarToggleButton from "@/components/SidebarToggleButton";
 import BrowserOpenButton from "@/components/floatingTools/BrowserOpenButton";
+import PreviewFloatingTools from "@/components/floatingTools/PreviewFloatingTools";
+import { sessionSource } from "@/components/temporaryChat/context";
 import {
   ArrowDownToLine,
   ArrowUp,
@@ -243,6 +245,7 @@ import {
   hasProjectFileDragData,
   PROJECT_FILE_DRAG_END_EVENT,
   PROJECT_FILE_DRAG_MOVE_EVENT,
+  nativeFileDropTarget,
   type ProjectFileDragEndDetail,
   type ProjectFileDragMoveDetail,
   projectFilePathsFromDataTransfer,
@@ -276,7 +279,7 @@ import StudioRunCard from "@/panels/StudioRunCard";
 import GameTeamPanel, {
   OPEN_GAME_TEAM_DETAILS_EVENT,
 } from "@/panels/GameTeamPanel";
-import { requestProjectRightPanelFilePreview, requestProjectRightPanelToggle, requestProjectRightPanelSessionFiles,
+import { requestProjectRightPanelFilePreview, requestProjectRightPanelToggle, requestProjectRightPanelSessionFiles, requestProjectRightPanelTab,
   PROJECT_RIGHT_PANEL_VISIBILITY_EVENT } from "@/panels/projectRightPanelEvents";
 import { activeChatTitle, formatMessageTime } from "@/panels/aidock/chatTitle";
 import {
@@ -4168,9 +4171,12 @@ export default function AIDock({
     [messages, workspaceCwd],
   );
   const [projectFilePanelOpen, setProjectFilePanelOpen] = useState(false);
+  const [sessionChatDocked, setSessionChatDocked] = useState(false);
   useEffect(() => {
     const onVisibility = (event: Event) => {
-      setProjectFilePanelOpen(Boolean((event as CustomEvent<{ open: boolean }>).detail?.open));
+      const detail = (event as CustomEvent<{ open: boolean; tab?: string }>).detail;
+      setProjectFilePanelOpen(Boolean(detail?.open));
+      setSessionChatDocked(Boolean(detail?.open) && detail?.tab === "chat");
     };
     window.addEventListener(PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, onVisibility);
     return () => window.removeEventListener(PROJECT_RIGHT_PANEL_VISIBILITY_EVENT, onVisibility);
@@ -6662,8 +6668,9 @@ export default function AIDock({
           setStickyDropActive(false);
           return;
         }
-        const overSticky = stickyCanAcceptFiles && !!sticky && pointInsideElement(payload.position, sticky);
-        const overComposer = !isReadOnly && !!el && pointInsideElement(payload.position, el);
+        const overBrowser = !!nativeFileDropTarget(payload.position)?.closest('[data-ugs-browser-panel]');
+        const overSticky = !overBrowser && stickyCanAcceptFiles && !!sticky && pointInsideElement(payload.position, sticky);
+        const overComposer = !overBrowser && !isReadOnly && !!el && pointInsideElement(payload.position, el);
         if (payload.type === "enter" || payload.type === "over") {
           setStickyDropActive(overSticky);
           setDropActive(!overSticky && overComposer);
@@ -8571,106 +8578,108 @@ export default function AIDock({
                 {t(locale, "dock.generating")}
               </span>
             )}
-            <div className={"ml-auto flex shrink-0 items-center gap-1" + (isChat ? " ugs-chat-header-actions" : "")}>
-              {isChat && (
-                <button
-                  type="button"
-                  onClick={() => newSession()}
-                  title={t(locale, "dock.newSession")}
-                  aria-label={t(locale, "dock.newSession")}
-                  className={headerActionButtonClass}
-                >
-                  <Plus size={14} strokeWidth={1.5} />
-                </button>
-              )}
-              {isChat && <BrowserOpenButton scope={previewScope} />}
-              {isChat && <TitleBarActions />}
-              {conversationActions}
-              {searchToggleButton}
-              {isChat && (
-                <SidebarToggleButton side="right" open={projectFilePanelOpen}
-                  onClick={requestProjectRightPanelToggle}
-                  controls="ugs-project-file-panel" locale={locale} />
-              )}
-            </div>
-            {returnSearchOpen && (
-              <div
-                className={
-                  "ugs-ai-return-search absolute left-3 right-3 top-full z-30 mt-2 flex items-center gap-1 rounded-lg border border-border bg-panel/95 p-1.5 shadow-2xl backdrop-blur sm:w-96 " +
-                  (isChat ? "sm:right-auto" : "sm:left-auto")
-                }
-              >
-                <div className="ugs-ai-return-search-input flex min-w-0 flex-1 items-center gap-1 rounded-md border border-border bg-bg px-2 py-1 transition-colors focus-within:border-accent">
-                  <Search size={13} className="shrink-0 text-fg-faint" />
-                  <input
-                    id="ai-return-search"
-                    type="search"
-                    ref={searchInputRef}
-                    value={returnSearch}
-                    onChange={(e) => setReturnSearch(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") {
-                        e.preventDefault();
-                        moveSearchMatch(e.shiftKey ? -1 : 1);
-                      } else if (e.key === "Escape") {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        closeReturnSearch();
-                      }
-                    }}
-                    placeholder={t(locale, "dock.searchPlaceholder")}
-                    aria-label={t(locale, "dock.searchAria")}
-                    spellCheck={false}
-                    className="min-w-0 flex-1 bg-transparent text-xs text-fg outline-none placeholder:text-fg-faint"
-                  />
-                  {returnSearch ? (
-                    <button
-                      type="button"
-                      onMouseDown={(e) => e.preventDefault()}
-                      onClick={clearReturnSearch}
-                      title={t(locale, "dock.searchClear")}
-                      aria-label={t(locale, "dock.searchClear")}
-                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-fg-faint transition-colors hover:text-fg"
-                    >
-                      <X size={12} />
-                    </button>
-                  ) : null}
-                </div>
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => moveSearchMatch(-1)}
-                  disabled={searchMatches.length === 0}
-                  title={t(locale, "dock.searchPrevious")}
-                  aria-label={t(locale, "dock.searchPrevious")}
-                  className="ugs-ai-return-search-button flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <ChevronUp size={14} />
-                </button>
-                <button
-                  type="button"
-                  onMouseDown={(e) => e.preventDefault()}
-                  onClick={() => moveSearchMatch(1)}
-                  disabled={searchMatches.length === 0}
-                  title={t(locale, "dock.searchNext")}
-                  aria-label={t(locale, "dock.searchNext")}
-                  className="ugs-ai-return-search-button flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  <ChevronDown size={14} />
-                </button>
-                <span
-                  aria-live="polite"
+            <TitleBarContent enabled={isChat} placement="end">
+              <div className={"ml-auto flex shrink-0 items-center gap-1" + (isChat ? " ugs-chat-header-actions" : "")}>
+                {isChat && (
+                  <button
+                    type="button"
+                    onClick={() => newSession()}
+                    title={t(locale, "dock.newSession")}
+                    aria-label={t(locale, "dock.newSession")}
+                    className={headerActionButtonClass}
+                  >
+                    <Plus size={14} strokeWidth={1.5} />
+                  </button>
+                )}
+                {isChat && <BrowserOpenButton scope={previewScope} />}
+                {isChat && <TitleBarActions />}
+                {conversationActions}
+                {searchToggleButton}
+                {isChat && (
+                  <SidebarToggleButton side="right" open={projectFilePanelOpen}
+                    onClick={requestProjectRightPanelToggle}
+                    controls="ugs-project-file-panel" locale={locale} />
+                )}
+              </div>
+              {returnSearchOpen && (
+                <div
                   className={
-                    "min-w-[3.75rem] whitespace-nowrap text-right font-mono text-[10px] " +
-                    (normalizedSearch && searchMatches.length === 0
-                      ? "text-accent-3"
-                      : "text-fg-faint")
+                    "ugs-ai-return-search absolute left-3 right-3 top-full z-30 mt-2 flex items-center gap-1 rounded-lg border border-border bg-panel/95 p-1.5 shadow-2xl backdrop-blur sm:w-96 " +
+                    (isChat ? "sm:right-auto" : "sm:left-auto")
                   }
                 >
-                  {searchStatus}
-                </span>
-              </div>
-            )}
+                  <div className="ugs-ai-return-search-input flex min-w-0 flex-1 items-center gap-1 rounded-md border border-border bg-bg px-2 py-1 transition-colors focus-within:border-accent">
+                    <Search size={13} className="shrink-0 text-fg-faint" />
+                    <input
+                      id="ai-return-search"
+                      type="search"
+                      ref={searchInputRef}
+                      value={returnSearch}
+                      onChange={(e) => setReturnSearch(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          moveSearchMatch(e.shiftKey ? -1 : 1);
+                        } else if (e.key === "Escape") {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          closeReturnSearch();
+                        }
+                      }}
+                      placeholder={t(locale, "dock.searchPlaceholder")}
+                      aria-label={t(locale, "dock.searchAria")}
+                      spellCheck={false}
+                      className="min-w-0 flex-1 bg-transparent text-xs text-fg outline-none placeholder:text-fg-faint"
+                    />
+                    {returnSearch ? (
+                      <button
+                        type="button"
+                        onMouseDown={(e) => e.preventDefault()}
+                        onClick={clearReturnSearch}
+                        title={t(locale, "dock.searchClear")}
+                        aria-label={t(locale, "dock.searchClear")}
+                        className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-fg-faint transition-colors hover:text-fg"
+                      >
+                        <X size={12} />
+                      </button>
+                    ) : null}
+                  </div>
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => moveSearchMatch(-1)}
+                    disabled={searchMatches.length === 0}
+                    title={t(locale, "dock.searchPrevious")}
+                    aria-label={t(locale, "dock.searchPrevious")}
+                    className="ugs-ai-return-search-button flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <ChevronUp size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    onMouseDown={(e) => e.preventDefault()}
+                    onClick={() => moveSearchMatch(1)}
+                    disabled={searchMatches.length === 0}
+                    title={t(locale, "dock.searchNext")}
+                    aria-label={t(locale, "dock.searchNext")}
+                    className="ugs-ai-return-search-button flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-panel-2 text-fg-dim transition-colors hover:border-accent hover:text-fg disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    <ChevronDown size={14} />
+                  </button>
+                  <span
+                    aria-live="polite"
+                    className={
+                      "min-w-[3.75rem] whitespace-nowrap text-right font-mono text-[10px] " +
+                      (normalizedSearch && searchMatches.length === 0
+                        ? "text-accent-3"
+                        : "text-fg-faint")
+                    }
+                  >
+                    {searchStatus}
+                  </span>
+                </div>
+              )}
+            </TitleBarContent>
           </header>
         </TitleBarContent>
         <div
@@ -8694,6 +8703,13 @@ export default function AIDock({
                   {stickyPromptSummary}
                 </button>}
             </div>
+          )}
+          {isChat && activeSessionId && messages.length > 0 && !forceEagerCapture && !sessionChatDocked && (
+            <PreviewFloatingTools label="针对当前会话随手聊" className="ugs-session-floating-tools"
+              positionKey="ultragamestudio.sessionFloatingTools.position.v1"
+              style={{ right: `${Math.max(56, chatVisibleRightInset + 56)}px` }}
+              source={() => sessionSource(activeSessionId, composer.workspace)}
+              onOpen={() => requestProjectRightPanelTab("chat")} />
           )}
           {visibleStatus && (
             <div

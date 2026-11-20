@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 const mocks = vi.hoisted(() => ({ preview: vi.fn(), thumbnail: vi.fn(), invoke: vi.fn() }));
 vi.mock('@/lib/tauri', async (importOriginal) => ({ ...await importOriginal<typeof import('@/lib/tauri')>(), tauriAvailable: () => false, previewLocalFile: mocks.preview, readImageThumbnail: mocks.thumbnail, previewOfficeDocument: vi.fn() }));
 vi.mock('@tauri-apps/api/core', async (importOriginal) => ({ ...await importOriginal<typeof import('@tauri-apps/api/core')>(), invoke: mocks.invoke, convertFileSrc: (path: string) => path }));
-import { browserSource, currentSource, fileSource, observeCurrentSource, registerVisibleSource } from './context';
+import { browserSource, currentSource, fileSource, observeCurrentSource, registerVisibleSource, sessionSource } from './context';
 import { useStore } from '@/store/useStore';
 
 describe('temporary chat source snapshots', () => {
@@ -28,6 +28,23 @@ describe('temporary chat source snapshots', () => {
     const b = browserSource();
     const closeA = registerVisibleSource(a); const closeB = registerVisibleSource(b);
     expect(await currentSource()).toBe(b); closeB(); expect(await currentSource()).toBe(a); closeA();
+  });
+  it('reads the latest session transcript at load time and keeps the newest part of long sessions', async () => {
+    const message = (id: string, role: 'user' | 'assistant', text: string) => ({ id, role, text, ts: 0 }) as never;
+    useStore.setState({ activeSessionId: 's1', sessions: [{ id: 's1', title: '卡顿排查' }] as never, messages: [] });
+    const source = sessionSource('s1', 'E:/Game');
+    expect(source.live).toBe(true);
+    expect(source.key).toBe((await currentSource())?.key);
+    expect(await source.load()).toBeUndefined();
+    useStore.setState({ messages: [message('a', 'user', '为什么卡'), message('b', 'assistant', '扩展宿主无响应')] });
+    expect(await source.load()).toMatchObject({ label: '卡顿排查', text: '会话：卡顿排查\n\n用户：为什么卡\n\n助手：扩展宿主无响应' });
+    useStore.setState({ messages: [message('a', 'user', '旧开头' + 'x'.repeat(70000)), message('b', 'assistant', '最新结论')] });
+    const long = await source.load();
+    expect(long?.text.length).toBeLessThanOrEqual(60000);
+    expect(long?.text).toContain('最新结论'); expect(long?.text).not.toContain('旧开头');
+    expect(long?.note).toContain('仅引用最近');
+    useStore.setState({ activeSessionId: 's2' });
+    await expect(source.load()).rejects.toThrow('会话已切换');
   });
   it('identifies files, pages and sessions separately and follows changes', async () => {
     const updates = vi.fn();

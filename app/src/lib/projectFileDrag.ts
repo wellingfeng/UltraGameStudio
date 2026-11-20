@@ -7,6 +7,11 @@ export const PROJECT_FILE_DRAG_MOVE_EVENT =
 export const PROJECT_FILE_DRAG_END_EVENT =
   'ultragamestudio:project-file-drag-end';
 
+export function nativeFileDropTarget(position: { x: number; y: number }): Element | null {
+  const scale = window.devicePixelRatio || 1;
+  return document.elementFromPoint?.(position.x / scale, position.y / scale) ?? null;
+}
+
 export interface ProjectFileDragMoveDetail {
   paths: string[];
   clientX: number;

@@ -9,7 +9,7 @@ import './SkillLearningCard.css';
 
 export interface SkillLearningCardProps {
   state: SkillReviewState;
-  /** Both surfaces show real progress and terminal diagnostics, not only writes. */
+  /** Chat shows confirmed saved lessons; history also shows progress and failures. */
   surface?: 'chat' | 'history';
   locale?: Locale;
   onApprove?: (batchId: string) => Promise<SkillMutationResult>;
@@ -118,7 +118,7 @@ function SkillLearningCardContent({ state, surface = 'chat', locale = 'zh-CN', o
       ? (zh ? `已等待 ${Math.max(0, Math.floor((now - state.queuedAt) / 1000))} 秒` : `Elapsed ${Math.max(0, Math.floor((now - state.queuedAt) / 1000))} s`)
       : undefined;
   const actionStyle = surface === 'chat' ? 'ugs-review-action' : actionClass;
-  if (!isSkillReviewVisible({ ...state, status }, surface)) return null;
+  if (!isSkillReviewVisible({ ...state, status, result, action: rolledBack ? 'rollback' : state.action }, surface)) return null;
   const body = <>
       {state.detail && <p className="text-fg-dim">{localizeSkillReviewText(state.detail, zh)}</p>}
       {admission && <>

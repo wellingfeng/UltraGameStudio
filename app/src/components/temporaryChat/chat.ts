@@ -33,6 +33,7 @@ export class TemporaryChat {
   private group: ChatSessions;
   private unsubscribe: () => void;
   private sourceKey?: string;
+  private source?: ContextSource;
   private active = new Set<Active>();
   private disposed = false;
   private loading = false;
@@ -41,6 +42,7 @@ export class TemporaryChat {
 
   constructor(private changed: (state: ChatState) => void, private port = nativePort, source?: ContextSource) {
     this.sourceKey = source?.key;
+    this.source = source;
     this.group = chatSessions(source?.key);
     this.state.sessionId = this.group.selectedId;
     this.unsubscribe = this.group.subscribe(() => this.sync());
@@ -52,6 +54,7 @@ export class TemporaryChat {
     if (source?.key === this.sourceKey && source?.key) return;
     this.unsubscribe();
     this.sourceKey = source?.key;
+    this.source = source;
     this.group = chatSessions(source?.key);
     this.state.sessionId = this.group.selectedId;
     this.unsubscribe = this.group.subscribe(() => this.sync());
@@ -97,7 +100,18 @@ export class TemporaryChat {
     }
     this.publish();
   }
-  removeContext() { if (this.state.busy) return; ++this.referenceVersion; this.context = undefined; this.state.reference = undefined; this.publish(); }
+  // Live sources refresh silently before each send; a failed refresh keeps the last good snapshot.
+  private async refreshLiveContext(source: ContextSource) {
+    const version = this.referenceVersion;
+    try {
+      const context = await source.load();
+      if (this.disposed || version !== this.referenceVersion || !context) return;
+      this.context = context;
+      this.state.reference = { label: context.label, status: 'ready', note: context.note };
+      this.publish();
+    } catch { /* Keep the previous snapshot. */ }
+  }
+  removeContext() { if (this.state.busy) return; this.source = undefined; ++this.referenceVersion; this.context = undefined; this.state.reference = undefined; this.publish(); }
   publish() { if (!this.disposed) this.changed(structuredClone(this.state)); }
   async refresh() {
     if (this.state.busy || this.loading || this.disposed) return;
@@ -148,8 +162,12 @@ export class TemporaryChat {
     this.active.add(active);
     group.running.set(session.id, { stop });
     group.notify(true);
-    const context = this.context ? { text: this.context.text, image: this.context.image } : undefined;
-    active.started = this.port.start({ requestId: active.id, providerId: model.providerId, model: model.model, messages, ...(context ? { context } : {}) }, event => {
+    const live = this.source?.live ? this.source : undefined;
+    const start = () => {
+      const context = this.context ? { text: this.context.text, image: this.context.image } : undefined;
+      return this.port.start({ requestId: active.id, providerId: model.providerId, model: model.model, messages, ...(context ? { context } : {}) }, onEvent);
+    };
+    const onEvent = (event: ChatEvent) => {
       if (!this.active.has(active)) return;
       if (event.type === 'delta') { turn.assistant += event.text; group.notify(); }
       else {
@@ -158,7 +176,11 @@ export class TemporaryChat {
         turn.error = event.type === 'error' ? event.message : undefined;
         session.updatedAt = Date.now(); group.notify(true);
       }
-    }).catch(error => {
+    };
+    const started = live
+      ? this.refreshLiveContext(live).then(() => this.active.has(active) ? start() : undefined)
+      : start();
+    active.started = started.catch(error => {
       if (!this.active.has(active)) return;
       this.active.delete(active); group.running.delete(session.id); turn.status = 'error';
       turn.error = typeof error === 'string' ? error : '聊天请求失败，请重试';

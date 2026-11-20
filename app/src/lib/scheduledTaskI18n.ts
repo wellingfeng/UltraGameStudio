@@ -58,7 +58,17 @@ const words = {
   failed: ['任务启动失败', 'Failed to start task', 'Échec du lancement', 'Ошибка запуска', 'Error al iniciar', 'कार्य शुरू नहीं हुआ', 'فشل بدء المهمة', 'Falha ao iniciar', 'タスク開始失敗', 'Start fehlgeschlagen', '작업 시작 실패'],
 } as const;
 
+const countFormats = {
+  runningCount: ['运行中{count}个', '{count} running', '{count} en cours', 'В работе: {count}', 'En curso: {count}', 'चल रहे: {count}', 'قيد التشغيل: {count}', 'Em execução: {count}', '実行中 {count} 件', '{count} aktiv', '실행 중 {count}개'],
+  completedCount: ['运行完{count}个', '{count} completed', '{count} terminés', 'Завершено: {count}', 'Completadas: {count}', 'पूरे हुए: {count}', 'اكتمل: {count}', 'Concluídas: {count}', '完了 {count} 件', '{count} fertig', '완료 {count}개'],
+} as const;
+
 export type ScheduledTaskTextKey = keyof typeof words;
 export function scheduleText(locale: Locale, key: ScheduledTaskTextKey): string {
   return words[key][SUPPORTED_LOCALES.indexOf(locale)] ?? words[key][0];
+}
+
+export function scheduledTaskCountText(locale: Locale, key: keyof typeof countFormats, count: number): string {
+  const format = countFormats[key][SUPPORTED_LOCALES.indexOf(locale)] ?? countFormats[key][0];
+  return format.replace('{count}', count.toLocaleString(locale));
 }

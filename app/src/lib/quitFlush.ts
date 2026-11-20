@@ -14,6 +14,7 @@ function hasWindow(): boolean {
 
 let beforeQuitListener: (() => void) | null = null;
 let beforeUnloadListener: (() => void) | null = null;
+let quitInProgress = false;
 
 // Extra synchronous flush tasks registered at runtime (e.g. the settings
 // personalization autosave flushing its pending debounced writes). Both the
@@ -40,6 +41,7 @@ function runQuitFlushTasks(): void {
 export function resetQuitFlushForTests(): void {
   beforeQuitListener = null;
   beforeUnloadListener = null;
+  quitInProgress = false;
   quitFlushTasks.clear();
 }
 
@@ -66,8 +68,10 @@ export async function installQuitFlushHandler(): Promise<void> {
     const { listen } = await import("@tauri-apps/api/event");
     if (beforeQuitListener) return;
     beforeQuitListener = () => {
-      // 守卫：仍有会话在运行时，退出必须用户显式确认。否则只 flush 不退出。
+      if (quitInProgress) return;
+      quitInProgress = true;
       void (async () => {
+        let failureContext = "退出确认失败";
         try {
           const { activeRunChannels, activeAiEditChannels } = await import(
             "@/store/channelRegistry"
@@ -75,27 +79,29 @@ export async function installQuitFlushHandler(): Promise<void> {
           const running =
             activeRunChannels().length + activeAiEditChannels().length;
           if (running > 0 && hasWindow()) {
-            const ok = window.confirm(
+            const { invoke } = await import("@tauri-apps/api/core");
+            // 托盘退出时主窗口可能隐藏，先恢复窗口，再等待原生对话框结果。
+            await invoke("focus_main_window");
+            const { confirm } = await import("@tauri-apps/plugin-dialog");
+            const ok = await confirm(
               `仍有 ${running} 个会话正在运行中，退出会强制中断它们。\n\n确认退出？`,
+              { title: "退出 UltraGameStudio", kind: "warning", okLabel: "退出", cancelLabel: "取消" },
             );
             if (!ok) {
-              void import("@tauri-apps/api/core")
-                .then(({ invoke }) => invoke("ugs_quit_cancel"))
-                .catch(() => {
-                  /* host already gone */
-                });
+              await invoke("ugs_quit_cancel");
               return;
             }
           }
-        } catch (err) {
-          console.warn("[quitFlush] running-session guard failed", err);
-          /* fall through:守卫失败不阻断原有 flush+退出流程 */
-        }
 
-        runQuitFlushTasks();
-        flushSecretsToLocalStorageFallback();
-        try {
-          await Promise.all([
+          failureContext = "退出前数据保存失败";
+          // Free the bounded history queue before synchronous quit hooks or
+          // draft/final producers submit their last writes. The reserved
+          // barrier still reports any earlier unobserved persistence failure.
+          const { historyStore } = await import("@/store/history/store");
+          await historyStore.flush();
+          runQuitFlushTasks();
+          flushSecretsToLocalStorageFallback();
+          const flushResults = await Promise.allSettled([
           import('@/lib/downloadRegistry').then(({ flushAssetIndex }) => flushAssetIndex()).catch(error => {
             console.error('[asset-index] 退出前资产索引写入失败', error);
           }),
@@ -123,11 +129,14 @@ export async function installQuitFlushHandler(): Promise<void> {
           }),
           // 把仍处于 debounce 窗口内的输入框草稿立即落盘，避免「退出即丢」。
           import("@/store/composerDraftPersistence")
-            .then(({ flushComposerDraftPersist }) => flushComposerDraftPersist())
-            .catch(() => {
-              /* draft flush failed — best-effort only */
-            }),
+            .then(({ flushComposerDraftPersist }) => flushComposerDraftPersist()),
           ]);
+          const failedFlushes = flushResults.filter((result) => result.status === "rejected");
+          if (failedFlushes.length > 0) {
+            throw new Error(failedFlushes.map((result) =>
+              result.reason instanceof Error ? result.reason.message : String(result.reason),
+            ).join("\n"));
+          }
           // Flush the producers before the history barrier. Waiting for only
           // already-admitted writes misses their debounce/publication timers.
           const { flushChatPersistenceForQuit } = await import('@/store/useStore');
@@ -135,7 +144,18 @@ export async function installQuitFlushHandler(): Promise<void> {
           const { invoke } = await import("@tauri-apps/api/core");
           await invoke("ugs_quit_flush_done");
         } catch (error) {
-          console.error("[quitFlush] persistence failed; quit cancelled", error);
+          console.error("[quitFlush] quit cancelled", error);
+          let detail = error instanceof Error ? error.message : String(error);
+          // A producer can report a failed write before the queue barrier sees
+          // it. Report any distinct history error now so a recovered retry
+          // does not replay an error already shown to the user.
+          try {
+            const { historyStore } = await import("@/store/history/store");
+            await historyStore.flush();
+          } catch (historyError) {
+            const historyDetail = historyError instanceof Error ? historyError.message : String(historyError);
+            if (!detail.includes(historyDetail)) detail += `\n${historyDetail}`;
+          }
           try {
             const { invoke } = await import("@tauri-apps/api/core");
             await invoke("ugs_quit_cancel");
@@ -143,8 +163,10 @@ export async function installQuitFlushHandler(): Promise<void> {
             console.warn("[quitFlush] failed to notify host about quit cancellation", cancelError);
           }
           if (hasWindow()) {
-            window.alert(`退出前数据保存失败，已取消退出：${error instanceof Error ? error.message : String(error)}`);
+            window.alert(`${failureContext}，已取消退出：${detail}`);
           }
+        } finally {
+          quitInProgress = false;
         }
       })();
     };

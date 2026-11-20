@@ -38,7 +38,7 @@ describe.each(['message-platforms', 'scheduled-tasks', 'artifacts'] as const)('�
     expect(container.querySelector('.ugs-titlebar-content')?.textContent).not.toContain('原会话标题');
     expect(container.querySelectorAll('.ugs-agent-usage')).toHaveLength(1);
     expect(container.querySelectorAll('.ugs-model-rankings')).toHaveLength(1);
-    expect(container.querySelector('.ugs-titlebar > .ugs-agent-usage')).not.toBeNull();
+    expect(container.querySelector('.ugs-titlebar-end > .ugs-agent-usage')).not.toBeNull();
     await act(async () => container.querySelector<HTMLButtonElement>(`${panelSelector} button`)!.click());
     expect(container.querySelector('textarea')).toBe(draft);
     expect(draft.value).toBe('继续编辑的草稿');

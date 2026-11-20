@@ -19,6 +19,7 @@ mod cli_runtime;
 mod claude_usage;
 mod dsh_log;
 mod free_proxy;
+mod gemini_kuro_proxy;
 mod floating_browser;
 mod history;
 mod kimi_log;
@@ -27,6 +28,8 @@ mod native_background;
 mod native_assets;
 mod native_notifications;
 mod performance;
+mod presentation_preview;
+mod project_run;
 mod memory_transactions;
 mod skill_candidates;
 mod proxy_http;
@@ -57,8 +60,6 @@ const TRAY_MENU_QUIT_ID: &str = "tray-quit";
 /// 就地编辑的 API Key 因 keychain 异步写未完成而丢失。
 const BEFORE_QUIT_EVENT: &str = "ugs:before-quit";
 const GITHUB_REPOSITORY_URL: &str = "https://github.com/wellingfeng/UltraGameStudio";
-const SINGLE_INSTANCE_WARNING_EVENT: &str = "single-instance-warning";
-const SINGLE_INSTANCE_WARNING_MESSAGE: &str = "只能同时运行一个进程";
 const SESSION_NOTIFICATION_CLICKED_EVENT: &str = "session-notification-clicked";
 const WAITING_INPUT_NOTIFICATION_GROUP: &str = "ugs-wait-input";
 const SLASH_CATALOG_UPDATED_EVENT: &str = "slash-catalog-updated";
@@ -131,6 +132,7 @@ fn focus_main_window(app: AppHandle) {
 #[tauri::command]
 async fn ugs_quit_flush_done(app: AppHandle) -> Result<(), String> {
     message_platforms::shutdown().await?;
+    tauri::async_runtime::spawn_blocking(project_run::shutdown).await.map_err(|error| error.to_string())?;
     app.exit(0);
     Ok(())
 }
@@ -12311,9 +12313,7 @@ fn preview_local_file_blocking(
 
     if let Some(mime) = document_mime_for_path(&resolved) {
         let ext = preview_extension(&resolved);
-        // PDF renders through the paged pdf.js viewer; the OOXML family is a zip
-        // container and renders through `preview_office_document`, which pulls
-        // only the leading slides/sheets instead of the whole archive.
+        // The Office pane chooses the renderer using the document MIME type.
         let kind = if ext == "pdf" { "document" } else { "office" };
         return Ok(LocalFilePreview {
             path,
@@ -12419,6 +12419,24 @@ async fn preview_local_file(
 async fn ensure_local_asset_scope(app: AppHandle, path: String) -> Result<(), String> {
     native_background::run_bounded(native_background::file_lane(), std::time::Duration::from_secs(10), move || {
         allow_asset_directory(&app, Path::new(&path), false)
+    }).await
+}
+
+#[tauri::command]
+async fn render_presentation_preview(app: AppHandle, path: String) -> Result<String, String> {
+    static LANE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::new();
+    let lane = LANE.get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1))).clone();
+    native_background::run_queued(lane, std::time::Duration::from_secs(210), || {}, move || {
+        let resolved = preview_path(&normalize_preview_separators(&path), None)?;
+        let resolved = resolved.canonicalize().map_err(|e| format!("打开演示文稿失败：{e}"))?;
+        if !matches!(preview_extension(&resolved).as_str(), "ppt" | "pptx") {
+            return Err("版式预览仅支持 PPT 和 PPTX。".into());
+        }
+        let rendered = preview_stream_path(&presentation_preview::render(&resolved)?);
+        app.asset_protocol_scope()
+            .allow_file(&rendered)
+            .map_err(|e| format!("演示文稿预览授权失败：{e}"))?;
+        Ok(rendered)
     }).await
 }
 
@@ -15774,6 +15792,22 @@ fn claude_gateway_settings_json(env_vars: &HashMap<String, String>) -> Option<se
         }
     }
 
+    // Kuro may keep a long inference request open without sending bytes. The
+    // Claude CLI otherwise aborts at 300s and its non-stream retry can return an
+    // empty response. Keep waiting; the UGS heartbeat still reports progress.
+    let is_kuro = env_value(env_vars, "ANTHROPIC_BASE_URL")
+        .and_then(|base| url::Url::parse(base).ok())
+        .and_then(|base| base.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "ai-gateway.kurogames.com");
+    if is_kuro {
+        for key in ["CLAUDE_ENABLE_BYTE_WATCHDOG", "CLAUDE_ENABLE_STREAM_WATCHDOG"] {
+            let value = env_value(env_vars, key).map(str::to_owned)
+                .or_else(|| std::env::var(key).ok().filter(|value| !value.trim().is_empty()))
+                .unwrap_or_else(|| "0".to_string());
+            settings_env.insert(key.to_string(), serde_json::Value::String(value));
+        }
+    }
+
     settings_env.insert(
         "ANTHROPIC_API_KEY".to_string(),
         serde_json::Value::String(api_key.to_string()),
@@ -18545,6 +18579,24 @@ async fn ai_cli_runtime(
         let is_dsh = protocol == "deepseek-harness";
         let is_zcode = protocol == "zcode";
         let is_grok = protocol == "grok";
+        // Kuro exposes OpenAI-compatible chat but not Gemini's native endpoint.
+        // Keep the selected Gemini CLI and model; translate only this gateway.
+        let _gemini_kuro_proxy = if is_gemini {
+            let base = env_vars.as_ref().and_then(|env| env_value(env, "GOOGLE_GEMINI_BASE_URL")).map(str::to_owned)
+                .or_else(|| std::env::var("GOOGLE_GEMINI_BASE_URL").ok());
+            if base.as_deref().is_some_and(gemini_kuro_proxy::is_kuro_gateway) {
+                let key = env_vars.as_ref().and_then(|env| env_value(env, "GOOGLE_API_KEY")).map(str::to_owned)
+                    .or_else(|| std::env::var("GOOGLE_API_KEY").ok())
+                    .filter(|key| !key.trim().is_empty())
+                    .ok_or("Kuro Gemini 渠道未配置 API Key")?;
+                let proxy = gemini_kuro_proxy::KuroGeminiProxy::start(key)?;
+                let env = env_vars.get_or_insert_with(HashMap::new);
+                env.insert("GOOGLE_GEMINI_BASE_URL".into(), proxy.base_url.clone());
+                env.insert("GEMINI_API_KEY".into(), proxy.token.clone());
+                env.insert("GOOGLE_API_KEY".into(), proxy.token.clone());
+                Some(proxy)
+            } else { None }
+        } else { None };
         // Self-heal a claude binary that an interrupted auto-update corrupted,
         // BEFORE the steer-channel probe below: `ai_cli_steer_supported` repairs
         // first as well, so both sides must read the same file.
@@ -24414,6 +24466,23 @@ requires_openai_auth = true\n";
     }
 
     #[test]
+    fn kuro_claude_gateway_keeps_slow_streams_open() {
+        let mut env = HashMap::new();
+        env.insert("ANTHROPIC_API_KEY".to_string(), "test-token".to_string());
+        env.insert("ANTHROPIC_BASE_URL".to_string(), "https://ai-gateway.kurogames.com".to_string());
+        let settings = claude_gateway_settings_json(&env).unwrap();
+        for name in ["CLAUDE_ENABLE_BYTE_WATCHDOG", "CLAUDE_ENABLE_STREAM_WATCHDOG"] {
+            assert_eq!(settings.pointer(&format!("/env/{name}")).and_then(|v| v.as_str()), Some("0"));
+        }
+        env.insert("CLAUDE_ENABLE_BYTE_WATCHDOG".to_string(), "1".to_string());
+        let settings = claude_gateway_settings_json(&env).unwrap();
+        assert_eq!(settings.pointer("/env/CLAUDE_ENABLE_BYTE_WATCHDOG").and_then(|v| v.as_str()), Some("1"));
+        env.insert("ANTHROPIC_BASE_URL".to_string(), "https://ai-gateway.kurogames.com.invalid".to_string());
+        let settings = claude_gateway_settings_json(&env).unwrap();
+        assert!(settings.pointer("/env/CLAUDE_ENABLE_STREAM_WATCHDOG").is_none());
+    }
+
+    #[test]
     fn claude_gateway_settings_override_skips_plain_model_env() {
         let mut env = HashMap::new();
         env.insert(
@@ -25197,6 +25266,40 @@ requires_openai_auth = true\n";
     }
 }
 
+#[cfg(windows)]
+fn disable_main_webview_f5_refresh(window: &tauri::WebviewWindow) -> tauri::Result<()> {
+    use webview2_com::{
+        Microsoft::Web::WebView2::Win32::ICoreWebView2AcceleratorKeyPressedEventArgs2,
+        AcceleratorKeyPressedEventHandler,
+    };
+    use windows::core::Interface;
+
+    window.with_webview(|webview| {
+        const VK_F5: u32 = 0x74;
+        let handler = AcceleratorKeyPressedEventHandler::create(Box::new(|_, args| {
+            let Some(args) = args else { return Ok(()) };
+            let mut key = 0;
+            unsafe {
+                args.VirtualKey(&mut key)?;
+                if key == VK_F5 {
+                    // Suppress the browser action while still delivering F5 to the page.
+                    match args.cast::<ICoreWebView2AcceleratorKeyPressedEventArgs2>() {
+                        Ok(args) => args.SetIsBrowserAcceleratorKeyEnabled(false)?,
+                        Err(_) => args.SetHandled(true)?,
+                    }
+                }
+            }
+            Ok(())
+        }));
+        let mut token = 0;
+        if let Err(error) = unsafe {
+            webview.controller().add_AcceleratorKeyPressed(&handler, &mut token)
+        } {
+            log::warn!("failed to disable main webview F5 refresh: {error}");
+        }
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Windows/WebView2: disable native window occlusion detection. WebView2
@@ -25226,10 +25329,6 @@ pub fn run() {
     let builder =
         tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
             show_main_window(app);
-            let _ = app.emit(
-                SINGLE_INSTANCE_WARNING_EVENT,
-                SINGLE_INSTANCE_WARNING_MESSAGE,
-            );
         }));
 
     builder
@@ -25253,6 +25352,10 @@ pub fn run() {
             autosave::spawn_autosave_service();
 
             if let Some(window) = app.get_webview_window(MAIN_WINDOW_LABEL) {
+                #[cfg(windows)]
+                if let Err(error) = disable_main_webview_f5_refresh(&window) {
+                    log::warn!("failed to configure main webview F5 handling: {error}");
+                }
                 let window_to_hide = window.clone();
                 window.on_window_event(move |event| {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
@@ -25385,6 +25488,12 @@ pub fn run() {
             cocos_mcp_setup_project,
             ue_mcp_ensure_binary,
             ue_mcp_setup_project,
+            project_run::project_run_info,
+            project_run::project_run_status,
+            project_run::project_run_action,
+            project_run::project_run_setup,
+            project_run::project_run_apply_setup,
+            project_run::project_run_save_profile,
             workspace_changes_baseline,
             workspace_changes,
             workspace_vcs_status,
@@ -25397,6 +25506,7 @@ pub fn run() {
             workspace_changes_cached,
             prepare_isolated_workspace,
             preview_local_file,
+            render_presentation_preview,
             ensure_local_asset_scope,
             preview_office_document,
             read_image_thumbnail,

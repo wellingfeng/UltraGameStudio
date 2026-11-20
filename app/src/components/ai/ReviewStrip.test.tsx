@@ -24,15 +24,15 @@ const skill: SkillReviewState = { status: 'noop', origin, detail: 'Exact host di
   admission: { status: 'not-admitted', reason: 'insufficient-evidence', completedActivities: 1, activityThreshold: 10 },
 };
 
-it('renders memory as a single disclosure strip rather than a diagnostic card', async () => {
-  const failed: MemoryReviewChatState = { ...memory, phase: 'failed', appliedOps: 1 };
-  await act(async () => { root.render(<MemoryReviewCard state={failed} />); });
+it('renders saved memory as a single disclosure strip rather than a diagnostic card', async () => {
+  const saved: MemoryReviewChatState = { ...memory, phase: 'applied', appliedOps: 1 };
+  await act(async () => { root.render(<MemoryReviewCard state={saved} />); });
   const article = container.querySelector('article')!;
   expect(article.classList.contains('ugs-review-strip')).toBe(true);
   expect(article.className).not.toMatch(/\bbg-panel\b|\bborder\b|\bp-3\b|\bpx-3\b/);
   const disclosure = article.querySelector<HTMLDetailsElement>('details[data-ugs-review-diagnostics]')!;
   expect(disclosure.open).toBe(false);
-  expect(disclosure.querySelector('summary [role="status"]')?.textContent).toBe('记忆复盘失败');
+  expect(disclosure.querySelector('summary [role="status"]')?.textContent).toBe('记忆已保存');
   expect(disclosure.querySelector('summary [data-ugs-review-glyph]')).not.toBeNull();
   expect(disclosure.querySelector('summary')?.textContent).not.toContain('复盘诊断');
   expect(disclosure.querySelector('[data-ugs-review-body]')?.textContent).toContain(memory.detail);
@@ -63,16 +63,11 @@ it('retains expanded history without styling it as a chat strip', async () => {
   expect(article.textContent).toContain('Exact host diagnostic');
 });
 
-it('keeps pending memory settings reachable without expanding diagnostics', async () => {
+it('does not show a pending memory strip or settings action in chat', async () => {
   const openSettings = vi.fn();
   await act(async () => { root.render(<MemoryReviewCard state={{ ...memory, phase: 'awaiting_approval', queuedOps: 2 }} onOpenSettings={openSettings} />); });
-  const button = container.querySelector<HTMLButtonElement>('button')!;
-  expect(button.closest('details')).toBeNull();
-  await act(async () => { button.click(); });
-  expect(openSettings).toHaveBeenCalledOnce();
-  expect(container.querySelector('summary [role="status"]')?.textContent).toBe('记忆提案待审批');
-  expect(container.querySelector('summary .ugs-review-meta')?.textContent).toBe('2 项');
-  expect(container.querySelector('[role="status"]')?.textContent).not.toContain('已保存');
+  expect(container.childElementCount).toBe(0);
+  expect(openSettings).not.toHaveBeenCalled();
 });
 
 it('shows the saved count once in the concise summary while keeping exact counts in diagnostics', async () => {

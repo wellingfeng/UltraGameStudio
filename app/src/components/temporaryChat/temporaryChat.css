@@ -11,4 +11,6 @@
 .temporary-chat-title button:hover{background:#2b2b2e;color:#f1f1f1}
 .temporary-chat-window iframe{display:block;flex:1;width:100%;min-height:0;border:0;background:#131314}
 .temporary-chat-window iframe[hidden]{display:none}
+.ugs-project-panel-chat{display:flex;flex:1;flex-direction:column;min-height:0;background:#131314}
+.ugs-project-panel-chat iframe{display:block;flex:1;width:100%;min-height:0;border:0;background:#131314}
 /* Moon End */

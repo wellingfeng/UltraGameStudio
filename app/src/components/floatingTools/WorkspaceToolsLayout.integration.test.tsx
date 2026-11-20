@@ -5,11 +5,20 @@ import { MainSurfaceProvider } from '@/components/MainSurface';
 import { TitleBarLayout } from '@/components/TitleBar';
 import { simpleBlueprint } from '@/core/defaultBlueprint';
 import { defaultComposer, samplePromptGroups } from '@/store/sampleSessions';
+import { PROJECT_FILE_DRAG_MIME } from '@/lib/projectFileDrag';
 import { useFilePreviewTabs } from '@/store/filePreviewTabs';
 import { useStore } from '@/store/useStore';
 import WorkspaceToolsLayout from './WorkspaceToolsLayout';
 
-it('真实会话标题栏创建多个浏览器，分别保留网页并可切换关闭', async () => {
+vi.mock('@/lib/tauri', async (importOriginal) => {
+  const tauri = await importOriginal<typeof import('@/lib/tauri')>();
+  return { ...tauri, previewLocalFile: async (path: string) => ({
+    path, fileName: path.split('/').at(-1), kind: 'text', mime: 'text/markdown',
+    text: `# ${path} 的正文`, sizeBytes: 40, truncated: false,
+  }) };
+});
+
+it('会话标题栏保留各浏览器网页与拖放文件，并可切换和关闭标签', async () => {
   const originalResizeObserver = globalThis.ResizeObserver;
   globalThis.ResizeObserver = class {
     observe = vi.fn();
@@ -30,7 +39,7 @@ it('真实会话标题栏创建多个浏览器，分别保留网页并可切换�
   const root = createRoot(host);
   try {
     await act(async () => root.render(<MainSurfaceProvider><TitleBarLayout><WorkspaceToolsLayout /></TitleBarLayout></MainSurfaceProvider>));
-    const action = host.querySelector<HTMLButtonElement>('.ugs-titlebar-content .ugs-chat-header-actions [aria-label="打开浏览器"]');
+    const action = host.querySelector<HTMLButtonElement>('.ugs-titlebar-end .ugs-chat-header-actions [aria-label="打开浏览器"]');
     expect(action).not.toBeNull();
     const actions = action!.parentElement!;
     expect(Array.from(actions.querySelectorAll<HTMLButtonElement>('button')).map((button) => button.getAttribute('aria-label'))).toEqual([
@@ -82,6 +91,36 @@ it('真实会话标题栏创建多个浏览器，分别保留网页并可切换�
     expect(host.querySelectorAll('[data-ugs-browser-panel]')).toHaveLength(1);
     expect(panes[1].hidden).toBe(false);
     expect(panes[1].querySelector<HTMLInputElement>('[aria-label="浏览器地址"]')?.value).toBe('https://second.example/');
+
+    const drop = async (target: HTMLElement, paths: string[]) => {
+      const event = new Event('drop', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', { value: {
+        types: [PROJECT_FILE_DRAG_MIME],
+        getData: () => JSON.stringify({ paths }),
+      } });
+      await act(async () => target.dispatchEvent(event));
+      expect(event.defaultPrevented).toBe(true);
+    };
+
+    await act(async () => action!.click());
+    const empty = host.querySelector<HTMLElement>('[data-ugs-browser-panel]:not([hidden])')!;
+    await drop(empty, ['E:/Game/初稿.md']);
+    expect(host.querySelectorAll('[data-ugs-browser-panel]')).toHaveLength(2);
+    expect(host.querySelector('[role="tab"][aria-label="初稿.md"]')?.getAttribute('aria-selected')).toBe('true');
+    expect(empty.querySelector('h1')?.textContent).toBe('E:/Game/初稿.md 的正文');
+
+    await drop(empty, ['E:/Game/定稿.md', 'E:/Game/备注.md']);
+    expect(host.querySelectorAll('[data-ugs-browser-panel]')).toHaveLength(4);
+    expect(empty.hidden).toBe(true);
+    expect(host.querySelector('[role="tab"][aria-label="备注.md"]')?.getAttribute('aria-selected')).toBe('true');
+    await act(async () => host.querySelector<HTMLButtonElement>('[role="tab"][aria-label="初稿.md"]')!.click());
+    expect(empty.hidden).toBe(false);
+    expect(empty.querySelector('h1')?.textContent).toBe('E:/Game/初稿.md 的正文');
+
+    await act(async () => host.querySelector<HTMLButtonElement>('[role="tab"][aria-label="second.example"]')!.click());
+    await drop(panes[1], ['E:/Game/网页旁的文件.md']);
+    expect(panes[1].querySelector('iframe')?.getAttribute('src')).toBe('https://second.example/');
+    expect(host.querySelector('[role="tab"][aria-label="网页旁的文件.md"]')?.getAttribute('aria-selected')).toBe('true');
   } finally {
     await act(async () => root.unmount());
     host.remove();

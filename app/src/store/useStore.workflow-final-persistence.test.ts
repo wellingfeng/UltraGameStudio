@@ -151,17 +151,25 @@ it('an overlapping quit must await a newly admitted workflow final producer', as
   });
   let firstDone = false;
   const quit1 = flushChatPersistenceForQuit().then(() => { firstDone = true; });
-  await vi.waitFor(() => expect(releases.has(first.sessionId!)).toBe(true));
-  const second = await fixture(`${prefix}-overlap-b`);
-  const quit2 = flushChatPersistenceForQuit();
-  await vi.waitFor(() => expect(releases.has(second.sessionId!)).toBe(true));
-  releases.get(first.sessionId!)!();
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  const settledBeforeSecondFinal = firstDone;
-  releases.get(second.sessionId!)!();
-  await Promise.all([quit1, quit2]);
-  expect(settledBeforeSecondFinal).toBe(false);
-  expect(JSON.parse(localStorage.getItem(storageKey(second.sessionId!))!).messages.some((message: { id: string }) => message.id === 'final')).toBe(true);
+  let quit2: Promise<void> | undefined;
+  try {
+    await vi.waitFor(() => expect(releases.has(first.sessionId!)).toBe(true));
+    const second = await fixture(`${prefix}-overlap-b`);
+    quit2 = flushChatPersistenceForQuit();
+    await vi.waitFor(() => expect(releases.has(second.sessionId!)).toBe(true));
+    releases.get(first.sessionId!)!();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const settledBeforeSecondFinal = firstDone;
+    releases.get(second.sessionId!)!();
+    await Promise.all([quit1, quit2]);
+    expect(settledBeforeSecondFinal).toBe(false);
+    expect(JSON.parse(localStorage.getItem(storageKey(second.sessionId!))!).messages.some((message: { id: string }) => message.id === 'final')).toBe(true);
+  } finally {
+    for (const release of releases.values()) release();
+    // Cleanup also releases a final that reaches the checkpoint after failure.
+    vi.restoreAllMocks();
+    await Promise.allSettled([quit1, ...(quit2 ? [quit2] : [])]);
+  }
 });
 
 it('a newer same-id success does not acknowledge an older failed final revision', async () => {

@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tauri::{Emitter, Manager, Webview, WebviewUrl};
+use tauri::{DragDropEvent, Emitter, Manager, Webview, WebviewEvent, WebviewUrl};
 use url::Url;
 
 #[derive(Clone, Serialize)]
@@ -14,6 +14,13 @@ struct BrowserEvent {
 struct BrowserTitleEvent {
     browser_id: String,
     title: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrowserFileDropEvent {
+    browser_id: String,
+    paths: Vec<std::path::PathBuf>,
 }
 
 fn browser_label(browser_id: &str) -> Result<String, String> {
@@ -93,6 +100,7 @@ pub async fn floating_browser_open(webview: Webview, browser_id: String, url: St
     let new_window_origin = origin.clone();
     let new_window_id = browser_id.clone();
     let title_browser_id = browser_id.clone();
+    let drop_browser_id = browser_id.clone();
     let builder = tauri::webview::WebviewBuilder::new(label, WebviewUrl::External(url))
         .on_navigation(move |url| allowed_url(url, navigation_origin.as_deref()))
         .on_new_window(move |url, _| {
@@ -107,10 +115,21 @@ pub async fn floating_browser_open(webview: Webview, browser_id: String, url: St
         .on_page_load(move |browser, payload| {
             let _ = browser.app_handle().emit_to("main", "ugs:browser-location", BrowserEvent { browser_id: browser_id.clone(), url: payload.url().to_string() });
         });
-    webview.window().add_child(builder,
+    let browser = webview.window().add_child(builder,
         tauri::LogicalPosition::new(bounds.x, bounds.y),
         tauri::LogicalSize::new(bounds.width, bounds.height),
     ).map_err(|error| error.to_string())?;
+    // A child webview receives its own native drops, outside the main webview.
+    browser.on_webview_event(move |event| {
+        if let WebviewEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
+            if !paths.is_empty() {
+                let _ = app.emit_to("main", "ugs:browser-file-drop", BrowserFileDropEvent {
+                    browser_id: drop_browser_id.clone(),
+                    paths: paths.clone(),
+                });
+            }
+        }
+    });
     Ok(())
 }
 

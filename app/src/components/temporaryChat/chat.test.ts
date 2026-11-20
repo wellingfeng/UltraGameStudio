@@ -54,6 +54,36 @@ describe('isolated temporary chat', () => {
     f.callbacks[1]({ type: 'done' }); chat.removeContext(); chat.send('不引用');
     expect(f.requests[2].context).toBeUndefined();
   });
+  it('reloads a live session reference before every send and keeps the last snapshot when a reload fails', async () => {
+    const f = fixture(); let round = 0;
+    const chat = new TemporaryChat(f.changed, f.port, { label: '当前会话', live: true, load: async () => {
+      round += 1;
+      if (round === 3) throw new Error('会话已切换');
+      return { label: '会话', text: `会话第 ${round} 版` };
+    } });
+    await chat.refresh(); await Promise.resolve();
+    chat.send('总结一下');
+    await vi.waitFor(() => expect(f.requests).toHaveLength(1));
+    expect(f.requests[0].context?.text).toBe('会话第 2 版');
+    f.callbacks[0]({ type: 'done' });
+    chat.send('再看看');
+    await vi.waitFor(() => expect(f.requests).toHaveLength(2));
+    expect(f.requests[1].context?.text).toBe('会话第 2 版');
+    f.callbacks[1]({ type: 'done' }); chat.removeContext(); chat.send('不引用');
+    await vi.waitFor(() => expect(f.requests).toHaveLength(3));
+    expect(f.requests[2].context).toBeUndefined(); expect(round).toBe(3);
+  });
+  it('skips the request when a live send is stopped while its reference reloads', async () => {
+    const f = fixture(); let release!: () => void; let round = 0;
+    const chat = new TemporaryChat(f.changed, f.port, { label: '当前会话', live: true, load: async () => {
+      if (++round === 2) await new Promise<void>(resolve => { release = resolve; });
+      return { label: '会话', text: '内容' };
+    } });
+    await chat.refresh(); await Promise.resolve();
+    chat.send('问题'); chat.stop(); release();
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(f.requests).toHaveLength(0); expect(chat.state.turns[0].status).toBe('stopped');
+  });
   it('does not send while a reference fails or after it was removed during loading', async () => {
     const f = fixture(); let resolve!: (value: { label: string; text: string }) => void;
     const chat = new TemporaryChat(f.changed, f.port, { label: '网页', load: () => new Promise(r => { resolve = r; }) });

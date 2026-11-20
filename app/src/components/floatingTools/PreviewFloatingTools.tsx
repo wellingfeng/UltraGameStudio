@@ -1,10 +1,11 @@
-import { useLayoutEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from 'react';
+import { useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from 'react';
 import { MessageCircleMore } from 'lucide-react';
 import { requestTemporaryChat } from '@/components/temporaryChat/TemporaryChatWindows';
 import type { ContextSource } from '@/components/temporaryChat/context';
 import './floatingTools.css';
 
 type Position = { x: number; y: number };
+type PositionChange = { key: string; position: Position | null };
 type Drag = { pointerId: number; start: Position; origin: Position; previous: Position | null; moved: boolean; last: Position };
 const POSITION_KEY = 'ultragamestudio.previewFloatingTools.position.v1';
 const POSITION_EVENT = 'ugs:preview-floating-tools-position';
@@ -18,13 +19,13 @@ function parsePosition(value: string | null): Position | null {
   } catch { return null; }
 }
 
-function readPosition(): Position | null {
-  try { return parsePosition(window.localStorage.getItem(POSITION_KEY)); } catch { return null; }
+function readPosition(key: string): Position | null {
+  try { return parsePosition(window.localStorage.getItem(key)); } catch { return null; }
 }
 
-function savePosition(position: Position) {
-  try { window.localStorage.setItem(POSITION_KEY, JSON.stringify(position)); } catch { /* Continue in memory. */ }
-  window.dispatchEvent(new CustomEvent<Position>(POSITION_EVENT, { detail: position }));
+function savePosition(key: string, position: Position) {
+  try { window.localStorage.setItem(key, JSON.stringify(position)); } catch { /* Continue in memory. */ }
+  window.dispatchEvent(new CustomEvent<PositionChange>(POSITION_EVENT, { detail: { key, position } }));
 }
 
 // Coordinates are shared by all previews, but remain visible inside the current preview.
@@ -45,13 +46,14 @@ function localPosition(element: HTMLElement, position: Position): { local: Posit
   return { global, local: { x: global.x - bounds.left - parent.clientLeft, y: global.y - bounds.top - parent.clientTop } };
 }
 
-export default function PreviewFloatingTools({ label, source, disabled = false, className, onOpen }: {
-  label: string; source: () => ContextSource; disabled?: boolean; className?: string; onOpen?: () => void;
+// positionKey separates button groups that should not share a dragged position (e.g. session vs previews).
+export default function PreviewFloatingTools({ label, source, disabled = false, className, onOpen, positionKey = POSITION_KEY, style }: {
+  label: string; source: () => ContextSource; disabled?: boolean; className?: string; onOpen?: () => void; positionKey?: string; style?: CSSProperties;
 }) {
   const rail = useRef<HTMLDivElement>(null);
   const drag = useRef<Drag | null>(null);
   const suppressClick = useRef(false);
-  const [position, setPosition] = useState<Position | null>(readPosition);
+  const [position, setPosition] = useState<Position | null>(() => readPosition(positionKey));
   const [local, setLocal] = useState<Position | null>(null);
 
   useLayoutEffect(() => {
@@ -76,15 +78,16 @@ export default function PreviewFloatingTools({ label, source, disabled = false, 
 
   useLayoutEffect(() => {
     const receive = (event: Event) => {
-      if (!drag.current) setPosition((event as CustomEvent<Position>).detail);
+      const detail = (event as CustomEvent<PositionChange>).detail;
+      if (detail?.key === positionKey && !drag.current) setPosition(detail.position);
     };
     const receiveStorage = (event: StorageEvent) => {
-      if (event.key === POSITION_KEY && !drag.current) setPosition(parsePosition(event.newValue));
+      if (event.key === positionKey && !drag.current) setPosition(parsePosition(event.newValue));
     };
     window.addEventListener(POSITION_EVENT, receive);
     window.addEventListener('storage', receiveStorage);
     return () => { window.removeEventListener(POSITION_EVENT, receive); window.removeEventListener('storage', receiveStorage); };
-  }, []);
+  }, [positionKey]);
 
   const startDrag = (event: PointerEvent<HTMLButtonElement>) => {
     if (event.button !== 0 || !rail.current) return;
@@ -109,7 +112,7 @@ export default function PreviewFloatingTools({ label, source, disabled = false, 
     moveDrag(event);
     const current = drag.current;
     drag.current = null;
-    if (current?.moved) { suppressClick.current = true; savePosition(current.last); }
+    if (current?.moved) { suppressClick.current = true; savePosition(positionKey, current.last); }
   };
   const cancelDrag = () => {
     if (!drag.current) return;
@@ -125,12 +128,12 @@ export default function PreviewFloatingTools({ label, source, disabled = false, 
     if (!next) return;
     event.preventDefault();
     setPosition(next.global);
-    savePosition(next.global);
+    savePosition(positionKey, next.global);
   };
 
   return <div ref={rail} className={`ugs-floating-tools ugs-preview-floating-tools${className ? ` ${className}` : ''}`}
     role="toolbar" aria-label="预览快捷工具" data-file-preview-ignore-outside-pointer="true"
-    style={local ? { left: local.x, top: local.y, right: 'auto' } : undefined}>
+    style={local ? { ...style, left: local.x, top: local.y, right: 'auto' } : style}>
     <button type="button" title={`${label}（可拖动调整位置）`} aria-label={label} disabled={disabled}
       onPointerDown={startDrag} onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={cancelDrag} onLostPointerCapture={cancelDrag}
       onKeyDown={moveWithKeys} onClick={(event) => {

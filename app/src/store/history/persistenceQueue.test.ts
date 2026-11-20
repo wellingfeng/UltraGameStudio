@@ -99,3 +99,116 @@ it('keeps final and global barriers ahead of subsequent same-session checkpoints
   blocked.release(); await Promise.all([first, ...writes]);
   expect(seen).toEqual(['checkpoint-1', 'final', 'checkpoint-2', 'flush', 'checkpoint-3']);
 });
+
+it('byte-admits retained terminal references while delaying expensive execution until backing completion', async () => {
+  const q = new PersistenceQueue(), blocked = gate();
+  let started = 0;
+  const first = q.enqueue(() => blocked.promise, 'x'.repeat(1_200_000), 'a', undefined, true, true);
+  const rest = ['b', 'c', 'd'].map((key) => q.enqueue(async () => { started++; }, 'y'.repeat(1_200_000), key, undefined, true, true));
+  const outcomes = rest.map((promise) => promise.then(() => 'ok', (error: Error) => error.message));
+  let premature: number;
+  try { for (let i = 0; i < 10; i++) await Promise.resolve(); premature = started; }
+  finally { blocked.release(); await Promise.allSettled([first, ...rest]); }
+  expect(premature).toBe(0);
+  expect(await Promise.all(outcomes)).toEqual(['ok', 'ok', 'ok']);
+  await expect(q.flush()).resolves.toBeUndefined();
+});
+
+it('keeps inexpensive terminal lanes concurrent within the existing four-worker bound', async () => {
+  const q = new PersistenceQueue(), blocked = gate();
+  const started: string[] = [];
+  const jobs = ['a', 'b', 'c', 'd', 'e'].map((key) => q.enqueue(async () => { started.push(key); await blocked.promise; }, 'small', key, undefined, true, true));
+  let before: string[];
+  try { for (let i = 0; i < 10; i++) await Promise.resolve(); before = [...started]; }
+  finally { blocked.release(); await Promise.all(jobs); }
+  expect(before).toEqual(['a', 'b', 'c', 'd']);
+  expect(started).toEqual(['a', 'b', 'c', 'd', 'e']);
+});
+
+it('terminal waiting and executing callers still share the original 128 task slots', async () => {
+  const q = new PersistenceQueue(), blocked = gate();
+  const jobs = Array.from({ length: 128 }, () => q.enqueue(() => blocked.promise, null, 'a', undefined, true, true));
+  const overflow = q.enqueue(async () => {}, null, 'b', undefined, true, true).then(() => 'accepted', (error: Error) => error.message);
+  let result: string;
+  try { result = await overflow; }
+  finally { blocked.release(); await Promise.allSettled(jobs); }
+  expect(result).toBe('HISTORY_QUEUE_FULL');
+});
+
+it('bounds all terminal retained payloads and returns permits after a real write failure', async () => {
+  const q = new PersistenceQueue(), blocked = gate();
+  const jobs = [0, 1].map((i) => q.enqueue(async () => { await blocked.promise; if (!i) throw new Error('disk failure'); }, 'x'.repeat(16_000_000), String(i), undefined, true, true).then(() => 'ok', (error: Error) => error.message));
+  const overflow = q.enqueue(async () => {}, 'x'.repeat(16_000_000), 'overflow', undefined, true, true).then(() => 'accepted', (error: Error) => error.message);
+  let result: string;
+  try { result = await overflow; }
+  finally { blocked.release(); await Promise.all(jobs); }
+  expect(result).toBe('HISTORY_QUEUE_BYTES_FULL');
+  expect(await jobs[0]).toBe('disk failure');
+  await expect(q.enqueue(async () => {}, 'x'.repeat(16_000_000), 'reuse', undefined, true, true)).resolves.toBeUndefined();
+});
+
+it('terminal producers preserve distinct actual results instead of coalescing checkpoints', async () => {
+  const q = new PersistenceQueue(), blocked = gate();
+  const active = q.enqueue(() => blocked.promise, null, 'a');
+  const seen: number[] = [];
+  const write = (n: number) => q.enqueue(async (value) => { seen.push(value); return value; }, n, 'a', (_a, b) => b, true, true);
+  const first = write(1), second = write(2);
+  let results: number[];
+  try { await Promise.resolve(); }
+  finally { blocked.release(); results = await Promise.all([first, second]); await active; }
+  expect(seen).toEqual([1, 2]);
+  expect(results).toEqual([1, 2]);
+});
+
+it('ordering-only snapshots need no full-queue admission and never consume durability failures', async () => {
+  const q = new PersistenceQueue(), blocked = gate();
+  const failure = new Error('ordering fixture real write failure');
+  const jobs = Array.from({ length: 128 }, (_, i) => q.enqueue(async () => { await blocked.promise; if (!i) throw failure; }, null, 'a'));
+  const settled = Promise.allSettled(jobs);
+  const ordering = q.waitForAccepted();
+  const overflow = q.enqueue(async () => {}, null, 'b').then(() => 'accepted', (error: Error) => error.message);
+  let ended = false;
+  void ordering.then(() => { ended = true; });
+  let premature: boolean;
+  try {
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    premature = ended;
+  } finally {
+    blocked.release();
+    await settled;
+    await ordering;
+  }
+  expect(premature).toBe(false);
+  expect(await overflow).toBe('HISTORY_QUEUE_FULL');
+  // The earlier refused admission remains the first unobserved failure.
+  await expect(q.flush()).rejects.toThrow('HISTORY_QUEUE_FULL');
+  const failedWrite = q.enqueue(async () => { throw failure; }, null, 'a');
+  const afterFailure = q.waitForAccepted();
+  await expect(failedWrite).rejects.toBe(failure);
+  await expect(afterFailure).resolves.toBeUndefined();
+  await expect(q.flush()).rejects.toBe(failure);
+  await expect(q.flush()).resolves.toBeUndefined();
+});
+
+it('ordering-only snapshots cover their own accepted target, not future work', async () => {
+  const q = new PersistenceQueue(), a = gate(), b = gate(), bStarted = gate();
+  const first = q.enqueue(() => a.promise, null);
+  const earlier = q.waitForAccepted();
+  const second = q.enqueue(async () => { bStarted.release(); await b.promise; }, null, 'b');
+  const later = q.waitForAccepted();
+  let ended = false;
+  void later.then(() => { ended = true; });
+  let premature: boolean;
+  try {
+    a.release();
+    await first;
+    await earlier;
+    await bStarted.promise;
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    premature = ended;
+  } finally {
+    a.release(); b.release();
+    await Promise.allSettled([first, second, earlier, later]);
+  }
+  expect(premature).toBe(false);
+});

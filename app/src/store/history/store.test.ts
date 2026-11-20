@@ -280,7 +280,7 @@ describe('historyStore session activity timestamps', () => {
       shortSession.id,
     ]);
     expect(sessions[0]?.updatedAt).toBe(longEnd);
-    expect(sessions[0]?.activityVersion).toBe(3);
+    expect(sessions[0]?.activityVersion).toBe(4);
   });
 });
 

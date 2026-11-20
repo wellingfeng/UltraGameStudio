@@ -144,7 +144,7 @@ import {
 import type { AiEditChannel } from './useStore';
 import { historyStore } from './history/store';
 import type { Message, Session } from './types';
-import { activeAiEdits, aiEditSnapshots } from './channelRegistry';
+import { activeAiEdits, aiEditSnapshots, getAiEditSnapshotsForSession } from './channelRegistry';
 import { streamPublications } from './streamPublication';
 import { IncrementalProtocolText } from './incrementalProtocolText';
 import { orderDisplayMessages } from '@/components/ai/lib/orderDisplayMessages';
@@ -623,6 +623,28 @@ describe('读取会话内容用于复制和导出', () => {
 });
 
 describe('simple-workflow chat mode', () => {
+  it('updates the session send time immediately and preserves it after the reply', async () => {
+    resetStore(simpleBlueprint('排序会话'));
+    mockDirectRoute();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const record = await historyStore.createSession({
+      workspaceId: workspace.id, isWorkflow: false, title: '排序会话',
+      messages: [{ id: 'old-user', role: 'user', text: '旧消息', createdAt: 1 }],
+    });
+    const session = sessionFromRecord(record);
+    useStore.setState({
+      historyReady: true, activeWorkspaceId: workspace.id, activeSessionId: record.id,
+      workspaces: [workspace], sessions: [session], sessionTree: { [workspace.id]: [session] },
+      messages: record.messages, workflow: simpleBlueprint('排序会话'),
+    });
+    gatewayMocks.completeGatewayText.mockResolvedValue('完成');
+    expect(useStore.getState().sendPrompt('新消息')).toBe(true);
+    const sentAt = useStore.getState().messages.find((message) => message.text === '新消息')!.createdAt;
+    expect(useStore.getState().sessionTree[workspace.id][0].lastUserMessageAt).toBe(sentAt);
+    await waitFor(() => !useStore.getState().aiStreaming, 'chat completion');
+    await waitFor(async () => (await historyStore.getSession(workspace.id, record.id))?.lastUserMessageAt === sentAt, 'persisted send time');
+    expect(useStore.getState().sessionTree[workspace.id][0].lastUserMessageAt).toBe(sentAt);
+  });
   it('活动回复流式发布不读取封存历史消息标识', async () => {
     resetStore(simpleBlueprint('Indexed streaming'));
     mockDirectRoute();
@@ -7062,6 +7084,59 @@ describe('simple-workflow chat mode', () => {
     expect(useStore.getState().messages).toEqual([]);
     expect(record?.messages).toEqual([]);
     expect(record?.workflow?.nodes[0]?.params.userInputs).toEqual([]);
+  });
+
+  it('deletes only the selected turn after completed chat snapshots are compacted', async () => {
+    window.localStorage.clear();
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    const workflow = simpleBlueprint('Chat');
+    resetStore(workflow);
+    const first: Message[] = [
+      { id: 'first-user', role: 'user', text: '第一轮提问', createdAt: 1 },
+      { id: 'first-reply', role: 'assistant', text: '第一轮回复', createdAt: 2, completedAt: 3 },
+    ];
+    const second: Message[] = [
+      { id: 'second-user', role: 'user', text: '第二轮提问', createdAt: 4 },
+      { id: 'second-steer', role: 'user', text: '第二轮补充', createdAt: 5 },
+      { id: 'second-reply', role: 'assistant', text: '第二轮回复', createdAt: 6, completedAt: 7 },
+    ];
+    const messages = [...first, ...second];
+    const record = await historyStore.createSession({ workspaceId: workspace.id, isWorkflow: false, messages });
+    const session = sessionFromRecord(record);
+    useStore.setState({
+      historyReady: true,
+      activeWorkspaceId: workspace.id,
+      activeSessionId: session.id,
+      workspaces: [workspace],
+      sessions: [session],
+      sessionTree: { [workspace.id]: [session] },
+      messages,
+    });
+
+    const sessionKey = `${workspace.id}::${session.id}`;
+    for (const [transcript, owned] of [[first, first], [messages, second]]) {
+      const channel: AiEditChannel = {
+        key: `${sessionKey}::${owned[0].id}`,
+        sessionKey,
+        workspaceId: workspace.id,
+        sessionId: session.id,
+        workflow,
+        messages: transcript,
+        cliRunIds: new Set(),
+        abortController: new AbortController(),
+        workflowSession: false,
+        chat: true,
+        ownedMessageIds: new Set(owned.map((message) => message.id)),
+      };
+      addAiEditChannel(channel);
+      removeAiEditChannel(channel);
+    }
+    expect(getAiEditSnapshotsForSession(workspace.id, session.id)).toHaveLength(1);
+
+    useStore.getState().deleteMessage('second-reply');
+    expect(useStore.getState().messages).toEqual(first);
+    expect((await historyStore.getSession(workspace.id, session.id))?.messages).toEqual(first);
   });
 
   it('keeps streamed tool sentinels on the final CLI chat message across turns', async () => {

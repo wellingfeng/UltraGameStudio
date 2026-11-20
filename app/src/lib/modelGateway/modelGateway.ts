@@ -202,9 +202,13 @@ export const resolveDirectGatewayRouteForSelection = resolveDirectGatewayRoute;
 
 export async function resolveCliGatewayRoute(
   selection: GatewaySelection,
+  requireAvailable = false,
 ): Promise<ResolvedGatewayRoute & { cliCommand: string }> {
   const route = resolveGatewayRoute(selectionWorkflow(selection));
   const cli = await resolveCliForRoute(route);
+  if (requireAvailable && cli.status !== 'ready') {
+    throw new Error('没有可用的编程命令行模型。');
+  }
   return { ...route, cliCommand: cli.command };
 }
 

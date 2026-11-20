@@ -23,9 +23,11 @@ export interface BrowserPreviewTab {
   expanded: boolean;
   url?: string;
   title?: string;
+  file?: FileRef;
 }
 
 export function browserTabLabel(tab: BrowserPreviewTab): string {
+  if (tab.file) return tab.file.basename;
   const title = tab.title?.trim();
   if (title) return title;
   const address = tab.url?.trim();
@@ -51,7 +53,8 @@ interface FilePreviewTabsState {
   setPreviewChatOpen: (scope: string, open: boolean) => void;
   open: (tab: Omit<FilePreviewTab, 'id'>) => void;
   openBrowser: (scope: string) => void;
-  setBrowserLocation: (id: string, url: string) => void;
+  openBrowserFiles: (id: string, paths: string[], newTabIfOccupied?: boolean) => void;
+  setBrowserLocation: (id: string, url: string, clearFile?: boolean) => void;
   setBrowserTitle: (id: string, title: string) => void;
   closeBrowser: (id: string) => void;
   setBrowserExpanded: (id: string, expanded: boolean) => void;
@@ -61,6 +64,10 @@ interface FilePreviewTabsState {
 
 // Reader tabs are UI state, independent of conversation/history/model context.
 let browserSequence = 0;
+function newBrowserId(): string {
+  return `${Date.now().toString(36)}-${++browserSequence}`;
+}
+
 export const useFilePreviewTabs = create<FilePreviewTabsState>((set) => ({
   tabs: [],
   activeByScope: {},
@@ -79,22 +86,43 @@ export const useFilePreviewTabs = create<FilePreviewTabsState>((set) => ({
     };
   }),
   openBrowser: (scope) => set((state) => {
-    const id = `${Date.now().toString(36)}-${++browserSequence}`;
+    const id = newBrowserId();
     return {
       browserTabs: [...state.browserTabs.map((tab) => tab.scope === scope ? { ...tab, expanded: true } : tab),
         { id, scope, expanded: true }],
       activeByScope: { ...state.activeByScope, [scope]: id },
     };
   }),
-  setBrowserLocation: (id, url) => set((state) => {
+  openBrowserFiles: (id, paths, newTabIfOccupied = true) => set((state) => {
+    const target = state.browserTabs.find((tab) => tab.id === id);
+    const files = paths.flatMap((path) => {
+      const basename = path.split(/[\\/]/).pop();
+      return basename ? [{ path, basename }] : [];
+    });
+    if (!target || files.length === 0) return state;
+
+    const { scope } = target;
+    const reuse = !newTabIfOccupied || (!target.url && !target.file);
+    const added = files.slice(reuse ? 1 : 0).map((file) => ({ id: newBrowserId(), scope, expanded: true, file }));
+    const selected = added.at(-1)?.id ?? (target.expanded ? id : state.activeByScope[scope] ?? null);
+    return {
+      browserTabs: [...state.browserTabs.map((tab) => {
+        if (reuse && tab.id === id) tab = { ...tab, file: files[0], url: undefined, title: undefined };
+        return added.length > 0 && tab.scope === scope && !tab.expanded ? { ...tab, expanded: true } : tab;
+      }), ...added],
+      activeByScope: { ...state.activeByScope, [scope]: selected },
+    };
+  }),
+  setBrowserLocation: (id, url, clearFile = false) => set((state) => {
     const tab = state.browserTabs.find((item) => item.id === id);
-    if (!tab || tab.url === url) return state;
-    return { browserTabs: state.browserTabs.map((item) => item.id === id ? { ...item, url, title: '' } : item) };
+    if (!tab || (tab.file && !clearFile) || (tab.url === url && !tab.file)) return state;
+    return { browserTabs: state.browserTabs.map((item) => item.id === id
+      ? { ...item, url, title: '', file: clearFile ? undefined : item.file } : item) };
   }),
   setBrowserTitle: (id, title) => set((state) => {
     const tab = state.browserTabs.find((item) => item.id === id);
     const normalized = title.replace(/\s+/g, ' ').trim();
-    if (!tab || tab.title === normalized) return state;
+    if (!tab || tab.file || tab.title === normalized) return state;
     return { browserTabs: state.browserTabs.map((item) => item.id === id ? { ...item, title: normalized } : item) };
   }),
   closeBrowser: (id) => set((state) => {

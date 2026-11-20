@@ -6,6 +6,7 @@ import { useStore } from '@/store/useStore';
 import ProjectFileTree from './ProjectFileTree';
 import SessionChangesSummary from '@/components/ai/SessionChangesSummary';
 import { collectSessionFileChanges } from '@/lib/turnFileChanges';
+import * as sessionChanges from '@/lib/sessionChanges';
 import { encodeToolPatch } from '@/components/ai/lib/toolEvent';
 import { requestProjectRightPanelFilePreview, requestProjectRightPanelToggle, requestProjectRightPanelSessionFiles, requestProjectRightPanelTab } from './projectRightPanelEvents';
 import { listWorkspaceDirectory, previewLocalFile, workspaceFileDiff } from '@/lib/tauri';
@@ -86,6 +87,16 @@ describe('ProjectFileTree on-demand layout', () => {
     await act(async () => requestProjectRightPanelTab('files'));
     expect(panel().querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain('文件');
     await act(async () => requestProjectRightPanelTab('files'));
+    expect(container.querySelector('aside')).toBeNull();
+  });
+  it('随手聊标签停靠在右侧面板内，针对当前会话且再次请求时收起', async () => {
+    await renderPanel();
+    await act(async () => requestProjectRightPanelTab('chat'));
+    expect(panel().querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain('随手聊');
+    const frame = panel().querySelector('.ugs-project-panel-chat iframe');
+    expect(frame?.getAttribute('title')).toBe('会话随手聊');
+    expect(document.querySelector('.temporary-chat-window')).toBeNull();
+    await act(async () => requestProjectRightPanelTab('chat'));
     expect(container.querySelector('aside')).toBeNull();
   });
   it('reads line changes when a local file is opened from the file tree', async () => {
@@ -266,6 +277,30 @@ describe('ProjectFileTree on-demand layout', () => {
     await act(async () => summary.click());
     expect(panel()).not.toBeNull();
     expect(window.localStorage.getItem('ultragamestudio.projectRightPanelTab.v1')).toBe('session');
+  });
+  it('does not add files from the cached workspace diff to session files', async () => {
+    const cachedDiff = vi.spyOn(sessionChanges, 'readPersistedSessionChanges').mockResolvedValue({
+      rootPath: 'E:/Game', generatedAtMs: 10, source: 'snapshot', truncated: false,
+      files: [{ path: 'unrelated-diff.ts', status: 'modified', binary: false,
+        truncated: false, lines: [{ kind: 'added', content: 'unrelated' }] }],
+    });
+    useStore.setState({
+      activeWorkspaceId: 'workspace-with-diff',
+      composer: { ...defaultComposer, workspace: 'E:/Game' },
+      messages: [{ id: 'edit', role: 'assistant', createdAt: 1,
+        text: encodeToolPatch({ id: 'tool', name: 'Edit', status: 'done',
+          args: { file_path: 'actual-edit.ts' } }) }],
+    });
+    await renderPanel();
+    await act(async () => requestProjectRightPanelSessionFiles());
+    for (let i = 0; i < 3; i++) {
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    }
+    expect(cachedDiff).toHaveBeenCalled();
+    const paths = Array.from(panel().querySelectorAll<HTMLButtonElement>('button[draggable="true"]'))
+      .map((button) => button.title);
+    expect(paths).toEqual(['E:/Game/actual-edit.ts']);
+    expect(panel().textContent).not.toContain('unrelated-diff.ts');
   });
   it('returns to the session-files tab from an embedded preview', async () => {
     await renderPanel();

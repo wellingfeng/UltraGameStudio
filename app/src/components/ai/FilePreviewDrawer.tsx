@@ -84,7 +84,7 @@ const MARKDOWN_PREVIEW_EXT = new Set([
 ]);
 
 type TextPreviewMode = 'code' | 'html' | 'markdown';
-type FilePreviewDrawerVariant = 'overlay' | 'embedded' | 'main';
+type FilePreviewDrawerVariant = 'overlay' | 'embedded' | 'main' | 'browser';
 
 export interface FilePreviewCustomContent {
   label: string;
@@ -517,6 +517,7 @@ export default function FilePreviewDrawer({
   const drawerId = useId();
   const embedded = variant !== 'overlay';
   const main = variant === 'main';
+  const browser = variant === 'browser';
   const workspace = useStore((state) => state.composer.workspace);
   const openMainPreview = useFilePreviewTabs((state) => state.open);
   const [state, setState] = useState<PreviewState>({ status: 'idle' });
@@ -535,9 +536,9 @@ export default function FilePreviewDrawer({
   const directImageSource = directImagePreviewSource(refData);
 
   useEffect(() => {
-    if (!refData || customContent || directImageSource || !active) return;
+    if (!refData || customContent || directImageSource || !active || browser) return;
     return registerVisibleSource(fileSource(refData, cwd));
-  }, [refData, cwd, customContent, directImageSource, active]);
+  }, [refData, cwd, customContent, directImageSource, active, browser]);
 
   useEffect(() => {
     if (embedded || overlayContainerRef) return;
@@ -624,7 +625,7 @@ export default function FilePreviewDrawer({
   }, [active, embedded, isExpanded, onClose, open]);
 
   useEffect(() => {
-    if (!open || main) return;
+    if (!open || main || browser) return;
     const onPointerDown = (event: PointerEvent) => {
       if (shouldIgnoreOutsidePointer(event.target)) return;
       const target = event.target as Node | null;
@@ -641,7 +642,7 @@ export default function FilePreviewDrawer({
       window.clearTimeout(timer);
       document.removeEventListener('pointerdown', onPointerDown, true);
     };
-  }, [embedded, main, onClose, open]);
+  }, [browser, embedded, main, onClose, open]);
 
   const file = state.status === 'ready' ? state.file : null;
   const { zoom: textZoom, setZoom: setTextZoom } = usePreviewZoom(file?.path ?? '');
@@ -680,7 +681,7 @@ export default function FilePreviewDrawer({
             <div className="h-full w-0.5 bg-transparent transition-colors group-hover:bg-accent/50" />
           </div>
         )}
-        <header className="flex min-h-0 shrink-0 items-start gap-2 border-b border-border-soft px-3 py-2">
+        {!browser && <header className="flex min-h-0 shrink-0 items-start gap-2 border-b border-border-soft px-3 py-2">
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
               <span className="truncate text-sm font-medium text-fg" title={path}>
@@ -770,8 +771,8 @@ export default function FilePreviewDrawer({
           >
             <X size={15} />
           </button>
-        </header>
-        {refData && !customContent && !directImageSource && active && (
+        </header>}
+        {!browser && refData && !customContent && !directImageSource && active && (
           <PreviewFloatingTools label="针对当前文件随手聊" source={() => fileSource(refData, cwd)} onOpen={main ? onOpenChat : undefined}
             className="ugs-file-preview-floating-tools" />
         )}

@@ -81,8 +81,10 @@ export interface AiEditChannel {
    * driving it.
    */
   background?: boolean;
-  /** Message ids created by this chat turn; used to merge concurrent replies. */
+  /** Message ids owned by this channel, or by all turns in a compacted snapshot. */
   ownedMessageIds?: Set<string>;
+  /** Original turn boundaries retained when completed snapshots share one transcript. */
+  compactedTurnMessageIds?: readonly ReadonlySet<string>[];
   /** Current reply bubble; checkpoints must not mark it complete. */
   activeAssistantMessageId?: string;
   /**

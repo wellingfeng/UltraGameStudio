@@ -7,7 +7,9 @@ export const OPEN_PROJECT_RIGHT_PANEL_SESSION_FILES_EVENT =
 export const SELECT_PROJECT_RIGHT_PANEL_TAB_EVENT = 'ugs:project-right-panel-select-tab';
 export const CLOSE_PROJECT_RIGHT_PANEL_EVENT = 'ugs:project-right-panel-close';
 
-export function requestProjectRightPanelTab(tab: 'session' | 'files'): void {
+export type ProjectRightPanelTab = 'session' | 'files' | 'chat';
+
+export function requestProjectRightPanelTab(tab: ProjectRightPanelTab): void {
   window.dispatchEvent(new CustomEvent(SELECT_PROJECT_RIGHT_PANEL_TAB_EVENT, { detail: { tab } }));
 }
 

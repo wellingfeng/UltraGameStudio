@@ -64,13 +64,14 @@ export interface HistoryStore {
   ): Promise<SessionRecord | null>;
   /** Restore a draft without hydrating the transcript or populating its cache. */
   getSessionComposerDraft(workspaceId: string, sessionId: string): Promise<string | undefined>;
-  /** Backing identity read: missing is null; unknown/unreadable rejects. */
-  getSessionForGeneration(workspaceId: string, sessionId: string): Promise<SessionRecord | null>;
+  /** Backing identity read; opt-in capture may use an already persisted cache identity. */
+  getSessionForGeneration(workspaceId: string, sessionId: string, options?: { captureKnownOrigin?: boolean }): Promise<SessionRecord | null>;
   createSession(input: SessionCreateInput): Promise<SessionRecord>;
   updateSession(
     workspaceId: string,
     sessionId: string,
     patch: SessionPatch,
+    options?: { terminal?: boolean },
   ): Promise<SessionRecord>;
   /** null retires a deleted/replaced target; rejection retains the obligation. */
   updateSessionIfGeneration(
@@ -79,6 +80,7 @@ export interface HistoryStore {
     origin: SessionOrigin,
     patch: SessionPatch,
     reconciliation?: SessionFinalReconciliation,
+    options?: { terminal?: boolean },
   ): Promise<SessionConditionalWriteResult | null>;
   pruneScheduledTaskHistory(workspaceId: string, sessionId: string, protectedMessageIds?: () => ReadonlySet<string>): Promise<{ record: SessionRecord; removedIds: string[]; backupError?: unknown } | null>;
   clearScheduledTaskHistory(workspaceId: string, sessionId: string, extraMessageIds: string[]): Promise<{ record: SessionRecord; removedIds: string[]; backupError?: unknown }>;
@@ -111,9 +113,23 @@ const WORKSPACES_INDEX = 'workspaces/index.json';
 const FALLBACK_PREFIX = 'ultragamestudio.history.v1:';
 const SESSION_RECORD_CACHE_LIMIT = 5;
 const SESSION_RECORD_PREWARM_LIMIT = 5;
-const SESSION_SUMMARY_ACTIVITY_VERSION = 3;
+const SESSION_SUMMARY_ACTIVITY_VERSION = 4;
 
 const writeQueue = new PersistenceQueue();
+// Cold draft identities have a separate, explicitly bounded read-only budget.
+// They retain only locators (128 requests / 512 KiB, four running reads), never
+// draft payload closures. Otherwise a full write lane can reject an identity
+// before any backing read and permanently poison the draft's fixed origin.
+const originReadQueue = new PersistenceQueue({ maxBytes: 512 * 1024, maxPayloadBytes: 4 * 1024 });
+const originCaptures = new Map<string, { result: Promise<SessionRecord | null>; completion: Promise<void> }>();
+
+function afterOriginCaptures<T, P>(run: (payload: P) => Promise<T>): (payload: P) => Promise<T> {
+  // Snapshot, not a live wait: future captures can depend on this operation.
+  // Bound completion references by the 128-request read budget. They contain
+  // no transcripts and resolve on failed reads too; failures stay with origin.
+  const captures = [...originCaptures.values()].map((capture) => capture.completion);
+  return captures.length ? async (payload) => { await Promise.all(captures); return run(payload); } : run;
+}
 // Session payload I/O is concurrent; all read/modify/write index transactions
 // still share one lane. Global maintenance waits for the session queue first.
 let metadataQueue: Promise<unknown> = Promise.resolve();
@@ -128,7 +144,7 @@ const sessionPrewarmTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 /** Declare ALL payload retained by closures; undefined is not a cost bypass. */
 function enqueue<T>(fn: () => Promise<T>, retained: unknown, allowChunked = false): Promise<T> {
-  return writeQueue.enqueue(fn, retained, undefined, undefined, allowChunked);
+  return writeQueue.enqueue(afterOriginCaptures(fn), retained, undefined, undefined, allowChunked);
 }
 
 function mergeCheckpoints(previous: SessionPatch, incoming: SessionPatch): SessionPatch | null {
@@ -524,7 +540,8 @@ function sessionSummary(record: SessionRecord): SessionSummary {
     title: record.title,
     isWorkflow: record.isWorkflow,
     createdAt: record.createdAt,
-    updatedAt: sessionCompletionTimestamp(record.messages, record.updatedAt),
+    updatedAt: sessionCompletionTimestamp(record.messages, record.updatedAt, record.meta?.runStatus === 'running'),
+    lastUserMessageAt: latestUserMessageTimestamp(record.messages, record.lastUserMessageAt),
     activityVersion: SESSION_SUMMARY_ACTIVITY_VERSION,
     preview: preview(record.messages),
     messageCount: record.messages.length,
@@ -614,6 +631,15 @@ function finiteTimestamp(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
 }
 
+export function latestUserMessageTimestamp(messages: Message[], previous?: number): number | undefined {
+  let latest = finiteTimestamp(previous) ? previous : undefined;
+  for (const message of messages) {
+    if (message.role !== 'user' || !finiteTimestamp(message.createdAt)) continue;
+    if (latest === undefined || message.createdAt > latest) latest = message.createdAt;
+  }
+  return latest;
+}
+
 const LEGACY_TURN_CLOCK_RE =
   /^⏱\s*\d{1,2}:\d{2}(?::\d{2})?\s*→\s*(\d{1,2}):(\d{2})(?::(\d{2}))?/u;
 const DAY_MS = 86_400_000;
@@ -644,24 +670,30 @@ function legacyAssistantCompletedTimestamp(message: Message): number | null {
   return clockTimestampOnMessageDate(message.createdAt, hour, minute, second);
 }
 
-function messageCompletedTimestamp(message: Message): number | null {
+function messageCompletedTimestamp(message: Message, active: boolean): number | null {
+  if (message.role === 'assistant' && /^\s*⟳\s*生成中[.…]*/mu.test(message.text)) return null;
   if (finiteTimestamp(message.completedAt)) return message.completedAt;
+  if (active || finiteTimestamp(message.streamUpdatedAt)) return null;
   return legacyAssistantCompletedTimestamp(message);
 }
 
-function messagesCompletedTimestamp(messages: Message[]): number | null {
+function messagesCompletedTimestamp(messages: Message[], running: boolean): number | null {
+  let pendingLastAssistant = running;
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const timestamp = messageCompletedTimestamp(messages[i]);
+    const active = pendingLastAssistant && messages[i].role === 'assistant';
+    if (active) pendingLastAssistant = false;
+    const timestamp = messageCompletedTimestamp(messages[i], active);
     if (timestamp != null) return timestamp;
   }
   return null;
 }
 
-function sessionCompletionTimestamp(
+export function sessionCompletionTimestamp(
   messages: Message[],
   fallback: number,
+  running = false,
 ): number {
-  return messagesCompletedTimestamp(messages) ?? fallback;
+  return messagesCompletedTimestamp(messages, running) ?? fallback;
 }
 
 function minTimestamp(values: number[], fallback: number): number {
@@ -1138,7 +1170,15 @@ async function listSessionsInternal(
       return indexed;
     }
     if (!(await shouldRebuildWorkspaceIndexFromFilesInternal(workspaceId))) {
-      return indexed;
+      if (sessionIndexHasCurrentActivityVersion(indexed)) return indexed;
+      // Default-workspace indexes deliberately exclude unrelated files. Refresh
+      // only the indexed records instead of rebuilding from the whole folder.
+      const refreshed = await Promise.all(indexed.map(async (summary) => {
+        const record = await getSessionInternal(workspaceId, summary.id);
+        return record?.workspaceId === workspaceId ? sessionSummary(record) : summary;
+      }));
+      await writeSessionIndexInternal(workspaceId, refreshed);
+      return sortSessions(refreshed);
     }
   }
   if (!(await shouldRebuildWorkspaceIndexFromFilesInternal(workspaceId))) {
@@ -1255,6 +1295,7 @@ async function createSessionInternal(
     isWorkflow: input.isWorkflow,
     createdAt: ts,
     updatedAt: sessionCompletionTimestamp(messages, ts),
+    lastUserMessageAt: latestUserMessageTimestamp(messages),
     messages,
     ...(input.isWorkflow && input.workflow ? { workflow: input.workflow } : {}),
     ...(input.meta ? { meta: input.meta } : {}),
@@ -1290,13 +1331,14 @@ async function updateSessionInternal(
   const updatedAt = patch.preserveUpdatedAt
     ? current.updatedAt
     : patch.messages
-      ? sessionCompletionTimestamp(messages, now())
+      ? sessionCompletionTimestamp(messages, now(), (patch.meta?.runStatus ?? current.meta?.runStatus) === 'running')
       : now();
   const next: SessionRecord = {
     ...current,
     title: patch.title ?? current.title,
     isWorkflow: nextIsWorkflow,
     updatedAt,
+    lastUserMessageAt: latestUserMessageTimestamp(messages, latestUserMessageTimestamp(current.messages, current.lastUserMessageAt)),
     messages,
     ...(nextIsWorkflow
       ? { workflow: patch.workflow ?? current.workflow }
@@ -1474,12 +1516,12 @@ export const historyStore: HistoryStore = {
 
   patchConfig(patch) {
     // Navigation state shares its own lane, not a barrier across all sessions.
-    return writeQueue.enqueue(async () => {
+    return writeQueue.enqueue(afterOriginCaptures(async () => {
       const config = await getConfigInternal();
       const next = { ...config, ...patch, schemaVersion: HISTORY_SCHEMA_VERSION };
       await writeConfigInternal(next);
       return next;
-    }, patch, JSON.stringify(['config']));
+    }), patch, JSON.stringify(['config']));
   },
 
   listWorkspaces() {
@@ -1550,41 +1592,62 @@ export const historyStore: HistoryStore = {
   getSession(workspaceId, sessionId) {
     // Preserve read-after-write ordering for this session without blocking on
     // unrelated streaming checkpoints or cold loads.
-    return writeQueue.enqueue(() => getSessionInternal(workspaceId, sessionId),
+    return writeQueue.enqueue(afterOriginCaptures(() => getSessionInternal(workspaceId, sessionId)),
       { workspaceId, sessionId }, JSON.stringify([workspaceId, sessionId]));
   },
 
   getSessionComposerDraft(workspaceId, sessionId) {
-    return writeQueue.enqueue(async () => {
+    return writeQueue.enqueue(afterOriginCaptures(async () => {
       const record = cachedSessionRecord(workspaceId, sessionId)
         ?? await readJson<SessionRecord>(sessionPath(workspaceId, sessionId), false, false, true);
       return typeof record?.meta?.composerDraft === 'string' ? record.meta.composerDraft : undefined;
-    }, { workspaceId, sessionId }, JSON.stringify([workspaceId, sessionId]));
+    }), { workspaceId, sessionId }, JSON.stringify([workspaceId, sessionId]));
   },
 
-  getSessionForGeneration(workspaceId, sessionId) {
-    return writeQueue.enqueue(async () => {
+  getSessionForGeneration(workspaceId, sessionId, options) {
+    // Draft typing must not consume write slots merely to capture an identity
+    // already confirmed by a backing read/write. The eventual CAS always reads
+    // backing storage again, so maintenance/deletion cannot revive this record.
+    const known = options?.captureKnownOrigin ? cachedSessionRecord(workspaceId, sessionId) : null;
+    if (known) return Promise.resolve(known);
+    const read = async () => {
       const record = await readSessionForGeneration(workspaceId, sessionId);
       return record && !record.deletedAt && record.id === sessionId && record.workspaceId === workspaceId ? record : null;
-    }, { workspaceId, sessionId }, JSON.stringify([workspaceId, sessionId]));
+    };
+    const lane = JSON.stringify([workspaceId, sessionId]);
+    if (!options?.captureKnownOrigin) return writeQueue.enqueue(afterOriginCaptures(read), { workspaceId, sessionId }, lane);
+    const existing = originCaptures.get(lane);
+    if (existing) return existing.result;
+    if (originCaptures.size >= 128) return Promise.reject(new Error('HISTORY_ORIGIN_CAPTURE_FULL'));
+    // Establish the order NOW, without a rejected write admission or retrying
+    // against a later incarnation. Later store work waits for this capture,
+    // including global delete/recreate/maintenance operations. This ordering
+    // wait does not consume the write lane's unobserved durability failures.
+    const prior = writeQueue.waitForAccepted();
+    const capture = originReadQueue.enqueue(async () => { await prior; return read(); }, { workspaceId, sessionId }, lane);
+    const completion = capture.then(() => undefined, () => undefined).finally(() => {
+      if (originCaptures.get(lane)?.result === capture) originCaptures.delete(lane);
+    });
+    originCaptures.set(lane, { result: capture, completion });
+    return capture;
   },
 
   createSession(input) {
     return enqueue(() => createSessionInternal(input), input, true);
   },
 
-  updateSession(workspaceId, sessionId, patch) {
-    return writeQueue.enqueue((next) => updateSessionInternal(workspaceId, sessionId, next),
-      patch, JSON.stringify([workspaceId, sessionId]), patch.streamCheckpoint ? mergeCheckpoints : undefined, true);
+  updateSession(workspaceId, sessionId, patch, options) {
+    return writeQueue.enqueue(afterOriginCaptures((next: SessionPatch) => updateSessionInternal(workspaceId, sessionId, next)),
+      patch, JSON.stringify([workspaceId, sessionId]), patch.streamCheckpoint ? mergeCheckpoints : undefined, true, options?.terminal);
   },
 
-  updateSessionIfGeneration(workspaceId, sessionId, origin, patch, reconciliation) {
+  updateSessionIfGeneration(workspaceId, sessionId, origin, patch, reconciliation, options) {
     // Every captured inert value is byte-admitted. No opaque payload callback,
     // no coalescing through a generation check, and no unbounded tombstone map.
     const payload = { workspaceId, sessionId,
       origin: { generation: origin.generation, createdAt: origin.createdAt, sourceFingerprint: origin.sourceFingerprint },
       patch, reconciliation };
-    return writeQueue.enqueue(async (request) => {
+    return writeQueue.enqueue(afterOriginCaptures(async (request: typeof payload) => {
       // Maintenance may move/remove records behind a hydrated cache. The
       // persisted incarnation, not an LRU entry, is the authority for CAS.
       const current = await readSessionForGeneration(request.workspaceId, request.sessionId);
@@ -1611,7 +1674,7 @@ export const historyStore: HistoryStore = {
       }
       const record = await updateSessionInternal(request.workspaceId, request.sessionId, nextPatch);
       return { record, messages: nextPatch.messages ?? [] };
-    }, payload, JSON.stringify([workspaceId, sessionId]), undefined, true);
+    }), payload, JSON.stringify([workspaceId, sessionId]), undefined, true, options?.terminal);
   },
 
   clearScheduledTaskHistory(workspaceId, sessionId, extraMessageIds) {

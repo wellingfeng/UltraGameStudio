@@ -93,7 +93,7 @@ export interface Message {
   thinkingLevel?: string;
   /** Epoch milliseconds. */
   createdAt: number;
-  /** Epoch milliseconds when an assistant turn finished. Used for history order. */
+  /** Epoch milliseconds when an assistant turn finished. */
   completedAt?: number;
   /** Monotonic revision of a streamed assistant message, including checkpoints. */
   streamUpdatedAt?: number;
@@ -188,6 +188,8 @@ export interface Session {
   createdAt: number;
   /** Last message / workflow update time; falls back to createdAt for old seeds. */
   updatedAt?: number;
+  /** Latest user send time, kept independently of background activity. */
+  lastUserMessageAt?: number;
   /**
    * True once this session has touched the workflow blueprint — runs, AI graph
    * edits, or direct node/edge mutations all flip it on. Pure chat sessions

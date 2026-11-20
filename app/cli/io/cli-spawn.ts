@@ -711,6 +711,17 @@ function spawnCliAgentProcess(prompt: string, opts: SpawnCliAgentOpts): Promise<
       env[CODEX_CHANNEL_KEY_ENV] = codexChannelKey;
     }
     normalizeSpawnEnv(env);
+    if (protocol === 'claude') {
+      try {
+        // Keep Kuro's slow streams open beyond the CLI's five-minute watchdog.
+        if (new URL(env.ANTHROPIC_BASE_URL ?? '').hostname.toLowerCase() === 'ai-gateway.kurogames.com') {
+          env.CLAUDE_ENABLE_BYTE_WATCHDOG ??= '0';
+          env.CLAUDE_ENABLE_STREAM_WATCHDOG ??= '0';
+        }
+      } catch {
+        // Missing or invalid URLs keep the CLI's own defaults.
+      }
+    }
     if (disableAutoupdater) env.DISABLE_AUTOUPDATER = '1';
 
     let child;

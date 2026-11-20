@@ -2,18 +2,23 @@ import { act, createElement } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import OfficePreviewPane from './OfficePreviewPane';
-import { previewOfficeDocument } from '@/lib/tauri';
-import { tArgs } from '@/lib/i18n';
+import { previewOfficeDocument, renderPresentationPreview } from '@/lib/tauri';
+import { t, tArgs } from '@/lib/i18n';
 import { useStore } from '@/store/useStore';
 
 vi.mock('@/lib/tauri', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/lib/tauri')>()),
   previewOfficeDocument: vi.fn(),
+  renderPresentationPreview: vi.fn(),
 }));
 
 vi.mock('@tauri-apps/api/core', () => ({
   convertFileSrc: (path: string) =>
     `http://asset.localhost/${encodeURIComponent(path)}`,
+}));
+
+vi.mock('./PdfPreview', () => ({
+  default: ({ url }: { url: string }) => createElement('div', { 'data-pdf-url': url }),
 }));
 
 const PPTX_MIME =
@@ -30,6 +35,7 @@ describe('OfficePreviewPane', () => {
     document.body.appendChild(container);
     root = createRoot(container);
     vi.mocked(previewOfficeDocument).mockReset();
+    vi.mocked(renderPresentationPreview).mockReset();
   });
 
   afterEach(async () => {
@@ -41,7 +47,29 @@ describe('OfficePreviewPane', () => {
     else document.documentElement.setAttribute('style', rootStyle);
   });
 
-  it('shows one slide at a time and admits what was not read', async () => {
+  it.each([
+    { mime: PPTX_MIME, extension: 'pptx' },
+    { mime: 'application/vnd.ms-powerpoint', extension: 'ppt' },
+  ])('loads rendered .$extension slides through the asset protocol', async ({ mime, extension }) => {
+    const path = `E:\\分享资料\\案例.${extension}`;
+    const pdfPath = 'E:\\预览缓存\\演示.pdf';
+    vi.mocked(renderPresentationPreview).mockResolvedValue(pdfPath);
+
+    await act(async () => {
+      root.render(createElement(OfficePreviewPane, {
+        path, streamPath: path, mime, fileName: `案例.${extension}`,
+      }));
+    });
+
+    expect(renderPresentationPreview).toHaveBeenCalledExactlyOnceWith(path);
+    expect(previewOfficeDocument).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-pdf-url]')?.getAttribute('data-pdf-url')).toBe(
+      `http://asset.localhost/${encodeURIComponent(pdfPath)}`,
+    );
+  });
+
+  it('shows the simplified PPTX preview and its page limit when rendering fails', async () => {
+    vi.mocked(renderPresentationPreview).mockRejectedValue(new Error('PowerPoint is unavailable'));
     vi.mocked(previewOfficeDocument).mockResolvedValue({
       kind: 'pptx',
       pageCount: 42,
@@ -64,14 +92,13 @@ describe('OfficePreviewPane', () => {
     });
     await act(async () => {});
 
-    expect(container.querySelector('iframe')?.getAttribute('srcdoc')).toContain(
-      '封面',
-    );
+    const html = container.querySelector('iframe')?.getAttribute('srcdoc');
+    expect(html).toContain('封面');
+    expect(html).toContain('目录');
     // 断言按当前语言算，测试不依赖 store 的初始 locale。
     const locale = useStore.getState().locale;
-    expect(container.textContent).toContain(
-      tArgs(locale, 'doc.pageOf', { current: 1, total: 2 }),
-    );
+    expect(container.textContent).toContain(t(locale, 'doc.presentationLayoutFallback'));
+    expect(container.querySelector(`[title="${t(locale, 'doc.nextPage')}"]`)).toBeNull();
     // 只解析了前两页，必须明确告诉用户还剩多少页没读。
     expect(container.textContent).toContain(
       tArgs(locale, 'doc.truncatedPages', { shown: 2, total: 42 }),
@@ -114,6 +141,7 @@ describe('OfficePreviewPane', () => {
     );
     // 翻页只是切换已解析的内容，不该再打一次后端。
     expect(previewOfficeDocument).toHaveBeenCalledTimes(1);
+    expect(renderPresentationPreview).not.toHaveBeenCalled();
   });
 
   it('updates an open preview from the app palette without re-reading or changing pages', async () => {

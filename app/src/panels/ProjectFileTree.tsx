@@ -27,10 +27,14 @@ import {
   Loader2,
   Lock,
   LockOpen,
+  MessageCircleMore,
   RefreshCw,
   X,
 } from 'lucide-react';
 import FilePreviewDrawer from '@/components/ai/FilePreviewDrawer';
+import TemporaryChatFrame from '@/components/temporaryChat/TemporaryChatFrame';
+import { sessionSource } from '@/components/temporaryChat/context';
+import '@/components/temporaryChat/temporaryChat.css';
 import type { FileRef } from '@/components/ai/lib/filePath';
 import { hasToolSentinel } from '@/components/ai/lib/toolEvent';
 import GameTeamPanel, {
@@ -45,6 +49,7 @@ import {
   TOGGLE_PROJECT_RIGHT_PANEL_EVENT,
   PROJECT_RIGHT_PANEL_VISIBILITY_EVENT,
   type OpenProjectRightPanelFilePreviewEventDetail,
+  type ProjectRightPanelTab,
 } from '@/panels/projectRightPanelEvents';
 import { t, type Locale } from '@/lib/i18n';
 import {
@@ -96,7 +101,7 @@ import {
 import { basename } from '@/lib/folderPicker';
 import { useStore } from '@/store/useStore';
 
-type ProjectPanelTab = 'files' | 'session';
+type ProjectPanelTab = ProjectRightPanelTab;
 type ProjectTreeViewMode = 'tree' | 'preview';
 type ProjectEngine = 'unreal' | 'unity' | 'godot' | 'cocos' | 'generic';
 
@@ -1146,7 +1151,7 @@ export default function ProjectFileTree() {
   useEffect(() => {
     const element = fileScrollRef.current;
     if (element) return attachAutoHideScroll(element, 900, 24, 'both');
-  }, [panelOpen, previewRef, teamDetailsPreview]);
+  }, [panelOpen, panelTab === 'chat', previewRef, teamDetailsPreview]);
 
   const loadDirectory = useCallback(
     async (
@@ -1257,7 +1262,7 @@ export default function ProjectFileTree() {
   useEffect(() => {
     const selectTab = (event: Event) => {
       const tab = (event as CustomEvent<{ tab: ProjectPanelTab }>).detail?.tab;
-      if (tab !== 'files' && tab !== 'session') return;
+      if (tab !== 'files' && tab !== 'session' && tab !== 'chat') return;
       const close = panelOpen && panelTab === tab && !previewRef && !teamDetailsPreview;
       setPreviewRef(null);
       setTeamDetailsPreview(null);
@@ -2249,6 +2254,7 @@ export default function ProjectFileTree() {
                 role="tab"
                 aria-selected={panelTab === 'files'}
                 onClick={() => updatePanelTab('files')}
+                title={t(locale, 'projectTree.title')}
                 className={
                   'flex h-7 min-w-0 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs transition-colors hover:text-fg ' +
                   (panelTab === 'files' ? 'bg-panel-2 text-fg' : 'text-fg-faint')
@@ -2264,6 +2270,7 @@ export default function ProjectFileTree() {
                 role="tab"
                 aria-selected={panelTab === 'session'}
                 onClick={() => updatePanelTab('session')}
+                title={t(locale, 'sessionFiles.tab')}
                 className={
                   'flex h-7 min-w-0 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs transition-colors hover:text-fg ' +
                   (panelTab === 'session' ? 'bg-panel-2 text-fg' : 'text-fg-faint')
@@ -2276,6 +2283,21 @@ export default function ProjectFileTree() {
                     {sessionFiles.length}
                   </span>
                 )}
+              </button>
+              {/* 「随手聊」tab：以当前会话记录为参考内容的随手聊，停靠在右侧面板内。 */}
+              <button
+                type="button"
+                role="tab"
+                aria-selected={panelTab === 'chat'}
+                onClick={() => updatePanelTab('chat')}
+                title="随手聊"
+                className={
+                  'flex h-7 min-w-0 flex-1 items-center justify-center gap-1.5 rounded px-2 text-xs transition-colors hover:text-fg ' +
+                  (panelTab === 'chat' ? 'bg-panel-2 text-fg' : 'text-fg-faint')
+                }
+              >
+                <MessageCircleMore size={13} className="shrink-0 text-accent" />
+                <span className="truncate">随手聊</span>
               </button>
             </div>
             {panelTab === 'files' && (
@@ -2315,7 +2337,9 @@ export default function ProjectFileTree() {
                 : selectedRootPath
             }
           >
-            {panelTab === 'session'
+            {panelTab === 'chat'
+              ? '针对当前会话记录提问，发送时读取最新内容'
+              : panelTab === 'session'
               ? sessionFileCountLine(
                   locale,
                   sessionFiles.length,
@@ -2363,6 +2387,22 @@ export default function ProjectFileTree() {
           </div>
         )}
 
+        {panelTab === 'chat' ? (
+          <div className="ugs-project-panel-chat" aria-label="会话随手聊">
+            {activeSessionId ? (
+              <TemporaryChatFrame
+                key={`${activeWorkspaceId ?? ''}:${activeSessionId}`}
+                source={sessionSource(activeSessionId, composerWorkspace)}
+                title="会话随手聊"
+                fileTab
+              />
+            ) : (
+              <div className="px-3 py-4 text-sm leading-relaxed text-fg-faint">
+                打开一个会话后，可在这里针对会话记录随手聊。
+              </div>
+            )}
+          </div>
+        ) : (
         <div
           ref={fileScrollRef}
           className={
@@ -2382,6 +2422,7 @@ export default function ProjectFileTree() {
             renderDirectory('', 0)
           )}
         </div>
+        )}
 
         {/* 「会话文件」tab 的列表随消息流实时更新，无需手动刷新按钮；仅文件树 tab
             提供刷新（重新列目录）。 */}

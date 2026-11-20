@@ -12,6 +12,28 @@
   user-select: none;
 }
 
+.ugs-titlebar-start,
+.ugs-titlebar-end {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  height: 100%;
+}
+.ugs-titlebar-start { flex: 1 1 0; }
+.ugs-titlebar-end { justify-content: flex-end; }
+.ugs-titlebar-project-run { flex: 0 0 auto; padding-inline: 6px; }
+.ugs-titlebar-project-run:empty { display: none; }
+.ugs-titlebar:has(> .ugs-titlebar-project-run:not(:empty)) > .ugs-titlebar-end { flex: 1 1 0; }
+.ugs-titlebar-chat-actions {
+  position: relative;
+  display: flex;
+  align-self: stretch;
+  flex-shrink: 0;
+  padding-inline: 8px;
+}
+.ugs-titlebar-chat-actions:empty { display: none; }
+.ugs-titlebar-chat-actions > .ugs-ai-return-search { left: auto; right: 8px; }
+
 .ugs-titlebar-brand {
   display: flex;
   flex-shrink: 0;
@@ -25,7 +47,6 @@
 
 .ugs-titlebar-brand svg { pointer-events: none; color: var(--fg-faint); }
 .ugs-titlebar-content { flex: 1; min-width: 0; height: 100%; }
-.ugs-titlebar-content .ugs-chat-header-actions { align-self: stretch; }
 .ugs-titlebar-global-actions { display: flex; align-self: stretch; }
 .ugs-titlebar-global-actions .ugs-agent-usage-trigger,
 .ugs-titlebar-global-actions .ugs-model-rankings-trigger { width: 28px; height: 28px; margin: 0; }

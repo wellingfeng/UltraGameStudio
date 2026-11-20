@@ -30,24 +30,17 @@ const gateDetails: Record<string, [string, string]> = {
   foreground_failed: ['前台任务未成功完成；未启动后台复盘。', 'Foreground did not complete successfully; background review not started.'],
 };
 export default function MemoryReviewCard({ state, locale = 'zh-CN', onOpenSettings }: MemoryReviewCardProps) {
-  // Background work and resultless reviews remain available in diagnostics, not chat.
-  if (['queued', 'admitting', 'reading', 'unconfirmed', 'disabled', 'skipped'].includes(state.phase)
-      || (state.appliedOps <= 0 && state.queuedOps <= 0)) return null;
+  // Only confirmed saves belong in chat; pending/failed jobs stay in settings diagnostics.
+  if (state.phase !== 'applied' || state.appliedOps <= 0 || state.error || state.recordingError) return null;
   const zh = locale === 'zh-CN';
-  const unconfirmed = state.phase === 'applied' && state.appliedOps <= 0;
   const [labelZh, labelEn, tone] = phases[state.phase];
   const detail = state.detail && (gateDetails[state.detail]?.[zh ? 0 : 1] ?? state.detail);
-  const label = unconfirmed ? (zh ? '记忆保存未确认' : 'Memory save unconfirmed') : zh ? labelZh : labelEn;
+  const label = zh ? labelZh : labelEn;
   const counts = [
-    state.appliedOps > 0 ? (state.phase === 'applied'
-      ? (zh ? `${state.appliedOps} 项` : `${state.appliedOps} items`)
-      : (zh ? `已保存 ${state.appliedOps} 项` : `Saved ${state.appliedOps}`)) : '',
-    state.queuedOps > 0 ? (state.phase === 'awaiting_approval'
-      ? (zh ? `${state.queuedOps} 项` : `${state.queuedOps} items`)
-      : (zh ? `待审批 ${state.queuedOps} 项` : `Pending approval ${state.queuedOps}`)) : '',
-    state.recordingError ? (zh ? '结果记录未确认' : 'Outcome recording unconfirmed') : '',
+    zh ? `${state.appliedOps} 项` : `${state.appliedOps} items`,
+    state.queuedOps > 0 ? (zh ? `待审批 ${state.queuedOps} 项` : `Pending approval ${state.queuedOps}`) : '',
   ].filter(Boolean).join(' · ');
-  return <article data-ugs-memory-review={state.id} data-tone={unconfirmed ? 'warning' : tone} data-active={state.phase === 'reading' ? 'true' : 'false'}
+  return <article data-ugs-memory-review={state.id} data-tone={tone} data-active="false"
     className="ugs-skill-review ugs-review-strip min-w-0 text-xs text-fg">
     <ReviewStrip label={label} meta={counts || undefined} diagnosticsLabel={zh ? '复盘诊断' : 'Review diagnostics'}>
       {(state.appliedOps > 0 || state.queuedOps > 0) && <p className="tabular-nums">

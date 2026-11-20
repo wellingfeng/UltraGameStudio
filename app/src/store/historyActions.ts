@@ -26,6 +26,7 @@ import {
   activeWorkflowSessionKey,
   sessionMatchesTarget,
   sessionFromRecord,
+  preserveSessionSendTime,
   sessionFromSummary,
   summaryFromRecord,
   normalizeScheduledTask,
@@ -164,7 +165,7 @@ export async function setWorkflowFavoriteHistorySession(
   useStore.setState((s) => {
     const update = (session: Session): Session =>
       sessionMatchesTarget(session, sessionId, workspaceId)
-        ? updatedSession
+        ? preserveSessionSendTime(session, updatedSession)
         : session;
     return {
       sessions: s.sessions.map(update),
@@ -313,7 +314,7 @@ export async function setWorkflowScheduledTaskHistorySession(
   useStore.setState((s) => {
     const update = (session: Session): Session =>
       sessionMatchesTarget(session, sessionId, workspaceId)
-        ? updatedSession
+        ? preserveSessionSendTime(session, updatedSession)
         : session;
     return {
       sessions: s.sessions.map(update),
@@ -524,8 +525,10 @@ async function initHistoryFromDisk(): Promise<void> {
     // pure time ordering after a restart. Read only the draft field: hydrating
     // every transcript here blocks startup and evicts the useful session cache.
     const draftByKey: Record<string, string> = {};
-    await Promise.all(
-      sessions.map(async (summary) => {
+    // The history queue is shared and bounded. Submitting the entire session
+    // list at once overflows it on workspaces with many conversations.
+    for (let offset = 0; offset < sessions.length; offset += 4) {
+      await Promise.all(sessions.slice(offset, offset + 4).map(async (summary) => {
         if (active && summary.id === active.id) return;
         const text = await historyStore.getSessionComposerDraft(workspace.id, summary.id);
         if (typeof text === 'string' && text.trim().length > 0) {
@@ -536,8 +539,8 @@ async function initHistoryFromDisk(): Promise<void> {
             })
           ] = text;
         }
-      }),
-    );
+      }));
+    }
     const currentState = useStore.getState();
     const recordWorkflow = activeRecord?.workflow
       ? restoreWorkflowRunSnapshot(activeRecord.workflow, activeRecord.meta)

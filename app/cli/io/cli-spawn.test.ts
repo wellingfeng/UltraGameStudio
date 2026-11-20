@@ -106,6 +106,8 @@ function fakeEnvBody(envOut: string): string {
 const fs = require('node:fs');
 fs.writeFileSync(${JSON.stringify(envOut)}, JSON.stringify({
   ANTHROPIC_MODEL: process.env.ANTHROPIC_MODEL || '',
+  CLAUDE_ENABLE_BYTE_WATCHDOG: process.env.CLAUDE_ENABLE_BYTE_WATCHDOG ?? null,
+  CLAUDE_ENABLE_STREAM_WATCHDOG: process.env.CLAUDE_ENABLE_STREAM_WATCHDOG ?? null,
 }));
 process.stdin.resume();
 process.stdin.on('end', () => {
@@ -330,6 +332,29 @@ process.stdin.on('end', () => {
     });
     const env = JSON.parse(readFileSync(envOut, 'utf8'));
     expect(env.ANTHROPIC_MODEL).toBe('nvidia/nemotron-3-super-120b-a12b');
+  });
+
+  it('keeps Claude streams open for the Kuro gateway while respecting explicit settings', async () => {
+    const envOut = join(dir, 'env-claude-kuro-watchdog.json');
+    const bin = makeFakeCli('fake-claude-kuro-watchdog', fakeEnvBody(envOut));
+    const common = { adapter: 'claude-code', cliCommand: bin, permission: 'full', cwd: dir };
+    await spawnCliAgent('p', { ...common, env: {
+      ANTHROPIC_API_KEY: 'test-token', ANTHROPIC_BASE_URL: 'https://ai-gateway.kurogames.com',
+    } });
+    let env = JSON.parse(readFileSync(envOut, 'utf8'));
+    expect(env.CLAUDE_ENABLE_BYTE_WATCHDOG).toBe('0');
+    expect(env.CLAUDE_ENABLE_STREAM_WATCHDOG).toBe('0');
+    await spawnCliAgent('p', { ...common, env: {
+      ANTHROPIC_API_KEY: 'test-token', ANTHROPIC_BASE_URL: 'https://ai-gateway.kurogames.com',
+      CLAUDE_ENABLE_BYTE_WATCHDOG: '1',
+    } });
+    env = JSON.parse(readFileSync(envOut, 'utf8'));
+    expect(env.CLAUDE_ENABLE_BYTE_WATCHDOG).toBe('1');
+    await spawnCliAgent('p', { ...common, env: {
+      ANTHROPIC_API_KEY: 'test-token', ANTHROPIC_BASE_URL: 'https://ai-gateway.kurogames.com.invalid',
+    } });
+    env = JSON.parse(readFileSync(envOut, 'utf8'));
+    expect(env.CLAUDE_ENABLE_STREAM_WATCHDOG).toBeNull();
   });
 
   it('returns accumulated text when no result event is emitted', async () => {

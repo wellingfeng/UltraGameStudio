@@ -3,7 +3,12 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { SkillMutationResult, SkillReviewState } from '@/runtime/skills/types';
 import { runSkillReview } from '@/runtime/skills/review';
-import Card from './SkillLearningCard';
+import SkillLearningCard, { type SkillLearningCardProps } from './SkillLearningCard';
+
+// Progress, approval, retry and recovery controls now belong to settings history.
+function Card({ surface = 'history', ...props }: SkillLearningCardProps) {
+  return <SkillLearningCard {...props} surface={surface} />;
+}
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 let container: HTMLDivElement;
@@ -35,7 +40,7 @@ describe('SkillLearningCard', () => {
     const skipped: SkillReviewState = { status: 'noop', origin, admission: { status: 'not-admitted', reason: 'insufficient-evidence', completedActivities: 3, activityThreshold: 10 } };
     for (const state of [noop, skipped]) {
       const before = JSON.stringify(state);
-      await act(async () => { root.render(<Card locale={locale} state={state} />); });
+      await act(async () => { root.render(<Card surface="chat" locale={locale} state={state} />); });
       expect(container.childElementCount).toBe(0);
       await act(async () => { root.render(<Card surface="history" locale={locale} state={JSON.parse(before)} />); });
       expect(container.querySelector('article')).not.toBeNull();
@@ -167,23 +172,22 @@ describe('SkillLearningCard', () => {
       if (status === 'failed') expect(container.querySelector('[role="alert"]')?.textContent).toContain('HTTP unavailable');
     }
   });
-  it('keeps failed and cancelled reviews visible in chat without claiming a successful write', async () => {
+  it('keeps failed and cancelled reviews out of chat even with a retained result', async () => {
     const cancelled = { ...result('cancelled'), error: 'Error: SKILL_REVIEW_BUDGET_TOKENS' };
     for (const status of ['cancelled', 'failed'] as const) {
-      await act(async () => { root.render(<Card state={{ status, origin, result: { ...cancelled, status } }} onRetry={vi.fn()} />); });
-      expect(container.querySelector('article')).not.toBeNull();
-      expect(container.querySelector('[role="status"]')?.textContent).toBeTruthy();
+      await act(async () => { root.render(<Card surface="chat" state={{ status, origin, result: { ...cancelled, status } }} onRetry={vi.fn()} />); });
+      expect(container.childElementCount).toBe(0);
       expect(container.textContent).not.toContain('经验已保存');
     }
   });
-  it('hides a locally resolved retry noop without losing its history diagnostics', async () => {
+  it('retains a locally resolved retry noop in history diagnostics', async () => {
     const failed = result('failed');
     const noop = { ...result('noop'), changes: [], riskReasons: [], lesson: '已有经验覆盖本次操作。' };
     const retry = vi.fn(async () => noop);
     await act(async () => { root.render(<Card state={{ status: 'failed', origin, result: failed }} onRetry={retry} />); });
     await act(async () => { container.querySelector<HTMLButtonElement>('[aria-label="重新复盘"]')!.click(); });
     expect(retry).toHaveBeenCalledExactlyOnceWith(failed.batchId);
-    expect(container.childElementCount).toBe(0);
+    expect(container.textContent).toContain('无新经验');
     await act(async () => { root.render(<Card surface="history" state={{ status: 'noop', origin, result: noop }} />); });
     expect(container.textContent).toContain('无新经验');
     expect(container.textContent).toContain(noop.lesson);
@@ -235,13 +239,13 @@ describe('SkillLearningCard', () => {
   });
 
   it('requires an applied host result and positive applied operations before reporting learned', async () => {
-    await act(async () => { root.render(<Card state={{ status: 'applied', origin }} />); });
+    await act(async () => { root.render(<Card surface="chat" state={{ status: 'applied', origin }} />); });
     expect(container.textContent).not.toContain('经验已保存');
     const applied = { ...result('applied'), operationsApplied: 1, revision: 'revision-new' };
-    await act(async () => { root.render(<Card state={{ status: 'applied', origin, result: applied }} />); });
+    await act(async () => { root.render(<Card surface="chat" state={{ status: 'applied', origin, result: applied }} />); });
     expect(container.querySelector('[role="status"]')?.textContent).toContain('经验已保存');
     expect(container.textContent).toContain('revision-new');
-    await act(async () => { root.render(<Card state={{ status: 'applied', origin, result: { ...applied, operationsApplied: 0 } }} />); });
+    await act(async () => { root.render(<Card surface="chat" state={{ status: 'applied', origin, result: { ...applied, operationsApplied: 0 } }} />); });
     expect(container.textContent).not.toContain('经验已保存');
   });
 

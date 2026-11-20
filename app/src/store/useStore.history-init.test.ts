@@ -182,4 +182,28 @@ describe('history initialization', () => {
     // Active session has no draft; switching target stays empty.
     expect(state.composerDraft).toBe('');
   });
+
+  it('loads more sessions than the bounded history queue without rejecting draft reads', async () => {
+    const { useStore } = await import('./useStore');
+    const { historyStore } = await import('./history/store');
+    const { workflowSessionKeyId } = await import('./sessionKey');
+    await historyStore.ready();
+    const workspace = await historyStore.resolveWorkspaceByPath('');
+    for (let i = 0; i < 132; i += 1) {
+      await historyStore.createSession({ workspaceId: workspace.id, id: `queue-init-${i}`,
+        isWorkflow: false, messages: [], title: `Session ${i}` });
+    }
+    await historyStore.updateSession(workspace.id, 'queue-init-3', {
+      meta: { composerDraft: 'draft from another session' }, preserveUpdatedAt: true,
+    });
+    await historyStore.patchConfig({ lastActiveWorkspaceId: workspace.id, lastActiveSessionId: 'queue-init-0' });
+    useStore.getState().initHistory();
+    await vi.waitFor(() => expect(useStore.getState().historyReady).toBe(true), { timeout: 10_000 });
+    const state = useStore.getState();
+    expect(state.historyError).toBeNull();
+    expect(state.sessions).toHaveLength(132);
+    expect(state.composerDrafts[workflowSessionKeyId({ workspaceId: workspace.id, sessionId: 'queue-init-3' })])
+      .toBe('draft from another session');
+    await expect(historyStore.flush()).resolves.toBeUndefined();
+  }, 20_000);
 });

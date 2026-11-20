@@ -15,6 +15,7 @@ type MockSession = {
   title: string;
   createdAt: number;
   updatedAt?: number;
+  lastUserMessageAt?: number;
   preview?: string;
   isWorkflow: boolean;
   simple?: boolean;
@@ -65,6 +66,7 @@ type MockStoreState = {
   >;
   aiEditingSessions: SessionKey[];
   chattingSessions: SessionKey[];
+  waitingInputSessions: SessionKey[];
   jobSessions: SessionKey[];
   jobSessionProgress: Record<
     string,
@@ -130,14 +132,16 @@ vi.mock('@/store/useStore', () => {
   const sessionLiveStatus = (
     sessionKey: SessionKey,
     liveState: Pick<MockStoreState, 'runningSessions' | 'aiEditingSessions'> &
-      Partial<Pick<MockStoreState, 'chattingSessions'>>,
+      Partial<Pick<MockStoreState, 'chattingSessions' | 'waitingInputSessions' | 'jobSessions'>>,
   ) => {
     const isMatch = (item: SessionKey) =>
       item.workspaceId === sessionKey.workspaceId &&
       item.sessionId === sessionKey.sessionId;
+    if ((liveState.waitingInputSessions ?? []).some(isMatch)) return 'waiting';
     if (liveState.runningSessions.some(isMatch)) return 'running';
     if ((liveState.chattingSessions ?? []).some(isMatch)) return 'running';
     if (liveState.aiEditingSessions.some(isMatch)) return 'aiEditing';
+    if ((liveState.jobSessions ?? []).some(isMatch)) return 'running';
     return null;
   };
 
@@ -201,6 +205,8 @@ vi.mock('@/lib/tauri', async (importOriginal) => {
 });
 
 import { openWorkspaceDirectory } from '@/lib/tauri';
+import { SCHEDULED_TASK_SCOPE } from '@/lib/scheduledTaskScope';
+import { SCHEDULED_TASK_TEMPLATES, taskFromTemplate } from '@/lib/scheduledTaskTemplates';
 import Sidebar from './Sidebar';
 
 const WORKSPACE: MockWorkspace = {
@@ -243,6 +249,7 @@ function resetSidebarStore(): void {
     runningSessionProgress: {},
     aiEditingSessions: [],
     chattingSessions: [],
+    waitingInputSessions: [],
     jobSessions: [],
     jobSessionProgress: {},
     newWorkflow: vi.fn(),
@@ -922,14 +929,14 @@ describe('Sidebar workflow rename', () => {
     } finally { await view.cleanup(); }
   });
 
-  it.each([true, false])('keeps pinned sessions above live, unread, draft and recent sessions (grouped=%s)', async (grouped) => {
+  it.each([true, false])('keeps live sessions above idle ones and pinned sessions above other idle ones (grouped=%s)', async (grouped) => {
     resetSidebarStore();
-    const pinned = { ...SESSION, id: 's_pin', title: '旧置顶', pinned: true, updatedAt: 1 };
-    const running = { ...SESSION, id: 's_run', title: '运行会话', updatedAt: 2 };
-    const editing = { ...SESSION, id: 's_edit', title: '编辑会话', updatedAt: 3 };
-    const unread = { ...SESSION, id: 's_unread', title: '未读完成', runStatus: 'success' as const, unreadCompletion: true, updatedAt: 4 };
-    const draft = { ...SESSION, id: 's_draft', title: '草稿会话', updatedAt: 5 };
-    const recent = { ...SESSION, id: 's_recent', title: '最新会话', updatedAt: 6 };
+    const pinned = { ...SESSION, id: 's_pin', title: '旧置顶', pinned: true, lastUserMessageAt: 1 };
+    const running = { ...SESSION, id: 's_run', title: '运行会话', lastUserMessageAt: 2 };
+    const editing = { ...SESSION, id: 's_edit', title: '编辑会话', lastUserMessageAt: 3 };
+    const unread = { ...SESSION, id: 's_unread', title: '未读完成', runStatus: 'success' as const, unreadCompletion: true, lastUserMessageAt: 4 };
+    const draft = { ...SESSION, id: 's_draft', title: '草稿会话', lastUserMessageAt: 5 };
+    const recent = { ...SESSION, id: 's_recent', title: '最新会话', lastUserMessageAt: 6 };
     mockState.sessions = [recent, draft, unread, editing, running, pinned];
     mockState.sessionTree = { [WORKSPACE.id]: mockState.sessions };
     mockState.workspaces = grouped ? [{ ...WORKSPACE, sessionCount: 6 }] : [];
@@ -939,11 +946,15 @@ describe('Sidebar workflow rename', () => {
     const view = await renderSidebar();
     try {
       const titles = mockState.sessions.map((session) => session.title);
-      expect(sessionTitleOrder(view.container, titles)[0]).toBe(pinned.title);
+      expect(sessionTitleOrder(view.container, titles)).toEqual([
+        editing.title, running.title, pinned.title, recent.title, draft.title, unread.title,
+      ]);
       mockState.sessions = mockState.sessions.map((session) => ({ ...session, pinned: false }));
       mockState.sessionTree = { [WORKSPACE.id]: mockState.sessions };
       await view.rerender();
-      expect(sessionTitleOrder(view.container, titles)[0]).toBe(editing.title);
+      expect(sessionTitleOrder(view.container, titles)).toEqual([
+        editing.title, running.title, recent.title, draft.title, unread.title, pinned.title,
+      ]);
     } finally { await view.cleanup(); }
   });
 
@@ -1368,6 +1379,42 @@ describe('Sidebar workflow rename', () => {
 });
 
 describe('Sidebar running progress indicator', () => {
+  it('updates scheduled session counts across workspaces as runs finish', async () => {
+    resetSidebarStore();
+    const scheduledTask = taskFromTemplate(SCHEDULED_TASK_TEMPLATES[0], 'zh-CN');
+    const legacy = { ...SESSION, id: 'legacy', scheduledTask, runStatus: 'success' as const };
+    const independent = { ...SESSION, id: 'independent', scheduledTask };
+    const neverRun = { ...SESSION, id: 'new-task', scheduledTask };
+    mockState.sessions = [SESSION, legacy];
+    mockState.sessionTree = {
+      [WORKSPACE.id]: mockState.sessions,
+      [SCHEDULED_TASK_SCOPE]: [independent, neverRun],
+    };
+    mockState.chattingSessions = [SESSION_KEY, { workspaceId: WORKSPACE.id, sessionId: legacy.id }];
+    mockState.jobSessions = [{ workspaceId: SCHEDULED_TASK_SCOPE, sessionId: independent.id }];
+
+    const view = await renderSidebar();
+    const count = () => Array.from(view.container.querySelectorAll('nav button'))
+      .find((button) => button.textContent?.startsWith('定时任务'))?.textContent;
+    try {
+      expect(count()).toContain('运行中2个 · 运行完0个');
+
+      mockState.chattingSessions = [SESSION_KEY];
+      await view.rerender();
+      expect(count()).toContain('运行中1个 · 运行完1个');
+
+      mockState.jobSessions = [];
+      mockState.sessionTree = {
+        ...mockState.sessionTree,
+        [SCHEDULED_TASK_SCOPE]: [{ ...independent, runStatus: 'error' }, neverRun],
+      };
+      await view.rerender();
+      expect(count()).toContain('运行中0个 · 运行完1个');
+    } finally {
+      await view.cleanup();
+    }
+  });
+
   it('keeps the blue activity indicator and border live while real progress changes', async () => {
     resetSidebarStore();
     mockState.runningSessions = [SESSION_KEY];
@@ -1753,7 +1800,7 @@ describe('Sidebar delete protection', () => {
 });
 
 describe('Sidebar live session ordering', () => {
-  it('orders running and AI-editing workspace sessions by timestamp within the live tier', async () => {
+  it('orders live workspace sessions ahead of completed sessions', async () => {
     resetSidebarStore();
     const runningSession = {
       ...SESSION,
@@ -1777,9 +1824,9 @@ describe('Sidebar live session ordering', () => {
       updatedAt: 1_700_000_200_000,
     };
     const titles = [
+      recentSession.title,
       thinkingSession.title,
       runningSession.title,
-      recentSession.title,
     ];
     mockState.sessionTree = {
       [WORKSPACE.id]: [recentSession, thinkingSession, runningSession],
@@ -1796,7 +1843,9 @@ describe('Sidebar live session ordering', () => {
     const view = await renderSidebar();
 
     try {
-      expect(sessionTitleOrder(view.container, titles)).toEqual(titles);
+      expect(sessionTitleOrder(view.container, titles)).toEqual([
+        thinkingSession.title, runningSession.title, recentSession.title,
+      ]);
     } finally {
       await view.cleanup();
     }
@@ -1836,7 +1885,7 @@ describe('Sidebar live session ordering', () => {
     }
   });
 
-  it('promotes workspace groups with live sessions and keeps groups together', async () => {
+  it('orders workspace groups by timestamp while keeping groups together', async () => {
     resetSidebarStore();
     const liveWorkspace = {
       ...WORKSPACE,
@@ -1877,6 +1926,8 @@ describe('Sidebar live session ordering', () => {
     };
     mockState.sessions = [recentSession, liveSession];
     mockState.activeWorkspaceId = liveWorkspace.id;
+    // Switcher points elsewhere so only running state vs. time is under test.
+    mockState.selectedWorkspaceId = 'ws_unlisted';
     mockState.activeSessionId = liveSession.id;
     mockState.runningSessions = [
       { workspaceId: liveWorkspace.id, sessionId: liveSession.id },
@@ -1885,10 +1936,11 @@ describe('Sidebar live session ordering', () => {
     const view = await renderSidebar();
 
     try {
-      expectTextBefore(view.container, liveWorkspace.name, recentWorkspace.name);
-      expectTextBefore(view.container, liveWorkspace.name, liveSession.title);
-      expectTextBefore(view.container, liveSession.title, recentWorkspace.name);
-      expectTextBefore(view.container, recentWorkspace.name, recentSession.title);
+      const precedes = (first: HTMLElement, second: HTMLElement) =>
+        expect(first.compareDocumentPosition(second) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      precedes(workspaceButton(view.container, recentWorkspace.name), sessionButton(view.container, recentSession.title));
+      precedes(sessionButton(view.container, recentSession.title), workspaceButton(view.container, liveWorkspace.name));
+      precedes(workspaceButton(view.container, liveWorkspace.name), sessionButton(view.container, liveSession.title));
     } finally {
       await view.cleanup();
     }
@@ -1952,7 +2004,7 @@ describe('Sidebar live session ordering', () => {
     }
   });
 
-  it('orders flat fallback running and AI-editing sessions by timestamp within the live tier', async () => {
+  it('orders live flat fallback sessions ahead of completed sessions', async () => {
     resetSidebarStore();
     const runningSession = {
       ...SESSION,
@@ -1976,9 +2028,9 @@ describe('Sidebar live session ordering', () => {
       updatedAt: 1_700_000_200_000,
     };
     const titles = [
+      recentSession.title,
       thinkingSession.title,
       runningSession.title,
-      recentSession.title,
     ];
     mockState.workspaces = [];
     mockState.sessionTree = {};
@@ -1995,13 +2047,15 @@ describe('Sidebar live session ordering', () => {
     const view = await renderSidebar();
 
     try {
-      expect(sessionTitleOrder(view.container, titles)).toEqual(titles);
+      expect(sessionTitleOrder(view.container, titles)).toEqual([
+        thinkingSession.title, runningSession.title, recentSession.title,
+      ]);
     } finally {
       await view.cleanup();
     }
   });
 
-  it('promotes sessions with an unsent composer draft above idle ones', async () => {
+  it('does not promote sessions with an unsent composer draft', async () => {
     resetSidebarStore();
     const draftSession = {
       ...SESSION,
@@ -2017,8 +2071,7 @@ describe('Sidebar live session ordering', () => {
       createdAt: 1_700_000_200_000,
       updatedAt: 1_700_000_200_000,
     };
-    // Drafted (older) should float above the more recent idle session.
-    const titles = [draftSession.title, recentSession.title];
+    const titles = [recentSession.title, draftSession.title];
     mockState.sessionTree = {
       [WORKSPACE.id]: [recentSession, draftSession],
     };
@@ -2038,7 +2091,7 @@ describe('Sidebar live session ordering', () => {
     }
   });
 
-  it('promotes the active session only when its live composer has text', async () => {
+  it('does not promote the active session when its composer has text', async () => {
     resetSidebarStore();
     const activeDraftSession = {
       ...SESSION,
@@ -2054,7 +2107,7 @@ describe('Sidebar live session ordering', () => {
       createdAt: 1_700_000_200_000,
       updatedAt: 1_700_000_200_000,
     };
-    const titles = [activeDraftSession.title, recentSession.title];
+    const titles = [recentSession.title, activeDraftSession.title];
     mockState.sessionTree = {
       [WORKSPACE.id]: [recentSession, activeDraftSession],
     };
@@ -2073,7 +2126,7 @@ describe('Sidebar live session ordering', () => {
     }
   });
 
-  it('keeps running sessions above drafted-but-idle ones', async () => {
+  it('orders running sessions ahead of drafted idle sessions', async () => {
     resetSidebarStore();
     const runningSession = {
       ...SESSION,
@@ -2089,8 +2142,7 @@ describe('Sidebar live session ordering', () => {
       createdAt: 1_700_000_200_000,
       updatedAt: 1_700_000_200_000,
     };
-    // Running outranks a draft even though the draft is more recent.
-    const titles = [runningSession.title, draftSession.title];
+    const titles = [draftSession.title, runningSession.title];
     mockState.sessionTree = {
       [WORKSPACE.id]: [draftSession, runningSession],
     };
@@ -2107,7 +2159,7 @@ describe('Sidebar live session ordering', () => {
     const view = await renderSidebar();
 
     try {
-      expect(sessionTitleOrder(view.container, titles)).toEqual(titles);
+      expect(sessionTitleOrder(view.container, titles)).toEqual([runningSession.title, draftSession.title]);
     } finally {
       await view.cleanup();
     }
@@ -2518,7 +2570,7 @@ describe('Sidebar session search', () => {
     resetSidebarStore();
     const manySessions = Array.from({ length: 25 }, (_, index) => ({
       ...SESSION,
-      id: `s_bulk_${index}`,
+      id: `s_bulk_${String(index).padStart(2, '0')}`,
       title: `Bulk Session ${index + 1}`,
     }));
     mockState.sessionTree = { [WORKSPACE.id]: manySessions };
@@ -2626,7 +2678,7 @@ describe('Sidebar session search', () => {
     resetSidebarStore();
     const manySessions = Array.from({ length: 25 }, (_, index) => ({
       ...SESSION,
-      id: `s_page_${index}`,
+      id: `s_page_${String(index).padStart(2, '0')}`,
       title: `Paged Session ${index + 1}`,
     }));
     mockState.sessionTree = { [WORKSPACE.id]: manySessions };
@@ -2687,7 +2739,7 @@ describe('Sidebar session search', () => {
     resetSidebarStore();
     const manySessions = Array.from({ length: 25 }, (_, index) => ({
       ...SESSION,
-      id: `s_flat_page_${index}`,
+      id: `s_flat_page_${String(index).padStart(2, '0')}`,
       title: `Flat Paged Session ${index + 1}`,
       isWorkflow: false,
     }));

@@ -67,7 +67,6 @@ import {
   workflowDeleteProtectionReason,
   workflowSessionKeyId,
   type WorkflowDeleteProtectionReason,
-  type WorkflowSessionKey,
 } from '@/store/useStore';
 import type { ScheduledTaskConfig, Session } from '@/store/types';
 import {
@@ -102,7 +101,8 @@ import SettingsModal from './SettingsModal';
 import ProjectSettingsModal from './ProjectSettingsModal';
 import ScheduledTaskDialog from './ScheduledTaskDialog';
 import { useMainSurface } from '@/components/MainSurface';
-import { scheduleText } from '@/lib/scheduledTaskI18n';
+import { scheduleText, scheduledTaskCountText } from '@/lib/scheduledTaskI18n';
+import { collectScheduledSessions } from '@/lib/scheduledTaskSessions';
 
 /**
  * CONTRACT: default export, no props. Left session rail.
@@ -131,12 +131,6 @@ function formatTime(ts: number): string {
 const WORKFLOW_HISTORY_PAGE_SIZE = 10;
 const WORKSPACE_HEADER_VISIBLE_PATHS = 2;
 const MAX_SESSION_RENAME_LENGTH = 80;
-type SidebarLiveState = {
-  runningSessions: WorkflowSessionKey[];
-  aiEditingSessions: WorkflowSessionKey[];
-  chattingSessions: WorkflowSessionKey[];
-  waitingInputSessions: WorkflowSessionKey[];
-};
 type ProjectScanCacheEntry = {
   path: string;
   scan: ProjectEnvironmentScan | null;
@@ -150,96 +144,34 @@ function workspaceHeaderPaths(workspace: WorkspaceSummary): string[] {
 }
 
 function sessionSortTimestamp(session: Session): number {
-  return session.updatedAt ?? session.createdAt;
-}
-
-function sessionLiveRank(
-  session: Session,
-  workspaceId: string | null,
-  liveState: SidebarLiveState,
-): number {
-  const liveStatus = sessionLiveStatus(
-    { workspaceId, sessionId: session.id },
-    liveState,
-  );
-  if (liveStatus === 'running') return 0;
-  if (liveStatus === 'waiting') return 0;
-  if (liveStatus === 'aiEditing') return 0;
-  // A completed-but-not-yet-viewed session needs attention, so it floats above
-  // plain idle sessions but stays below anything still actively live.
-  if (session.runStatus === 'success' && session.unreadCompletion === true) {
-    return 1;
-  }
-  return 2;
-}
-
-/**
- * 0 when the session's composer still holds unsent text, 1 otherwise. Applied
- * as a secondary sort key after live status so a drafted-but-idle session never
- * jumps above a running one, but does float above idle sessions with no draft.
- */
-function sessionDraftRank(
-  session: Session,
-  workspaceId: string | null,
-  draftKeys: ReadonlySet<string>,
-): number {
-  const key = workflowSessionKeyId({ workspaceId, sessionId: session.id });
-  return draftKeys.has(key) ? 0 : 1;
+  return session.lastUserMessageAt ?? session.createdAt;
 }
 
 function sortHistorySessions(
   sessions: Session[],
   workspaceId: string | null,
-  liveState: SidebarLiveState,
-  draftKeys: ReadonlySet<string>,
+  liveState: Parameters<typeof sessionLiveStatus>[1],
 ): Session[] {
+  const liveRanks = new Map(
+    sessions.map((session) => [
+      session.id,
+      sessionLiveStatus({ workspaceId, sessionId: session.id }, liveState) === null ? 1 : 0,
+    ]),
+  );
   return sessions.filter((session) => !session.scheduledTask).sort((a, b) => {
+    const liveDiff = (liveRanks.get(a.id) ?? 1) - (liveRanks.get(b.id) ?? 1);
+    if (liveDiff !== 0) return liveDiff;
     const pinDiff = Number(b.pinned === true) - Number(a.pinned === true);
     if (pinDiff !== 0) return pinDiff;
-    const aLiveRank = sessionLiveRank(a, workspaceId, liveState);
-    const bLiveRank = sessionLiveRank(b, workspaceId, liveState);
-    const liveDiff = aLiveRank - bLiveRank;
-    if (liveDiff !== 0) return liveDiff;
-    if (aLiveRank > 1) {
-      const draftDiff =
-        sessionDraftRank(a, workspaceId, draftKeys) -
-        sessionDraftRank(b, workspaceId, draftKeys);
-      if (draftDiff !== 0) return draftDiff;
-    }
-    return sessionSortTimestamp(b) - sessionSortTimestamp(a);
+    return sessionSortTimestamp(b) - sessionSortTimestamp(a) || a.id.localeCompare(b.id);
   });
-}
-
-function workspaceLiveRank(
-  sessions: Session[],
-  workspaceId: string,
-  liveState: SidebarLiveState,
-): number {
-  return sessions.reduce(
-    (best, session) =>
-      Math.min(best, sessionLiveRank(session, workspaceId, liveState)),
-    2,
-  );
-}
-
-/** 0 when any session in the workspace has an unsent composer draft, else 1. */
-function workspaceDraftRank(
-  sessions: Session[],
-  workspaceId: string,
-  draftKeys: ReadonlySet<string>,
-): number {
-  return sessions.some(
-    (session) => sessionDraftRank(session, workspaceId, draftKeys) === 0,
-  )
-    ? 0
-    : 1;
 }
 
 function workspaceGroupSortTimestamp(
   sessions: Session[],
   workspace: WorkspaceSummary,
 ): number {
-  return sessions[0] ? sessionSortTimestamp(sessions[0]) : workspace.updatedAt;
+  return sessions.reduce((latest, session) => Math.max(latest, sessionSortTimestamp(session)), 0) || workspace.updatedAt;
 }
 
 function clampPercent(percent: number | null | undefined): number | null {
@@ -1224,6 +1156,19 @@ export default function Sidebar({
       waitingInputSessions,
     ],
   );
+  const scheduledSessions = useMemo(
+    () => collectScheduledSessions(sessions, sessionTree, activeWorkspaceId),
+    [sessions, sessionTree, activeWorkspaceId],
+  );
+  const { running: scheduledRunning, completed: scheduledCompleted } = useMemo(() => {
+    let running = 0;
+    let completed = 0;
+    for (const { session, workspaceId } of scheduledSessions) {
+      if (sessionLiveStatus({ workspaceId, sessionId: session.id }, sidebarLiveState)) running++;
+      else if (session.runStatus === 'success') completed++;
+    }
+    return { running, completed };
+  }, [scheduledSessions, sidebarLiveState]);
 
   // Session keys whose composer still holds unsent text. The active session's
   // draft lives in `composerDraft` (only flushed into `composerDrafts` on
@@ -1327,17 +1272,8 @@ export default function Sidebar({
 
   const historyFlatSessions = useMemo(
     () =>
-      sortHistorySessions(
-        sessions,
-        null,
-        sidebarLiveState,
-        draftSessionKeys,
-      ),
-    [
-      sessions,
-      sidebarLiveState,
-      draftSessionKeys,
-    ],
+      sortHistorySessions(sessions, null, sidebarLiveState),
+    [sessions, sidebarLiveState],
   );
 
   const hasHistory =
@@ -1359,7 +1295,6 @@ export default function Sidebar({
             sessionTree[workspace.id] ?? [],
             workspace.id,
             sidebarLiveState,
-            draftSessionKeys,
           );
           return {
             workspace,
@@ -1385,23 +1320,18 @@ export default function Sidebar({
             Number(b.sessions.some((session) => session.pinned === true)) -
             Number(a.sessions.some((session) => session.pinned === true));
           if (pinDiff !== 0) return pinDiff;
+          // Explicit workspace switches (top-left switcher / group header)
+          // move that group to the top. Session clicks keep selectedWorkspaceId,
+          // so opening or running a session never reorders groups.
           const selectedDiff =
             (a.workspace.id === selectedWorkspaceId ? 0 : 1) -
             (b.workspace.id === selectedWorkspaceId ? 0 : 1);
           if (selectedDiff !== 0) return selectedDiff;
-          const liveDiff =
-            workspaceLiveRank(a.sessions, a.workspace.id, sidebarLiveState) -
-            workspaceLiveRank(b.sessions, b.workspace.id, sidebarLiveState);
-          if (liveDiff !== 0) return liveDiff;
-          const draftDiff =
-            workspaceDraftRank(a.sessions, a.workspace.id, draftSessionKeys) -
-            workspaceDraftRank(b.sessions, b.workspace.id, draftSessionKeys);
-          if (draftDiff !== 0) return draftDiff;
           const timeDiff =
             workspaceGroupSortTimestamp(b.sessions, b.workspace) -
             workspaceGroupSortTimestamp(a.sessions, a.workspace);
           if (timeDiff !== 0) return timeDiff;
-          return a.workspace.name.localeCompare(b.workspace.name);
+          return a.workspace.id.localeCompare(b.workspace.id);
         }),
     [
       selectedWorkspaceId,
@@ -1410,7 +1340,6 @@ export default function Sidebar({
       scopedWorkspaces,
       sessionTree,
       sidebarLiveState,
-      draftSessionKeys,
     ],
   );
 
@@ -1549,8 +1478,15 @@ export default function Sidebar({
           <span>消息平台</span>
         </button>
         <button type="button" onClick={() => setSurface('scheduled-tasks')} aria-current={surface === 'scheduled-tasks' ? 'page' : undefined} className={`${sidebarPrimaryButtonClassName} ${surface === 'scheduled-tasks' ? 'bg-panel-2 text-fg' : ''}`}>
-          <AlarmClock size={16} className="shrink-0 text-fg-faint transition-colors group-hover:text-fg-dim" />
-          <span>{scheduleText(locale, 'title')}</span>
+          <AlarmClock size={16} className="shrink-0 text-fg-faint transition-colors group-hover:text-fg-dim" aria-hidden="true" />
+          <span className="flex min-w-0 flex-1 flex-wrap items-center justify-between gap-x-0.5">
+            <span>{scheduleText(locale, 'title')}</span>
+            <span className="text-[11px] leading-4 tabular-nums text-fg-faint" aria-live="polite" aria-atomic="true">
+              <span className={cn('whitespace-nowrap', scheduledRunning > 0 && 'text-accent')}>{scheduledTaskCountText(locale, 'runningCount', scheduledRunning)}</span>
+              {' · '}
+              <span className="whitespace-nowrap">{scheduledTaskCountText(locale, 'completedCount', scheduledCompleted)}</span>
+            </span>
+          </span>
         </button>
         {assetCenterEnabled && (
           <button

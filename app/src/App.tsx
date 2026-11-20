@@ -8,12 +8,12 @@ import MessagePlatformRunner from '@/components/MessagePlatformRunner';
 import BackgroundJobRunner from '@/components/BackgroundJobRunner';
 import SkillLearningRecovery from '@/components/SkillLearningRecovery';
 import StatusBar from '@/components/StatusBar';
+import ProjectRunToolbar from '@/components/ProjectRunToolbar';
 import { TitleBarLayout } from '@/components/TitleBar';
 import { primeCliRuntime } from '@/lib/cliConfig';
 import { primeCliUpdateStatus } from '@/lib/cliUpdateStatus';
 import {
   migrateLegacyBrandStorage,
-  onSingleInstanceWarning,
   type LegacyBrandMigrationProgress,
 } from '@/lib/tauri';
 import { useStore } from '@/store/useStore';
@@ -62,25 +62,10 @@ export default function App() {
     void primeCliUpdateStatus();
   }, [initHistory, startupMigration.done]);
 
-  useEffect(() => {
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    void onSingleInstanceWarning((message) => {
-      window.alert(message || '只能同时运行一个进程');
-    }).then((fn) => {
-      if (disposed) fn();
-      else unlisten = fn;
-    });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
   return (
     <MainSurfaceProvider sessionKey={sessionKey}>
     <div className="ugs-app-shell flex h-screen w-screen flex-col overflow-hidden bg-bg text-fg">
-      <TitleBarLayout sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen((open) => !open)} locale={locale}>
+      <TitleBarLayout sidebarOpen={sidebarOpen} onToggleSidebar={() => setSidebarOpen((open) => !open)} locale={locale} projectRun={<ProjectRunToolbar />}>
         <ScheduledTaskRunner />
         <MessagePlatformRunner />
         <BackgroundJobRunner />

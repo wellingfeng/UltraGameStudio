@@ -27,7 +27,7 @@ impl NativeSkillInvocation {
         if !request.enabled || request.mode == LearningMode::Off {
             return Err("SKILL_NATIVE_TOOLS_DISABLED".into());
         }
-        if request.source.cwd.as_deref() != cwd {
+        if !same_cwd(request.source.cwd.as_deref(), cwd) {
             return Err("SKILL_NATIVE_CWD_MISMATCH".into());
         }
         super::host::persisted_native_source(&host.background.global_root, &request.source)?;
@@ -208,6 +208,25 @@ impl NativeSkillInvocation {
             })).collect::<Vec<_>>());
         }
         Ok(result)
+    }
+}
+
+/// Same project directory, not same spelling: `E:\A`, `e:/a/` and `E:\A\`
+/// must not fail closed. A genuinely different directory still mismatches.
+fn same_cwd(source: Option<&str>, cwd: Option<&str>) -> bool {
+    fn clean(v: Option<&str>) -> Option<&str> {
+        v.map(str::trim).filter(|v| !v.is_empty())
+    }
+    match (clean(source), clean(cwd)) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a == b
+                || match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+                    (Ok(a), Ok(b)) => a == b,
+                    _ => false,
+                }
+        }
+        _ => false,
     }
 }
 
@@ -509,6 +528,20 @@ pub(crate) mod tests {
             .is_err(),
             "source and execution grants must be independent"
         );
+    }
+
+    #[test]
+    fn cwd_check_accepts_spelling_variants_but_rejects_other_directories() {
+        let f = Fixture::new("native-cwd-variants");
+        let project = f.project().to_string_lossy().into_owned();
+        let trailing = format!("{project}{}", std::path::MAIN_SEPARATOR);
+        assert!(same_cwd(Some(&project), Some(&trailing)));
+        assert!(same_cwd(Some(&project), Some(&project.replace('\\', "/"))));
+        assert!(same_cwd(None, None));
+        assert!(!same_cwd(Some(&project), None));
+        let other = f.global().to_string_lossy().into_owned();
+        assert!(!same_cwd(Some(&project), Some(&other)));
+        assert!(!same_cwd(Some(&project), Some("Z:/definitely/missing/ugs")));
     }
 
     #[test]
