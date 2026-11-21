@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { Message } from '@/store/types';
-import { orderDisplayMessages } from './orderDisplayMessages';
+import { latestUserInput, orderDisplayMessages } from './orderDisplayMessages';
 
 function msg(
   id: string,
@@ -20,9 +20,22 @@ describe('orderDisplayMessages', () => {
     const messages = [msg('u1', 'user', 100), msg('a1', 'assistant', 200),
       msg('u2', 'user', 300, { replacesMessageId: 'u1' }), msg('a2', 'assistant', 400),
       msg('u3', 'user', 500, { replacesMessageId: 'u2' })];
-    expect(ids(orderDisplayMessages(JSON.parse(JSON.stringify(messages)), ['u3']))).toEqual(['a1', 'a2', 'u3']);
+    expect(ids(orderDisplayMessages(JSON.parse(JSON.stringify(messages)), ['u3']))).toEqual(['u3', 'a1', 'a2']);
     expect(ids(messages)).toEqual(['u1', 'a1', 'u2', 'a2', 'u3']);
-    expect(ids(orderDisplayMessages(messages.slice(0, -1)))).toEqual(['a1', 'u2', 'a2']);
+    expect(ids(orderDisplayMessages(messages.slice(0, -1)))).toEqual(['u2', 'a1', 'a2']);
+  });
+
+  it('keeps a queued legacy revision above its in-flight reply and latest for editing', () => {
+    const messages = [
+      msg('u1', 'user', 100),
+      msg('a1', 'assistant', 200),
+      msg('u2', 'user', 500, { replacesMessageId: 'u1', editedAt: 600 }),
+    ];
+    const visible = orderDisplayMessages(messages, ['u2']);
+    expect(ids(visible)).toEqual(['u2', 'a1']);
+    expect(visible[0].createdAt).toBe(100);
+    expect(latestUserInput(messages)?.id).toBe('u2');
+    expect(messages[2].createdAt).toBe(500);
   });
 
   it('keeps queued prompts after an answered interaction and its later continuation', () => {

@@ -1,20 +1,35 @@
 import type { Message } from '@/store/types';
 
-/** Collapse edited resends without mutating the actual conversation history. */
+/** Collapse edited resends at the original input's position without mutating history. */
 export function hideReplacedUserMessages(messages: Message[]): Message[] {
   const replacedIds = new Set(messages.flatMap((message) =>
     message.role === 'user' && message.replacesMessageId ? [message.replacesMessageId] : []));
-  return replacedIds.size
-    ? messages.filter((message) => message.role !== 'user' || !replacedIds.has(message.id))
-    : messages;
+  if (!replacedIds.size) return messages;
+  const byId = new Map(messages.map((message) => [message.id, message]));
+  return messages.flatMap((message) => {
+    if (message.role === 'user' && replacedIds.has(message.id)) return [];
+    if (!message.replacesMessageId) return [message];
+    let createdAt = message.createdAt;
+    let replaced = byId.get(message.replacesMessageId);
+    const seen = new Set<string>();
+    while (replaced?.role === 'user' && !seen.has(replaced.id)) {
+      seen.add(replaced.id);
+      createdAt = replaced.createdAt;
+      replaced = replaced.replacesMessageId ? byId.get(replaced.replacesMessageId) : undefined;
+    }
+    return [createdAt === message.createdAt ? message : { ...message, createdAt }];
+  });
 }
 
 /** Latest real user input by send time, independent of display or queue order. */
 export function latestUserInput(messages: Message[]): Message | undefined {
+  const replacedIds = new Set(messages.flatMap((message) =>
+    message.role === 'user' && message.replacesMessageId ? [message.replacesMessageId] : []));
+  const sentAt = (message: Message) => Math.max(message.createdAt, message.editedAt ?? 0);
   let latest: Message | undefined;
-  for (const message of hideReplacedUserMessages(messages)) {
-    if (message.role !== 'user') continue;
-    if (!latest || message.createdAt >= latest.createdAt) latest = message;
+  for (const message of messages) {
+    if (message.role !== 'user' || replacedIds.has(message.id)) continue;
+    if (!latest || sentAt(message) >= sentAt(latest)) latest = message;
   }
   return latest;
 }
@@ -33,8 +48,9 @@ export function latestUserInput(messages: Message[]): Message | undefined {
  * Insert before the reply after chronological sorting, without changing store
  * order or timestamps. This also repairs legacy trailing interjections.
  *
- * Pending prompts stay at the tail in queue FIFO order until execution starts.
- * They are not turn boundaries for legacy interjection inference.
+ * Pending new prompts stay at the tail in queue FIFO order until execution
+ * starts. Revisions retain their original turn position, even while queued.
+ * Pending prompts are not turn boundaries for legacy interjection inference.
  * Sort is skipped when the array is already monotonic, so steady-state
  * rendering stays O(n).
  */
@@ -50,7 +66,7 @@ export function orderDisplayMessages(
     const byId = new Map(messages.map((message) => [message.id, message]));
     const queued = queuedMessageIds.flatMap((id) => {
       const message = byId.get(id);
-      return message?.role === 'user' ? [message] : [];
+      return message?.role === 'user' && !message.replacesMessageId ? [message] : [];
     });
     if (queued.length > 0) {
       const queuedIds = new Set(queued.map((message) => message.id));

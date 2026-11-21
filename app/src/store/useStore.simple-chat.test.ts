@@ -805,7 +805,9 @@ describe('simple-workflow chat mode', () => {
     await waitFor(() => !useStore.getState().aiStreaming, 'revised reply');
     const current = useStore.getState().messages;
     expect(current.find((message) => message.id === 'edit-u')?.text).toBe('旧问题 `E:/photo.png`');
-    expect(current.find((message) => message.replacesMessageId === 'after-u')).toMatchObject({ text: '新问题 `E:/photo.png`' });
+    expect(current.find((message) => message.replacesMessageId === 'after-u')).toMatchObject({
+      text: '新问题 `E:/photo.png`', createdAt: 5,
+    });
     expect(current.map((message) => message.id)).toContain('edit-a');
     expect(current.map((message) => message.id)).toContain('after-u');
     const prompt = String(gatewayMocks.completeGatewayText.mock.calls[0][0].userContent);
@@ -6073,7 +6075,7 @@ describe('simple-workflow chat mode', () => {
     mockDirectRoute();
     gatewayMocks.completeGatewayText.mockResolvedValue('回答');
     const future = Date.now() + 1000;
-    useStore.setState({ messages: [{ id: 'future-revision', role: 'user', text: '此前修订', createdAt: future }] });
+    useStore.setState({ messages: [{ id: 'future-revision', role: 'user', text: '此前修订', createdAt: 1, editedAt: future }] });
     expect(useStore.getState().sendPrompt('最后输入')).toBe(true);
     expect(useStore.getState().messages.find((message) => message.text === '最后输入')!.createdAt).toBeGreaterThan(future);
     await waitFor(() => !useStore.getState().aiStreaming, 'latest input completes');

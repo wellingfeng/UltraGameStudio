@@ -5756,7 +5756,7 @@ export const useStore = create<StoreState>((set, get) => ({
       ...revisionMessage,
       id: shortId('m'),
       text: trimmed,
-      createdAt: state.messages.reduce((latest, message) => Math.max(latest, message.createdAt + 1), Date.now()),
+      createdAt: revisionMessage.createdAt,
       editedAt: Math.max(Date.now(), (revisionMessage.editedAt ?? revisionMessage.createdAt) + 1),
       replacesMessageId: revisionMessage.id,
       chatRevisions: undefined,
@@ -5770,7 +5770,7 @@ export const useStore = create<StoreState>((set, get) => ({
       text: trimmed,
       // A preceding revision may already be ahead of the wall clock.
       createdAt: state.messages.reduce((latest, message) =>
-        message.role === 'user' ? Math.max(latest, message.createdAt + 1) : latest, Date.now()),
+        message.role === 'user' ? Math.max(latest, Math.max(message.createdAt, message.editedAt ?? 0) + 1) : latest, Date.now()),
       ...(options?.scheduledTaskRun ? { scheduledTaskRun: true } : {}),
     };
     linkMessageManagedAssets(userMsg, aiEditingSession);

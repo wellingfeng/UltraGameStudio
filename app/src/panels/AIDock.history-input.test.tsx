@@ -61,6 +61,23 @@ it('hides superseded inputs in the stream, sticky prompt and topic navigation af
   } finally { await v.cleanup(); }
 });
 
+it('keeps a queued revision above the AI reply being edited', async () => {
+  const v = await view();
+  try {
+    await act(async () => useStore.setState((state) => ({ messages: [
+      ...state.messages,
+      { id: 'u2-edited', role: 'user', text: '修改后的第二轮输入', createdAt: 3, editedAt: 5, replacesMessageId: 'u2' },
+    ], queuedChatMessageIds: ['u2-edited'] })));
+    const rows = [...v.container.querySelectorAll<HTMLElement>('[data-ugs-message-row]')];
+    const revised = rows.findIndex((row) => row.textContent?.includes('修改后的第二轮输入'));
+    const reply = rows.findIndex((row) => row.textContent?.includes('第二轮回答'));
+    expect(revised).toBeGreaterThanOrEqual(0);
+    expect(revised).toBeLessThan(reply);
+    expect(v.container.textContent).not.toContain('第二轮输入 `E:/photo.png`');
+    expect(v.container.querySelector('[data-ugs-sticky-prompt]')?.getAttribute('data-ugs-sticky-prompt')).toBe('u2-edited');
+  } finally { await v.cleanup(); }
+});
+
 it('shares the history editor with the pinned input, preserves file refs and cancels without sending', async () => {
   const v = await view();
   const send = vi.fn(() => true);
