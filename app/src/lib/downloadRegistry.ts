@@ -837,55 +837,75 @@ export interface LinkLocalAssetToMessageInput {
 }
 
 export function linkLocalAssetToMessage(input: LinkLocalAssetToMessageInput): void {
-  const sessionId = input.sessionId?.trim();
-  const messageId = input.messageId?.trim();
-  if (!sessionId || !messageId) return;
-  const localPath = normalizeLocalPath(input.localPath);
-  if (!localPath) return;
+  linkLocalAssetsToMessages([input]);
+}
+
+function linkLocalAssetsToMessages(inputs: LinkLocalAssetToMessageInput[]): void {
+  if (!inputs.length) return;
   hydrate();
 
-  const key = pathKey(localPath);
-  const title = input.title?.trim() || fileNameFromUrl(localPath);
-  const kind = input.kind ?? kindForManagedPath(localPath);
-  const now = Date.now();
-  const existingIndex = entries.findIndex(
-    (entry) => entry.localPath && pathKey(entry.localPath) === key,
-  );
-  const operation = input.source ?? (existingIndex >= 0 ? 'referenced' : 'generated');
-  const event: AssetEvent = { id: `${sessionId}:${messageId}:${operation}`, operation, at: input.at ?? now, sessionId, messageId, workspaceId: input.workspaceId, provenance: input.provenance ?? 'answer' };
-
-  if (existingIndex >= 0) {
-    const existing = entries[existingIndex];
-    if (!input.source && existing.events?.some(e => e.sessionId === sessionId && e.messageId === messageId)) {
-      if (input.sessionTitle && existing.sessionId === sessionId && existing.sessionTitle !== input.sessionTitle) updateAssetDetails(existing.id, { sessionTitle: input.sessionTitle });
-      return;
+  const byPath = inputs.length > 1 ? new Map<string, number>() : null;
+  if (byPath) {
+    for (const [index, entry] of entries.entries()) {
+      if (!entry.localPath) continue;
+      const key = pathKey(entry.localPath);
+      if (!byPath.has(key)) byPath.set(key, index);
     }
-    if (existing.events?.some(e => e.id === event.id) && (!input.sessionTitle || existing.sessionTitle === input.sessionTitle)) return;
-    commit(
-      entries.map((entry, index) =>
-        index === existingIndex
-          ? {
-              ...entry,
-              kind: entry.kind ?? kind,
-              title: entry.title || title,
-              localPath,
-              ...(!entry.events?.length || event.at >= entry.events[0].at ? { sessionId, workspaceId: input.workspaceId ?? null, messageId, source: input.source ?? entry.source, provenance: event.provenance, sessionTitle: input.sessionTitle ?? entry.sessionTitle } : {}),
-              events: [event, ...(entry.events ?? []).filter(e => e.id !== event.id)].sort((a, b) => b.at - a.at),
-              status: entry.status === 'pending' ? entry.status : 'success',
-              finishedAt: entry.finishedAt ?? now,
-            }
-          : entry,
-      ),
-    );
-    return;
   }
+  let next: AssetEntry[] | undefined;
 
-  // Don't recreate an asset the user cleared just because an old chat message
-  // still references its path.
-  if (dismissedPaths.has(key)) return;
+  for (const input of inputs) {
+    const sessionId = input.sessionId?.trim();
+    const messageId = input.messageId?.trim();
+    if (!sessionId || !messageId) continue;
+    const localPath = normalizeLocalPath(input.localPath);
+    if (!localPath) continue;
 
-  commit([
-    {
+    const key = pathKey(localPath);
+    const existingIndex = byPath
+      ? byPath.get(key) ?? -1
+      : entries.findIndex((entry) => entry.localPath && pathKey(entry.localPath) === key);
+    const existing = (next ?? entries)[existingIndex];
+    const title = input.title?.trim() || fileNameFromUrl(localPath);
+    const kind = input.kind ?? kindForManagedPath(localPath);
+    const now = Date.now();
+    const operation = input.source ?? (existing ? 'referenced' : 'generated');
+    const event: AssetEvent = {
+      id: `${sessionId}:${messageId}:${operation}`, operation, at: input.at ?? now,
+      sessionId, messageId, workspaceId: input.workspaceId, provenance: input.provenance ?? 'answer',
+    };
+
+    if (existing) {
+      if (!input.source && existing.events?.some(e => e.sessionId === sessionId && e.messageId === messageId)) {
+        if (input.sessionTitle && existing.sessionId === sessionId && existing.sessionTitle !== input.sessionTitle) {
+          (next ??= [...entries])[existingIndex] = { ...existing, sessionTitle: input.sessionTitle };
+        }
+        continue;
+      }
+      if (existing.events?.some(e => e.id === event.id) && (!input.sessionTitle || existing.sessionTitle === input.sessionTitle)) continue;
+      (next ??= [...entries])[existingIndex] = {
+        ...existing,
+        kind: existing.kind ?? kind,
+        title: existing.title || title,
+        localPath,
+        ...(!existing.events?.length || event.at >= existing.events[0].at ? {
+          sessionId, workspaceId: input.workspaceId ?? null, messageId, source: input.source ?? existing.source,
+          provenance: event.provenance, sessionTitle: input.sessionTitle ?? existing.sessionTitle,
+        } : {}),
+        events: [event, ...(existing.events ?? []).filter(e => e.id !== event.id)].sort((a, b) => b.at - a.at),
+        status: existing.status === 'pending' ? existing.status : 'success',
+        finishedAt: existing.finishedAt ?? now,
+      };
+      continue;
+    }
+
+    // Don't recreate an asset the user cleared just because an old chat message
+    // still references its path.
+    if (dismissedPaths.has(key)) continue;
+
+    next ??= [...entries];
+    byPath?.set(key, next.length);
+    next.push({
       id: diskAssetId(localPath),
       kind,
       source: input.source ?? 'generated',
@@ -902,9 +922,12 @@ export function linkLocalAssetToMessage(input: LinkLocalAssetToMessageInput): vo
       sessionTitle: input.sessionTitle,
       events: [event],
       availability: 'unknown',
-    },
-    ...entries,
-  ]);
+    });
+  }
+  if (next) {
+    const added = next.splice(entries.length);
+    commit(added.reverse().concat(next));
+  }
 }
 
 export function linkManagedAssetsFromMessageText(input: {
@@ -921,10 +944,11 @@ export function linkManagedAssetsFromMessageText(input: {
     const path = displayFileRefPath(artifact.ref, input.cwd);
     paths.set(pathKey(path), { path, title: artifact.label });
   }
+  const links: LinkLocalAssetToMessageInput[] = [];
   for (const { path: localPath, title } of paths.values()) {
     // A clipboard input mentioned by an answer remains an input.
     if (/[\\/](?:clipboard-images|session-captures)[\\/]/i.test(localPath)) continue;
-    linkLocalAssetToMessage({
+    links.push({
       localPath,
       sessionId: input.sessionId,
       workspaceId: input.workspaceId,
@@ -934,6 +958,7 @@ export function linkManagedAssetsFromMessageText(input: {
       sessionTitle: input.sessionTitle,
     });
   }
+  linkLocalAssetsToMessages(links);
 }
 
 /** Confirmed successful file changes, including project files outside caches. */
@@ -945,13 +970,15 @@ export function linkModifiedAssetsFromMessage(input: {
   at?: number;
   sessionTitle?: string;
 }): void {
+  const links: LinkLocalAssetToMessageInput[] = [];
+  const root = input.changes?.rootPath;
   for (const file of input.changes?.files ?? []) {
     if (file.status === 'deleted') continue;
-    const root = input.changes?.rootPath;
     const path = root && !/^(?:[A-Za-z]:[\\/]|\/|\\\\)/.test(file.path)
       ? `${root.replace(/[\\/]+$/, '')}/${file.path.replace(/^\.\//, '')}` : file.path;
-    linkLocalAssetToMessage({ ...input, localPath: path, source: file.status === 'added' ? 'generated' : 'modified', provenance: 'recorded' });
+    links.push({ ...input, localPath: path, source: file.status === 'added' ? 'generated' : 'modified', provenance: 'recorded' });
   }
+  linkLocalAssetsToMessages(links);
 }
 
 export function updateAssetDetails(id: string, patch: Pick<AssetEntry, 'favorite' | 'tags' | 'availability' | 'sessionTitle'>): void {
@@ -978,15 +1005,17 @@ export function linkKnownManagedAssetsFromMessageText(input: {
   );
   if (knownUnlinkedPaths.size === 0) return;
 
+  const links: LinkLocalAssetToMessageInput[] = [];
   for (const localPath of managedAssetPathsFromText(input.text)) {
     if (!knownUnlinkedPaths.has(pathKey(localPath))) continue;
-    linkLocalAssetToMessage({
+    links.push({
       localPath,
       sessionId,
       workspaceId: input.workspaceId,
       messageId,
     });
   }
+  linkLocalAssetsToMessages(links);
 }
 
 export interface AssetMessageLinkCandidate {

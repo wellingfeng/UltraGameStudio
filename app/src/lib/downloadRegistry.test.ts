@@ -7,6 +7,7 @@ import {
   linkKnownManagedAssetsFromMessageText,
   linkLocalAssetToMessage,
   linkManagedAssetsFromMessageText,
+  linkModifiedAssetsFromMessage,
   managedAssetPathsFromText,
   markAssetDone,
   markAssetFailed,
@@ -455,6 +456,41 @@ describe('asset registry', () => {
     expect(list[0].sessionId).toBe('s_1');
     expect(list[0].workspaceId).toBe('w_1');
     expect(list[0].messageId).toBe('m_1');
+  });
+
+  it('persists a turn of file changes in one update and ignores replays', () => {
+    linkLocalAssetToMessage({ localPath: 'C:/project/existing.txt', sessionId: 's_1', messageId: 'm_1', at: 100 });
+    const listener = vi.fn();
+    const unsubscribe = subscribeAssets(listener);
+    const write = vi.spyOn(Storage.prototype, 'setItem');
+    const turn = {
+      sessionId: 's_2', workspaceId: 'w_1', messageId: 'm_2', at: 200,
+      changes: {
+        source: 'snapshot' as const, rootPath: 'C:/project',
+        files: [
+          { path: 'existing.txt', status: 'modified' as const },
+          { path: 'new.txt', status: 'added' as const },
+          { path: 'C:\\PROJECT\\NEW.txt', status: 'added' as const },
+          { path: 'deleted.txt', status: 'deleted' as const },
+        ],
+      },
+    };
+
+    linkModifiedAssetsFromMessage(turn);
+    linkModifiedAssetsFromMessage(turn);
+    unsubscribe();
+
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(getAssets()).toEqual([
+      expect.objectContaining({ title: 'new.txt', source: 'generated', messageId: 'm_2', events: [
+        expect.objectContaining({ operation: 'generated', provenance: 'recorded' }),
+      ] }),
+      expect.objectContaining({ title: 'existing.txt', source: 'modified', messageId: 'm_2', events: [
+        expect.objectContaining({ operation: 'modified', provenance: 'recorded' }),
+        expect.objectContaining({ messageId: 'm_1' }),
+      ] }),
+    ]);
   });
 
   it('links a punctuated managed path to the existing disk asset instead of duplicating it', () => {

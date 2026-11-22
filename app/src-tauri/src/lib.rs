@@ -16411,6 +16411,39 @@ fn write_kimi_headless_agent(cwd: Option<&str>) -> Result<TempFileGuard, String>
     Ok(TempFileGuard::new(path))
 }
 
+const KIMI_PROMPT_LOADER: &str = r#"import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const [entry, promptPath, ...args] = process.argv.slice(1);
+const promptIndex = args.indexOf('--prompt');
+if (promptIndex < 0 || promptIndex + 1 >= args.length) {
+  throw new Error('UGS Kimi prompt placeholder missing');
+}
+args[promptIndex + 1] = readFileSync(promptPath, 'utf8');
+process.argv = [process.argv[0], entry, ...args];
+await import(pathToFileURL(entry).href);
+"#;
+
+fn write_kimi_prompt(cwd: Option<&str>, task: &str) -> Result<TempFileGuard, String> {
+    let path = temp_output_path_for_cwd(cwd, "ultragamestudio-kimi-prompt", "txt");
+    std::fs::write(&path, task).map_err(|e| format!("写入 kimi 提示文件失败: {e}"))?;
+    Ok(TempFileGuard::new(path))
+}
+
+fn kimi_node_launch_args(entry: &str, prompt_path: Option<&str>, args: &[String]) -> Vec<String> {
+    let mut node_args = Vec::with_capacity(args.len() + 6);
+    if let Some(prompt_path) = prompt_path {
+        node_args.push("--input-type=module".into());
+        node_args.push("-e".into());
+        node_args.push(KIMI_PROMPT_LOADER.into());
+        node_args.push(entry.into());
+        node_args.push(prompt_path.into());
+    } else {
+        node_args.push(entry.into());
+    }
+    node_args.extend(args.iter().cloned());
+    node_args
+}
+
 /// Whether to request token-level partial streaming from the claude CLI via
 /// `--include-partial-messages`. On by default so assistant text + extended
 /// thinking stream as they are generated (matching the interactive CLI's live
@@ -18658,10 +18691,11 @@ async fn ai_cli_runtime(
         // The full turn prompt (workspace note + prompt + language directive)
         // for the app-server writer thread; the one-shot path keeps it in argv.
         let mut zcode_task: Option<String> = None;
-        // And for kimi-code: its npm shim runs `node <pkg>/dist/main.mjs`, and
-        // the headless prompt is likewise a `-p/--prompt` argv value (>=0.38),
-        // so the same cmd.exe ~8191-char cap applies. See the is_kimi branch.
+        // kimi-code's npm shim runs `node <pkg>/dist/main.mjs`. Direct-node
+        // launches load the prompt from a sidecar file so neither cmd.exe's
+        // ~8191-char cap nor CreateProcess's ~32767-char cap includes the task.
         let mut kimi_node_entry: Option<String> = None;
+        let mut kimi_prompt_path: Option<String> = None;
 
         // 会话级思考深度。前端（`gatewayRouteEnv`）只在「该渠道+模型确实支持」
         // 时才下发 `UGS_THINKING_LEVEL`，值是渠道原生的等级拼写；这里按 adapter
@@ -18823,8 +18857,10 @@ async fn ai_cli_runtime(
             // would otherwise hang (old versions) or exit with a raw
             // "No model configured" error (>= 0.38) that lacks the UGS fix.
             ensure_kimi_ready(env_vars.as_ref())?;
-            // Kimi Code CLI headless one-shot. The prompt is an argv value via
-            // `-p/--prompt` (never stdin). kimi-code >= 0.38 removed `--print`,
+            // Kimi Code CLI headless one-shot. The CLI accepts the prompt via
+            // `-p/--prompt` (never stdin); direct-node launches restore that
+            // argv inside Node after reading the task from a sidecar file.
+            // kimi-code >= 0.38 removed `--print`,
             // `--input-format` and `--final-message-only`, and `--yolo`/`--auto`/
             // `--plan` all conflict with `--prompt` — headless turns ALWAYS run
             // fully autonomous (auto-approved tools, auto-dismissed questions).
@@ -18852,16 +18888,23 @@ async fn ai_cli_runtime(
                 task.push_str("\n\n");
                 task.push_str(&language_directive);
             }
-            // Prefer spawning the package's `dist/main.mjs` directly with node
-            // (bypasses the `.cmd` shim's cmd.exe ~8191-char command-line cap;
-            // node gets the ~32767-char CreateProcess ceiling). Fall back to
-            // the historical `cmd /C` shim path when the package layout isn't
-            // the expected npm shim.
+            // Spawn the package's `dist/main.mjs` through a short Node loader.
+            // The loader replaces the empty --prompt placeholder with the full
+            // sidecar contents before importing Kimi, so long prompts never
+            // reach the Windows command line. Fall back to the historical shim
+            // when the expected npm entry cannot be resolved.
             if let Some(entry) = cli_runtime::resolve_kimi_node_entry(&binary) {
                 kimi_node_entry = Some(entry.to_string_lossy().to_string());
+                let prompt_file = write_kimi_prompt(cwd.as_deref(), &task)?;
+                kimi_prompt_path = Some(prompt_file.path().to_string_lossy().to_string());
+                temp_files.push(prompt_file);
             }
             args.push("--prompt".into());
-            args.push(task);
+            if kimi_prompt_path.is_some() {
+                args.push(String::new());
+            } else {
+                args.push(task);
+            }
             args.push("--output-format".into());
             args.push("stream-json".into());
 
@@ -19429,11 +19472,10 @@ async fn ai_cli_runtime(
             node_args.extend(args.iter().cloned());
             build_launch_command("node", &node_args, &None)
         } else if let Some(entry) = kimi_node_entry.as_deref() {
-            // kimi-code direct entry launch: `node <pkg>/dist/main.mjs --prompt
-            // <task> --output-format stream-json …`. Same cmd.exe-length bypass.
-            let mut node_args = Vec::with_capacity(args.len() + 1);
-            node_args.push(entry.to_string());
-            node_args.extend(args.iter().cloned());
+            // kimi-code direct entry launch. With a prompt sidecar this becomes
+            // `node -e <loader> <main.mjs> <prompt.txt> --prompt "" …`; the
+            // loader supplies the real task and imports the untouched CLI.
+            let node_args = kimi_node_launch_args(entry, kimi_prompt_path.as_deref(), &args);
             build_launch_command("node", &node_args, &None)
         } else {
             build_launch_command(&binary, &args, &shell)
@@ -24359,6 +24401,62 @@ requires_openai_auth = true\n";
             assert!(KIMI_HEADLESS_AGENT.contains(tool), "missing {tool}");
         }
         assert!(KIMI_HEADLESS_AGENT.contains("<<UGS_ASK>>"));
+    }
+
+    #[test]
+    fn kimi_node_loader_preserves_long_prompt_without_passing_it_in_argv() {
+        let root = std::env::temp_dir().join(format!(
+            "ugs-kimi-prompt-loader-{}-{}",
+            std::process::id(),
+            temp_stamp()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let entry = root.join("fixture.mjs");
+        std::fs::write(
+            &entry,
+            "process.stdout.write(JSON.stringify(process.argv.slice(2)));",
+        )
+        .unwrap();
+        let prompt = "中文🙂\"\\\r\n".repeat(6000);
+        let prompt_path = root.join("prompt.txt");
+        std::fs::write(&prompt_path, &prompt).unwrap();
+        let args = vec![
+            "--prompt".to_string(),
+            String::new(),
+            "--output-format".to_string(),
+            "stream-json".to_string(),
+        ];
+
+        let node_args = kimi_node_launch_args(
+            &entry.to_string_lossy(),
+            Some(&prompt_path.to_string_lossy()),
+            &args,
+        );
+        assert!(node_args.iter().all(|arg| arg.len() < 1000));
+        let output = new_spawn_command("node")
+            .args(&node_args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let actual: Vec<String> = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(
+            actual,
+            vec![
+                "--prompt".to_string(),
+                prompt,
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+            ]
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
