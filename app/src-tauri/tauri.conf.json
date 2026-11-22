@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "UltraGameStudio",
-  "version": "0.5.25",
+  "version": "0.5.26",
   "identifier": "com.ultragamestudio.desktop",
   "build": {
     "frontendDist": "../dist",
